@@ -29,10 +29,6 @@ class BaseModel(AsyncAttrs, DeclarativeBase):
     }
 
 
-# class User(SQLAlchemyBaseUserTableUUID, BaseModel):
-#     pass
-
-
 # 创建异步数据库引擎
 engine = create_async_engine(settings.SQLALCHEMY_DATABASE_URL, echo=True)
 
