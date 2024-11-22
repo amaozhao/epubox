@@ -1,85 +1,113 @@
-from fastapi import FastAPI, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from app.routers import storage_router
-
-from app.core.errors import (
-    file_upload_error_handler,
-    file_size_error_handler,
-    file_type_error_handler,
-    general_error_handler,
-    FileUploadError,
-    FileSizeError,
-    FileTypeError,
-)
+import asyncio
+import uvicorn
+import os
+import logging
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
-from app.models.user import User
-from app.schemas.user import UserCreate, UserRead, UserUpdate
-from app.users.manager import auth_backend, current_active_user, fastapi_users
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.sessions import SessionMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
+from app.api.v1 import translation, users, files
+from app.db.session import engine, init_db
+from app.core.config import settings
+from app.utils.cleanup import start_cleanup_task
+from app.middleware.rate_limit import RateLimitMiddleware
+from app.docs.api import custom_openapi
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Not needed if you setup a migration system like Alembic
-    # await create_db_and_tables()
-    yield
-
+async def lifespan(app: FastAPI) -> AsyncGenerator:
+    """
+    Context manager for FastAPI app. It will run all code before `yield`
+    on app startup, and will run code after `yield` on app shutdown.
+    """
+    try:
+        # Create upload directories if they don't exist
+        logger.info("Creating upload directories...")
+        os.makedirs(settings.TEMP_UPLOAD_DIR, exist_ok=True)
+        os.makedirs(settings.PROCESSED_FILES_DIR, exist_ok=True)
+        
+        # Initialize database
+        logger.info("Initializing database...")
+        await init_db()
+        
+        # Start cleanup task on application startup
+        start_cleanup_task()
+        logger.info("Application startup completed")
+        yield
+        
+    except Exception as e:
+        logger.error(f"Error during startup: {str(e)}", exc_info=True)
+        raise
+    finally:
+        logger.info("Application shutdown")
 
 app = FastAPI(
-    title="EPUBox API",
-    description="API for EPUBox - EPUB file management system",
+    title="EPUBox",
+    description="A scalable EPUB translation service",
     version="1.0.0",
-    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
-# Configure CORS
+# CORS middleware configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],  # In production, replace with specific origins
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# 注册自定义错误处理器
-app.add_exception_handler(FileUploadError, file_upload_error_handler)
-app.add_exception_handler(FileSizeError, file_size_error_handler)
-app.add_exception_handler(FileTypeError, file_type_error_handler)
-app.add_exception_handler(Exception, general_error_handler)  # 捕获其他未处理的异常
+# Mount static files
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
-# Authentication routes
-app.include_router(
-    fastapi_users.get_auth_router(auth_backend),
-    prefix="/api/auth/jwt",
-    tags=["Authentication"],
-)
-app.include_router(
-    fastapi_users.get_register_router(UserRead, UserCreate),
-    prefix="/api/auth",
-    tags=["Authentication"],
-)
-app.include_router(
-    fastapi_users.get_reset_password_router(),
-    prefix="/api/auth",
-    tags=["Authentication"],
-)
-app.include_router(
-    fastapi_users.get_verify_router(UserRead),
-    prefix="/api/auth",
-    tags=["Authentication"],
-)
-app.include_router(
-    fastapi_users.get_users_router(UserRead, UserUpdate),
-    prefix="/api/users",
-    tags=["Users"],
+# Add session middleware
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.SECRET_KEY
 )
 
+# Add rate limiting middleware
+app.add_middleware(RateLimitMiddleware)
 
-@app.get("/api/me", response_model=UserRead)
-async def authenticated_route(user: User = Depends(current_active_user)):
-    """Get current authenticated user information."""
-    return user
+# Include routers
+app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
+app.include_router(translation.router, prefix="/api/v1/translation", tags=["translation"])
+app.include_router(files.router, prefix="/api/v1/files", tags=["files"])
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    logger.error(f"HTTP Exception: {exc.status_code} - {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
 
-# 注册路由
-app.include_router(storage_router, prefix="/api", tags=["Storage"])
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    logger.debug("Health check requested")
+    return {"status": "ok"}
+
+# Use custom OpenAPI schema
+app.openapi = lambda: custom_openapi(app)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

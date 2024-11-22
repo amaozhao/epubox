@@ -1,26 +1,62 @@
-# app/models/user.py
-from typing import Optional
-from sqlalchemy import String, Boolean
-from sqlalchemy.orm import Mapped, mapped_column
-from fastapi_users.db import SQLAlchemyBaseUserTableUUID
-from app.core.database import BaseModel
+"""User model for authentication and authorization."""
 
+from sqlalchemy import Column, Integer, String, Boolean, Enum as SQLEnum
+from sqlalchemy.orm import relationship
 
-class User(SQLAlchemyBaseUserTableUUID, BaseModel):
-    """User model with required fields for FastAPI-Users."""
+from app.db.base import Base, TimestampMixin
+from app.core.types import UserRole
+
+class User(Base, TimestampMixin):
+    """User model representing application users.
     
-    email: Mapped[str] = mapped_column(
-        String(length=320), unique=True, index=True, nullable=False
+    Attributes:
+        id: Unique identifier for the user
+        email: User's email address (unique)
+        hashed_password: Securely hashed password
+        full_name: User's full name
+        role: User's role for authorization
+        is_active: Whether the user account is active
+        is_superuser: Whether the user has superuser privileges
+        files: Related file metadata records
+        translation_tasks: Related translation tasks
+    """
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    full_name = Column(String)
+    role = Column(SQLEnum(UserRole), default=UserRole.FREE, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    is_superuser = Column(Boolean, default=False, nullable=False)
+
+    # Relationships
+    files = relationship(
+        "FileMetadata",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin"
     )
-    hashed_password: Mapped[str] = mapped_column(
-        String(length=1024), nullable=False
+    translation_tasks = relationship(
+        "TranslationTask",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin"
     )
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, default=True, nullable=False
-    )
-    is_superuser: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
-    )
-    is_verified: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
-    )
+
+    def has_permission(self, required_role: UserRole) -> bool:
+        """Check if user has required role permission.
+        
+        Args:
+            required_role: The role level required for access
+            
+        Returns:
+            bool: True if user has sufficient permissions
+        """
+        if self.is_superuser:
+            return True
+        return self.role.has_permission(required_role)
+
+    class Config:
+        """Pydantic configuration."""
+        orm_mode = True

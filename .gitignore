@@ -9,7 +9,9 @@ __pycache__/
 .DS_Store
 *.epub
 *.db
+progress.json
 uploads/
+tests/epubox/test_pipeline/output/
 
 # Distribution / packaging
 .Python

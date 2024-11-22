@@ -1,118 +1,85 @@
+"""Test configuration and fixtures."""
+import sys
+from unittest.mock import Mock
 import pytest
-import asyncio
-from typing import AsyncGenerator
+import pytest_asyncio
+from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.pool import StaticPool
+from contextlib import asynccontextmanager
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from fastapi import FastAPI
-from app.core.database import get_async_session, BaseModel
+
+# Import and apply mocks before importing app
+from .mocks import mock_aioredis, mock_httpx
+sys.modules['aioredis'] = mock_aioredis
+sys.modules['httpx'] = mock_httpx
+
+# Now we can safely import app
 from app.main import app
-from app.models.user import User
-from app.models.storage import EpubFile
+from app.db.base import Base
+from app.db.session import get_session
 
+# Create test database
+SQLALCHEMY_TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
-# This is a test database URL
-TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+engine = create_async_engine(
+    SQLALCHEMY_TEST_DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+TestingSessionLocal = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
 
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create an instance of the default event loop for each test case."""
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
-def test_app() -> FastAPI:
-    """Create a test instance of the FastAPI application."""
-    return app
-
-
-@pytest.fixture(scope="session")
-async def test_engine():
-    """Create a test database engine."""
-    engine = create_async_engine(
-        TEST_DATABASE_URL,
-        echo=True,
-        future=True
-    )
+@pytest_asyncio.fixture(scope="session")
+async def db_engine():
+    """Create test database engine."""
     async with engine.begin() as conn:
-        await conn.run_sync(BaseModel.metadata.drop_all)
-        await conn.run_sync(BaseModel.metadata.create_all)
+        await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:
-        await conn.run_sync(BaseModel.metadata.drop_all)
-    await engine.dispose()
+        await conn.run_sync(Base.metadata.drop_all)
 
-
-@pytest.fixture
-async def db(test_engine) -> AsyncGenerator[AsyncSession, None]:
-    """Create a test database session."""
-    session_maker = sessionmaker(
-        test_engine,
-        class_=AsyncSession,
-        expire_on_commit=False
-    )
-    async with session_maker() as session:
+@pytest_asyncio.fixture
+async def db():
+    """Get a test database session."""
+    # Create tables
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    
+    async with TestingSessionLocal() as session:
         try:
             yield session
         finally:
             await session.rollback()
             await session.close()
 
+async def get_test_session():
+    """Override the get_session dependency."""
+    async with TestingSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.rollback()
+            await session.close()
 
-@pytest.fixture
-async def client(test_app) -> AsyncGenerator[AsyncClient, None]:
-    """Create a test client."""
-    async with AsyncClient(app=test_app, base_url="http://test") as client:
-        yield client
+@pytest_asyncio.fixture
+async def client(db):
+    """Get a test client with overridden session dependency."""
+    app.dependency_overrides[get_session] = get_test_session
+    async with AsyncClient(app=app, base_url="http://test") as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
 
-
-@pytest.fixture
-async def test_user(db: AsyncSession) -> AsyncGenerator[User, None]:
-    """Create a test user."""
-    user = User(
-        email="test@example.com",
-        hashed_password="test_hashed_password",
-        is_active=True
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    try:
-        yield user
-    finally:
-        await db.delete(user)
-        await db.commit()
-
-
-@pytest.fixture
-async def test_epub_file(db: AsyncSession) -> AsyncGenerator[EpubFile, None]:
-    """Create a test epub file."""
-    epub_file = EpubFile(
-        filename="test.epub",
-        status="pending"
-    )
-    db.add(epub_file)
-    await db.commit()
-    await db.refresh(epub_file)
-    try:
-        yield epub_file
-    finally:
-        await db.delete(epub_file)
-        await db.commit()
-
-
-@pytest.fixture
-async def test_user_token(test_user: User) -> str:
-    """Create a test verification token."""
-    return "test_verification_token"
-
-
-@pytest.fixture
-async def authenticated_client(client: AsyncClient, test_user_token: str) -> AsyncGenerator[AsyncClient, None]:
-    """Create an authenticated test client."""
-    client.headers["Authorization"] = f"Bearer {test_user_token}"
-    yield client
+@pytest_asyncio.fixture
+async def test_user():
+    """Get test user data."""
+    return {
+        "email": "test@example.com",
+        "password": "password123"
+    }
