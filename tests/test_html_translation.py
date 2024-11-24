@@ -3,6 +3,39 @@ from bs4 import BeautifulSoup
 from typing import List
 from app.services.translation.html_processor import HTMLProcessor, TextFragment
 from app.services.translation.semantic import SemanticTranslationService, TranslationService
+from app.services.translation.base import BaseTranslationAdapter, TranslationRequest, TranslationResponse
+
+class MockTranslator(BaseTranslationAdapter):
+    def __init__(self):
+        super().__init__(api_key="mock_key")
+
+    async def translate_text(self, request: TranslationRequest) -> TranslationResponse:
+        return TranslationResponse(
+            translated_text=f"[{request.target_language}]{request.text}",
+            source_language=request.source_language,
+            target_language=request.target_language,
+            confidence=1.0
+        )
+
+    async def translate_batch(self, requests: List[TranslationRequest]) -> List[TranslationResponse]:
+        responses = []
+        for request in requests:
+            response = await self.translate_text(request)
+            responses.append(response)
+        return responses
+
+    async def detect_language(self, text: str) -> str:
+        return "en"
+
+    def get_supported_languages(self) -> List[str]:
+        return ["en", "zh", "ja", "ko"]
+
+    async def get_translation_cost(self, text: str, source_lang: str, target_lang: str) -> float:
+        return len(text) * 0.001
+
+    async def validate_languages(self, source_lang: str, target_lang: str) -> bool:
+        supported = self.get_supported_languages()
+        return source_lang in supported and target_lang in supported
 
 class MockTranslationService(TranslationService):
     async def translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
@@ -17,7 +50,7 @@ def html_processor():
 
 @pytest.fixture
 def translation_service():
-    return SemanticTranslationService(MockTranslationService())
+    return SemanticTranslationService(MockTranslator())
 
 def test_html_processor_skip_tags(html_processor):
     html = """

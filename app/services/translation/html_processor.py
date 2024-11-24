@@ -1,4 +1,4 @@
-from typing import List, Set, Tuple, Optional
+from typing import List, Set, Tuple, Optional, Dict
 from bs4 import BeautifulSoup, Tag, NavigableString
 from dataclasses import dataclass
 
@@ -73,9 +73,8 @@ class HTMLProcessor:
                 
             # Skip XML declaration, DOCTYPE, and HTML structure elements
             if (text.startswith('<?xml') or
-                text.startswith('<!DOCTYPE') or
+                text == '<!DOCTYPE html>' or  # Only skip exact DOCTYPE
                 'xml version' in text or
-                text == 'html' or  # DOCTYPE html
                 text == 'xmlns' or  # xmlns attribute
                 text.startswith('http://www.') or  # xmlns URLs
                 text.startswith('javascript:') or  # JavaScript URLs
@@ -232,27 +231,22 @@ class HTMLProcessor:
         return fragments
 
     def extract_text_fragments(self, soup: BeautifulSoup) -> List[TextFragment]:
-        """
-        Extract text fragments from HTML while preserving structure.
-        Returns list of TextFragment objects.
-        """
+        """Extract text fragments from HTML content."""
         fragments = []
         
         def process_node(node):
             if isinstance(node, NavigableString):
-                # Process text nodes
                 if not self._should_skip_node(node):
                     text = str(node).strip()
                     if text:
-                        path = self._get_node_path(node)
                         for chunk in self._split_text(text):
                             fragments.append(TextFragment(
                                 text=chunk,
-                                path=path,
+                                path=self._get_node_path(node),
                                 original_node=node
                             ))
             elif isinstance(node, Tag):
-                # Extract translatable attributes
+                # Extract translatable attributes first
                 fragments.extend(self._extract_translatable_attributes(node))
                 
                 # Skip processing children for tags in skip_tags
@@ -266,89 +260,27 @@ class HTMLProcessor:
         process_node(soup)
         return fragments
 
-    def rebuild_html(self, soup: BeautifulSoup, translated_fragments: List[Tuple[TextFragment, str]]) -> str:
-        """
-        Rebuild HTML with translated text fragments.
-        
-        Args:
-            soup: Original BeautifulSoup object
-            translated_fragments: List of (original_fragment, translated_text) tuples
-        
-        Returns:
-            Translated HTML string
-        """
-        # First, update text nodes
-        text_translations = {}  # path -> list of translations
-        attr_translations = {}  # path -> {attr_name -> list of translations}
-        
-        # Group translations by path and type (text node or attribute)
-        for fragment, translation in translated_fragments:
-            path = fragment.path
-            original_text = fragment.text
-            
-            # Check if this is an attribute translation
-            if ' @' in path:
-                base_path, attr_name = path.rsplit(' @', 1)
-                attr_translations.setdefault(base_path, {}).setdefault(attr_name, []).append(translation)
-            else:
-                text_translations.setdefault(path, []).append(translation)
-        
-        # Update text nodes
-        for path, translations in text_translations.items():
-            # Find the tag using the path
-            current = soup
-            try:
-                for part in path.split(' > '):
-                    if not part:  # Skip empty parts
-                        continue
-                    if '[' in part:
-                        tag_name, index_part = part.split('[', 1)
-                        index = int(index_part[:-1])  # Remove the closing bracket
-                        if tag_name == 'document':
-                            continue  # Skip document node, as we're already at soup
-                        current = list(current.find_all(tag_name, recursive=False))[index]
-                    else:
-                        current = current.find(part, recursive=False)
-                    
-                    if not current:
-                        break
+    def update_html_with_translations(self, soup: BeautifulSoup, translations: Dict[str, str]) -> None:
+        """Update HTML content with translations."""
+        def process_node(node):
+            if isinstance(node, NavigableString):
+                if not self._should_skip_node(node):
+                    path = self._get_node_path(node)
+                    if path in translations:
+                        node.replace_with(translations[path])
+            elif isinstance(node, Tag):
+                # Update translatable attributes
+                for attr in self.translatable_attrs:
+                    if attr in node.attrs:
+                        path = f"{self._get_node_path(node)} @{attr}"
+                        if path in translations:
+                            node[attr] = translations[path]
                 
-                if current and current.string:
-                    current.string.replace_with(' '.join(t for t in translations if t))
-            except (ValueError, IndexError) as e:
-                print(f"Error processing path {path}: {str(e)}")
-                continue
+                # Process children
+                for child in list(node.children):
+                    process_node(child)
         
-        # Update translated attributes
-        for path, attrs in attr_translations.items():
-            # Find the tag using the path
-            current = soup
-            try:
-                for part in path.split(' > '):
-                    if not part:  # Skip empty parts
-                        continue
-                    if '[' in part:
-                        tag_name, index_part = part.split('[', 1)
-                        index = int(index_part[:-1])  # Remove the closing bracket
-                        if tag_name == 'document':
-                            continue  # Skip document node, as we're already at soup
-                        current = list(current.find_all(tag_name, recursive=False))[index]
-                    else:
-                        current = current.find(part, recursive=False)
-                    
-                    if not current:
-                        break
-                
-                if current:
-                    for attr_name, translations in attrs.items():
-                        translated_text = ' '.join(t for t in translations if t)
-                        if translated_text:
-                            current[attr_name] = translated_text
-            except (ValueError, IndexError) as e:
-                print(f"Error processing path {path}: {str(e)}")
-                continue
-        
-        return str(soup)
+        process_node(soup)
 
     def process_html(self, html_content: str) -> Tuple[BeautifulSoup, List[TextFragment]]:
         """
@@ -363,3 +295,11 @@ class HTMLProcessor:
         soup = self.parse_html(html_content)
         fragments = self.extract_text_fragments(soup)
         return soup, fragments
+
+    def rebuild_html(self, soup: BeautifulSoup, translations: List[Tuple[TextFragment, str]]) -> str:
+        """
+        Rebuild HTML with translated text fragments.
+        """
+        translation_dict = {f.path: trans for f, trans in translations}
+        self.update_html_with_translations(soup, translation_dict)
+        return str(soup)

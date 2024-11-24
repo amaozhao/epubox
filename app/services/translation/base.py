@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 from pydantic import BaseModel
+import warnings
 
 class TranslationRequest(BaseModel):
     text: str
@@ -26,6 +27,24 @@ class BaseTranslationAdapter(ABC):
     async def translate_text(self, request: TranslationRequest) -> TranslationResponse:
         """Translate a single piece of text."""
         pass
+
+    async def translate_text_legacy(self, text: str, source_language: str, target_language: str) -> str:
+        """
+        Legacy method for translating text. This method is deprecated.
+        Please use translate_text with TranslationRequest instead.
+        """
+        warnings.warn(
+            "translate_text_legacy is deprecated. Please use translate_text with TranslationRequest instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        request = TranslationRequest(
+            text=text,
+            source_language=source_language,
+            target_language=target_language
+        )
+        response = await self.translate_text(request)
+        return response.translated_text
 
     @abstractmethod
     async def translate_batch(self, requests: List[TranslationRequest]) -> List[TranslationResponse]:
