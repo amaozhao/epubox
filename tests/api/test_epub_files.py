@@ -1,10 +1,11 @@
 import os
+import zipfile
 from pathlib import Path
+
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-import zipfile
 
 from app.core.config import settings
 from app.models.epub_file import EPUBFile

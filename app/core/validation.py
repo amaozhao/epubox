@@ -1,11 +1,12 @@
+from typing import Optional
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
 
 from app.core.exceptions import (
     InvalidPasswordException,
-    UserValidationError,
     UserAlreadyExists,
+    UserValidationError,
 )
 from app.core.logging import validation_logger as logger
 from app.models.user import User

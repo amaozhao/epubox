@@ -1,6 +1,7 @@
 from typing import Optional
-from pydantic import EmailStr, validator
+
 from fastapi_users import schemas
+from pydantic import EmailStr, validator
 
 from app.core.logging import schemas_logger as logger
 

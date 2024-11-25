@@ -1,13 +1,11 @@
-import pytest
-from pathlib import Path
-import tempfile
 import os
 import shutil
-import logging
+import tempfile
+from pathlib import Path
+
+import pytest
 
 from app.services.epub_parser import EPUBParser
-
-logger = logging.getLogger(__name__)
 
 TEST_EPUB_PATH = Path(__file__).parent / "test.epub"
 
@@ -149,15 +147,12 @@ def test_get_all_translatable_content(sample_epub_path):
 def test_excluded_tags(sample_epub_path):
     """Test that excluded tags are properly handled."""
     parser = EPUBParser(sample_epub_path)
-    logger.debug(f"Loaded EPUB file with {len(parser.chapters)} chapters")
-
     if not parser.chapters:
         pytest.fail("No chapters found in EPUB file")
 
     # Find a chapter that has text content
     text_chapter = None
     for chapter in parser.chapters:
-        logger.debug(f"Checking chapter: {chapter['name']} (ID: {chapter['id']})")
         if chapter.get("has_text"):
             text_chapter = chapter
             break
@@ -166,13 +161,10 @@ def test_excluded_tags(sample_epub_path):
         pytest.skip("No chapters with text content found in EPUB file")
 
     chapter_id = text_chapter["id"]
-    logger.debug(f"Testing with chapter ID: {chapter_id} (has text content)")
 
     # Test with default excluded tags (code, pre, script, style)
     default_content = parser.get_translatable_content(chapter_id)
-    print(
-        f"\nDebug: Content with default excluded tags: {len(default_content)} segments"
-    )
+
     if default_content:
         print("Debug: Default content first few segments:")
         for segment in default_content[:5]:
@@ -184,9 +176,7 @@ def test_excluded_tags(sample_epub_path):
     minimal_content = parser.get_translatable_content(
         chapter_id, excluded_tags=minimal_excluded
     )
-    print(
-        f"\nDebug: Content with minimal excluded tags: {len(minimal_content)} segments"
-    )
+
     if minimal_content:
         print("Debug: Minimal exclusion content first few segments:")
         for segment in minimal_content[:5]:

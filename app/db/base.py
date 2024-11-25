@@ -12,9 +12,10 @@ logger = get_logger(__name__)
 # Create the declarative base
 Base = declarative_base()
 
+from app.models.epub_file import EPUBFile  # noqa
+
 # Import all models here to ensure they are registered with SQLAlchemy
 from app.models.user import User  # noqa
-from app.models.epub_file import EPUBFile  # noqa
 
 # Create the async engine
 engine = create_async_engine(

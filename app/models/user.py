@@ -1,6 +1,7 @@
 from typing import Optional
+
 from fastapi_users_db_sqlalchemy import SQLAlchemyBaseUserTable
-from sqlalchemy import String, Boolean, select, Integer
+from sqlalchemy import Boolean, Integer, String, select
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.logging import models_logger as logger

@@ -1,11 +1,11 @@
-from typing import AsyncGenerator, Annotated
+from typing import Annotated, AsyncGenerator
 
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import current_active_user
 from app.db.base import get_async_session
 from app.models.user import User
-from app.core.auth import current_active_user
 
 
 # Reusable dependencies

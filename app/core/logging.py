@@ -1,13 +1,13 @@
 """Logging configuration for the application."""
 
 import logging
-import sys
 import os
+import sys
 from datetime import datetime
+from functools import lru_cache
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
-from typing import Dict, Optional, List, Any, Union
-from functools import lru_cache
+from typing import Any, Dict, List, Optional, Union
 
 import structlog
 from structlog.types import Processor

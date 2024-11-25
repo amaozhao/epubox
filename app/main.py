@@ -1,13 +1,13 @@
-from fastapi import FastAPI, Depends
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_users import FastAPIUsers
 
+from app.api.endpoints import epub_files
 from app.core.auth import auth_backend, get_user_manager
 from app.core.config import settings
 from app.core.logging import app_logger as logger
 from app.models.user import User
 from app.schemas.user import UserCreate, UserRead, UserUpdate
-from app.api.endpoints import epub_files
 
 # Create FastAPI app
 app = FastAPI(

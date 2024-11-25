@@ -1,11 +1,12 @@
+import io
 import os
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Optional
-from fastapi import UploadFile, HTTPException
+
 import aiofiles
-import uuid
-import io
+from fastapi import HTTPException, UploadFile
 
 from app.core.config import settings
 

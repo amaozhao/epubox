@@ -1,9 +1,10 @@
-from typing import Dict, List, Optional
-import ebooklib
-from ebooklib import epub
-from bs4 import BeautifulSoup, NavigableString, Comment
 import os
 from pathlib import Path
+from typing import Dict, List, Optional
+
+import ebooklib
+from bs4 import BeautifulSoup, Comment, NavigableString
+from ebooklib import epub
 
 from app.core.logging import get_logger
 
