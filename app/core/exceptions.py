@@ -1,52 +1,26 @@
-"""Custom exception classes."""
-
-from typing import Any, Dict, Optional
 from fastapi import HTTPException, status
+from fastapi_users.exceptions import UserAlreadyExists
 
-class EPUBoxException(HTTPException):
-    """Base exception for EPUBox application."""
-    
-    def __init__(
-        self,
-        status_code: int,
-        detail: str,
-        headers: Optional[Dict[str, Any]] = None
-    ):
-        super().__init__(status_code=status_code, detail=detail, headers=headers)
+from app.core.logging import exceptions_logger as logger
 
-class NotFoundException(EPUBoxException):
-    """Exception raised when a resource is not found."""
-    
-    def __init__(self, detail: str = "Resource not found"):
-        super().__init__(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
 
-class UnauthorizedException(EPUBoxException):
-    """Exception raised for authentication failures."""
-    
-    def __init__(self, detail: str = "Invalid credentials"):
-        super().__init__(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=detail,
-            headers={"WWW-Authenticate": "Bearer"}
-        )
+class UserValidationError(HTTPException):
+    """Base exception for user validation errors."""
 
-class ForbiddenException(EPUBoxException):
-    """Exception raised for authorization failures."""
-    
-    def __init__(self, detail: str = "Not enough permissions"):
-        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    def __init__(self, detail: str):
+        logger.error("user_validation_exception", detail=detail)
+        super().__init__(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
 
-class ValidationException(EPUBoxException):
-    """Exception raised for validation errors."""
-    
-    def __init__(self, detail: str = "Validation error"):
-        super().__init__(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
 
-class DatabaseException(EPUBoxException):
-    """Exception raised for database errors."""
-    
-    def __init__(self, detail: str = "Database error occurred"):
-        super().__init__(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=detail
-        )
+class DuplicateUserError(UserAlreadyExists):
+    """Exception raised when a user with the same unique field already exists."""
+
+    pass
+
+
+class InvalidPasswordException(HTTPException):
+    """Exception raised when password validation fails."""
+
+    def __init__(self, detail: str):
+        logger.error("invalid_password_exception", detail=detail)
+        super().__init__(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)

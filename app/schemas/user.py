@@ -1,60 +1,96 @@
-"""User schema models for request/response validation."""
-
-from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, EmailStr, constr
+from pydantic import EmailStr, validator
+from fastapi_users import schemas
 
-from app.core.types import UserRole
+from app.core.logging import schemas_logger as logger
 
-class UserBase(BaseModel):
-    """Base schema for user data."""
-    email: EmailStr
+
+class UserRead(schemas.BaseUser[int]):
+    """User read schema."""
+
+    username: str
+    phone: Optional[str] = None
     full_name: Optional[str] = None
-    role: Optional[UserRole] = UserRole.FREE
-    is_active: Optional[bool] = True
-
-class UserCreate(UserBase):
-    """Schema for creating a new user."""
-    password: constr(min_length=8)  # type: ignore
-    confirm_password: str
-
-    def validate_passwords_match(self):
-        """Validate that password and confirm_password match."""
-        if self.password != self.confirm_password:
-            raise ValueError("Passwords do not match")
-
-class UserUpdate(BaseModel):
-    """Schema for updating a user."""
-    full_name: Optional[str] = None
-    email: Optional[EmailStr] = None
-    is_active: Optional[bool] = None
-    role: Optional[UserRole] = None
-
-class UserPasswordUpdate(BaseModel):
-    """Schema for updating user password."""
-    current_password: str
-    new_password: constr(min_length=8)  # type: ignore
-    confirm_password: str
-
-    def validate_passwords_match(self):
-        """Validate that new_password and confirm_password match."""
-        if self.new_password != self.confirm_password:
-            raise ValueError("New passwords do not match")
-
-class UserInDBBase(UserBase):
-    """Base schema for user in database."""
-    id: int
-    created_at: datetime
-    updated_at: datetime
+    is_active: bool = True
+    is_superuser: bool = False
+    is_verified: bool = False
 
     class Config:
-        """Pydantic configuration."""
-        from_attributes = True
+        """Pydantic config."""
 
-class User(UserInDBBase):
-    """Schema for user response."""
-    pass
+        orm_mode = True
 
-class UserInDB(UserInDBBase):
-    """Schema for user in database with hashed password."""
-    hashed_password: str
+    @validator("phone")
+    def phone_validator(cls, v: Optional[str]) -> Optional[str]:
+        """Validate phone number."""
+        if v is None:
+            return v
+        if not v.startswith("+"):
+            logger.warning("phone_validation_failed", reason="invalid_format", phone=v)
+            raise ValueError("Phone number must start with '+'")
+        logger.debug("phone_validation_passed", phone=v)
+        return v
+
+
+class UserCreate(schemas.BaseUserCreate):
+    """User creation schema."""
+
+    username: str
+    phone: Optional[str] = None
+    is_active: bool = True
+    is_superuser: bool = False
+    is_verified: bool = False
+
+    @validator("username")
+    def username_validator(cls, v: str) -> str:
+        """Validate username."""
+        if len(v) < 3:
+            logger.warning(
+                "username_validation_failed", reason="too_short", length=len(v)
+            )
+            raise ValueError("Username must be at least 3 characters long")
+        logger.debug("username_validation_passed", username=v)
+        return v
+
+    @validator("phone")
+    def phone_validator(cls, v: Optional[str]) -> Optional[str]:
+        """Validate phone number."""
+        if v is None:
+            return v
+        if not v.startswith("+"):
+            logger.warning("phone_validation_failed", reason="invalid_format", phone=v)
+            raise ValueError("Phone number must start with '+'")
+        logger.debug("phone_validation_passed", phone=v)
+        return v
+
+
+class UserUpdate(schemas.BaseUserUpdate):
+    """User update schema."""
+
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    full_name: Optional[str] = None
+
+    @validator("username")
+    def username_validator(cls, v: Optional[str]) -> Optional[str]:
+        """Validate username."""
+        if v is None:
+            return v
+        if len(v) < 3:
+            logger.warning(
+                "username_validation_failed", reason="too_short", length=len(v)
+            )
+            raise ValueError("Username must be at least 3 characters long")
+        logger.debug("username_validation_passed", username=v)
+        return v
+
+    @validator("phone")
+    def phone_validator(cls, v: Optional[str]) -> Optional[str]:
+        """Validate phone number."""
+        if v is None:
+            return v
+        if not v.startswith("+"):
+            logger.warning("phone_validation_failed", reason="invalid_format", phone=v)
+            raise ValueError("Phone number must start with '+'")
+        logger.debug("phone_validation_passed", phone=v)
+        return v

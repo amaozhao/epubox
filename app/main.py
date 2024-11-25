@@ -1,113 +1,96 @@
-import asyncio
-import uvicorn
-import os
-import logging
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from starlette.middleware.sessions import SessionMiddleware
-from fastapi.staticfiles import StaticFiles
-from pathlib import Path
+from fastapi_users import FastAPIUsers
 
-from app.api.v1 import translation, users, files
-from app.db.session import engine, init_db
+from app.core.auth import auth_backend, get_user_manager
 from app.core.config import settings
-from app.utils.cleanup import start_cleanup_task
-from app.middleware.rate_limit import RateLimitMiddleware
-from app.docs.api import custom_openapi
+from app.core.logging import app_logger as logger
+from app.models.user import User
+from app.schemas.user import UserCreate, UserRead, UserUpdate
+from app.api.endpoints import epub_files
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
-
-logger = logging.getLogger(__name__)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator:
-    """
-    Context manager for FastAPI app. It will run all code before `yield`
-    on app startup, and will run code after `yield` on app shutdown.
-    """
-    try:
-        # Create upload directories if they don't exist
-        logger.info("Creating upload directories...")
-        os.makedirs(settings.TEMP_UPLOAD_DIR, exist_ok=True)
-        os.makedirs(settings.PROCESSED_FILES_DIR, exist_ok=True)
-        
-        # Initialize database
-        logger.info("Initializing database...")
-        await init_db()
-        
-        # Start cleanup task on application startup
-        start_cleanup_task()
-        logger.info("Application startup completed")
-        yield
-        
-    except Exception as e:
-        logger.error(f"Error during startup: {str(e)}", exc_info=True)
-        raise
-    finally:
-        logger.info("Application shutdown")
-
+# Create FastAPI app
 app = FastAPI(
-    title="EPUBox",
-    description="A scalable EPUB translation service",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    lifespan=lifespan
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
 )
 
-# CORS middleware configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Mount static files
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
-
-# Add session middleware
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=settings.SECRET_KEY
-)
-
-# Add rate limiting middleware
-app.add_middleware(RateLimitMiddleware)
-
-# Include routers
-app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
-app.include_router(translation.router, prefix="/api/v1/translation", tags=["translation"])
-app.include_router(files.router, prefix="/api/v1/files", tags=["files"])
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc):
-    logger.error(f"HTTP Exception: {exc.status_code} - {exc.detail}")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail},
+# Configure CORS
+if settings.BACKEND_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.BACKEND_CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    logger.debug("Health check requested")
-    return {"status": "ok"}
+# FastAPI Users instance
+fastapi_users = FastAPIUsers[User, int](
+    get_user_manager,
+    [auth_backend],
+)
 
-# Use custom OpenAPI schema
-app.openapi = lambda: custom_openapi(app)
+# Include routers
+app.include_router(
+    fastapi_users.get_auth_router(auth_backend),
+    prefix=f"{settings.API_V1_STR}/auth/jwt",
+    tags=["auth"],
+)
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+app.include_router(
+    fastapi_users.get_register_router(UserRead, UserCreate),
+    prefix=f"{settings.API_V1_STR}/auth",
+    tags=["auth"],
+)
+
+app.include_router(
+    fastapi_users.get_verify_router(UserRead),
+    prefix=f"{settings.API_V1_STR}/auth",
+    tags=["auth"],
+)
+
+app.include_router(
+    fastapi_users.get_reset_password_router(),
+    prefix=f"{settings.API_V1_STR}/auth",
+    tags=["auth"],
+)
+
+app.include_router(
+    fastapi_users.get_users_router(UserRead, UserUpdate),
+    prefix=f"{settings.API_V1_STR}/users",
+    tags=["users"],
+)
+
+# Include EPUB file management endpoints
+app.include_router(
+    epub_files.router,
+    prefix=f"{settings.API_V1_STR}/epub-files",
+    tags=["epub-files"],
+    dependencies=[Depends(fastapi_users.current_user())],
+)
+
+
+@app.get("/")
+async def root():
+    """Root endpoint."""
+    logger.info("root_endpoint_accessed", status="success")
+    return {"message": "Welcome to EPUBox API"}
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Log when the application starts."""
+    logger.info(
+        "application_startup",
+        project_name=settings.PROJECT_NAME,
+        api_v1_str=settings.API_V1_STR,
+        backend_cors_origins=settings.BACKEND_CORS_ORIGINS,
+    )
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Log when the application shuts down."""
+    logger.info("application_shutdown", project_name=settings.PROJECT_NAME)
