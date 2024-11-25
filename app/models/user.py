@@ -5,7 +5,7 @@ from sqlalchemy import Boolean, Integer, String, select
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.logging import models_logger as logger
-from app.db.base import Base
+from app.db.base_class import Base
 
 
 class User(SQLAlchemyBaseUserTable[int], Base):

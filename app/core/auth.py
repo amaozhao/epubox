@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.core.exceptions import InvalidPasswordException
 from app.core.logging import auth_logger as logger
 from app.core.validation import PasswordValidator, UserValidator
-from app.db.base import get_async_session
+from app.db.session import get_async_session
 from app.models.user import User
 
 # Configure structured logging
