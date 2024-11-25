@@ -2,6 +2,10 @@ import asyncio
 from typing import AsyncGenerator, Generator, Optional
 
 import pytest
+import os
+import logging
+import shutil
+import tempfile
 from fastapi import FastAPI, Depends
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -78,6 +82,36 @@ async def get_test_user_manager(
     except Exception as e:
         logger.error("test_user_manager_error", error=str(e))
         raise
+
+
+@pytest.fixture(autouse=True)
+def setup_logging():
+    """Configure logging for tests to only show warnings and above."""
+    logging.getLogger().setLevel(logging.WARNING)
+    for handler in logging.getLogger().handlers:
+        handler.setLevel(logging.WARNING)
+
+
+@pytest.fixture
+def sample_epub_path():
+    """Create a temporary copy of test.epub for testing."""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    source_epub = os.path.join(current_dir, "test.epub")
+
+    # Create a temporary file
+    temp_fd, temp_path = tempfile.mkstemp(suffix=".epub")
+    os.close(temp_fd)
+
+    # Copy the test file to the temporary location
+    shutil.copy2(source_epub, temp_path)
+
+    yield temp_path
+
+    # Cleanup the temporary file after the test
+    try:
+        os.unlink(temp_path)
+    except OSError:
+        pass
 
 
 @pytest.fixture(autouse=True)
