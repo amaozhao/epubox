@@ -252,6 +252,7 @@ exceptions_logger = get_logger("app.core.exceptions")
 models_logger = get_logger("app.models")
 epub_logger = get_logger("app.core.epub")  # Logger for EPUB operations
 api_logger = get_logger("app.api")
+services_logger = get_logger("app.services")  # Logger for services
 test_logger = get_logger("tests")
 
 # Initialize logging with default settings

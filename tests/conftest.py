@@ -87,6 +87,10 @@ def sample_epub_path():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     source_epub = os.path.join(current_dir, "test.epub")
 
+    # Verify the source file exists and has content
+    assert os.path.exists(source_epub), f"Test EPUB file not found at {source_epub}"
+    assert os.path.getsize(source_epub) > 0, f"Test EPUB file is empty at {source_epub}"
+
     # Create a temporary file
     temp_fd, temp_path = tempfile.mkstemp(suffix=".epub")
     os.close(temp_fd)
@@ -94,13 +98,18 @@ def sample_epub_path():
     # Copy the test file to the temporary location
     shutil.copy2(source_epub, temp_path)
 
+    # Verify the copied file
+    tmp_size = os.path.getsize(temp_path)
+    logger.debug(f"Copied EPUB file size: {tmp_size} bytes")
+    logger.debug(f"Temporary file path: {temp_path}")
+
     yield temp_path
 
     # Cleanup the temporary file after the test
     try:
         os.unlink(temp_path)
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning(f"Failed to cleanup temporary file {temp_path}: {e}")
 
 
 @pytest.fixture(autouse=True)

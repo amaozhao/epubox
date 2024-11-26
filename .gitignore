@@ -175,3 +175,8 @@ database.db
 logs/
 *.log
 *.log.*
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml

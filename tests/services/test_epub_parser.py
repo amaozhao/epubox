@@ -1,36 +1,9 @@
 import os
-import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from app.services.epub_parser import EPUBParser
-
-TEST_EPUB_PATH = Path(__file__).parent / "test.epub"
-
-
-@pytest.fixture
-def sample_epub_path():
-    """Create a temporary copy of the test EPUB file for testing."""
-    # Verify the source file exists and has content
-    assert TEST_EPUB_PATH.exists(), f"Test EPUB file not found at {TEST_EPUB_PATH}"
-    assert (
-        TEST_EPUB_PATH.stat().st_size > 0
-    ), f"Test EPUB file is empty at {TEST_EPUB_PATH}"
-
-    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp_file:
-        # Copy the test EPUB file to a temporary location
-        shutil.copy2(TEST_EPUB_PATH, tmp_file.name)
-
-        # Verify the copied file
-        tmp_size = os.path.getsize(tmp_file.name)
-        print(f"\nDebug: Copied EPUB file size: {tmp_size} bytes")
-        print(f"Debug: Temporary file path: {tmp_file.name}")
-
-        yield tmp_file.name
-        # Cleanup
-        os.unlink(tmp_file.name)
 
 
 def test_epub_parser_initialization(sample_epub_path):
