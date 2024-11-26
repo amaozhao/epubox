@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     FIRST_SUPERUSER_EMAIL: Optional[EmailStr] = None
     FIRST_SUPERUSER_PASSWORD: Optional[SecretStr] = None
 
+    MISTRAL_API_KEY: Optional[str] = None
+
     class Config:
         case_sensitive = True
         env_file = ".env"
