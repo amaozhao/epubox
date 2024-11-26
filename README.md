@@ -129,6 +129,55 @@ Common status codes:
 - 429: Too Many Requests
 - 500: Internal Server Error
 
+## Development Status
+
+### Implemented Features
+- Basic file upload structure
+- Authentication framework
+- Database structure
+- API endpoints structure
+- Basic HTML attribute preservation
+- Initial configuration setup
+
+### In Progress
+1. Translation Service
+   - Translation queue management
+   - Mistral API integration
+   - Progress tracking for translation jobs
+
+2. Authentication & Authorization
+   - Role-based access control
+   - Rate limiting implementation
+   - User management endpoints
+
+3. EPUB Processing
+   - EPUB content extraction
+   - HTML attribute preservation during translation
+   - EPUB reassembly after translation
+
+4. File Management
+   - File cleanup/deletion
+   - Storage optimization
+   - File versioning
+
+5. Testing
+   - Integration tests
+   - Performance tests
+   - Edge case handling
+
+6. System Reliability
+   - Comprehensive error handling
+   - Detailed logging system
+   - Error recovery mechanisms
+
+### Next Steps
+1. Complete translation service implementation
+2. Implement comprehensive testing
+3. Add rate limiting and role-based access
+4. Enhance error handling and logging
+5. Implement file management features
+6. Add monitoring and optimization
+
 ## Development Setup
 
 1. Clone the repository:
