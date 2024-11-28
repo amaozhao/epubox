@@ -50,6 +50,23 @@ class GoogleTranslator(BaseTranslator):
     BATCH_CHUNK_SIZE = 50
     MAX_CONCURRENT_REQUESTS = 10
 
+    # Supported languages with their names
+    SUPPORTED_LANGUAGES = [
+        {"code": "en", "name": "English"},
+        {"code": "es", "name": "Spanish"},
+        {"code": "fr", "name": "French"},
+        {"code": "de", "name": "German"},
+        {"code": "it", "name": "Italian"},
+        {"code": "pt", "name": "Portuguese"},
+        {"code": "ru", "name": "Russian"},
+        {"code": "zh", "name": "Chinese"},
+        {"code": "ja", "name": "Japanese"},
+        {"code": "ko", "name": "Korean"},
+        {"code": "ar", "name": "Arabic"},
+        {"code": "hi", "name": "Hindi"},
+        {"code": "auto", "name": "Auto-detect"},
+    ]
+
     def __init__(self, api_key: str, source_lang: str, target_lang: str):
         """Initialize Google translator.
 
@@ -231,14 +248,20 @@ class GoogleTranslator(BaseTranslator):
             )
             return "en"  # Default fallback
 
-    def get_supported_languages(self) -> List[str]:
+    def get_supported_languages(self) -> Dict[str, List[Dict[str, str]]]:
         """Get list of supported languages.
 
         Returns:
-            List[str]: List of supported language codes
+            Dict[str, List[Dict[str, str]]]: Dictionary containing source and target languages
         """
-        # This could be expanded to dynamically fetch from Google Translate
-        return ["en", "zh", "es", "fr", "de", "ja", "ko", "ru", "ar", "hi", "auto"]
+        # Remove auto-detect from target languages
+        target_languages = [
+            lang for lang in self.SUPPORTED_LANGUAGES if lang["code"] != "auto"
+        ]
+        return {
+            "source_languages": self.SUPPORTED_LANGUAGES,
+            "target_languages": target_languages,
+        }
 
     async def close(self):
         """Close the httpx client."""

@@ -46,5 +46,17 @@ class CRUDEPUBFile(CRUDBase[EPUBFile, EPUBFileCreate, EPUBFileUpdate]):
         result = await db.execute(query)
         return result.scalars().all()
 
+    def is_owner(self, obj: EPUBFile, user_id: int) -> bool:
+        """Check if the user is the owner of the file.
+
+        Args:
+            obj: The EPUB file object to check.
+            user_id: The ID of the user to check ownership for.
+
+        Returns:
+            bool: True if the user is the owner, False otherwise.
+        """
+        return obj.user_id == user_id
+
 
 epub_file = CRUDEPUBFile(EPUBFile)

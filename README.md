@@ -7,9 +7,12 @@ EPUBox is a powerful web service that allows you to translate EPUB files across 
 - User authentication with JWT tokens
 - File upload and management
 - EPUB translation with multiple language support
+  - Multiple translation providers (Google, Mock, planned: OpenAI, Mistral)
+  - HTML formatting preservation
+  - Asynchronous processing with progress tracking
+  - Task management (submit, status check, cancellation)
 - Rate limiting based on user roles
 - File metadata tracking
-- Asynchronous translation processing
 - Secure file handling
 
 ## API Documentation
@@ -74,6 +77,13 @@ curl -X GET "http://localhost:8000/api/v1/files/download/1" \
 
 ### Translation
 
+Get supported languages:
+
+```bash
+curl -X GET "http://localhost:8000/api/v1/translation/languages" \
+     -H "Authorization: Bearer your-token-here"
+```
+
 Start translation:
 
 ```bash
@@ -82,8 +92,9 @@ curl -X POST "http://localhost:8000/api/v1/translation/translate" \
      -H "Content-Type: application/json" \
      -d '{
        "file_id": 1,
-       "source_language": "en",
-       "target_language": "es"
+       "source_lang": "en",
+       "target_lang": "es",
+       "provider": "google"
      }'
 ```
 
@@ -91,6 +102,13 @@ Check translation status:
 
 ```bash
 curl -X GET "http://localhost:8000/api/v1/translation/status/task-id-here" \
+     -H "Authorization: Bearer your-token-here"
+```
+
+Cancel translation:
+
+```bash
+curl -X DELETE "http://localhost:8000/api/v1/translation/cancel/task-id-here" \
      -H "Authorization: Bearer your-token-here"
 ```
 
@@ -132,51 +150,66 @@ Common status codes:
 ## Development Status
 
 ### Implemented Features
-- Basic file upload structure
-- Authentication framework
-- Database structure
-- API endpoints structure
-- Basic HTML attribute preservation
-- Initial configuration setup
+- Complete authentication system
+- File upload and management
+- Translation API endpoints
+  - Task submission
+  - Status checking
+  - Task cancellation
+  - Language support
+- Translation providers
+  - Google Translate integration
+  - Mock provider for testing
+- Queue management
+  - Async task processing
+  - Progress tracking
+  - Task cancellation
+- Test coverage
+  - API endpoint tests
+  - Translation flow tests
+  - Error handling tests
 
 ### In Progress
-1. Translation Service
-   - Translation queue management
-   - Mistral API integration
-   - Progress tracking for translation jobs
+1. EPUB Translation Enhancement
+   - Metadata translation (title, author, description)
+   - Table of contents translation
+   - Internal links preservation
+   - Image alt text translation
+   - Content validation
+   - Progress reporting improvements
 
-2. Authentication & Authorization
-   - Role-based access control
-   - Rate limiting implementation
-   - User management endpoints
+2. Translation Quality
+   - Context-aware translation
+   - Term consistency
+   - Custom dictionaries support
+   - Quality validation
 
-3. EPUB Processing
-   - EPUB content extraction
-   - HTML attribute preservation during translation
-   - EPUB reassembly after translation
+3. Provider Integration
+   - OpenAI integration
+   - Mistral integration
+   - Provider selection optimization
 
-4. File Management
-   - File cleanup/deletion
-   - Storage optimization
-   - File versioning
-
-5. Testing
-   - Integration tests
-   - Performance tests
-   - Edge case handling
-
-6. System Reliability
-   - Comprehensive error handling
-   - Detailed logging system
-   - Error recovery mechanisms
+4. Testing & Validation
+   - EPUB format tests
+   - Large file handling
+   - Performance benchmarks
+   - Memory usage optimization
 
 ### Next Steps
-1. Complete translation service implementation
-2. Implement comprehensive testing
-3. Add rate limiting and role-based access
-4. Enhance error handling and logging
-5. Implement file management features
-6. Add monitoring and optimization
+1. Complete EPUB translation features
+   - Full metadata support
+   - Structure preservation
+   - Navigation handling
+2. Add new translation providers
+   - OpenAI implementation
+   - Mistral implementation
+3. Enhance translation quality
+   - Context awareness
+   - Terminology consistency
+4. Improve validation and testing
+   - Format validation
+   - Quality checks
+   - Performance testing
 
 ## Development Setup
 

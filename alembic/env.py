@@ -42,7 +42,7 @@ def run_migrations_offline() -> None:
 
     """
     logger.info("running_offline_migrations")
-    url = settings.SQLALCHEMY_DATABASE_URI
+    url = settings.DATABASE_URL
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -65,7 +65,7 @@ async def run_migrations_online() -> None:
     logger.info("running_online_migrations")
     configuration = config.get_section(config.config_ini_section)
     if configuration and "sqlalchemy.url" not in configuration:
-        configuration["sqlalchemy.url"] = settings.SQLALCHEMY_DATABASE_URI
+        configuration["sqlalchemy.url"] = settings.DATABASE_URL
 
     connectable = async_engine_from_config(
         configuration,

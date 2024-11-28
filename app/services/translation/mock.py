@@ -44,10 +44,25 @@ class MockTranslator(BaseTranslator):
         await asyncio.sleep(0.1)
         return "en"
 
-    def get_supported_languages(self) -> List[str]:
+    def get_supported_languages(self) -> Dict[str, List[Dict[str, str]]]:
         """Get mock supported languages.
 
         Returns:
-            List[str]: List of common language codes
+            Dict: Dictionary containing source and target languages with their codes and names
         """
-        return ["en", "es", "fr", "de", "zh", "ja", "ko"]
+        languages = [
+            {"code": "en", "name": "English"},
+            {"code": "es", "name": "Spanish"},
+            {"code": "fr", "name": "French"},
+            {"code": "de", "name": "German"},
+            {"code": "it", "name": "Italian"},
+            {"code": "pt", "name": "Portuguese"},
+            {"code": "ru", "name": "Russian"},
+            {"code": "zh", "name": "Chinese"},
+            {"code": "ja", "name": "Japanese"},
+            {"code": "ko", "name": "Korean"},
+        ]
+        return {
+            "source_languages": languages,
+            "target_languages": languages,
+        }

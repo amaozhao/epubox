@@ -17,8 +17,11 @@ class EPUBFile(Base):
     upload_date = Column(DateTime, default=datetime.utcnow, nullable=False)
     user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
 
-    # Relationship with User model
+    # Relationships
     user = relationship("User", back_populates="epub_files")
+    translation_projects = relationship(
+        "TranslationProject", back_populates="epub_file"
+    )
 
     class Config:
         orm_mode = True

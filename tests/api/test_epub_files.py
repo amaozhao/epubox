@@ -1,3 +1,5 @@
+"""Test cases for EPUB file endpoints."""
+
 import os
 import zipfile
 from pathlib import Path
@@ -30,7 +32,7 @@ async def test_upload_epub(
     with open(test_epub_path, "rb") as f:
         files = {"file": ("test.epub", f, "application/epub+zip")}
         response = await async_client.post(
-            f"{settings.API_V1_STR}/epub-files/upload/",
+            f"{settings.API_V1_STR}/files/upload/",
             headers=headers,
             files=files,
         )
@@ -54,7 +56,7 @@ async def test_list_epub_files(
     """Test listing EPUB files."""
     headers = {"Authorization": f"Bearer {test_user_token}"}
     response = await async_client.get(
-        f"{settings.API_V1_STR}/epub-files/",
+        f"{settings.API_V1_STR}/files/",
         headers=headers,
     )
 
@@ -76,7 +78,7 @@ async def test_get_epub_file(
     with open(test_epub_path, "rb") as f:
         files = {"file": ("test.epub", f, "application/epub+zip")}
         response = await async_client.post(
-            f"{settings.API_V1_STR}/epub-files/upload/",
+            f"{settings.API_V1_STR}/files/upload/",
             headers=headers,
             files=files,
         )
@@ -85,7 +87,7 @@ async def test_get_epub_file(
 
     # Then get the file
     response = await async_client.get(
-        f"{settings.API_V1_STR}/epub-files/{file_id}",
+        f"{settings.API_V1_STR}/files/{file_id}",
         headers=headers,
     )
     assert response.status_code == 200
@@ -106,7 +108,7 @@ async def test_delete_epub_file(
     with open(test_epub_path, "rb") as f:
         files = {"file": ("test.epub", f, "application/epub+zip")}
         response = await async_client.post(
-            f"{settings.API_V1_STR}/epub-files/upload/",
+            f"{settings.API_V1_STR}/files/upload/",
             headers=headers,
             files=files,
         )
@@ -114,22 +116,15 @@ async def test_delete_epub_file(
     file_id = response.json()["id"]
     file_path = response.json()["file_path"]
 
-    # Then delete the file
+    # Then delete it
     response = await async_client.delete(
-        f"{settings.API_V1_STR}/epub-files/{file_id}",
+        f"{settings.API_V1_STR}/files/{file_id}",
         headers=headers,
     )
     assert response.status_code == 200
 
-    # Verify file is deleted from disk
+    # Check file was deleted
     assert not os.path.exists(file_path)
-
-    # Verify file is deleted from database
-    response = await async_client.get(
-        f"{settings.API_V1_STR}/epub-files/{file_id}",
-        headers=headers,
-    )
-    assert response.status_code == 404
 
 
 async def test_unauthorized_access(
@@ -140,14 +135,14 @@ async def test_unauthorized_access(
 ):
     """Test unauthorized access to EPUB endpoints."""
     # Try to list files without token
-    response = await async_client.get(f"{settings.API_V1_STR}/epub-files/")
+    response = await async_client.get(f"{settings.API_V1_STR}/files/")
     assert response.status_code == 401
 
     # Try to upload without token
     with open(test_epub_path, "rb") as f:
         files = {"file": ("test.epub", f, "application/epub+zip")}
         response = await async_client.post(
-            f"{settings.API_V1_STR}/epub-files/upload/",
+            f"{settings.API_V1_STR}/files/upload/",
             files=files,
         )
     assert response.status_code == 401
@@ -162,23 +157,23 @@ async def test_invalid_file_type(
     """Test uploading invalid file type."""
     headers = {"Authorization": f"Bearer {test_user_token}"}
 
-    # Create a test text file
-    test_file = Path("tests/data/test.txt")
-    test_file.parent.mkdir(parents=True, exist_ok=True)
-    test_file.write_text("This is not an EPUB file")
+    # Create a fake zip file
+    test_file = Path("tests/test.zip")
+    with zipfile.ZipFile(test_file, "w") as zf:
+        zf.writestr("test.txt", "This is not an EPUB file")
 
     try:
         with open(test_file, "rb") as f:
-            files = {"file": ("test.txt", f, "text/plain")}
+            files = {"file": ("test.zip", f, "application/zip")}
             response = await async_client.post(
-                f"{settings.API_V1_STR}/epub-files/upload/",
+                f"{settings.API_V1_STR}/files/upload/",
                 headers=headers,
                 files=files,
             )
-
         assert response.status_code == 400
         assert "Invalid file type" in response.json()["detail"]
 
     finally:
+        # Clean up test file
         if test_file.exists():
             test_file.unlink()

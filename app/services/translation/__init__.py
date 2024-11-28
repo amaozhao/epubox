@@ -10,6 +10,8 @@ class TranslationProvider(str, Enum):
     GOOGLE = "google"
     DEEPL = "deepl"
     MOCK = "mock"  # For testing purposes
+    OPENAI = "openai"
+    MISTRAL = "mistral"
 
 
 class TranslationError(Exception):

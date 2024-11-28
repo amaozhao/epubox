@@ -23,6 +23,9 @@ from app.core.config import settings
 from app.core.logging import test_logger as logger
 from app.db.base import Base
 from app.main import app
+
+# Import all models to ensure they are registered with SQLAlchemy
+from app.models import *
 from app.models.user import User
 from app.schemas.user import UserCreate
 
@@ -155,6 +158,29 @@ async def db() -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest.fixture
+def db_session(db):
+    """Database session fixture."""
+    return db.sync_session
+
+
+@pytest.fixture
+def sample_translation_project(db_session):
+    """Create a sample translation project for testing."""
+    from app.models.translation_project import TranslationProject
+
+    project = TranslationProject(
+        name="Test Project",
+        source_language="en",
+        target_language="es",
+        source_epub_path="/path/to/test.epub",
+        status="pending",
+    )
+    db_session.add(project)
+    db_session.commit()
+    return project
+
+
+@pytest.fixture
 async def test_user_token(db: AsyncSession) -> str:
     """Create a test user and return JWT token."""
     user_db = SQLAlchemyUserDatabase(db, User)
@@ -174,6 +200,34 @@ async def test_user_token(db: AsyncSession) -> str:
     # Generate JWT token
     strategy = get_jwt_strategy()
     token = await strategy.write_token(user)
+    return token
+
+
+@pytest.fixture
+async def test_other_user(db: AsyncSession) -> User:
+    """Create another test user and return the User object."""
+    user_db = SQLAlchemyUserDatabase(db, User)
+    user_manager = UserManager(user_db)
+
+    user = await user_manager.create(
+        UserCreate(
+            email="other@example.com",
+            username="otheruser",
+            password="otherpassword123",
+            is_active=True,
+            is_superuser=False,
+            is_verified=True,
+        )
+    )
+    return user
+
+
+@pytest.fixture
+async def test_other_user_token(test_other_user: User) -> str:
+    """Return JWT token for the other test user."""
+    # Generate JWT token
+    strategy = get_jwt_strategy()
+    token = await strategy.write_token(test_other_user)
     return token
 
 

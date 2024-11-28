@@ -160,11 +160,13 @@ async def test_detect_language_network_error(translator):
 def test_get_supported_languages(translator):
     """Test getting supported languages."""
     languages = translator.get_supported_languages()
-    assert isinstance(languages, list)
-    assert all(isinstance(lang, str) for lang in languages)
-    assert "en" in languages
-    assert "zh" in languages
-    assert "auto" in languages
+    assert isinstance(languages, dict)
+    assert "source_languages" in languages
+    assert "target_languages" in languages
+    assert isinstance(languages["source_languages"], list)
+    assert isinstance(languages["target_languages"], list)
+    assert any(lang["code"] == "en" for lang in languages["source_languages"])
+    assert any(lang["code"] == "zh" for lang in languages["target_languages"])
 
 
 @pytest.mark.asyncio
