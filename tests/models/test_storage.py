@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from tests.test_infrastructure.models import Storage, StorageStatus, User
+from tests.infrastructure.models import Storage, StorageStatus, User
 
 
 @pytest.mark.asyncio

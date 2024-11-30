@@ -1,5 +1,7 @@
-"""Test configuration and fixtures."""
+"""Test fixtures."""
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -8,14 +10,21 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from tests.test_infrastructure.database import Base
-from tests.test_infrastructure.models import Storage, StorageStatus, User
+from tests.infrastructure.database import Base
+from tests.infrastructure.models import Storage, StorageStatus, User
 
-# Create test database
 SQLALCHEMY_TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest.fixture(scope="function")
+def event_loop():
+    """Create an instance of the default event loop for each test case."""
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest_asyncio.fixture(scope="function")
 async def engine():
     """Create test database engine."""
     test_engine = create_async_engine(
@@ -35,7 +44,7 @@ async def engine():
     await test_engine.dispose()
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(scope="function")
 async def db(engine):
     """Get a test database session."""
     TestingSessionLocal = async_sessionmaker(
@@ -47,49 +56,53 @@ async def db(engine):
     )
 
     async with TestingSessionLocal() as session:
-        # 开始事务
-        async with session.begin():
-            # 清理表数据
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
-                await conn.run_sync(Base.metadata.create_all)
-            yield session
+        yield session
 
 
-@pytest_asyncio.fixture
-async def test_user(db: AsyncSession) -> User:
-    """创建测试用户"""
+@pytest.fixture(autouse=True)
+def setup_logging():
+    # 设置日志级别为 ERROR，只显示错误信息
+    logging.basicConfig(
+        level=logging.ERROR,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+@pytest_asyncio.fixture(scope="function")
+async def test_user(db: AsyncSession):
+    """Create a test user."""
     user = User(
-        id=str(uuid.uuid4()),
+        id="test-user-id",
         username="testuser",
         email="test@example.com",
-        password_hash="hashed_password",
+        password_hash="dummy_hash",
         is_active=True,
         is_verified=False,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
     db.add(user)
-    await db.flush()
+    await db.commit()
     await db.refresh(user)
     return user
 
 
-@pytest_asyncio.fixture
-async def test_storage(db: AsyncSession, test_user: User) -> Storage:
-    """创建测试存储记录"""
+@pytest_asyncio.fixture(scope="function")
+async def test_storage(db: AsyncSession, test_user: User):
+    """Create a test storage record."""
     storage = Storage(
         id=str(uuid.uuid4()),
-        user_id=test_user.id,
         original_filename="test.epub",
-        file_size=1024,
+        file_size=1000,
         mime_type="application/epub+zip",
-        upload_path="/tmp/test.epub",
         status=StorageStatus.UPLOADED,
+        upload_path="/path/to/test.epub",
+        user_id=test_user.id,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
     db.add(storage)
-    await db.flush()
+    await db.commit()
     await db.refresh(storage)
     return storage

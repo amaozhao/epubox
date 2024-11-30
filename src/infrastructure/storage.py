@@ -1,7 +1,7 @@
 import os
 import shutil
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO, Optional
 from zipfile import ZipFile
@@ -80,7 +80,7 @@ class StorageService:
                 status=StorageStatus.UPLOADED,
                 upload_path=str(file_path),
                 user_id=user_id,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),  # 统一使用 UTC 时间
             )
 
             self.session.add(storage)
@@ -101,17 +101,16 @@ class StorageService:
             logger.error(
                 "file_upload_failed",
                 filename=filename,
-                user_id=user_id,
                 error=str(e),
                 exc_info=True,
             )
-            raise FileError(f"Failed to save file: {str(e)}")
+            raise FileError(f"Failed to upload file: {str(e)}")
 
     async def create_work_copy(self, file_id: str) -> str:
         """
         创建工作副本
         :param file_id: 原始文件ID
-        :return: 工作副本ID
+        :return: 工作副本路径
         """
         try:
             # 获取存储记录
@@ -138,10 +137,11 @@ class StorageService:
                 "work_copy_created",
                 original_file_id=file_id,
                 work_copy_id=work_copy_id,
+                target_path=str(target_path),
                 user_id=storage.user_id,
             )
 
-            return work_copy_id
+            return str(target_path)
 
         except Exception as e:
             await self.session.rollback()
@@ -320,47 +320,79 @@ class StorageService:
         :param max_age_hours: 最大保留时间（小时）
         """
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)  # 统一使用 UTC 时间
+
+            # 刷新会话，确保获取最新数据
+            await self.session.flush()
 
             # 获取过期的存储记录
             stmt = select(Storage).where(
                 and_(
-                    Storage.status != StorageStatus.DELETED,
+                    Storage.status.in_(
+                        [
+                            StorageStatus.UPLOADED,
+                            StorageStatus.FAILED,
+                            StorageStatus.COMPLETED,
+                        ]
+                    ),
                     Storage.created_at < current_time - timedelta(hours=max_age_hours),
                 )
             )
             result = await self.session.execute(stmt)
             expired_storages = result.scalars().all()
 
+            deleted_count = 0
             for storage in expired_storages:
-                # 删除物理文件
-                if storage.upload_path:
-                    upload_path = Path(storage.upload_path)
-                    if upload_path.exists():
-                        upload_path.unlink()
+                try:
+                    # 删除物理文件
+                    if storage.upload_path:
+                        upload_path = Path(storage.upload_path)
+                        if upload_path.exists():
+                            upload_path.unlink()
+                            logger.info(
+                                "deleted_upload_file",
+                                file_id=storage.id,
+                                path=str(upload_path),
+                            )
 
-                if storage.translation_path:
-                    translation_path = Path(storage.translation_path)
-                    if translation_path.exists():
-                        translation_path.unlink()
+                    if storage.translation_path:
+                        translation_path = Path(storage.translation_path)
+                        if translation_path.exists():
+                            translation_path.unlink()
+                            logger.info(
+                                "deleted_translation_file",
+                                file_id=storage.id,
+                                path=str(translation_path),
+                            )
 
-                # 更新存储状态
-                storage.status = StorageStatus.DELETED
+                    # 更新存储状态
+                    storage.status = StorageStatus.DELETED
+                    deleted_count += 1
 
-                logger.info(
-                    "expired_file_deleted",
-                    file_id=storage.id,
-                    age_hours=(current_time - storage.created_at).total_seconds()
-                    / 3600,
-                    user_id=storage.user_id,
-                )
+                    logger.info(
+                        "expired_file_deleted",
+                        file_id=storage.id,
+                        age_hours=(current_time - storage.created_at).total_seconds()
+                        / 3600,
+                        user_id=storage.user_id,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "failed_to_delete_file",
+                        file_id=storage.id,
+                        error=str(e),
+                        exc_info=True,
+                    )
+                    continue
 
-            await self.session.commit()
+            # 提交所有更改
+            if deleted_count > 0:
+                await self.session.commit()
 
             logger.info(
                 "cleanup_completed",
                 max_age_hours=max_age_hours,
-                files_deleted=len(expired_storages),
+                files_deleted=deleted_count,
             )
 
         except Exception as e:
