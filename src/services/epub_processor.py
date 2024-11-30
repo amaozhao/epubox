@@ -58,12 +58,11 @@ class EPUBProcessor:
                     content = item.get_content()
                     if isinstance(content, bytes):
                         content = content.decode("utf-8")
-                    soup = BeautifulSoup(content, "html.parser")
                     content = {
                         "id": item.get_name().replace(".xhtml", ""),
                         "file_name": item.get_name(),
                         "media_type": "application/xhtml+xml",
-                        "content": soup.get_text(strip=True),
+                        "content": content,
                     }
                     contents.append(content)
                     logging.debug(f"Extracted content from {item.get_name()}")
@@ -76,6 +75,19 @@ class EPUBProcessor:
             error_msg = f"Failed to extract EPUB content: {str(e)}"
             logging.error(error_msg)
             raise EPUBProcessorError(error_msg)
+
+    def _extract_body_content(self, html_content: str) -> str:
+        """Extract body content from HTML string."""
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            body = soup.body
+            if body:
+                # 保留body标签内的所有内容
+                return "".join(str(tag) for tag in body.contents)
+            return html_content
+        except Exception as e:
+            logging.error(f"Failed to extract body content: {str(e)}")
+            return html_content
 
     async def save_translated_content(
         self,
@@ -121,7 +133,11 @@ class EPUBProcessor:
                     for content in translated_contents:
                         if content["file_name"] == item.get_name():
                             try:
-                                item.set_content(content["content"])
+                                # 提取并设置body内容
+                                body_content = self._extract_body_content(
+                                    content["content"]
+                                )
+                                item.set_content(body_content)
                                 content_updated = True
                                 logging.debug(f"Updated content for {item.get_name()}")
                             except Exception as e:
