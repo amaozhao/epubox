@@ -101,76 +101,453 @@ sequenceDiagram
 
 ```python
 class EPUBProcessor:
-    """EPUB文件处理核心组件"""
+    """EPUB文件处理核心组件
     
-    def __init__(self, html_processor: HTMLProcessor, storage: StorageService):
+    职责：
+    1. 管理EPUB文件的读写
+    2. 协调HTML内容的翻译流程
+    3. 维护临时文件和工作目录
+    """
+    
+    def __init__(self, html_processor: HTMLProcessor, temp_dir: str = None):
         self.html_processor = html_processor
-        self.storage = storage
+        self.temp_dir = temp_dir or tempfile.mkdtemp()
     
-    async def process_epub(self, file_id: str, source_lang: str, target_lang: str) -> str:
-        """
-        处理EPUB文件的主入口
-        - 协调整个翻译流程
-        - 返回翻译后的文件ID
+    async def translate_epub(self, epub_path: str, source_lang: str, target_lang: str, output_path: str) -> str:
+        """翻译EPUB文件的主入口
+        
+        Args:
+            epub_path: 源EPUB文件路径
+            source_lang: 源语言
+            target_lang: 目标语言
+            output_path: 输出文件路径
+            
+        Returns:
+            输出文件路径
         """
         try:
-            # 创建工作副本
-            work_copy_id = await self.storage.create_work_copy(file_id)
+            # 1. 提取内容
+            contents = await self.extract_content(epub_path)
             
-            # 获取EPUB中的HTML文件列表
-            html_files = await self.list_html_files(work_copy_id)
-            
-            # 处理每个HTML文件
-            tasks = []
-            for html_file in html_files:
-                task = self.process_html_file(
-                    work_copy_id,
-                    html_file,
-                    source_lang,
-                    target_lang
+            # 2. 处理每个内容文件
+            translated_contents = []
+            for content in contents:
+                translated_content = await self.html_processor.process_content(
+                    content, source_lang, target_lang
                 )
-                tasks.append(task)
+                translated_contents.append(translated_content)
             
-            # 并行处理HTML文件
-            await asyncio.gather(*tasks)
-            
-            return work_copy_id
-            
+            # 3. 保存翻译后的内容
+            return await self.save_translated_content(
+                epub_path, translated_contents, output_path
+            )
         except Exception as e:
-            # 出错时删除工作副本
-            await self.storage.delete_file(work_copy_id)
-            raise e
+            logging.error(f"Failed to translate EPUB: {str(e)}")
+            raise EPUBProcessorError(f"Translation failed: {str(e)}")
     
-    async def process_html_file(self, epub_id: str, html_path: str, source_lang: str, target_lang: str):
-        """
-        处理单个HTML文件
-        - 从EPUB中读取HTML
-        - 调用HTML处理器
-        - 更新EPUB中的HTML
-        """
-        # 从EPUB中读取HTML内容
-        html_content = await self.storage.read_epub_html(epub_id, html_path)
+    async def extract_content(self, epub_path: str) -> List[Dict[str, Any]]:
+        """提取EPUB文件中的可翻译内容"""
+        pass
         
-        # 翻译HTML内容
-        translated_html = await self.html_processor.process_html(
-            html_content,
-            source_lang,
-            target_lang
-        )
-        
-        # 更新EPUB中的HTML文件
-        await self.storage.update_epub_html(epub_id, html_path, translated_html)
-    
-    async def list_html_files(self, epub_id: str) -> list:
-        """
-        获取EPUB中的HTML文件列表
-        - 解析EPUB结构
-        - 返回所有HTML文件的路径
-        """
+    async def save_translated_content(self, epub_path: str, translated_contents: List[Dict[str, Any]], output_path: str) -> str:
+        """保存翻译后的内容到新的EPUB文件"""
         pass
 ```
 
-### 4.3 存储服务
+### 4.3 HTML处理器
+
+```python
+class HTMLProcessor:
+    """HTML内容处理组件
+    
+    职责：
+    1. 处理从EPUB提取的HTML内容
+    2. 确保内容分段不超过翻译服务的token限制
+    3. 保持HTML结构和语义的完整性
+    4. 处理长文档的分割和合并
+    5. 保护和还原特殊HTML内容
+    """
+    
+    def __init__(self, translation_service: TranslationService):
+        self.translation_service = translation_service
+        self.max_tokens = translation_service.get_token_limit()
+
+    async def process_content(self, content: Dict[str, Any], source_lang: str, target_lang: str) -> Dict[str, Any]:
+        """处理从EPUB提取的内容
+        
+        Args:
+            content: EPUBProcessor提取的内容字典
+                {
+                    "id": str,           # 文件ID
+                    "file_name": str,    # 文件名
+                    "media_type": str,   # 媒体类型
+                    "content": str       # HTML内容
+                }
+            source_lang: 源语言
+            target_lang: 目标语言
+            
+        Returns:
+            处理后的内容字典，保持相同的结构
+        
+        处理流程：
+        1. 预处理：识别和保护不可翻译内容
+        2. 分析结构：解析HTML树，识别可翻译节点
+        3. 分段处理：按照语义和token限制分割内容
+        4. 翻译处理：调用翻译服务
+        5. 内容重组：合并翻译结果，还原HTML结构
+        """
+        pass
+
+    async def preprocess(self, html_content: str) -> tuple[str, dict]:
+        """HTML预处理
+        
+        - 识别并标记不需要翻译的内容：
+          * 代码块 (<code>, <pre>)
+          * 脚本和样式 (<script>, <style>)
+          * 多媒体内容 (img, video等)
+          * 数学公式 (<math>, LaTeX)
+          * 特殊属性 (data-*, aria-*, role)
+        
+        - 生成规范的占位符：
+          * 格式：[[TYPE_NAME_INDEX]]
+          * 示例：[[CODE_BLOCK_1]], [[SCRIPT_1]]
+        
+        - 维护映射关系：
+          * 记录原始内容和属性
+          * 保存标签类型和索引
+        """
+        pass
+
+    async def analyze_structure(self, html_content: str) -> dict:
+        """分析HTML结构
+        
+        - 解析HTML树结构：
+          * 识别标签层级关系
+          * 标记可翻译节点
+          * 确定语义边界
+        
+        - 结构信息记录：
+          * 段落边界 (<p>, <div>, <section>)
+          * 语义单元 (标题、列表项等)
+          * 嵌套关系
+        """
+        pass
+
+    async def segment_text(self, structure: dict) -> list:
+        """文本分段处理
+        
+        分割策略：
+        1. 语义完整性：
+           - 优先在自然段落边界分割
+           - 保持语义单元的完整性（标题、列表项等）
+           - 不打断HTML标签结构
+        
+        2. 分割规则：
+           - 首选边界：段落标签 (<p>, <div>, <section>)
+           - 次选边界：句子结束（句号、问号、感叹号）
+           - 最后选择：合适的分隔符（逗号、分号）
+           - 禁止：词语中间分割
+        
+        3. Token控制：
+           - 确保每段不超过最大token限制
+           - 考虑翻译后文本可能的膨胀
+           - 为特殊标记预留token空间
+        
+        4. 结构保护：
+           - 保持原有HTML标签结构
+           - 不引入新的HTML标签
+           - 使用注释标记分割点
+        
+        返回：分段后的文本列表，每段都是完整的HTML片段
+        """
+        pass
+
+    async def restore_content(self, translated_segments: list, mapping: dict) -> str:
+        """还原处理后的内容
+        
+        - 合并翻译后的文本片段：
+          * 按原有顺序重组
+          * 移除临时注释标记
+          * 确保HTML结构完整
+        
+        - 还原不可翻译内容：
+          * 替换占位符
+          * 还原原始属性
+          * 保持标签完整性
+        
+        - 验证输出：
+          * 检查HTML结构完整性
+          * 验证所有占位符都已还原
+          * 确保标签匹配
+        """
+        pass
+
+    async def _handle_placeholders(self, html_content: str, mapping: dict) -> str:
+        """处理占位符
+        
+        占位符设计：
+        {
+            "[[TAG_TYPE_1]]": {
+                "type": "tag_name",          # 标签类型（pre, code, script等）
+                "name": "tag_name",          # 原始标签名
+                "content": "<tag>...</tag>", # 完整的原始HTML内容
+                "attributes": {              # 所有属性的详细信息
+                    "class": ["value"],
+                    "data-x": "value",
+                    "boolean-attr": None     # 布尔属性
+                },
+                "structure": {               # 标签的结构信息
+                    "outer_html": "<tag>...</tag>",
+                    "inner_html": "...",     # 内部HTML
+                    "text_content": "..."    # 纯文本内容
+                }
+            }
+        }
+        
+        处理流程：
+        1. 预处理阶段：
+           - 从外到内遍历HTML树
+           - 遇到不可翻译标签时：
+             * 生成唯一的占位符（[[TAG_TYPE_N]]）
+             * 保存完整的标签信息（包括属性和内容）
+             * 用占位符替换原标签
+           - 遇到普通标签时：
+             * 继续处理其子节点
+             * 保留其结构和属性
+        
+        2. 翻译阶段：
+           - 翻译包含占位符的文本
+           - 占位符在翻译过程中保持不变
+        
+        3. 还原阶段：
+           - 按占位符长度排序（避免部分替换）
+           - 对每个占位符：
+             * 优先使用保存的完整内容还原
+             * 如果需要重建：使用保存的属性和结构信息
+           - 验证还原结果的完整性
+        """
+        pass
+
+### 4.3 HTML处理器详细设计
+
+#### 4.3.1 Token 计算策略
+
+1. **计算范围**
+   - 只计算需要翻译的文本内容的 token 数量
+   - 不计算 HTML 标签、属性等结构性内容
+   - 使用 tiktoken 进行精确的 token 计算
+
+2. **Token 限制**
+   - 基础限制：每段最大 token 数（默认 1000）
+   - 考虑翻译膨胀率：预留 1.5 倍空间
+   - 实际限制 = 基础限制 / 1.5
+
+#### 4.3.2 分段策略
+
+1. **基本原则**
+   - 保持语义单元完整性
+   - 在自然段落边界处分段
+   - 考虑 token 限制和膨胀率
+
+2. **分段层次**
+   - 一级分段：块级元素边界
+   - 二级分段：当块级内容超过 token 限制时
+   - 三级分段：按文本节点分割超长内容
+
+3. **分段过程**
+   ```mermaid
+   flowchart TD
+       A[开始] --> B{检查 token 数}
+       B -- 超过限制 --> C{是否块级边界?}
+       C -- 是 --> D[在边界处分段]
+       C -- 否 --> E[尝试内容分割]
+       B -- 未超过 --> F[继续累积]
+       D --> G[下一个元素]
+       E --> G
+       F --> G
+   ```
+
+#### 4.3.3 技术实现细节
+
+1. **占位符生成策略**
+
+```python
+class HTMLProcessor:
+    def __init__(self):
+        self._placeholder_counter = 1
+        self.NON_TRANSLATABLE_TAGS = {'pre', 'code', 'script', 'style'}
+        
+    def generate_placeholder(self, tag_type: str) -> str:
+        """生成唯一的占位符
+        格式: [[TAG_TYPE_N]]，其中N是递增的计数器
+        """
+        placeholder = f"[[{tag_type.upper()}_{self._placeholder_counter}]]"
+        self._placeholder_counter += 1
+        return placeholder
+```
+
+2. **标签处理优先级**
+
+```mermaid
+graph TD
+    A[开始处理] --> B{是否是根节点?}
+    B -- 是 --> C[处理子节点]
+    B -- 否 --> D{是否是不可翻译标签?}
+    D -- 是 --> E[生成占位符]
+    D -- 否 --> F{是否有父级不可翻译标签?}
+    F -- 是 --> G[跳过处理]
+    F -- 否 --> C
+    C --> H[继续处理下一个节点]
+```
+
+3. **映射数据结构设计**
+
+```python
+@dataclass
+class HTMLElement:
+    """HTML元素的数据结构"""
+    type: str                 # 标签类型
+    name: str                 # 标签名
+    content: str             # 原始内容
+    attributes: Dict[str, Any] = field(default_factory=dict)  # 属性
+    structure: Dict[str, str] = field(default_factory=dict)   # 结构信息
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式用于存储"""
+        return {
+            "type": self.type,
+            "name": self.name,
+            "content": self.content,
+            "attributes": self.attributes,
+            "structure": self.structure
+        }
+```
+
+4. **属性处理细节**
+
+```python
+class AttributeProcessor:
+    """属性处理器"""
+    
+    @staticmethod
+    def process_boolean_attr(value: Any) -> Optional[None]:
+        """处理布尔属性（如async, defer）"""
+        return None if value in (True, '') else value
+    
+    @staticmethod
+    def process_class_attr(value: str) -> List[str]:
+        """处理class属性"""
+        return value.split() if isinstance(value, str) else value
+    
+    @staticmethod
+    def process_style_attr(value: str) -> str:
+        """处理style属性"""
+        return value.strip()
+    
+    @staticmethod
+    def process_data_attr(value: Any) -> Any:
+        """处理data-*属性"""
+        return json.dumps(value) if isinstance(value, (dict, list)) else str(value)
+```
+
+5. **还原策略**
+
+```python
+class RestoreStrategy:
+    """内容还原策略"""
+    
+    @staticmethod
+    def from_complete_content(mapping: Dict[str, Any]) -> str:
+        """从完整内容还原"""
+        return mapping["content"]
+    
+    @staticmethod
+    def rebuild_from_parts(mapping: Dict[str, Any]) -> str:
+        """从部分信息重建"""
+        tag_name = mapping["name"]
+        attrs = ' '.join(
+            f'{k}="{v}"' if v is not None else k
+            for k, v in mapping["attributes"].items()
+        )
+        inner_html = mapping["structure"]["inner_html"]
+        return f"<{tag_name} {attrs}>{inner_html}</{tag_name}>"
+```
+
+6. **错误恢复机制**
+
+```python
+class ErrorRecovery:
+    """错误恢复处理"""
+    
+    @staticmethod
+    def validate_placeholder(placeholder: str) -> bool:
+        """验证占位符格式"""
+        return bool(re.match(r'\[\[([A-Z]+)_(\d+)\]\]', placeholder))
+    
+    @staticmethod
+    def validate_mapping(mapping: Dict[str, Any]) -> bool:
+        """验证映射数据完整性"""
+        required_fields = {"type", "name", "content"}
+        return all(field in mapping for field in required_fields)
+    
+    @staticmethod
+    def validate_html_structure(html: str) -> bool:
+        """验证HTML结构完整性"""
+        soup = BeautifulSoup(html, 'html.parser')
+        return bool(soup.find())
+```
+
+7. **性能优化策略**
+
+a) **内存优化**：
+   - 使用 `__slots__` 优化类内存使用
+   - 及时清理不需要的映射数据
+   - 使用生成器处理大型文档
+
+```python
+@dataclass
+class HTMLElement:
+    __slots__ = ['type', 'name', 'content', 'attributes', 'structure']
+```
+
+b) **时间优化**：
+   - 使用集合进行O(1)查找
+   - 预先编译正则表达式
+   - 缓存常用的属性处理结果
+
+```python
+class HTMLProcessor:
+    def __init__(self):
+        self._placeholder_pattern = re.compile(r'\[\[([A-Z]+)_(\d+)\]\]')
+        self._non_translatable_tags = frozenset(['pre', 'code', 'script', 'style'])
+```
+
+8. **安全处理**
+
+```python
+class SecurityHandler:
+    """安全处理器"""
+    
+    @staticmethod
+    def escape_html(text: str) -> str:
+        """转义HTML特殊字符"""
+        return html.escape(text)
+    
+    @staticmethod
+    def sanitize_attributes(attrs: Dict[str, Any]) -> Dict[str, Any]:
+        """清理属性值"""
+        return {
+            k: html.escape(str(v)) if isinstance(v, str) else v
+            for k, v in attrs.items()
+        }
+    
+    @staticmethod
+    def validate_tag_name(name: str) -> bool:
+        """验证标签名安全性"""
+        return bool(re.match(r'^[a-zA-Z][a-zA-Z0-9]*$', name))
+```
+
+### 4.4 存储服务
 
 ```python
 class StorageService:
@@ -188,7 +565,13 @@ class StorageService:
         - 保存到上传目录
         - 返回文件ID
         """
-        pass
+        file_id = await self._generate_file_id()
+        file_path = os.path.join(self.upload_dir, file_id)
+        
+        async with aiofiles.open(file_path, 'wb') as f:
+            await f.write(file_data)
+        
+        return file_id
 
     async def create_work_copy(self, file_id: str) -> str:
         """
@@ -197,7 +580,12 @@ class StorageService:
         - 生成新的文件ID
         - 返回工作副本ID
         """
-        pass
+        work_copy_id = await self._generate_file_id()
+        source_path = os.path.join(self.upload_dir, file_id)
+        target_path = os.path.join(self.translation_dir, work_copy_id)
+        
+        await self._copy_file(source_path, target_path)
+        return work_copy_id
 
     async def get_file(self, file_id: str) -> bytes:
         """
@@ -205,7 +593,16 @@ class StorageService:
         - 支持获取原始文件或翻译后的文件
         - 文件不存在时抛出异常
         """
-        pass
+        # 先检查翻译目录
+        file_path = os.path.join(self.translation_dir, file_id)
+        if not os.path.exists(file_path):
+            # 如果不存在，检查上传目录
+            file_path = os.path.join(self.upload_dir, file_id)
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File {file_id} not found")
+        
+        async with aiofiles.open(file_path, 'rb') as f:
+            return await f.read()
 
     async def read_epub_html(self, epub_id: str, html_path: str) -> str:
         """
@@ -213,6 +610,8 @@ class StorageService:
         - 使用epub库读取HTML内容
         - 处理编码问题
         """
+        epub_path = os.path.join(self.translation_dir, epub_id)
+        # 使用epub库读取指定的HTML文件
         pass
 
     async def update_epub_html(self, epub_id: str, html_path: str, content: str):
@@ -221,6 +620,8 @@ class StorageService:
         - 使用epub库更新文件内容
         - 保持EPUB结构完整
         """
+        epub_path = os.path.join(self.translation_dir, epub_id)
+        # 使用epub库更新指定的HTML文件
         pass
 
     async def delete_file(self, file_id: str):
@@ -229,90 +630,31 @@ class StorageService:
         - 支持删除原始文件或翻译后的文件
         - 清理相关资源
         """
-        pass
+        # 检查并删除翻译目录中的文件
+        translation_path = os.path.join(self.translation_dir, file_id)
+        if os.path.exists(translation_path):
+            os.remove(translation_path)
+            return
+        
+        # 检查并删除上传目录中的文件
+        upload_path = os.path.join(self.upload_dir, file_id)
+        if os.path.exists(upload_path):
+            os.remove(upload_path)
+
+    async def _copy_file(self, source: str, target: str):
+        """复制文件"""
+        async with aiofiles.open(source, 'rb') as sf:
+            async with aiofiles.open(target, 'wb') as tf:
+                await tf.write(await sf.read())
 
     def _ensure_dirs(self):
         """确保必要的目录存在"""
-        pass
+        os.makedirs(self.upload_dir, exist_ok=True)
+        os.makedirs(self.translation_dir, exist_ok=True)
 
     async def _generate_file_id(self) -> str:
         """生成唯一的文件ID"""
-        pass
-```
-
-### 4.4 HTML处理器
-
-```python
-class HTMLProcessor:
-    """HTML内容处理组件"""
-    
-    def __init__(self, translation_service: TranslationService):
-        self.translation_service = translation_service
-
-    async def process_html(self, html_content: str, source_lang: str, target_lang: str) -> str:
-        """
-        处理HTML内容的主入口
-        - 协调HTML处理和翻译流程
-        - 返回翻译后的HTML内容
-        """
-        # 预处理HTML
-        content, mapping = await self.preprocess(html_content)
-        
-        # 分析结构
-        structure = await self.analyze_structure(content)
-        
-        # 分段处理
-        segments = await self.segment_text(structure)
-        
-        # 批量翻译文本段
-        translated_segments = await self.translation_service.batch_translate(
-            segments,
-            source_lang,
-            target_lang
-        )
-        
-        # 还原HTML结构
-        return await self.restore_content(translated_segments, mapping)
-
-    async def preprocess(self, html_content: str) -> tuple[str, dict]:
-        """
-        HTML预处理
-        - 识别并标记不可翻译内容：
-          * 代码块 (<code>, <pre>)
-          * 脚本 (<script>)
-          * 样式 (<style>)
-          * 多媒体内容 (img, video等)
-        - 生成占位符
-        - 返回处理后的HTML和映射表
-        """
-        pass
-
-    async def analyze_structure(self, html_content: str) -> dict:
-        """
-        分析HTML结构
-        - 解析标签树
-        - 识别嵌套关系
-        - 定位可翻译节点
-        """
-        pass
-
-    async def segment_text(self, structure: dict) -> list:
-        """
-        文本分段处理
-        - 按自然段落分割
-        - 保护HTML结构
-        - 控制分段大小
-        """
-        pass
-
-    async def restore_content(self, translated_segments: list, mapping: dict) -> str:
-        """
-        还原处理后的内容
-        - 替换占位符
-        - 还原原始标签
-        - 保持HTML结构完整
-        """
-        pass
+        return str(uuid.uuid4())
 ```
 
 ### 4.5 翻译服务
