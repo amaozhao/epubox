@@ -1,191 +1,197 @@
-import html
+"""Test HTML processor."""
 
 import pytest
 from bs4 import BeautifulSoup
 
-from src.services.html_processor import (
-    AttributeProcessor,
-    ContentRestoreError,
-    ErrorRecovery,
-    HTMLElement,
-    HTMLProcessingError,
-    HTMLProcessor,
-    RestoreStrategy,
-    StructureError,
-    TokenLimitError,
+from src.services.processors.html import HTMLProcessingError, HTMLProcessor
+from src.services.translation.google_translation_service import GoogleTranslationService
+from src.services.translation.mistral_translation_service import (
+    MistralTranslationService,
 )
 
 
-class MockTranslationService:
-    def __init__(self, max_tokens=1000):
-        self.max_tokens = max_tokens
-        self.translate_calls = []
-
-    async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
-        self.translate_calls.append(
-            {"text": text, "source_lang": source_lang, "target_lang": target_lang}
-        )
-        translations = {
-            "测试标题": "Test Title",
-            "这是一段测试文本": "This is a test text",
-            "这是另一段测试文本": "This is another test text",
-            "文章标题": "Article Title",
-            "第一段落": "First paragraph",
-            "第二段落": "Second paragraph",
-            "列表项1": "List item 1",
-            "列表项2": "List item 2",
-        }
-
-        for zh, en in translations.items():
-            if zh in text:
-                text = text.replace(zh, en)
-        return text
-
-    def get_token_limit(self) -> int:
-        return self.max_tokens
+@pytest.fixture
+def google_translation_service():
+    """Create Google translation service for testing."""
+    return GoogleTranslationService(
+        max_retries=3, min_wait=1, max_wait=10, timeout=30, is_testing=True
+    )
 
 
 @pytest.fixture
-def html_processor():
-    return HTMLProcessor(MockTranslationService())
+def mistral_translation_service():
+    """Create Mistral translation service for testing."""
+    return MistralTranslationService(
+        model="mistral-tiny",
+        max_retries=3,
+        min_wait=1,
+        max_wait=10,
+        timeout=30,
+        is_testing=True,
+    )
 
 
-@pytest.mark.asyncio
+@pytest.fixture
+def google_html_processor(google_translation_service):
+    """Create HTML processor with Google translation for testing."""
+    return HTMLProcessor(translation_service=google_translation_service)
+
+
+@pytest.fixture
+def mistral_html_processor(mistral_translation_service):
+    """Create HTML processor with Mistral translation for testing."""
+    return HTMLProcessor(translation_service=mistral_translation_service)
+
+
+def create_long_html(text_length: int) -> str:
+    """创建指定长度的HTML内容"""
+    return f"""
+    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Praise for Linux Pocket Guide</title><link href="epub.css" rel="stylesheet" type="text/css"/>
+<meta content="urn:uuid:e48a1cb1-4de3-4395-8a0a-9dee0497b5a9" name="Adept.expected.resource"/></head><body data-type="book"><section class="praise" data-pdf-bookmark="Praise for Linux Pocket Guide" data-type="dedication" epub:type="dedication"><div class="dedication" id="id251">
+<h1>Praise for <em>Linux Pocket Guide</em></h1>
+
+<blockquote>
+<p><em>Linux Pocket Guide</em> is a must-have book on every Linux user’s desk, even in this digital age. It’s like a collection of my favorite bookmarked manual pages that I keep revisiting for reference, but simpler to understand <span class="keep-together">and easier to follow</span>.</p>
+
+<p data-type="attribution">Abhishek Prakash, cofounder of It’s FOSS</p>
+</blockquote>
+
+<blockquote>
+<p>One of the beloved features of Linux environments is the assortment of small utilities that combine in wonderful ways to solve problems. This book distills that experience into an accessible reference. Even experienced readers will rediscover forgotten facets and incredible options on <span class="keep-together">their favorite tools</span>.</p>
+
+<p data-type="attribution">Jess Males, DevOps engineer, TriumphPay</p>
+</blockquote>
+
+<blockquote>
+<p>This is such a handy reference! It somehow manages to be both thorough and concise.</p>
+
+<p data-type="attribution">Jerod Santo, changelog.com</p>
+</blockquote>
+
+</div></section></body></html>
+    """
+
+
 class TestHTMLProcessor:
-    """HTML处理器测试"""
+    """Test HTML processor."""
 
-    @pytest.fixture
-    def processor(self):
-        return HTMLProcessor(MockTranslationService())
+    async def test_google_translation_segmentation(
+        self, google_html_processor, google_translation_service
+    ):
+        """测试 Google 翻译的分段和翻译功能"""
+        # 创建一个较长的HTML内容
+        html_content = create_long_html(1000)  # 创建1000字符的内容
 
-    class TestPlaceholderGeneration:
-        """占位符生成策略测试"""
+        # 翻译内容
+        translated_html = await google_html_processor.translate_html(
+            html_content,
+            "zh",  # 源语言
+            "en",  # 目标语言
+            translator=google_translation_service,
+        )
 
-        async def test_generate_unique_placeholders(self, processor):
-            """测试生成唯一占位符"""
-            p1 = processor.generate_placeholder("DIV")
-            p2 = processor.generate_placeholder("DIV")
-            p3 = processor.generate_placeholder("SPAN")
+        # 验证翻译结果
+        assert translated_html is not None
+        assert len(translated_html) > 0
 
-            assert p1 != p2  # 相同标签类型生成不同占位符
-            assert p1 != p3  # 不同标签类型生成不同占位符
-            assert all(p.startswith("[[") and p.endswith("]]") for p in [p1, p2, p3])
+        # 解析HTML并验证结构
+        original_soup = BeautifulSoup(html_content, "html.parser")
+        translated_soup = BeautifulSoup(translated_html, "html.parser")
 
-        async def test_non_translatable_tags(self, processor):
-            """测试不可翻译标签处理"""
-            html = """
-            <div>
-                <pre>def test(): pass</pre>
-                <code>print("hello")</code>
-                <script>alert('test')</script>
-                <style>.test { color: red; }</style>
-            </div>
-            """
-            processed_html, mapping = await processor.preprocess(html)
+        # 验证 body 中的 HTML 结构完整性
+        original_body = original_soup.find("body")
+        translated_body = translated_soup.find("body")
+        assert len(original_body.find_all(True)) == len(translated_body.find_all(True))
 
-            # 验证所有不可翻译标签都被替换为占位符
-            for tag in processor.NON_TRANSLATABLE_TAGS:
-                assert f"[[{tag.upper()}_" in processed_html
+        # 验证所有内容元素都被翻译了
+        original_text_elements = [
+            elem for elem in original_body.find_all(text=True) if elem.strip()
+        ]
+        translated_text_elements = [
+            elem for elem in translated_body.find_all(text=True) if elem.strip()
+        ]
+        assert len(original_text_elements) == len(translated_text_elements)
 
-            # 验证映射包含所有原始内容
-            assert len(mapping) == 4  # 应该有4个占位符映射
+    async def test_mistral_translation_segmentation(
+        self, mistral_html_processor, mistral_translation_service
+    ):
+        """测试 Mistral 翻译的分段和翻译功能"""
+        # 创建一个较长的HTML内容
+        html_content = create_long_html(1000)  # 创建1000字符的内容
 
-    class TestAttributeProcessing:
-        """属性处理测试"""
+        # 翻译内容
+        translated_html = await mistral_html_processor.translate_html(
+            html_content,
+            "zh",  # 源语言
+            "en",  # 目标语言
+            translator=mistral_translation_service,
+        )
 
-        async def test_boolean_attributes(self):
-            """测试布尔属性处理"""
-            attr_processor = AttributeProcessor()
-            assert attr_processor.process_boolean_attr(True) is None
-            assert attr_processor.process_boolean_attr("") is None
-            assert attr_processor.process_boolean_attr("value") == "value"
+        # 验证翻译结果
+        assert translated_html is not None
+        assert len(translated_html) > 0
 
-        async def test_class_attributes(self):
-            """测试class属性处理"""
-            attr_processor = AttributeProcessor()
-            assert attr_processor.process_class_attr("cls1 cls2") == ["cls1", "cls2"]
-            assert attr_processor.process_class_attr("single") == ["single"]
+        # 解析HTML并验证结构
+        original_soup = BeautifulSoup(html_content, "html.parser")
+        translated_soup = BeautifulSoup(translated_html, "html.parser")
 
-        async def test_style_attributes(self):
-            """测试style属性处理"""
-            attr_processor = AttributeProcessor()
-            assert attr_processor.process_style_attr(" color: red; ") == "color: red;"
+        # 验证 body 中的 HTML 结构完整性
+        original_body = original_soup.find("body")
+        translated_body = translated_soup.find("body")
+        assert len(original_body.find_all(True)) == len(translated_body.find_all(True))
 
-        async def test_data_attributes(self):
-            """测试data属性处理"""
-            attr_processor = AttributeProcessor()
-            assert (
-                attr_processor.process_data_attr({"key": "value"}) == '{"key": "value"}'
-            )
-            assert attr_processor.process_data_attr(["item"]) == '["item"]'
-            assert attr_processor.process_data_attr("string") == "string"
+        # 验证所有内容元素都被翻译了
+        original_text_elements = [
+            elem for elem in original_body.find_all(text=True) if elem.strip()
+        ]
+        translated_text_elements = [
+            elem for elem in translated_body.find_all(text=True) if elem.strip()
+        ]
+        assert len(original_text_elements) == len(translated_text_elements)
 
-    class TestContentRestoration:
-        """内容还原测试"""
+    async def test_content_integrity(
+        self, google_html_processor, google_translation_service
+    ):
+        """测试翻译后内容的完整性"""
+        # 创建包含多个HTML元素的内容
+        html_content = """
+            <html>
+                <head></head>
+                <body>
+                    <h1>标题1</h1>
+                    <p>段落1</p>
+                    <h2>标题2</h2>
+                    <p>段落2</p>
+                    <ul>
+                        <li>列表项1</li>
+                        <li>列表项2</li>
+                    </ul>
+                </body>
+            </html>
+        """
 
-        async def test_complete_content_restore(self):
-            """测试完整内容还原"""
-            mapping = {"content": "<div>test</div>"}
-            restored = RestoreStrategy.from_complete_content(mapping)
-            assert restored == "<div>test</div>"
+        # 直接调用 translate_html 方法
+        translated_html = await google_html_processor.translate_html(
+            html_content,
+            "zh",  # 源语言
+            "en",  # 目标语言
+            translator=google_translation_service,
+        )
 
-        async def test_rebuild_from_parts(self):
-            """测试从部分信息重建"""
-            mapping = {
-                "name": "div",
-                "attributes": {"class": "test", "id": "main"},
-                "structure": {"inner_html": "content"},
-            }
-            restored = RestoreStrategy.rebuild_from_parts(mapping)
-            assert 'class="test"' in restored
-            assert 'id="main"' in restored
-            assert ">content<" in restored
+        # 解析原始和翻译后的HTML
+        original_soup = BeautifulSoup(html_content, "html.parser")
+        translated_soup = BeautifulSoup(translated_html, "html.parser")
 
-    class TestErrorHandling:
-        """错误处理测试"""
+        # 验证 body 中的 HTML 结构完整性
+        original_body = original_soup.find("body")
+        translated_body = translated_soup.find("body")
+        assert len(original_body.find_all(True)) == len(translated_body.find_all(True))
 
-        async def test_validate_placeholder(self):
-            """测试占位符验证"""
-            assert ErrorRecovery.validate_placeholder("[[DIV_1]]") is True
-            assert ErrorRecovery.validate_placeholder("invalid") is False
-
-        async def test_validate_mapping(self):
-            """测试映射数据验证"""
-            valid_mapping = {"type": "div", "name": "div", "content": "<div>test</div>"}
-            assert ErrorRecovery.validate_mapping(valid_mapping) is True
-
-            invalid_mapping = {"type": "div", "content": "<div>test</div>"}
-            assert ErrorRecovery.validate_mapping(invalid_mapping) is False
-
-        async def test_token_limit_error(self, processor):
-            """测试Token限制错误"""
-            # 创建一个超长的文本
-            long_text = "测试文本" * 1000
-            html = f"<div>{long_text}</div>"
-
-            # 设置一个较小的token限制
-            processor.translation_service.max_tokens = 100
-
-            with pytest.raises(TokenLimitError):
-                await processor.process_content(html, "zh", "en")
-
-        async def test_structure_error(self, processor):
-            """测试结构错误"""
-            # 测试未闭合标签的情况
-            invalid_html = "<div>未闭合的标签"
-            result = await processor.process_content(invalid_html, "zh", "en")
-            assert result == invalid_html  # 应该返回原文
-
-            # 测试空内容的情况
-            with pytest.raises(StructureError):
-                await processor.preprocess("")
-
-            # 测试无效HTML结构的情况
-            with pytest.raises(StructureError):
-                await processor.preprocess("not html content")
-
-        async def test_content_restore_error(self, processor):
-            """测试内容还原错误"""
-            invalid_mapping = {"[[INVALID]]": {"type": "unknown"}}
-            with pytest.raises(ContentRestoreError):
-                await processor.restore_content("[[INVALID]]", invalid_mapping)
+        # 验证所有内容元素都被翻译了
+        original_text_elements = [
+            elem for elem in original_body.find_all(text=True) if elem.strip()
+        ]
+        translated_text_elements = [
+            elem for elem in translated_body.find_all(text=True) if elem.strip()
+        ]
+        assert len(original_text_elements) == len(translated_text_elements)

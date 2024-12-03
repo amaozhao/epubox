@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from src.services.translator import (
+from src.services.translation.translator import (
     DeepLTranslator,
     GoogleTranslator,
     MistralTranslator,

@@ -1,5 +1,5 @@
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import DateTime
@@ -45,18 +45,23 @@ class Storage(Base):
         String(255)
     )  # 翻译文件路径（如果有）
 
-    # 用户关联
-    user_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=False
+    # 用户关联（在测试环境中可以为空）
+    user_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("users.id"), nullable=True
     )
-    user: Mapped["User"] = relationship(back_populates="storages")
+    user = relationship("User", back_populates="storages")
 
     # 时间戳
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(tz=timezone.utc),
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(tz=timezone.utc),
+        onupdate=lambda: datetime.now(tz=timezone.utc),
     )
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)  # 完成时间
 

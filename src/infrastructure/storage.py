@@ -1,3 +1,5 @@
+"""存储服务模块"""
+
 import os
 import shutil
 import uuid
@@ -34,8 +36,13 @@ class StorageService:
         :param translation_dir: 翻译文件目录
         """
         self.session = session
-        self.upload_dir = Path(upload_dir or settings.UPLOAD_DIR)
-        self.translation_dir = Path(translation_dir or settings.TRANSLATION_DIR)
+        # 只有当参数为 None 时才使用默认值
+        self.upload_dir = Path(
+            settings.UPLOAD_DIR if upload_dir is None else upload_dir
+        )
+        self.translation_dir = Path(
+            settings.TRANSLATION_DIR if translation_dir is None else translation_dir
+        )
         self._ensure_dirs()
 
         logger.info(
@@ -49,155 +56,152 @@ class StorageService:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.translation_dir.mkdir(parents=True, exist_ok=True)
 
-    async def _generate_file_id(self) -> str:
+    def _generate_file_id(self) -> str:
         """生成唯一的文件ID"""
         return str(uuid.uuid4())
 
     async def save_upload(self, file: BinaryIO, filename: str, user_id: str) -> str:
         """
         保存上传的文件
-        :param file: 文件对象
-        :param filename: 原始文件名
-        :param user_id: 用户ID
-        :return: 文件ID
+        - 生成唯一文件ID
+        - 保存到上传目录
+        - 返回文件ID
+
+        Args:
+            file: 文件对象
+            filename: 原始文件名
+            user_id: 上传用户ID
+
+        Returns:
+            str: 文件ID
         """
-        try:
-            file_id = await self._generate_file_id()
-            file_path = self.upload_dir / file_id
+        file_id = self._generate_file_id()
+        file_path = os.path.join(self.upload_dir, file_id)
 
-            # 保存文件
-            async with aiofiles.open(file_path, "wb") as f:
-                # 读取并写入文件内容
-                content = file.read()
-                await f.write(content)
+        # 读取文件内容
+        file_data = file.read()
 
-            # 创建存储记录
-            storage = Storage(
-                id=file_id,
-                original_filename=filename,
-                file_size=len(content),
-                mime_type="application/epub+zip",  # EPUB文件类型
-                status=StorageStatus.UPLOADED,
-                upload_path=str(file_path),
-                user_id=user_id,
-                created_at=datetime.now(timezone.utc),  # 统一使用 UTC 时间
-            )
+        # 保存文件
+        async with aiofiles.open(file_path, "wb") as f:
+            await f.write(file_data)
 
-            self.session.add(storage)
-            await self.session.commit()
+        # 创建存储记录
+        storage = Storage(
+            id=file_id,
+            original_filename=filename,
+            upload_path=str(file_path),
+            file_size=len(file_data),
+            mime_type="application/epub+zip",
+            status=StorageStatus.UPLOADED,
+            created_at=datetime.now(timezone.utc),
+            user_id=user_id,
+        )
 
-            logger.info(
-                "file_uploaded",
-                file_id=file_id,
-                original_filename=filename,
-                size=len(content),
-                user_id=user_id,
-            )
+        # 保存到数据库
+        self.session.add(storage)
+        await self.session.commit()
 
-            return file_id
-
-        except Exception as e:
-            await self.session.rollback()
-            logger.error(
-                "file_upload_failed",
-                filename=filename,
-                error=str(e),
-                exc_info=True,
-            )
-            raise FileError(f"Failed to upload file: {str(e)}")
+        return file_id
 
     async def create_work_copy(self, file_id: str) -> str:
         """
         创建工作副本
-        :param file_id: 原始文件ID
+        :param file_id: 文件ID
         :return: 工作副本路径
         """
         try:
             # 获取存储记录
             storage = await self.session.get(Storage, file_id)
             if not storage:
-                raise FileError(f"Storage record {file_id} not found")
+                raise FileError(f"Storage record not found: {file_id}")
 
-            source_path = Path(storage.upload_path)
-            if not source_path.exists():
-                raise FileError(f"Original file {file_id} not found")
+            # 获取原始文件路径
+            original_file = Path(storage.upload_path)
+            if not original_file.exists():
+                raise FileError(f"Original file not found: {file_id}")
 
-            work_copy_id = await self._generate_file_id()
-            target_path = self.translation_dir / work_copy_id
+            # 创建工作副本路径
+            work_copy_path = (
+                self.translation_dir / f"{file_id}_work{original_file.suffix}"
+            )
 
             # 复制文件
-            shutil.copy2(source_path, target_path)
+            shutil.copy2(original_file, work_copy_path)
 
-            # 更新存储记录
-            storage.translation_path = str(target_path)
-            storage.status = StorageStatus.PROCESSING
-            await self.session.commit()
-
-            logger.info(
-                "work_copy_created",
-                original_file_id=file_id,
-                work_copy_id=work_copy_id,
-                target_path=str(target_path),
-                user_id=storage.user_id,
-            )
-
-            return str(target_path)
+            return str(work_copy_path)
 
         except Exception as e:
-            await self.session.rollback()
-            logger.error(
-                "work_copy_creation_failed",
-                file_id=file_id,
-                error=str(e),
-                exc_info=True,
-            )
             raise FileError(f"Failed to create work copy: {str(e)}")
 
-    async def get_file(self, file_id: str, directory: Optional[str] = None) -> bytes:
+    async def get_file(self, file_id: str, directory: str = "upload") -> bytes:
         """
         获取文件内容
-        :param file_id: 文件ID
-        :param directory: 可选的目录指定（upload或translation）
-        :return: 文件内容
+        - 支持获取原始文件或翻译后的文件
+        - 文件不存在时抛出异常
         """
-        try:
-            # 获取存储记录
-            storage = await self.session.get(Storage, file_id)
-            if not storage:
-                raise FileError(f"Storage record {file_id} not found")
+        # 获取存储记录
+        storage = await self.session.get(Storage, file_id)
+        if not storage:
+            raise FileError(f"Storage record {file_id} not found")
 
-            # 确定文件路径
-            if directory == "upload":
-                file_path = Path(storage.upload_path)
-            elif directory == "translation":
-                if not storage.translation_path:
-                    raise FileError(f"Translation file not found for {file_id}")
-                file_path = Path(storage.translation_path)
-            else:
-                # 优先使用翻译文件
-                file_path = Path(storage.translation_path or storage.upload_path)
+        # 根据目录选择文件路径
+        if directory == "translation" and storage.translation_path:
+            file_path = storage.translation_path
+        else:
+            file_path = storage.upload_path
 
-            if not file_path.exists():
-                raise FileError(f"File {file_id} not found at {file_path}")
+        if not os.path.exists(file_path):
+            raise FileError(f"File {file_id} not found at {file_path}")
 
-            # 读取文件内容
-            async with aiofiles.open(file_path, "rb") as f:
-                content = await f.read()
+        async with aiofiles.open(file_path, "rb") as f:
+            return await f.read()
 
-            logger.info(
-                "file_retrieved",
-                file_id=file_id,
-                size=len(content),
-                user_id=storage.user_id,
-            )
+    async def read_epub_html(self, epub_id: str, html_path: str) -> str:
+        """
+        读取EPUB中的HTML文件内容
+        - 使用epub库读取HTML内容
+        - 处理编码问题
+        """
+        epub_path = os.path.join(
+            self.translation_dir, f"{epub_id}.epub"
+        )  # 添加 .epub 扩展名
+        with ZipFile(epub_path, "r") as epub:
+            try:
+                with epub.open(html_path) as html_file:
+                    return html_file.read().decode("utf-8")
+            except KeyError:
+                raise FileError(f"HTML file {html_path} not found in EPUB")
 
-            return content
+    async def update_epub_html(self, epub_id: str, html_path: str, content: str):
+        """
+        更新EPUB中的HTML文件
+        - 使用epub库更新文件内容
+        - 保持EPUB结构完整
+        """
+        epub_path = os.path.join(
+            self.translation_dir, f"{epub_id}.epub"
+        )  # 添加 .epub 扩展名
+        # 创建临时文件
+        temp_path = f"{epub_path}.tmp"
 
-        except Exception as e:
-            logger.error(
-                "file_retrieval_failed", file_id=file_id, error=str(e), exc_info=True
-            )
-            raise FileError(f"Failed to retrieve file: {str(e)}")
+        with ZipFile(epub_path, "r") as src_epub:
+            with ZipFile(temp_path, "w") as dst_epub:
+                # 复制所有文件
+                for item in src_epub.namelist():
+                    if item != html_path:
+                        dst_epub.writestr(item, src_epub.read(item))
+                    else:
+                        # 更新HTML文件
+                        dst_epub.writestr(item, content.encode("utf-8"))
+
+        # 替换原文件
+        os.replace(temp_path, epub_path)
+
+    async def _copy_file(self, source: str, target: str):
+        """复制文件"""
+        async with aiofiles.open(source, "rb") as sf:
+            async with aiofiles.open(target, "wb") as tf:
+                await tf.write(await sf.read())
 
     async def delete_file(self, file_id: str, directory: Optional[str] = None) -> None:
         """
@@ -271,6 +275,7 @@ class StorageService:
 
             # 创建临时文件
             temp_path = self.upload_dir / f"temp_{file_id}"
+
             try:
                 # 写入临时文件
                 async with aiofiles.open(temp_path, "wb") as f:
@@ -338,6 +343,7 @@ class StorageService:
                     Storage.created_at < current_time - timedelta(hours=max_age_hours),
                 )
             )
+
             result = await self.session.execute(stmt)
             expired_storages = result.scalars().all()
 
@@ -350,19 +356,9 @@ class StorageService:
                         if upload_path.exists():
                             upload_path.unlink()
                             logger.info(
-                                "deleted_upload_file",
+                                "deleted_file",
                                 file_id=storage.id,
                                 path=str(upload_path),
-                            )
-
-                    if storage.translation_path:
-                        translation_path = Path(storage.translation_path)
-                        if translation_path.exists():
-                            translation_path.unlink()
-                            logger.info(
-                                "deleted_translation_file",
-                                file_id=storage.id,
-                                path=str(translation_path),
                             )
 
                     # 更新存储状态
@@ -399,3 +395,67 @@ class StorageService:
             await self.session.rollback()
             logger.error("cleanup_failed", error=str(e), exc_info=True)
             raise FileError(f"Failed to cleanup expired files: {str(e)}")
+
+    async def save_file(self, file_path: str) -> str:
+        """
+        保存文件到存储系统
+        :param file_path: 文件路径
+        :return: 文件ID
+        """
+        try:
+            # 生成唯一的文件ID
+            file_id = str(uuid.uuid4())
+
+            # 构建目标路径
+            target_path = self.upload_dir / f"{file_id}.epub"
+
+            # 复制文件到目标路径
+            shutil.copy2(file_path, target_path)
+
+            # 创建存储记录
+            storage = Storage(
+                id=file_id,
+                original_path=str(file_path),
+                upload_path=str(target_path),
+                status=StorageStatus.UPLOADED,
+                created_at=datetime.now(timezone.utc),
+            )
+
+            # 保存到数据库
+            self.session.add(storage)
+            await self.session.commit()
+
+            return file_id
+
+        except Exception as e:
+            raise FileError(f"Failed to save file: {str(e)}")
+
+    async def get_output_path(self, file_id: str, target_lang: str) -> str:
+        """
+        获取输出文件路径
+        :param file_id: 文件ID
+        :param target_lang: 目标语言
+        :return: 输出文件路径
+        """
+        return str(self.translation_dir / f"{file_id}_{target_lang}.epub")
+
+    async def create_task(self, file_id: str, output_path: str) -> str:
+        """
+        创建翻译任务
+        :param file_id: 文件ID
+        :param output_path: 输出文件路径
+        :return: 任务ID
+        """
+        try:
+            # 更新存储记录状态
+            storage = await self.session.get(Storage, file_id)
+            if storage:
+                storage.status = StorageStatus.PROCESSING
+                storage.output_path = output_path
+                storage.updated_at = datetime.now(timezone.utc)
+                await self.session.commit()
+
+            return file_id
+
+        except Exception as e:
+            raise FileError(f"Failed to create task: {str(e)}")

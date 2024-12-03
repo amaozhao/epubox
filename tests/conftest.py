@@ -61,12 +61,18 @@ async def db(engine):
 
 @pytest.fixture(autouse=True)
 def setup_logging():
-    # 设置日志级别为 ERROR，只显示错误信息
+    """禁用测试时的日志输出"""
+    # 设置根日志级别
     logging.basicConfig(
         level=logging.ERROR,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    # 确保所有logger都设置为ERROR级别
+    logging.getLogger().setLevel(logging.ERROR)
+    for logger_name in logging.root.manager.loggerDict:
+        logging.getLogger(logger_name).setLevel(logging.ERROR)
 
 
 @pytest_asyncio.fixture(scope="function")

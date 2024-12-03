@@ -78,19 +78,85 @@ def sample_epub():
     """创建示例EPUB文件"""
     buffer = BytesIO()
     with ZipFile(buffer, "w") as zip_file:
-        # 添加mimetype文件
+        # 添加mimetype文件（必须是第一个文件且不压缩）
         zip_file.writestr("mimetype", "application/epub+zip")
-        # 添加container.xml
+
+        # 添加 META-INF/container.xml
         zip_file.writestr(
             "META-INF/container.xml",
-            """<?xml version="1.0"?>
+            """<?xml version="1.0" encoding="UTF-8"?>
             <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
                 <rootfiles>
-                    <rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>
+                    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
                 </rootfiles>
             </container>""",
         )
+
+        # 添加 content.opf
+        zip_file.writestr(
+            "OEBPS/content.opf",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+                <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                    <dc:title>Test Book</dc:title>
+                    <dc:creator>Test Author</dc:creator>
+                    <dc:identifier id="uid">test-book-id</dc:identifier>
+                    <dc:language>en</dc:language>
+                </metadata>
+                <manifest>
+                    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+                    <item id="chapter1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+                </manifest>
+                <spine>
+                    <itemref idref="nav"/>
+                    <itemref idref="chapter1"/>
+                </spine>
+            </package>""",
+        )
+
+        # 添加导航文件
+        zip_file.writestr(
+            "OEBPS/nav.xhtml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE html>
+            <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+                <head>
+                    <title>Navigation</title>
+                </head>
+                <body>
+                    <nav epub:type="toc">
+                        <h1>Table of Contents</h1>
+                        <ol>
+                            <li><a href="chapter1.xhtml">Chapter 1</a></li>
+                        </ol>
+                    </nav>
+                </body>
+            </html>""",
+        )
+
+        # 添加内容文件
+        zip_file.writestr(
+            "OEBPS/chapter1.xhtml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE html>
+            <html xmlns="http://www.w3.org/1999/xhtml">
+                <head>
+                    <title>Chapter 1</title>
+                </head>
+                <body>
+                    <h1>Chapter 1</h1>
+                    <p>This is a test chapter.</p>
+                </body>
+            </html>""",
+        )
+
     return buffer.getvalue()
+
+
+@pytest.fixture
+def sample_file():
+    """创建示例文件内容"""
+    return b"Sample file content"
 
 
 @pytest.mark.asyncio
@@ -100,7 +166,9 @@ async def test_save_upload(storage_service, sample_file, test_user):
     file_id = await storage_service.save_upload(file, "test.txt", test_user.id)
 
     assert file_id is not None
-    assert os.path.exists(os.path.join(storage_service.upload_dir, file_id))
+    # 获取存储记录
+    storage = await storage_service.session.get(Storage, file_id)
+    assert os.path.exists(storage.upload_path)
 
 
 @pytest.mark.asyncio
@@ -131,19 +199,33 @@ async def test_delete_file(storage_service, sample_file, test_user):
     file = BytesIO(sample_file)
     file_id = await storage_service.save_upload(file, "test.txt", test_user.id)
 
+    # 获取存储记录
+    storage = await storage_service.session.get(Storage, file_id)
+    file_path = storage.upload_path
+
     # 删除文件
     await storage_service.delete_file(file_id)
 
-    assert not os.path.exists(os.path.join(storage_service.upload_dir, file_id))
+    # 验证文件已被删除
+    assert not os.path.exists(file_path)
+
+    # 验证存储记录状态已更新
+    await storage_service.session.refresh(storage)
+    assert storage.status == StorageStatus.DELETED
 
 
 @pytest.mark.asyncio
 async def test_verify_epub_valid(storage_service, sample_epub, test_user):
     """测试验证有效的EPUB文件"""
+    # 创建一个有效的EPUB文件
     file = BytesIO(sample_epub)
     file_id = await storage_service.save_upload(file, "test.epub", test_user.id)
 
-    is_valid = await storage_service.verify_epub(file_id)
+    # 获取存储记录
+    storage = await storage_service.session.get(Storage, file_id)
+
+    # 验证EPUB文件
+    is_valid = await storage_service.verify_epub(file_id, "upload")
     assert is_valid
 
 
@@ -172,10 +254,10 @@ async def test_cleanup_expired_files(storage_service, sample_file, test_user):
         storages.append(storage)
 
     # 修改前两个文件的创建时间为过期时间
-    expired_time = datetime.now(timezone.utc) - timedelta(days=8)
+    expired_time = datetime.now(timezone.utc) - timedelta(hours=25)  # 25小时前
     for storage in storages[:2]:
         # 修改文件的修改时间
-        file_path = os.path.join(storage_service.upload_dir, storage.id)
+        file_path = storage.upload_path
         os.utime(file_path, (expired_time.timestamp(), expired_time.timestamp()))
         # 修改数据库中的创建时间
         storage.created_at = expired_time
@@ -194,16 +276,11 @@ async def test_cleanup_expired_files(storage_service, sample_file, test_user):
     await storage_service.session.refresh(storages[2])
 
     # 验证结果：前两个文件应该被删除，最后一个文件应该保留
-    assert not os.path.exists(os.path.join(storage_service.upload_dir, files[0]))
-    assert not os.path.exists(os.path.join(storage_service.upload_dir, files[1]))
-    assert os.path.exists(os.path.join(storage_service.upload_dir, files[2]))
+    assert not os.path.exists(storages[0].upload_path)
+    assert not os.path.exists(storages[1].upload_path)
+    assert os.path.exists(storages[2].upload_path)
 
     # 验证数据库状态
     assert storages[0].status == StorageStatus.DELETED
     assert storages[1].status == StorageStatus.DELETED
     assert storages[2].status == StorageStatus.UPLOADED
-
-    # 验证文件的物理删除
-    for file_id in files[:2]:
-        file_path = os.path.join(storage_service.upload_dir, file_id)
-        assert not os.path.exists(file_path), f"File {file_id} should have been deleted"

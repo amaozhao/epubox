@@ -23,14 +23,14 @@ class Settings(BaseSettings):
 
     # 文件存储配置
     UPLOAD_DIR: Union[str, Path] = (
-        Path(__file__).parent.parent.parent / "data" / "uploads"
+        Path(__file__).parent.parent.parent / "tests" / "output" / "uploads"
     )
     TRANSLATION_DIR: Union[str, Path] = (
-        Path(__file__).parent.parent.parent / "data" / "translations"
+        Path(__file__).parent.parent.parent / "tests" / "output" / "translations"
     )
     LOG_DIR: Union[str, Path] = Path(__file__).parent.parent.parent / "logs"
-    STORAGE_PATH: Union[str, Path] = Path("data/storage")
-    TEMP_PATH: Union[str, Path] = Path("data/temp")
+    STORAGE_PATH: Union[str, Path] = Path("tests/output/storage")
+    TEMP_PATH: Union[str, Path] = Path("tests/output/temp")
 
     # 认证配置
     SECRET_KEY: str = "your-secret-key"  # 默认值仅用于开发
