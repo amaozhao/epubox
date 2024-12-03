@@ -5,5 +5,6 @@
 
 from app.db.base import Base  # noqa
 from app.models.user import User  # noqa
+from app.models.oauth import OAuthAccount  # noqa
 
 # 导入所有模型，使其对 Alembic 可见
