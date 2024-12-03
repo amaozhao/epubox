@@ -18,9 +18,8 @@ class User(Base):
     avatar_url = Column(String(255), nullable=True)  # 头像URL可选
 
     # 状态标志
-    is_active = Column(Boolean, default=True)
-    is_verified = Column(Boolean, default=False)  # 邮箱是否验证
-    is_superuser = Column(Boolean, default=False)
+    verified = Column(Boolean, default=False)  # 邮箱是否验证
+    superuser = Column(Boolean, default=False)
 
     # 关联关系
     oauth_accounts = relationship(

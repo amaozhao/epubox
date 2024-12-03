@@ -1,13 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any
 
 from app.db.session import get_async_session
 from app.services.user.oauth.base import OAuthState
 from app.services.user.oauth.github import GitHubOAuth
 from app.services.user.oauth.service import OAuthService
-from app.core.auth import auth_backend
+from app.core.auth import auth_backend, get_current_user
 from app.core.config import settings
+from app.schemas.user import User, UserCreate, Token, UserLogin
+from app.services.user.auth import AuthService
+from app.models.user import User
 
 
 router = APIRouter()
@@ -18,6 +23,122 @@ oauth_providers = {
 }
 
 
+@router.post("/register", response_model=User)
+async def register(
+    user_in: UserCreate,
+    db: AsyncSession = Depends(get_async_session),
+) -> User:
+    """注册新用户"""
+    auth_service = AuthService(db)
+    user = await auth_service.register_new_user(user_in)
+    return user
+
+
+@router.post("/login", response_model=Token)
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_async_session),
+) -> Token:
+    """用户登录"""
+    auth_service = AuthService(db)
+    user = await auth_service.authenticate_user(
+        form_data.username,
+        form_data.password,
+    )
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # 创建访问令牌
+    access_token = auth_backend.create_access_token(
+        data={"sub": user.username}
+    )
+    refresh_token = auth_backend.create_refresh_token(
+        data={"sub": user.username}
+    )
+    
+    return Token(
+        access_token=access_token,
+        token_type="bearer",
+        refresh_token=refresh_token,
+    )
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(
+    refresh_token: str,
+    db: AsyncSession = Depends(get_async_session),
+) -> Token:
+    """刷新访问令牌"""
+    auth_service = AuthService(db)
+    token = await auth_service.refresh_token(refresh_token)
+    return token
+
+
+@router.get("/me", response_model=User)
+async def read_users_me(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """获取当前用户信息"""
+    return current_user
+
+
+# 认证相关路由
+auth_router = APIRouter()
+
+
+@auth_router.post("/register", response_model=Token)
+async def register(
+    user_in: UserCreate,
+    db: AsyncSession = Depends(get_async_session),
+) -> Any:
+    """注册新用户"""
+    auth_service = AuthService(db)
+    user = await auth_service.register_new_user(user_in)
+    return await auth_service.create_token(user)
+
+
+@auth_router.post("/token", response_model=Token)
+async def login(
+    user_in: UserLogin,
+    db: AsyncSession = Depends(get_async_session),
+) -> Any:
+    """用户登录"""
+    auth_service = AuthService(db)
+    user = await auth_service.authenticate_user(
+        user_in.username, user_in.password
+    )
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await auth_service.create_token(user)
+
+
+@auth_router.post("/token/refresh", response_model=Token)
+async def refresh_token(
+    refresh_token: str,
+    db: AsyncSession = Depends(get_async_session),
+) -> Any:
+    """刷新访问令牌"""
+    auth_service = AuthService(db)
+    return await auth_service.refresh_token(refresh_token)
+
+
+@auth_router.get("/me", response_model=User)
+async def read_current_user(
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """获取当前用户信息"""
+    return current_user
+
+
+# OAuth 相关路由
 @router.get("/oauth/{provider}/authorize")
 async def oauth_authorize(
     provider: str,
@@ -53,22 +174,23 @@ async def oauth_callback(
 
     # TODO: 从Redis获取并验证state
 
+    # 获取OAuth用户信息
     oauth_provider = oauth_providers[provider]
-    try:
-        # 验证并获取用户信息
-        result = await oauth_provider.verify_and_process(code, state)
-
-        # 关联或创建用户
-        oauth_service = OAuthService(db)
-        user, created = await oauth_service.get_or_create_user(result["user_info"])
-
-        # 生成token
-        token = await auth_backend.get_strategy().write_token(user)
-
-        # 重定向到前端，带上token
-        redirect_url = f"{settings.FRONTEND_URL}/oauth/callback?token={token}"
-        return RedirectResponse(url=redirect_url)
-
-    except Exception as e:
-        error_redirect = f"{settings.FRONTEND_URL}/oauth/error?error={str(e)}"
-        return RedirectResponse(url=error_redirect)
+    oauth_service = OAuthService(db)
+    
+    # 获取用户信息
+    oauth_user = await oauth_provider.get_user_info(code)
+    
+    # 获取或创建用户
+    user = await oauth_service.get_or_create_user(oauth_user)
+    
+    # 创建访问令牌
+    access_token = auth_backend.create_access_token(
+        data={"sub": user.username}
+    )
+    
+    # 重定向到前端，带上访问令牌
+    redirect_uri = "TODO: 从state中获取"  # TODO: 从Redis中获取state
+    return RedirectResponse(
+        f"{redirect_uri}?access_token={access_token}"
+    )

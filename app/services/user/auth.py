@@ -1,18 +1,22 @@
-from typing import Optional
-from datetime import timedelta
+from typing import Optional, Union, Dict, Any
+from datetime import timedelta, datetime
 
-from fastapi import Depends, Request
+from fastapi import Depends, Request, HTTPException, status
 from fastapi_users import BaseUserManager, IntegerIDMixin
 from fastapi_users.authentication import (
     AuthenticationBackend,
     BearerTransport,
     JWTStrategy,
 )
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from jose import jwt, JWTError
 
 from app.core.config import settings
 from app.models.user import User
 from app.db.session import get_async_session
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.security import get_password_hash, verify_password
+from app.schemas.user import UserCreate, Token
 
 
 # Bearer transport
@@ -28,7 +32,7 @@ def get_jwt_strategy() -> JWTStrategy:
     return JWTStrategy(
         secret=settings.SECRET_KEY,
         lifetime_seconds=timedelta(
-            days=settings.ACCESS_TOKEN_EXPIRE_DAYS
+            minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         ).total_seconds(),
     )
 
@@ -50,7 +54,6 @@ auth_backend = AuthenticationBackend(
     get_strategy=get_jwt_strategy,
 )
 
-# Refresh token认证后端
 refresh_auth_backend = AuthenticationBackend(
     name="jwt-refresh",
     transport=refresh_bearer_transport,
@@ -58,26 +61,173 @@ refresh_auth_backend = AuthenticationBackend(
 )
 
 
-class UserManager(IntegerIDMixin, BaseUserManager[User, int]):
-    reset_password_token_secret = settings.SECRET_KEY
-    verification_token_secret = settings.SECRET_KEY
+class AuthService:
+    """认证服务"""
 
-    async def on_after_register(self, user: User, request: Optional[Request] = None):
-        """用户注册后的回调"""
-        print(f"User {user.id} has registered.")
+    def __init__(self, db: AsyncSession):
+        self.db = db
 
-    async def on_after_forgot_password(
-        self, user: User, token: str, request: Optional[Request] = None
-    ):
-        """忘记密码后的回调"""
-        print(f"User {user.id} has forgot their password. Reset token: {token}")
+    async def register_new_user(self, user_in: UserCreate) -> User:
+        """注册新用户"""
+        # 检查邮箱是否已存在
+        if user_in.email:
+            result = await self.db.execute(
+                select(User).where(User.email == user_in.email)
+            )
+            if result.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="该邮箱已被注册",
+                )
 
-    async def on_after_request_verify(
-        self, user: User, token: str, request: Optional[Request] = None
-    ):
-        """请求验证后的回调"""
-        print(f"Verification requested for user {user.id}. Verification token: {token}")
+        # 检查用户名是否已存在
+        result = await self.db.execute(
+            select(User).where(User.username == user_in.username)
+        )
+        if result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="该用户名已被使用",
+            )
+
+        # 创建新用户
+        user = User(
+            email=user_in.email,
+            username=user_in.username,
+            hashed_password=get_password_hash(user_in.password),
+        )
+        self.db.add(user)
+        await self.db.commit()
+        await self.db.refresh(user)
+        return user
+
+    async def authenticate_user(
+        self, username: str, password: str
+    ) -> Optional[User]:
+        """验证用户"""
+        # 查找用户
+        result = await self.db.execute(
+            select(User).where(User.username == username)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            return None
+        if not verify_password(password, user.hashed_password):
+            return None
+        return user
+
+    async def get_current_user(self, token: str) -> Optional[User]:
+        """获取当前用户"""
+        try:
+            payload = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=[settings.JWT_ALGORITHM],
+            )
+            username = payload.get("sub")
+            if not username:
+                return None
+        except JWTError:
+            return None
+
+        result = await self.db.execute(
+            select(User).where(User.username == username)
+        )
+        user = result.scalar_one_or_none()
+        return user
+
+    async def create_token(self, user: User) -> Token:
+        """创建访问令牌"""
+        access_token_expires = timedelta(
+            minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+        )
+        refresh_token_expires = timedelta(
+            days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+        )
+
+        # 创建访问令牌
+        access_token = self._create_token(
+            data={"sub": user.username},
+            expires_delta=access_token_expires,
+        )
+
+        # 创建刷新令牌
+        refresh_token = self._create_token(
+            data={"sub": user.username},
+            expires_delta=refresh_token_expires,
+        )
+
+        return Token(
+            access_token=access_token,
+            token_type="bearer",
+            refresh_token=refresh_token,
+        )
+
+    async def refresh_token(self, refresh_token: str) -> Token:
+        """刷新访问令牌"""
+        try:
+            payload = jwt.decode(
+                refresh_token,
+                settings.SECRET_KEY,
+                algorithms=[settings.JWT_ALGORITHM],
+            )
+            username = payload.get("sub")
+            if not username:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="无效的刷新令牌",
+                )
+        except JWTError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="无效的刷新令牌",
+            )
+
+        # 获取用户
+        result = await self.db.execute(
+            select(User).where(User.username == username)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="用户不存在",
+            )
+
+        return await self.create_token(user)
+
+    def _create_token(
+        self,
+        data: Dict[str, Any],
+        expires_delta: Optional[timedelta] = None,
+    ) -> str:
+        """创建JWT令牌"""
+        to_encode = data.copy()
+        if expires_delta:
+            expire = datetime.utcnow() + expires_delta
+        else:
+            expire = datetime.utcnow() + timedelta(minutes=15)
+        to_encode.update({"exp": expire})
+        encoded_jwt = jwt.encode(
+            to_encode,
+            settings.SECRET_KEY,
+            algorithm=settings.JWT_ALGORITHM,
+        )
+        return encoded_jwt
 
 
-async def get_user_manager(session: AsyncSession = Depends(get_async_session)):
-    yield UserManager(session)
+async def get_current_user(
+    db: AsyncSession = Depends(get_async_session),
+    token: str = Depends(bearer_transport.get_strategy),
+) -> User:
+    """获取当前用户依赖项"""
+    auth_service = AuthService(db)
+    user = await auth_service.get_current_user(token)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="无效的认证凭据",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user

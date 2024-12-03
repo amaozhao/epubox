@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User
 from app.models.oauth import OAuthAccount
 from app.services.user.oauth.base import OAuthUserInfo
+from app.services.user.auth import AuthService
+from app.core.security import verify_password
 
 
 @pytest.mark.asyncio
@@ -131,3 +133,157 @@ async def test_oauth_account_linking(db: AsyncSession):
     assert len(user.oauth_accounts) == 2
     providers = {acc.provider for acc in user.oauth_accounts}
     assert providers == {"github", "google"}
+
+
+@pytest.mark.asyncio
+async def test_user_registration(async_client: AsyncClient, db: AsyncSession):
+    """测试用户注册"""
+    # 测试正常注册
+    response = await async_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "test@example.com",
+            "username": "testuser",
+            "password": "testpass123",
+        },
+    )
+    assert response.status_code == 200
+    assert "access_token" in response.json()
+    assert "refresh_token" in response.json()
+
+    # 验证用户创建
+    user = await db.get(User, 1)
+    assert user is not None
+    assert user.email == "test@example.com"
+    assert user.username == "testuser"
+    assert verify_password("testpass123", user.hashed_password)
+
+    # 测试重复用户名
+    response = await async_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "other@example.com",
+            "username": "testuser",
+            "password": "testpass123",
+        },
+    )
+    assert response.status_code == 400
+
+    # 测试重复邮箱
+    response = await async_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "test@example.com",
+            "username": "otheruser",
+            "password": "testpass123",
+        },
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_user_login(async_client: AsyncClient, db: AsyncSession):
+    """测试用户登录"""
+    # 创建测试用户
+    auth_service = AuthService(db)
+    user = await auth_service.register_new_user(
+        {
+            "email": "test@example.com",
+            "username": "testuser",
+            "password": "testpass123",
+        }
+    )
+
+    # 测试正确凭据登录
+    response = await async_client.post(
+        "/api/v1/auth/token",
+        json={
+            "username": "testuser",
+            "password": "testpass123",
+        },
+    )
+    assert response.status_code == 200
+    assert "access_token" in response.json()
+    assert "refresh_token" in response.json()
+
+    # 测试错误密码
+    response = await async_client.post(
+        "/api/v1/auth/token",
+        json={
+            "username": "testuser",
+            "password": "wrongpass",
+        },
+    )
+    assert response.status_code == 401
+
+    # 测试不存在的用户
+    response = await async_client.post(
+        "/api/v1/auth/token",
+        json={
+            "username": "nonexistent",
+            "password": "testpass123",
+        },
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_token_refresh(async_client: AsyncClient, db: AsyncSession):
+    """测试令牌刷新"""
+    # 创建测试用户并登录
+    auth_service = AuthService(db)
+    user = await auth_service.register_new_user(
+        {
+            "email": "test@example.com",
+            "username": "testuser",
+            "password": "testpass123",
+        }
+    )
+    token = await auth_service.create_token(user)
+
+    # 测试有效的刷新令牌
+    response = await async_client.post(
+        "/api/v1/auth/token/refresh",
+        json={"refresh_token": token.refresh_token},
+    )
+    assert response.status_code == 200
+    assert "access_token" in response.json()
+    assert "refresh_token" in response.json()
+
+    # 测试无效的刷新令牌
+    response = await async_client.post(
+        "/api/v1/auth/token/refresh",
+        json={"refresh_token": "invalid_token"},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_current_user(async_client: AsyncClient, db: AsyncSession):
+    """测试获取当前用户信息"""
+    # 创建测试用户并登录
+    auth_service = AuthService(db)
+    user = await auth_service.register_new_user(
+        {
+            "email": "test@example.com",
+            "username": "testuser",
+            "password": "testpass123",
+        }
+    )
+    token = await auth_service.create_token(user)
+
+    # 测试有效令牌
+    response = await async_client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token.access_token}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["username"] == "testuser"
+    assert response.json()["email"] == "test@example.com"
+
+    # 测试无效令牌
+    response = await async_client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": "Bearer invalid_token"},
+    )
+    assert response.status_code == 401
