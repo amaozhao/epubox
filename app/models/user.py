@@ -1,62 +1,45 @@
-"""User model for authentication and authorization."""
-
-from sqlalchemy import Column, Integer, String, Boolean, Enum as SQLEnum
+from typing import Optional, List
+from sqlalchemy import Column, Integer, String, Boolean, DateTime
 from sqlalchemy.orm import relationship
 
-from app.db.base import Base, TimestampMixin
-from app.core.types import UserRole
+from app.db.base_class import Base
 
-class User(Base, TimestampMixin):
-    """User model representing application users.
-    
-    Attributes:
-        id: Unique identifier for the user
-        email: User's email address (unique)
-        hashed_password: Securely hashed password
-        full_name: User's full name
-        role: User's role for authorization
-        is_active: Whether the user account is active
-        is_superuser: Whether the user has superuser privileges
-        files: Related file metadata records
-        translation_tasks: Related translation tasks
-    """
+
+class User(Base):
+    """用户模型"""
+
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-    full_name = Column(String)
-    role = Column(SQLEnum(UserRole), default=UserRole.FREE, nullable=False)
-    is_active = Column(Boolean, default=True, nullable=False)
-    is_superuser = Column(Boolean, default=False, nullable=False)
+    email = Column(String(255), index=True, nullable=True)  # 邮箱可选且不要求唯一
+    username = Column(
+        String(255), unique=True, index=True, nullable=False
+    )  # 用户名必须唯一
+    avatar_url = Column(String(255), nullable=True)  # 头像URL可选
 
-    # Relationships
-    files = relationship(
-        "FileMetadata",
-        back_populates="user",
-        cascade="all, delete-orphan",
-        lazy="selectin"
-    )
-    translation_tasks = relationship(
-        "TranslationTask",
-        back_populates="user",
-        cascade="all, delete-orphan",
-        lazy="selectin"
-    )
+    # 状态标志
+    is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)  # 邮箱是否验证
+    is_superuser = Column(Boolean, default=False)
 
-    def has_permission(self, required_role: UserRole) -> bool:
-        """Check if user has required role permission.
-        
-        Args:
-            required_role: The role level required for access
-            
-        Returns:
-            bool: True if user has sufficient permissions
-        """
-        if self.is_superuser:
-            return True
-        return self.role.has_permission(required_role)
+    # 关联关系
+    oauth_accounts = relationship(
+        "OAuthAccount", back_populates="user", cascade="all, delete-orphan"
+    )
 
     class Config:
-        """Pydantic configuration."""
         orm_mode = True
+
+    @property
+    def is_authenticated(self) -> bool:
+        """用户是否已认证"""
+        return True  # OAuth用户总是已认证的
+
+    @property
+    def display_name(self) -> str:
+        """显示名称"""
+        if self.username:
+            return self.username
+        if self.email:
+            return self.email.split("@")[0]
+        return f"user_{self.id}"  # 如果都没有，返回 user_id
