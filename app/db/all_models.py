@@ -1,9 +1,5 @@
-"""
-此文件用于 Alembic 自动发现所有模型。
-在创建新的模型时，需要在这里导入。
-"""
+# 导入所有数据库模型
+from app.db.models import OAuthAccount, User  # 从 models 中导入用户模型
 
-from app.db.base import Base  # noqa
-from app.models.user import User  # noqa
-
-# 导入所有模型，使其对 Alembic 可见
+# 可以在这里添加更多模型的导入
+# 例如：from app.db.models import Post, Comment 等
