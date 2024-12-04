@@ -9,7 +9,7 @@ from app.schemas.oauth.github import (
     GitHubTokenResponse,
     GitHubUserInfo,
 )
-from app.db.session import get_db
+from app.db.session import get_async_session
 
 router = APIRouter()
 
@@ -32,7 +32,7 @@ async def github_authorize():
 async def github_callback(
     code: str = Query(...),
     state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ) -> GitHubLoginResponse:
     """GitHub OAuth回调"""
     # 验证state

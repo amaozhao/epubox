@@ -9,7 +9,7 @@ from app.schemas.oauth.google import (
     GoogleTokenResponse,
     GoogleUserInfo,
 )
-from app.db.session import get_db
+from app.db.session import get_async_session
 
 router = APIRouter()
 
@@ -32,7 +32,7 @@ async def google_authorize():
 async def google_callback(
     code: str = Query(...),
     state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ) -> GoogleLoginResponse:
     """Google OAuth回调"""
     # 验证state

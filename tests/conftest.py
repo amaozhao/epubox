@@ -15,10 +15,10 @@ from app.db.base import Base
 from app.main import app
 
 # 测试数据库 URL
-TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+TEST_DB_URL = "sqlite+aiosqlite:///./test.db"
 
 # 创建测试引擎
-engine = create_async_engine(TEST_DATABASE_URL, echo=True)
+engine = create_async_engine(TEST_DB_URL, echo=True)
 async_session = async_sessionmaker(engine, expire_on_commit=False)
 
 

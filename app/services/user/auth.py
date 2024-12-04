@@ -10,7 +10,8 @@ from fastapi_users.authentication import (
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from jose import jwt, JWTError
+import jwt
+from jwt import PyJWTError
 
 from app.core.config import settings
 from app.models.user import User
@@ -128,7 +129,7 @@ class AuthService:
             username = payload.get("sub")
             if not username:
                 return None
-        except JWTError:
+        except PyJWTError:
             return None
 
         result = await self.db.execute(
@@ -178,7 +179,7 @@ class AuthService:
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="无效的刷新令牌",
                 )
-        except JWTError:
+        except PyJWTError:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="无效的刷新令牌",
@@ -219,7 +220,7 @@ class AuthService:
 
 async def get_current_user(
     db: AsyncSession = Depends(get_async_session),
-    token: str = Depends(bearer_transport.get_strategy),
+    token: str = Depends(bearer_transport.scheme),
 ) -> User:
     """获取当前用户依赖项"""
     auth_service = AuthService(db)

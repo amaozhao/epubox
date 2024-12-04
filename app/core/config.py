@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "EpuBox"
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api/v1"
+    SERVER_HOST: str = "http://localhost:8000"
+    PROJECT_DESCRIPTION: str = "EpuBox translation API"
+    CORS_ORIGINS: List[str] = ["*"]
+
+    # 日志配置
 
     # 安全配置
     SECRET_KEY: str = "your-secret-key"
@@ -57,7 +62,7 @@ class Settings(BaseSettings):
     OAUTH_CALLBACK_BASE_URL: str = "http://localhost:8000"  # 开发环境默认值
 
     # 数据库配置
-    DATABASE_URL: str = "sqlite+aiosqlite:///./epub.db"
+    DB_URL: str = "sqlite+aiosqlite:///./epub.db"
     DB_ECHO: bool = True
     DB_POOL_SIZE: int = 5
     DB_POOL_TIMEOUT: int = 30

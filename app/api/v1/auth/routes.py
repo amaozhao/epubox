@@ -8,11 +8,11 @@ from app.db.session import get_async_session
 from app.services.user.oauth.base import OAuthState
 from app.services.user.oauth.github import GitHubOAuth
 from app.services.user.oauth.service import OAuthService
-from app.core.auth import auth_backend, get_current_user
+from app.services.user.auth import auth_backend, get_current_user
 from app.core.config import settings
 from app.schemas.user import User, UserCreate, Token, UserLogin
 from app.services.user.auth import AuthService
-from app.models.user import User
+# from app.models.user import User
 
 
 router = APIRouter()

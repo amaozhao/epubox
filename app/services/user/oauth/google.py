@@ -3,7 +3,7 @@ import httpx
 from datetime import datetime, timedelta
 
 from app.core.config import settings
-from app.services.user.oauth.base import OAuthProvider, OAuthUserInfo, OAuthError
+from app.services.user.oauth.base import OAuthProvider, OAuthState, OAuthUserInfo, OAuthError
 
 
 class GoogleOAuth(OAuthProvider):

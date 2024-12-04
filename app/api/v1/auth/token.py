@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.db.session import get_async_session
-from app.core.auth import auth_backend, get_current_user
+from app.services.user.auth import auth_backend, get_current_user
 from app.schemas.auth import TokenResponse, RefreshTokenRequest
 from app.core.config import settings
 from app.models.user import User

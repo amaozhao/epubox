@@ -13,8 +13,8 @@ from app.schemas.oauth.wechat import (
     WeChatTokenResponse,
     WeChatUserInfo,
 )
-from app.db.session import get_db
-from app.core.auth import create_access_token, create_refresh_token
+from app.db.session import get_async_session
+from app.core.security import create_access_token, create_refresh_token
 
 router = APIRouter()
 
@@ -47,7 +47,7 @@ async def wechat_mp_authorize():
 @router.post("/wechat/mini/login")
 async def wechat_mini_login(
     request: WeChatMiniLoginRequest,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ) -> WeChatLoginResponse:
     """微信小程序登录"""
     try:
@@ -100,7 +100,7 @@ async def wechat_mini_login(
 async def wechat_callback(
     code: str = Query(...),
     state: str = Query(...),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_async_session),
 ) -> WeChatLoginResponse:
     """微信授权回调"""
     # 验证state

@@ -8,7 +8,7 @@ from app.services.user.oauth.base import OAuthState
 from app.services.user.oauth.github import GitHubOAuth
 from app.core.config import settings
 from app.services.user.oauth.service import OAuthService
-from app.core.auth import auth_backend
+from app.services.user.auth import auth_backend
 
 
 router = APIRouter(prefix="/oauth")

@@ -13,7 +13,7 @@ from app.db.all_models import Base  # 导入所有模型
 config = context.config
 
 # 从 settings 获取数据库 URL，但是使用同步的 SQLite
-sync_url = settings.DATABASE_URL.replace("sqlite+aiosqlite:", "sqlite:")
+sync_url = settings.DB_URL.replace("sqlite+aiosqlite:", "sqlite:")
 config.set_main_option("sqlalchemy.url", sync_url)
 
 # Interpret the config file for Python logging.
