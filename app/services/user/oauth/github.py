@@ -3,7 +3,13 @@ import httpx
 from datetime import datetime, timedelta
 
 from app.core.config import settings
-from app.services.user.oauth.base import OAuthConfig, OAuthProvider, OAuthState, OAuthUserInfo, OAuthError
+from app.services.user.oauth.base import (
+    OAuthConfig,
+    OAuthProvider,
+    OAuthState,
+    OAuthUserInfo,
+    OAuthError,
+)
 
 
 class GitHubOAuth(OAuthProvider):

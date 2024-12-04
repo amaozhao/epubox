@@ -12,7 +12,6 @@ from app.services.user.auth import auth_backend, get_current_user
 from app.core.config import settings
 from app.schemas.user import User, UserCreate, Token, UserLogin
 from app.services.user.auth import AuthService
-# from app.models.user import User
 
 
 router = APIRouter()
@@ -51,15 +50,11 @@ async def login(
             detail="用户名或密码错误",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # 创建访问令牌
-    access_token = auth_backend.create_access_token(
-        data={"sub": user.username}
-    )
-    refresh_token = auth_backend.create_refresh_token(
-        data={"sub": user.username}
-    )
-    
+    access_token = auth_backend.create_access_token(data={"sub": user.username})
+    refresh_token = auth_backend.create_refresh_token(data={"sub": user.username})
+
     return Token(
         access_token=access_token,
         token_type="bearer",
@@ -108,9 +103,7 @@ async def login(
 ) -> Any:
     """用户登录"""
     auth_service = AuthService(db)
-    user = await auth_service.authenticate_user(
-        user_in.username, user_in.password
-    )
+    user = await auth_service.authenticate_user(user_in.username, user_in.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -177,20 +170,16 @@ async def oauth_callback(
     # 获取OAuth用户信息
     oauth_provider = oauth_providers[provider]
     oauth_service = OAuthService(db)
-    
+
     # 获取用户信息
     oauth_user = await oauth_provider.get_user_info(code)
-    
+
     # 获取或创建用户
     user = await oauth_service.get_or_create_user(oauth_user)
-    
+
     # 创建访问令牌
-    access_token = auth_backend.create_access_token(
-        data={"sub": user.username}
-    )
-    
+    access_token = auth_backend.create_access_token(data={"sub": user.username})
+
     # 重定向到前端，带上访问令牌
     redirect_uri = "TODO: 从state中获取"  # TODO: 从Redis中获取state
-    return RedirectResponse(
-        f"{redirect_uri}?access_token={access_token}"
-    )
+    return RedirectResponse(f"{redirect_uri}?access_token={access_token}")

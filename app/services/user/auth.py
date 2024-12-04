@@ -102,14 +102,10 @@ class AuthService:
         await self.db.refresh(user)
         return user
 
-    async def authenticate_user(
-        self, username: str, password: str
-    ) -> Optional[User]:
+    async def authenticate_user(self, username: str, password: str) -> Optional[User]:
         """验证用户"""
         # 查找用户
-        result = await self.db.execute(
-            select(User).where(User.username == username)
-        )
+        result = await self.db.execute(select(User).where(User.username == username))
         user = result.scalar_one_or_none()
 
         if not user:
@@ -132,20 +128,14 @@ class AuthService:
         except PyJWTError:
             return None
 
-        result = await self.db.execute(
-            select(User).where(User.username == username)
-        )
+        result = await self.db.execute(select(User).where(User.username == username))
         user = result.scalar_one_or_none()
         return user
 
     async def create_token(self, user: User) -> Token:
         """创建访问令牌"""
-        access_token_expires = timedelta(
-            minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
-        )
-        refresh_token_expires = timedelta(
-            days=settings.REFRESH_TOKEN_EXPIRE_DAYS
-        )
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        refresh_token_expires = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
         # 创建访问令牌
         access_token = self._create_token(
@@ -186,9 +176,7 @@ class AuthService:
             )
 
         # 获取用户
-        result = await self.db.execute(
-            select(User).where(User.username == username)
-        )
+        result = await self.db.execute(select(User).where(User.username == username))
         user = result.scalar_one_or_none()
         if not user:
             raise HTTPException(
