@@ -20,8 +20,8 @@
 
 3. **递归处理**
    - 从根节点开始递归处理HTML内容
-   - 当内容超过限制时递归处理子节点
-   - 确保处理的内容块不超过API限制
+   - 优先处理需要跳过的标签，整体替换为占位符
+   - 对剩余内容进行翻译任务划分
 
 ## 3. 详细设计
 
@@ -67,7 +67,8 @@ SKIP_TAGS = {
 这些标签的内容将被完整保留，不进行翻译处理。对于这些标签：
 - 保持原始内容不变
 - 保持原始样式和属性
-- 在翻译过程中使用占位符替换整个标签内容
+- 将整个标签（包括其所有子内容）作为一个整体替换为占位符
+- 处理嵌套标签时，优先处理外层标签
 
 ### 3.2 占位符设计
 
@@ -85,47 +86,22 @@ SKIP_TAGS = {
    - 视觉上容易识别
    - 最小化占用空间
 
-3. **示例**
-   ```python
-   class HTMLContentProcessor:
-       def __init__(self, max_chunk_size=4500):
-           self.max_chunk_size = max_chunk_size
-           self.placeholder_counter = 0
-           self.placeholders = {}
-           
-       def _create_placeholder(self, content):
-           """创建简化的占位符"""
-           placeholder = f"†{self.placeholder_counter}†"
-           self.placeholders[placeholder] = content
-           self.placeholder_counter += 1
-           return placeholder
-           
-       def restore_content(self, translated_text):
-           """还原占位符内容"""
-           result = translated_text
-           # 使用简单的正则表达式匹配占位符
-           pattern = r'†(\d+)†'
-           
-           for match in re.finditer(pattern, result):
-               placeholder = match.group(0)
-               if placeholder in self.placeholders:
-                   result = result.replace(placeholder, self.placeholders[placeholder])
-                   
-           return result
-   ```
-
 ### 3.3 处理流程
 
 ```
 1. 输入HTML内容
    ↓
-2. 替换不需要翻译的内容为占位符
-   ↓
-3. 递归处理HTML节点
+2. 递归处理skip标签
    |
-   ├── 检查节点内容大小
-   |   ├── 如果在限制内：创建翻译任务
-   |   └── 如果超过限制：递归处理子节点
+   ├── 从根节点开始递归查找skip标签
+   |   ├── 找到skip标签：将整个标签及其内容替换为占位符
+   |   └── 不是skip标签：继续递归处理子节点
+   ↓
+3. 递归处理剩余内容
+   |
+   ├── 检查节点内容
+   |   ├── 文本节点：添加到翻译任务
+   |   └── 元素节点：递归处理子节点
    ↓
 4. 生成翻译任务列表
    ↓
@@ -136,19 +112,11 @@ SKIP_TAGS = {
 
 #### 3.4.1 HTMLContentProcessor 类
 
-```python
-class HTMLContentProcessor:
-    def __init__(self, max_chunk_size=4500):
-        self.max_chunk_size = max_chunk_size
-        self.placeholder_counter = 0
-        self.placeholders = {}
-```
-
 主要方法：
-- `process_html(soup)`: 处理HTML内容
+- `process_html(html_content)`: 处理HTML内容
+- `_replace_skip_tags(node)`: 递归处理和替换skip标签
 - `_create_placeholder(content)`: 创建占位符
-- `_replace_skip_content(node)`: 替换不需要翻译的内容
-- `_process_node(node, tasks)`: 递归处理节点
+- `_process_content(node, tasks)`: 递归处理待翻译内容
 - `restore_content(translated_text)`: 还原占位符
 
 ## 4. 数据结构
@@ -158,7 +126,7 @@ class HTMLContentProcessor:
 ```python
 {
     'content': str,  # 需要翻译的内容
-    'node': BeautifulSoup.Tag  # 对应的HTML节点
+    'node': NavigableString  # 对应的文本节点
 }
 ```
 
@@ -178,62 +146,30 @@ class HTMLContentProcessor:
    - 验证HTML结构的完整性
    - 处理无效的HTML标签
 
-2. **内容大小控制**
-   - 处理超大的HTML节点
-   - 确保不超过API限制
+2. **内容处理**
+   - 确保所有skip标签被正确替换
+   - 保持文档结构完整性
 
-3. **占位符冲突**
+3. **占位符处理**
    - 确保占位符的唯一性
-   - 处理可能的冲突情况
+   - 正确还原所有占位符内容
 
 ## 6. 性能考虑
 
 1. **内存使用**
-   - 使用递归方式处理大文件
-   - 及时释放不需要的内容
+   - 及时清理不需要的节点
+   - 优化占位符存储
 
 2. **处理效率**
-   - 优化递归处理逻辑
-   - 减少不必要的字符串操作
+   - 优先处理skip标签减少后续处理量
+   - 避免重复遍历文档
 
 ## 7. 限制和约束
 
-1. **API限制**
-   - 默认最大块大小为4500字符
-   - 可根据具体API调整限制
+1. **HTML兼容性**
+   - 支持标准HTML5标签
+   - 处理EPUB特有标签
 
-2. **HTML结构**
-   - 依赖于有效的HTML结构
-   - 需要正确的标签嵌套
-
-## 8. 未来优化方向
-
-1. **占位符机制**
-   - 可能需要更安全的占位符设计
-   - 考虑更多的特殊情况
-
-2. **分割策略**
-   - 优化节点分割算法
-   - 提高处理效率
-
-3. **内容处理**
-   - 添加更多的内容处理规则
-   - 支持更复杂的HTML结构
-
-## 9. 使用示例
-
-```python
-# 创建处理器实例
-processor = HTMLContentProcessor(max_chunk_size=4500)
-
-# 处理HTML内容
-soup = BeautifulSoup(html_content, 'html.parser')
-tasks, placeholders = processor.process_html(soup)
-
-# 处理翻译任务
-for task in tasks:
-    translated_content = translate_service.translate(task['content'])
-    task['translated_content'] = translated_content
-
-# 还原占位符
-final_content = processor.restore_content(translated_content)
+2. **文档完整性**
+   - 确保不破坏文档结构
+   - 保持标签属性完整
