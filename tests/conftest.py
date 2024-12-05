@@ -20,7 +20,6 @@ engine = create_async_engine(
     poolclass=StaticPool,  # 使用静态连接池以避免连接问题
     connect_args={
         "check_same_thread": False,  # SQLite 特定设置
-        "timeout": 30,  # 增加超时时间
     },
 )
 
@@ -45,7 +44,7 @@ def event_loop():
     loop.close()
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="function")
 async def setup_database():
     """设置测试数据库"""
     async with engine.begin() as conn:

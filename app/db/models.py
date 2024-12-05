@@ -37,7 +37,8 @@ class User(SQLAlchemyBaseUserTable[int], Base):
 
     # OAuth关联
     oauth_accounts: Mapped[list["OAuthAccount"]] = relationship(
-        "OAuthAccount", back_populates="user", cascade="all, delete-orphan"
+        "OAuthAccount", back_populates="user", cascade="all, delete-orphan",
+        lazy="selectin"  # 使用 selectin 策略来避免 N+1 问题
     )
 
 
