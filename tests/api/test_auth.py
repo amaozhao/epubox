@@ -1,11 +1,12 @@
+from unittest.mock import patch
+
 import pytest
-from fastapi import FastAPI, Depends
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from unittest.mock import patch
 
 from app.api.v1.auth import router as auth_router
 from app.core.config import settings
@@ -50,10 +51,10 @@ async def db_session(setup_database) -> AsyncSession:
 def app(db_session: AsyncSession, mock_oauth_settings):
     """创建测试应用"""
     app = FastAPI()
-    
+
     async def get_test_session():
         yield db_session
-    
+
     app.dependency_overrides[get_async_session] = get_test_session
     app.include_router(auth_router, prefix="/api/v1/auth")
     return app
@@ -80,12 +81,16 @@ async def test_register_endpoint(client, db_session: AsyncSession):
         },
     )
     assert response.status_code == 201
-    
+
     # 从数据库中获取用户并显式加载关系
-    query = select(User).where(User.email == "test@example.com").options(selectinload(User.oauth_accounts))
+    query = (
+        select(User)
+        .where(User.email == "test@example.com")
+        .options(selectinload(User.oauth_accounts))
+    )
     result = await db_session.execute(query)
     user = result.scalar_one()
-    
+
     # 使用 Pydantic 模型验证用户数据
     user_data = UserRead.model_validate(user)
     assert user_data.email == "test@example.com"
@@ -128,10 +133,12 @@ async def test_login_endpoint(client):
 async def test_github_oauth_login(mock_get_auth_url, client):
     """测试 GitHub OAuth 登录"""
     mock_auth_url = "https://mock-github.com/auth"
+
     async def mock_get_auth_url_impl(*args, **kwargs):
         return mock_auth_url
+
     mock_get_auth_url.side_effect = mock_get_auth_url_impl
-    
+
     response = client.get("/api/v1/auth/github/authorize")
     assert response.status_code == 200
     data = response.json()
@@ -144,10 +151,12 @@ async def test_github_oauth_login(mock_get_auth_url, client):
 async def test_google_oauth_login(mock_get_auth_url, client):
     """测试 Google OAuth 登录"""
     mock_auth_url = "https://mock-google.com/auth"
+
     async def mock_get_auth_url_impl(*args, **kwargs):
         return mock_auth_url
+
     mock_get_auth_url.side_effect = mock_get_auth_url_impl
-    
+
     response = client.get("/api/v1/auth/google/authorize")
     assert response.status_code == 200
     data = response.json()
@@ -164,7 +173,7 @@ async def test_get_current_user(client, db_session: AsyncSession):
         "password": "string",
         "username": "currentuser",
     }
-    
+
     register_response = client.post(
         "/api/v1/auth/register",
         json=user_data,
