@@ -9,7 +9,6 @@
 ```sql
 -- 翻译服务提供商配置表
 CREATE TABLE IF NOT EXISTS translation_providers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,                    -- 提供商名称（如 openai, google）
     provider_type TEXT NOT NULL,           -- 提供商类型
     is_default BOOLEAN DEFAULT false,      -- 是否为默认提供商
@@ -17,33 +16,13 @@ CREATE TABLE IF NOT EXISTS translation_providers (
     config TEXT NOT NULL,                  -- JSON格式的配置信息
     rate_limit INTEGER DEFAULT 3,          -- 每分钟请求限制
     retry_count INTEGER DEFAULT 3,         -- 重试次数
-    retry_delay INTEGER DEFAULT 60,        -- 重试延迟(秒)
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL
-);
-
--- 翻译记录表
-CREATE TABLE IF NOT EXISTS translation_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT NOT NULL,                -- 关联的任务ID
-    chapter_index INTEGER NOT NULL,       -- 章节索引
-    provider_id INTEGER NOT NULL,         -- 使用的提供商ID
-    source_text TEXT NOT NULL,            -- 源文本
-    translated_text TEXT,                 -- 翻译后的文本
-    source_lang TEXT NOT NULL,            -- 源语言
-    target_lang TEXT NOT NULL,            -- 目标语言
-    word_count INTEGER NOT NULL,          -- 源文本字数
-    status TEXT NOT NULL,                 -- 状态（pending/success/failed）
-    error_message TEXT,                   -- 错误信息
-    created_at TIMESTAMP NOT NULL,        -- 开始时间
-    completed_at TIMESTAMP,               -- 完成时间
-    FOREIGN KEY (provider_id) REFERENCES translation_providers(id),
-    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    retry_delay INTEGER DEFAULT 5,         -- 重试延迟(秒)
+    limit_type TEXT NOT NULL,              -- 限制类型（chars: 字符数, tokens: token数）
+    limit_value INTEGER NOT NULL           -- 具体的限制值
 );
 
 -- 提供商统计表
 CREATE TABLE IF NOT EXISTS provider_stats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
     provider_id INTEGER NOT NULL,
     date DATE NOT NULL,                    -- 统计日期
     total_requests INTEGER DEFAULT 0,      -- 总请求数
@@ -56,9 +35,6 @@ CREATE TABLE IF NOT EXISTS provider_stats (
 );
 
 -- 创建索引
-CREATE INDEX IF NOT EXISTS idx_records_task ON translation_records(task_id);
-CREATE INDEX IF NOT EXISTS idx_records_status ON translation_records(status);
-CREATE INDEX IF NOT EXISTS idx_records_chapter ON translation_records(task_id, chapter_index);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_stats_date ON provider_stats(provider_id, date);
 ```
 
@@ -121,7 +97,7 @@ class RateLimiter:
 
 def retry_on_error(
     max_retries: int = 3,
-    retry_delay: int = 1,
+    retry_delay: int = 5,
     exceptions: tuple = (TranslationError,)
 ):
     """重试装饰器"""
@@ -168,7 +144,7 @@ class TranslationProvider(AsyncContextManager['TranslationProvider'], ABC):
         config: dict,
         rate_limit: int = 3,
         retry_count: int = 3,
-        retry_delay: int = 1
+        retry_delay: int = 5
     ):
         self.config = config
         self.rate_limiter = RateLimiter(rate_limit)
@@ -403,7 +379,7 @@ class TranslationManager(AsyncContextManager['TranslationManager']):
         self.providers.clear()
         self.default_provider_id = None
     
-    @retry_on_error(max_retries=3, retry_delay=1)
+    @retry_on_error(max_retries=3, retry_delay=5)
     async def translate(
         self,
         task_id: str,
@@ -421,58 +397,15 @@ class TranslationManager(AsyncContextManager['TranslationManager']):
         
         provider = self.providers[provider_id]
         
-        # 记录翻译请求
-        async with self.db.connection() as conn:
-            record_id = await conn.fetchval("""
-                INSERT INTO translation_records (
-                    task_id, chapter_index, provider_id,
-                    source_text, source_lang, target_lang,
-                    word_count, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                RETURNING id
-            """, task_id, chapter_index, provider_id,
-                text, source_lang, target_lang,
-                len(text.split()), 'pending',
-                datetime.now())
-        
         try:
             # 执行翻译
             translated_text = await provider.translate(
                 text, source_lang, target_lang, **kwargs
             )
             
-            # 更新成功记录
-            async with self.db.connection() as conn:
-                await conn.execute("""
-                    UPDATE translation_records
-                    SET translated_text = ?,
-                        status = ?,
-                        completed_at = ?
-                    WHERE id = ?
-                """, 
-                translated_text,
-                'success',
-                datetime.now(),
-                record_id
-                )
-            
             return translated_text
             
         except Exception as e:
-            # 更新失败记录
-            async with self.db.connection() as conn:
-                await conn.execute("""
-                    UPDATE translation_records
-                    SET status = ?,
-                        error_message = ?,
-                        completed_at = ?
-                    WHERE id = ?
-                """, 
-                'failed',
-                str(e),
-                datetime.now(),
-                record_id
-                )
             raise
 
 ## 4. 使用示例
