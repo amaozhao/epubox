@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import AsyncGenerator
 
 import pytest
@@ -66,3 +67,26 @@ async def db_session(setup_database) -> AsyncGenerator[AsyncSession, None]:
         finally:
             await session.rollback()
             await session.close()
+
+
+@pytest.fixture(scope="session")
+def test_data_dir() -> Path:
+    """获取测试数据目录."""
+    return Path(__file__).parent / "data"
+
+
+@pytest.fixture(scope="session")
+def sample_epub_path(test_data_dir) -> Path:
+    """获取示例EPUB文件路径."""
+    epub_path = test_data_dir / "sample.epub"
+    if not epub_path.exists():
+        pytest.skip("Sample EPUB file not found")
+    return epub_path
+
+
+@pytest.fixture(scope="function")
+def temp_work_dir(tmp_path) -> Path:
+    """创建临时工作目录."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    return work_dir
