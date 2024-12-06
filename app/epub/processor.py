@@ -206,3 +206,61 @@ class EpubProcessor:
     def get_work_file_path(self) -> str:
         """获取工作文件路径."""
         return str(self.work_file)
+
+        try:
+            self.html_contents = self._extract_html()
+            return self.html_contents
+
+        except Exception as e:
+            logger.error(f"Failed to extract content: {e}")
+            raise
+
+    async def update_content(self, translated_contents: Dict[str, str]) -> bool:
+        """
+        使用翻译后的内容更新EPUB文件.
+
+        Args:
+            translated_contents: 翻译后的HTML内容字典
+
+        Returns:
+            bool: 更新是否成功
+        """
+        if not self.book:
+            raise RuntimeError("EPUB file not loaded. Call prepare() first.")
+
+        try:
+            # 更新HTML内容
+            if not self._update_html(translated_contents):
+                return False
+
+            # 保存更新后的EPUB文件
+            return self._save_epub()
+
+        except Exception as e:
+            logger.error(f"Failed to update content: {e}")
+            return False
+
+    async def cleanup(self) -> None:
+        """清理临时文件和资源."""
+        try:
+            # 清理内存资源
+            self.book = None
+            self.html_contents.clear()
+
+            # 清理临时文件
+            if self.work_file.exists():
+                self.work_file.unlink()
+
+            # 清理工作目录（如果为空）
+            try:
+                self.work_dir.rmdir()
+            except OSError:
+                # 目录不为空，忽略错误
+                pass
+
+        except Exception as e:
+            logger.error(f"Failed to cleanup: {e}")
+
+    def get_work_file_path(self) -> str:
+        """获取工作文件路径."""
+        return str(self.work_file)

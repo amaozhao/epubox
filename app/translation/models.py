@@ -4,7 +4,7 @@ import enum
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, Enum, Float, ForeignKey, String, Text
+from sqlalchemy import JSON, Boolean, Date, Enum, Float, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -27,7 +27,7 @@ class TranslationProvider(Base):
     provider_type: Mapped[str] = mapped_column(String, nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    config: Mapped[str] = mapped_column(Text, nullable=False)
+    config: Mapped[dict] = mapped_column(JSON, nullable=False)
     rate_limit: Mapped[int] = mapped_column(default=3)
     retry_count: Mapped[int] = mapped_column(default=3)
     retry_delay: Mapped[int] = mapped_column(default=5)

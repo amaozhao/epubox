@@ -49,11 +49,22 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
 
     def __init__(self, provider_model: TranslationProviderModel):
         """Initialize the provider with model configuration."""
+        # 确保 config 是字典类型
+        if isinstance(provider_model.config, str):
+            import json
+
+            try:
+                config = json.loads(provider_model.config)
+            except json.JSONDecodeError as e:
+                raise ConfigurationError(f"Invalid JSON in config: {e}")
+        else:
+            config = provider_model.config
+
         # 在设置任何配置之前先验证
-        self.validate_config(provider_model.config)
+        self.validate_config(config)
 
         self.provider_model = provider_model
-        self.config = provider_model.config
+        self.config = config
         self.retry_count = provider_model.retry_count
         self.retry_delay = provider_model.retry_delay
         self._initialized = False

@@ -8,6 +8,12 @@ from typing import Optional
 import tiktoken
 from bs4 import BeautifulSoup
 from mistralai import Mistral, models
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ..errors import ConfigurationError, RateLimitError, TranslationError
 from ..models import LimitType
@@ -88,7 +94,9 @@ class MistralProvider(TranslationProvider):
                 print(f"Model: {self.model}")
 
                 response = await self.client.chat.complete_async(
-                    model=self.model, messages=messages, **kwargs
+                    model=self.model,
+                    messages=messages,
+                    **kwargs,
                 )
 
                 print(f"API Response: {response}")

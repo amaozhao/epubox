@@ -65,45 +65,98 @@ async def translate_book(
         translator = factory.create_provider(provider_model)
         await translator.initialize()
 
+        async def translate_html_content(
+            translator,
+            content: str,
+            source_lang: str,
+            target_lang: str,
+            max_tokens: int = 3000,
+        ) -> str:
+            """
+            翻译 HTML 内容，如果内容过长会自动分割。
+
+            Args:
+                translator: 翻译器实例
+                content: HTML 内容
+                source_lang: 源语言
+                target_lang: 目标语言
+                max_tokens: 每个块的最大 token 数
+
+            Returns:
+                翻译后的 HTML 内容
+            """
+            import tiktoken
+            from bs4 import BeautifulSoup
+
+            # 初始化 tokenizer
+            tokenizer = tiktoken.get_encoding("cl100k_base")
+
+            # 解析 HTML
+            soup = BeautifulSoup(content, "html.parser")
+            translated_blocks = []
+            current_block = []
+            current_tokens = 0
+
+            # 遍历所有段落级元素
+            for element in soup.find_all(
+                ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6"]
+            ):
+                # 获取元素的 HTML 字符串
+                element_html = str(element)
+                element_tokens = len(tokenizer.encode(element_html))
+
+                # 如果当前块加上新元素会超过 token 限制
+                if current_tokens + element_tokens > max_tokens and current_block:
+                    # 翻译当前块
+                    block_html = "".join(current_block)
+                    translated_block = await translator.translate(
+                        text=block_html,
+                        source_lang=source_lang,
+                        target_lang=target_lang,
+                    )
+                    translated_blocks.append(translated_block)
+
+                    # 重置当前块
+                    current_block = []
+                    current_tokens = 0
+
+                # 添加元素到当前块
+                current_block.append(element_html)
+                current_tokens += element_tokens
+
+            # 翻译最后一个块
+            if current_block:
+                block_html = "".join(current_block)
+                translated_block = await translator.translate(
+                    text=block_html,
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                )
+                translated_blocks.append(translated_block)
+
+            # 合并所有翻译后的块
+            return "".join(translated_blocks)
+
         try:
             # 翻译内容
             translated_contents = {}
             total_files = len(html_contents)
 
             print(f"\nStarting translation of {total_files} files...")
-            for idx, (name, tasks) in enumerate(html_contents.items(), 1):
+            for idx, (name, content) in enumerate(html_contents.items(), 1):
                 print(f"\nTranslating file {idx}/{total_files}: {name}")
                 try:
-                    # 翻译每个任务
-                    translated_tasks = []
-                    total_tasks = len(tasks)
-                    for task_idx, task in enumerate(tasks, 1):
-                        print(f"  Translating task {task_idx}/{total_tasks}...")
-                        translated_text = await translator.translate(
-                            text=task["content"],
-                            source_lang=source_lang,
-                            target_lang=target_lang,
-                        )
-                        translated_tasks.append(translated_text)
-                        print(
-                            f"  Successfully translated task {task_idx}/{total_tasks}"
-                        )
-
-                        # 在任务之间添加延迟
-                        if task_idx < total_tasks:
-                            delay = 5  # 30秒延迟
-                            print(f"  Waiting {delay} seconds before next task...")
-                            await asyncio.sleep(delay)
-
-                    translated_contents[name] = translated_tasks
-                    print(f"Successfully translated file {idx}/{total_files}")
-
-                    # 在文件之间添加延迟
-                    if idx < total_files:
-                        delay = 10  # 60秒延迟
-                        print(f"Waiting {delay} seconds before next file...")
-                        await asyncio.sleep(delay)
-
+                    # 分块翻译内容
+                    print(f"  Translating content...")
+                    translated_text = await translate_html_content(
+                        translator=translator,
+                        content=content,
+                        source_lang=source_lang,
+                        target_lang=target_lang,
+                        max_tokens=4000,  # 设置较小的块大小，为 HTML 标签预留空间
+                    )
+                    translated_contents[name] = translated_text
+                    print(f"  Successfully translated {name}")
                 except Exception as e:
                     print(f"Error translating file {name}: {str(e)}")
                     raise
