@@ -23,35 +23,6 @@ from ..models import TranslationProvider as TranslationProviderModel
 T = TypeVar("T")
 
 
-class RateLimiter:
-    """Rate limiter for translation providers."""
-
-    def __init__(self, requests_per_second: int = 1, time_window: int = 1):
-        self.rate_limit = requests_per_second
-        self.time_window = time_window
-        self.tokens = requests_per_second
-        self.last_update = time.time()
-        self.lock = asyncio.Lock()
-
-    async def acquire(self):
-        """Acquire a token from the rate limiter."""
-        async with self.lock:
-            now = time.time()
-            time_passed = now - self.last_update
-            self.tokens = min(
-                self.rate_limit,
-                self.tokens + time_passed * (self.rate_limit / self.time_window),
-            )
-            self.last_update = now
-
-            # Check if we have enough tokens
-            if self.tokens < 1:
-                raise RateLimitError("Rate limit exceeded")
-
-            # If we have enough tokens, decrease the count
-            self.tokens -= 1
-
-
 class AsyncContextManager(Generic[T]):
     """Async context manager base class."""
 
@@ -78,9 +49,11 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
 
     def __init__(self, provider_model: TranslationProviderModel):
         """Initialize the provider with model configuration."""
+        # 在设置任何配置之前先验证
+        self.validate_config(provider_model.config)
+
         self.provider_model = provider_model
         self.config = provider_model.config
-        self.rate_limiter = RateLimiter(requests_per_second=provider_model.rate_limit)
         self.retry_count = provider_model.retry_count
         self.retry_delay = provider_model.retry_delay
         self._initialized = False
@@ -107,6 +80,11 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
         """Count tokens in text. Override this in token-based providers."""
         raise NotImplementedError("Token counting not implemented for this provider")
 
+    @abstractmethod
+    async def check_rate_limit(self):
+        """Check rate limit. Override this in providers that need rate limiting."""
+        pass
+
     async def check_limits(self, text: str):
         """Check all applicable limits."""
         count = self.count_units(text)
@@ -115,7 +93,7 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
                 f"Text length ({count} {self.provider_model.limit_type.value}) "
                 f"exceeds maximum allowed ({self.provider_model.limit_value})"
             )
-        await self.rate_limiter.acquire()
+        await self.check_rate_limit()
 
     async def translate(
         self, text: str, source_lang: str, target_lang: str, **kwargs
