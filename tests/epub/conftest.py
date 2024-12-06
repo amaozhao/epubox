@@ -45,3 +45,5 @@ def create_test_epub(tmp_path):
         return epub_path
 
     return _create_epub
+
+    return _create_epub

@@ -212,3 +212,135 @@ class TestHTMLContentProcessor:
         assert "<!-- Another comment -->" in tasks[0]["content"]
         assert "<p>Text before comment</p>" in tasks[0]["content"]
         assert "<p>Text after comment</p>" in tasks[0]["content"]
+
+    async def test_process_long_html(self, processor):
+        """Test processing of long HTML content."""
+        with open("tests/html/test.html", "r", encoding="utf-8") as f:
+            html = f.read()
+
+        tasks = await processor.process_html(html)
+
+        # 基本验证
+        assert isinstance(tasks, list)
+        assert len(tasks) > 0
+
+        # 合并所有任务内容以便搜索
+        all_content = " ".join(task["content"] for task in tasks)
+
+        # 1. 验证标题和内容被正确提取
+        assert "1000+" in all_content
+        assert "AI/ML Product/Project" in all_content
+        assert "This is a list of 1000+ AI product ideas" in all_content
+        assert "21 Industries" in all_content
+        assert "1. Energy" in all_content
+        assert "2. Agriculture" in all_content
+
+        # 2. 验证 img 和 link 标签被替换为占位符
+        img_tag = '<img src="image_rsrc44.jpg" alt="" class="class_sP"/>'
+        link_tag = '<link rel="stylesheet" type="text/css" href="stylesheet.css"/>'
+
+        # 检查占位符是否存在且格式正确
+        assert len(processor.placeholders) >= 2
+        assert all(
+            placeholder.startswith("†") and placeholder.endswith("†")
+            for placeholder in processor.placeholders.keys()
+        )
+
+        # 检查原始标签是否被正确保存在占位符中
+        placeholders_content = processor.placeholders.values()
+        found_img_match = False
+        found_link_match = False
+
+        for content in placeholders_content:
+            if self._compare_html_tags(img_tag, content):
+                found_img_match = True
+            if self._compare_html_tags(link_tag, content):
+                found_link_match = True
+
+        assert (
+            found_img_match
+        ), f"No matching img tag found in placeholders. Expected: {img_tag}"
+        assert (
+            found_link_match
+        ), f"No matching link tag found in placeholders. Expected: {link_tag}"
+
+        # 检查原始内容中不应该包含这些标签
+        assert img_tag not in all_content
+        assert link_tag not in all_content
+
+        # 3. 验证内容恢复
+        for task in tasks:
+            restored = await processor.restore_content(task["content"])
+            if "†" in task["content"]:
+                # 有占位符的内容应该被替换
+                assert restored != task["content"]
+                # 确保占位符被替换回了有效的HTML
+                assert "<" in restored and ">" in restored
+
+                # 验证还原后的img标签
+                if self._compare_html_tags(img_tag, task["content"]):
+                    assert self._compare_html_tags(img_tag, restored)
+
+                # 验证还原后的link标签
+                if self._compare_html_tags(link_tag, task["content"]):
+                    assert self._compare_html_tags(link_tag, restored)
+
+                # 验证所有占位符都被替换
+                assert "†" not in restored
+            else:
+                # 没有占位符的内容应该保持不变
+                assert restored == task["content"]
+
+        # 4. 验证完整的还原流程
+        # 选择一个包含占位符的任务
+        placeholder_task = next(task for task in tasks if "†" in task["content"])
+        restored_content = await processor.restore_content(placeholder_task["content"])
+
+        # 解析原始内容和还原后的内容
+        original_soup = BeautifulSoup(html, "html.parser")
+        restored_soup = BeautifulSoup(restored_content, "html.parser")
+
+        # 验证还原后的img标签
+        original_img = original_soup.find("img")
+        restored_img = restored_soup.find("img")
+        if original_img and restored_img:
+            assert original_img.attrs == restored_img.attrs
+
+        # 验证还原后的link标签
+        original_link = original_soup.find("link")
+        restored_link = restored_soup.find("link")
+        if original_link and restored_link:
+            assert original_link.attrs == restored_link.attrs
+
+        # 5. 验证HTML结构和属性被保留
+        assert 'class="heading_sF"' in all_content
+        assert 'id="id__798_2_"' in all_content
+        assert 'class="class_s8"' in all_content
+        assert 'class="class_s3W"' in all_content
+
+    def _compare_html_tags(self, tag1_str: str, tag2_str: str) -> bool:
+        """比较两个HTML标签是否语义等价。
+
+        Args:
+            tag1_str: 第一个HTML标签字符串
+            tag2_str: 第二个HTML标签字符串
+
+        Returns:
+            bool: 如果标签语义等价则返回True
+        """
+        # 解析HTML标签
+        soup1 = BeautifulSoup(tag1_str, "html.parser")
+        soup2 = BeautifulSoup(tag2_str, "html.parser")
+
+        tag1 = soup1.find()
+        tag2 = soup2.find()
+
+        if tag1 is None or tag2 is None:
+            return False
+
+        # 比较标签名
+        if tag1.name != tag2.name:
+            return False
+
+        # 比较属性
+        return tag1.attrs == tag2.attrs
