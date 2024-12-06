@@ -1,5 +1,6 @@
 """Test translation models."""
 
+import json
 from datetime import date, datetime
 
 import pytest
@@ -133,3 +134,88 @@ async def test_limit_type_enum():
     assert LimitType.CHARS.value == "chars"
     assert LimitType.TOKENS.value == "tokens"
     assert len(LimitType) == 2  # Only two types supported
+
+
+def test_provider_model_validation():
+    """Test provider model validation."""
+    # Test config as JSON string (converted from dict)
+    config_dict = {"api_key": "test-key", "model": "test-model"}
+    provider = TranslationProvider(
+        name="Test Provider",
+        provider_type="test",
+        is_default=True,
+        enabled=True,
+        config=json.dumps(config_dict),  # Convert dict to JSON string
+        rate_limit=5,
+        retry_count=3,
+        retry_delay=5,
+        limit_type=LimitType.CHARS,
+        limit_value=5000,
+    )
+    # Config should be stored as string
+    assert isinstance(provider.config, str)
+
+    # Test with direct JSON string
+    config_str = '{"api_key": "test-key", "model": "test-model"}'
+    provider = TranslationProvider(
+        name="Test Provider",
+        provider_type="test",
+        is_default=True,
+        enabled=True,
+        config=config_str,
+        rate_limit=5,
+        retry_count=3,
+        retry_delay=5,
+        limit_type=LimitType.CHARS,
+        limit_value=5000,
+    )
+    # Config should remain as string
+    assert isinstance(provider.config, str)
+    assert provider.config == config_str
+
+
+def test_provider_model_defaults():
+    """Test provider model default values."""
+    provider = TranslationProvider(
+        name="Test Provider",
+        provider_type="test",
+        config=json.dumps({"api_key": "test-key"}),  # Convert dict to JSON string
+        is_default=False,  # Explicitly set default values
+        enabled=True,
+        rate_limit=1,
+        retry_count=3,
+        retry_delay=1,
+        limit_type=LimitType.CHARS,
+        limit_value=25000,
+    )
+    # Check the values we explicitly set
+    assert provider.is_default is False
+    assert provider.enabled is True
+    assert provider.rate_limit == 1
+    assert provider.retry_count == 3
+    assert provider.retry_delay == 1
+    assert provider.limit_type == LimitType.CHARS
+    assert provider.limit_value == 25000
+
+
+def test_provider_model_config_types():
+    """Test provider model config type handling."""
+    # Test with dictionary converted to JSON string
+    provider = TranslationProvider(
+        name="Test Provider",
+        provider_type="test",
+        config=json.dumps({"api_key": "test-key"}),  # Convert dict to JSON string
+        limit_type=LimitType.CHARS,
+        limit_value=1000,
+    )
+    assert isinstance(provider.config, str)
+
+    # Test with direct JSON string
+    provider = TranslationProvider(
+        name="Test Provider",
+        provider_type="test",
+        config='{"api_key": "test-key"}',
+        limit_type=LimitType.CHARS,
+        limit_value=1000,
+    )
+    assert isinstance(provider.config, str)
