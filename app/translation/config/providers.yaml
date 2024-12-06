@@ -1,0 +1,14 @@
+mistral:
+  module: app.translation.providers.mistral
+  class: MistralProvider
+  description: Mistral AI Translation Provider
+  limit_type: tokens
+  default_rate_limit: 1
+  default_max_units: 25000
+  retry:
+    max_attempts: 3
+    initial_delay: 1
+    max_delay: 10
+  features:
+    streaming: true
+    batch_translation: false

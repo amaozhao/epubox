@@ -507,3 +507,243 @@ for provider in providers:
    - 并发请求控制
    - 资源限制管理
    - 缓存机制
+
+## 7. 翻译引擎设计文档
+
+### 概述
+翻译引擎负责将文本从源语言翻译为目标语言，支持多种翻译提供者。
+
+### 基类 `TranslationProvider`
+`TranslationProvider` 是所有翻译提供者的基类，定义了通用接口和组件。
+
+#### 主要方法
+- `get_provider_type()`: 返回提供者类型标识符。
+- `validate_config(config: dict)`: 验证提供者配置，确保必需的参数（如 API 密钥）存在。
+- `translate(text: str, source_lang: str, target_lang: str, **kwargs)`: 执行翻译操作，应用速率限制和重试机制。
+
+### 速率限制器 `RateLimiter`
+`RateLimiter` 控制翻译请求的速率，防止超出 API 限制。支持自定义请求频率和时间窗口。
+
+#### 主要特性
+- 支持按秒级别的请求频率控制（默认：每秒1次请求）
+- 可配置时间窗口
+- 异步锁机制确保并发安全
+
+#### 主要方法
+- `acquire()`: 获取一个令牌以进行翻译请求
+
+### 文本限制管理
+#### 计量单位
+系统支持多种文本计量单位：
+- Token：基于模型的分词计数（如 Mistral）
+- Character：字符计数（如 Google Translate）
+
+#### 限制配置 `LimitConfig`
+统一的限制配置类，包含：
+- `requests_per_second`: 每秒请求数限制
+- `max_units_per_request`: 每次请求的最大单位数
+- `unit_type`: 计量单位类型（TOKEN/CHARACTER）
+
+#### 文本计数器 `TextCounter`
+抽象接口，用于实现不同的计数方式：
+- `TokenCounter`: 实现基于 token 的计数
+- `CharacterCounter`: 实现基于字符的计数
+
+### 具体实现示例
+
+### Mistral Provider
+- 计量单位：Token
+- 限制：
+  - 每秒 1 次请求
+  - 每次最多 25000 tokens
+
+### Google Translate Provider
+- 计量单位：Character
+- 限制：
+  - 每秒 10 次请求
+  - 每次最多 5000 字符
+
+### 错误处理机制
+翻译过程中可能会遇到不同类型的错误，如速率限制错误、无效请求等，系统会抛出相应的异常。
+
+### 使用示例
+```python
+# 创建 Mistral 提供者
+mistral_provider = MistralProvider(config)
+
+# 执行翻译
+translated_text = await mistral_provider.translate("Hello, world!", "en", "fr")
+```
+
+### 翻译引擎设计文档
+
+## 1. 系统概述
+翻译引擎负责管理和协调多个翻译提供者，提供统一的翻译接口。系统支持动态配置和加载不同的翻译提供者，并对每个提供者实施相应的限制和控制。
+
+## 2. 核心组件
+
+### 2.1 提供者工厂（Provider Factory）
+提供者工厂负责创建和管理翻译提供者实例。采用基于配置文件的动态加载机制，支持灵活地添加和管理多个翻译提供者。
+
+#### 2.1.1 配置文件结构
+```yaml
+# providers.yaml
+mistral:
+  module: app.translation.providers.mistral
+  class: MistralProvider
+  description: Mistral AI Translation Provider
+  limit_type: tokens
+  default_rate_limit: 1
+  default_max_units: 25000
+
+google:
+  module: app.translation.providers.google
+  class: GoogleProvider
+  description: Google Cloud Translation
+  limit_type: chars
+  default_rate_limit: 10
+  default_max_units: 5000
+```
+
+#### 2.1.2 工厂类职责
+- 加载和解析提供者配置文件
+- 动态导入提供者类
+- 创建提供者实例
+- 管理提供者类的缓存
+
+### 2.2 基础提供者类（Base Provider）
+所有翻译提供者的基类，定义统一的接口和通用功能。
+
+#### 2.2.1 核心功能
+- 速率限制控制
+- 单位（字符/token）计数
+- 错误处理和重试机制
+- 配置验证
+
+#### 2.2.2 主要接口
+- 初始化配置和限制
+- 翻译方法
+- 单位计数方法
+- 配置验证方法
+
+### 2.3 限制管理（Limit Management）
+管理不同类型的限制，包括请求频率和文本单位限制。
+
+#### 2.3.1 限制类型
+- 字符数限制（CHARS）
+- Token数限制（TOKENS）
+
+#### 2.3.2 限制配置
+- 每秒请求数限制
+- 单次请求最大单位数
+- 重试次数和间隔
+
+### 2.4 数据模型
+数据库模型用于存储提供者配置和统计信息。
+
+#### 2.4.1 提供者配置模型
+- 基本信息（名称、类型等）
+- 限制配置
+- API配置
+- 启用状态
+
+#### 2.4.2 统计信息模型
+- 请求统计
+- 错误统计
+- 性能指标
+
+## 3. 工作流程
+
+### 3.1 提供者初始化
+1. 系统启动时加载提供者配置文件
+2. 按需动态导入提供者类
+3. 根据数据库配置创建提供者实例
+
+### 3.2 翻译请求处理
+1. 接收翻译请求
+2. 检查文本长度限制
+3. 应用速率限制
+4. 执行翻译
+5. 处理错误和重试
+6. 更新统计信息
+
+### 3.3 提供者管理
+1. 通过配置文件添加新提供者
+2. 通过数据库管理提供者配置
+3. 监控提供者状态和性能
+
+## 4. 扩展性设计
+
+### 4.1 添加新提供者
+1. 创建提供者类实现文件
+2. 在配置文件中添加提供者信息
+3. 在数据库中添加提供者配置
+
+### 4.2 自定义限制
+1. 在提供者配置中定义限制参数
+2. 实现自定义的限制检查逻辑
+
+## 5. 错误处理
+
+### 5.1 错误类型
+- 配置错误
+- 速率限制错误
+- API错误
+- 网络错误
+
+### 5.2 重试策略
+- 可配置的重试次数
+- 指数退避
+- 错误分类和选择性重试
+
+## 6. 监控和统计
+
+### 6.1 性能指标
+- 响应时间
+- 成功率
+- 错误率
+- 速率限制命中率
+
+### 6.2 资源使用
+- API 调用量
+- 字符/Token 使用量
+- 并发请求数
+
+## 7. 配置示例
+
+### 7.1 提供者配置文件
+```yaml
+# 完整的提供者配置示例
+mistral:
+  module: app.translation.providers.mistral
+  class: MistralProvider
+  description: Mistral AI Translation Provider
+  limit_type: tokens
+  default_rate_limit: 1
+  default_max_units: 25000
+  retry:
+    max_attempts: 3
+    initial_delay: 1
+    max_delay: 10
+  features:
+    streaming: true
+    batch_translation: false
+```
+
+### 7.2 数据库配置
+```python
+# 提供者配置示例
+provider_config = {
+    "name": "Mistral",
+    "provider_type": "mistral",
+    "is_default": True,
+    "enabled": True,
+    "config": {
+        "api_key": "xxx",
+        "model": "mistral-tiny"
+    },
+    "rate_limit": 1,
+    "limit_type": LimitType.TOKENS,
+    "limit_value": 25000
+}
+```
