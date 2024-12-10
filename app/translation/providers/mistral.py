@@ -1,15 +1,17 @@
 """Mistral translation provider."""
 
-import asyncio
-from datetime import datetime, timedelta
+from typing import Dict
 
 import tiktoken
 from mistralai import Mistral, models
 
-from app.translation.errors import ConfigurationError, RateLimitError, TranslationError
+from app.core.logging import get_logger
+from app.translation.errors import ConfigurationError, TranslationError
 from app.translation.models import LimitType
 from app.translation.models import TranslationProvider as TranslationProviderModel
 from app.translation.providers.base import TranslationProvider
+
+logger = get_logger(__name__)
 
 
 class MistralProvider(TranslationProvider):
@@ -22,15 +24,8 @@ class MistralProvider(TranslationProvider):
 
         self.api_key = self.config.get("api_key")
         self.model = self.config.get("model", "mistral-tiny")
-        self.max_retries = self.config.get("max_retries", 3)
-        self.retry_delay = self.config.get("retry_delay", 5)  # seconds
         self.client = Mistral(api_key=self.api_key)
-        self.tokenizer = self._initialize_tokenizer()
-
-        # 限流状态
-        self._rate_limit_lock = asyncio.Lock()
-        self._last_error_time = None
-        self._rate_limit_reset = None
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
     def get_provider_type(self) -> str:
         """Get provider type identifier."""
@@ -42,76 +37,11 @@ class MistralProvider(TranslationProvider):
             raise ConfigurationError("Mistral API key is required")
         return True
 
-    def _initialize_tokenizer(self):
-        """Initialize the tokenizer for counting tokens."""
-        # Mistral uses cl100k_base encoding (same as GPT-4)
-        return tiktoken.get_encoding("cl100k_base")
-
     def _count_tokens(self, text: str) -> int:
         """Count tokens in text using tiktoken."""
         if not self.tokenizer:
             raise ConfigurationError("Tokenizer not initialized")
         return len(self.tokenizer.encode(text))
-
-    async def check_rate_limit(self):
-        """Check if we're currently rate limited by Mistral API."""
-        async with self._rate_limit_lock:
-            now = datetime.now()
-
-            # 如果之前遇到过限流
-            if self._rate_limit_reset and now < self._rate_limit_reset:
-                wait_minutes = (self._rate_limit_reset - now).seconds // 60
-                raise RateLimitError(
-                    f"Rate limit exceeded. Please try again in {wait_minutes} minutes"
-                )
-
-    async def _handle_rate_limit(self):
-        """Handle rate limit error by setting a reset time."""
-        async with self._rate_limit_lock:
-            self._last_error_time = datetime.now()
-            # Mistral API 的限流是按小时计算的
-            self._rate_limit_reset = self._last_error_time + timedelta(seconds=5)
-
-    async def _make_request(self, messages: list, **kwargs) -> str:
-        """Make API request with retry logic."""
-        await self.check_rate_limit()
-        retries = 0
-
-        while retries <= self.max_retries:
-            try:
-                response = await self.client.chat.complete_async(
-                    model=self.model,
-                    messages=messages,
-                    **kwargs,
-                )
-                return response.choices[0].message.content.strip()
-
-            except models.SDKError as e:
-                print(f"\nSDK Error occurred:")
-                print(f"Status code: {e.status_code}")
-                print(f"Error message: {e.message}")
-
-                if "rate limit exceeded" in str(e).lower():
-                    await self._handle_rate_limit()
-                    retries += 1
-                    if retries <= self.max_retries:
-                        wait_time = self.retry_delay * (2 ** (retries - 1))
-                        print(
-                            f"Rate limit hit, waiting {wait_time} seconds before retry {retries}/{self.max_retries}"
-                        )
-                        await asyncio.sleep(wait_time)
-                        last_error = e
-                        continue
-                    raise RateLimitError(str(e))
-                raise TranslationError(f"Mistral API error: {e.message}")
-
-            except models.HTTPValidationError as e:
-                raise TranslationError(f"Invalid request: {str(e)}")
-
-            except Exception as e:
-                print(f"\nUnexpected error: {str(e)}")
-                print(f"Error type: {type(e)}")
-                raise TranslationError(f"Translation failed: {str(e)}")
 
     async def _translate(
         self, text: str, source_lang: str, target_lang: str, **kwargs
@@ -129,38 +59,37 @@ class MistralProvider(TranslationProvider):
                 f"Text length ({token_count} tokens) exceeds maximum allowed ({self.provider_model.limit_value} tokens)"
             )
 
-        try:
-            # 构建提示，要求保留HTML标签和占位符
-            messages = [
-                models.UserMessage(
-                    content=(
-                        f"Translate the following text from {source_lang} to {target_lang}. "
-                        "CRITICAL REQUIREMENTS:\n"
-                        "1. PRESERVE ALL HTML TAGS EXACTLY AS THEY APPEAR\n"
-                        "   - Keep all HTML tags unchanged\n"
-                        "   - Maintain all HTML attributes\n"
-                        "   - Only translate the text content between tags\n"
-                        "2. PRESERVE ALL PLACEHOLDERS\n"
-                        "   - Placeholders are in the format †number† (e.g., †0†, †1†)\n"
-                        "   - Keep them EXACTLY as they appear\n"
-                        "   - DO NOT translate them\n"
-                        "   - DO NOT change their format\n"
-                        "3. Return the complete text with all HTML structure and placeholders intact\n"
-                        "4. Do not add any explanations\n\n"
-                        "Example:\n"
-                        "Input: '<p>Hello †0†, <span class=\"name\">world</span>!</p>'\n"
-                        "Output: '<p>你好 †0†，<span class=\"name\">世界</span>！</p>'\n\n"
-                        f"Text to translate: {text}"
-                    )
+        messages = [
+            models.UserMessage(
+                content=(
+                    f"Translate the following text from {source_lang} to {target_lang}. "
+                    "CRITICAL REQUIREMENTS:\n"
+                    "1. PRESERVE ALL HTML TAGS EXACTLY AS THEY APPEAR\n"
+                    "   - Keep all HTML tags unchanged\n"
+                    "   - Maintain all HTML attributes\n"
+                    "   - Only translate the text content between tags\n"
+                    "2. PRESERVE ALL PLACEHOLDERS\n"
+                    "   - Placeholders are in the format †number† (e.g., †0†, †1†)\n"
+                    "   - Keep them EXACTLY as they appear\n"
+                    "   - DO NOT translate them\n"
+                    "   - DO NOT change their format\n"
+                    "3. Return the complete text with all HTML structure and placeholders intact\n"
+                    "4. Do not add any explanations\n\n"
+                    "Example:\n"
+                    "Input: '<p>Hello †0†, <span class=\"name\">world</span>!</p>'\n"
+                    "Output: '<p>你好 †0†，<span class=\"name\">世界</span>！</p>'\n\n"
+                    f"Text to translate: {text}"
                 )
-            ]
+            )
+        ]
 
-            translated = await self._make_request(messages, **kwargs)
-
-            return translated.strip()
-
-        except RateLimitError:
-            # 直接向上传递RateLimitError
-            raise
+        try:
+            response = await self.client.chat.complete_async(
+                model=self.model,
+                messages=messages,
+                **kwargs,
+            )
+            return response.choices[0].message.content.strip()
         except Exception as e:
+            logger.error("Translation request failed", error=str(e))
             raise TranslationError(f"Translation failed: {str(e)}")

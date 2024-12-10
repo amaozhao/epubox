@@ -11,16 +11,34 @@ from typing import Any, Dict, Generic, Optional, TypeVar
 
 from tenacity import (
     AsyncRetrying,
+    before_sleep_log,
+    retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
+
+from app.core.logging import get_logger
 
 from ..errors import ConfigurationError, TranslationError
 from ..models import LimitType
 from ..models import TranslationProvider as TranslationProviderModel
 
 T = TypeVar("T")
+
+
+logger = get_logger(__name__)
+
+
+def log_retry_attempt(retry_state):
+    """记录重试尝试."""
+    exception = retry_state.outcome.exception()
+    if exception:
+        logger.warning(
+            "Translation request failed, retrying",
+            attempt=retry_state.attempt_number,
+            error=str(exception),
+        )
 
 
 class AsyncContextManager(Generic[T]):
@@ -91,11 +109,6 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
         """Count tokens in text. Override this in token-based providers."""
         raise NotImplementedError("Token counting not implemented for this provider")
 
-    @abstractmethod
-    async def check_rate_limit(self):
-        """Check rate limit. Override this in providers that need rate limiting."""
-        pass
-
     async def check_limits(self, text: str):
         """Check all applicable limits."""
         count = self.count_units(text)
@@ -104,33 +117,65 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
                 f"Text length ({count} {self.provider_model.limit_type.value}) "
                 f"exceeds maximum allowed ({self.provider_model.limit_value})"
             )
-        await self.check_rate_limit()
-
-    async def translate(
-        self, text: str, source_lang: str, target_lang: str, **kwargs
-    ) -> str:
-        """Translate text from source language to target language."""
-        # Check limits
-        await self.check_limits(text)
-
-        # Use tenacity for retrying
-        async for attempt in AsyncRetrying(
-            stop=stop_after_attempt(self.retry_count),
-            wait=wait_exponential(multiplier=self.retry_delay, min=1, max=10),
-            retry=retry_if_exception_type((TranslationError, ConnectionError)),
-            reraise=True,
-        ):
-            with attempt:
-                return await self._translate(
-                    text=text,
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                    **kwargs,
-                )
 
     @abstractmethod
     async def _translate(
         self, text: str, source_lang: str, target_lang: str, **kwargs
     ) -> str:
-        """Provider-specific translation implementation."""
+        """Translate text from source language to target language.
+
+        This is the core translation method that each provider must implement.
+        It should focus only on the translation logic, without handling retries or limits.
+
+        Args:
+            text: Text to translate.
+            source_lang: Source language code.
+            target_lang: Target language code.
+            **kwargs: Additional provider-specific arguments.
+
+        Returns:
+            Translated text.
+
+        Raises:
+            TranslationError: If translation fails.
+        """
         pass
+
+    @retry(
+        stop=stop_after_attempt(3),  # 最多重试3次
+        wait=wait_exponential(multiplier=1, min=4, max=10),  # 指数退避：4s, 8s, 16s
+        before_sleep=log_retry_attempt,  # 使用自定义的日志函数
+        retry_error_callback=lambda retry_state: retry_state.outcome.result(),  # 返回最后一次尝试的结果
+    )
+    async def translate(
+        self, text: str, source_lang: str, target_lang: str, **kwargs
+    ) -> str:
+        """Translate text from source language to target language.
+
+        This method handles all the common logic like:
+        - Empty text checking
+        - Length/token limits checking
+        - Retries with exponential backoff
+        - Error handling and logging
+
+        Args:
+            text: Text to translate.
+            source_lang: Source language code.
+            target_lang: Target language code.
+            **kwargs: Additional provider-specific arguments.
+
+        Returns:
+            Translated text.
+
+        Raises:
+            TranslationError: If translation fails after all retries.
+        """
+        if not text:
+            return text
+
+        await self.check_limits(text)
+
+        try:
+            return await self._translate(text, source_lang, target_lang, **kwargs)
+        except Exception as e:
+            raise TranslationError(f"Translation failed: {str(e)}")
