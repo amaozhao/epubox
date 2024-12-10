@@ -12,6 +12,7 @@ __pycache__/
 *.db
 progress.json
 uploads/
+.idea/
 tests/epubox/test_pipeline/output/
 
 # Distribution / packaging
