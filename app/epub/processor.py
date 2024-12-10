@@ -154,13 +154,21 @@ class EpubProcessor:
         self.load_epub()
 
     async def process(self):
+        """处理 EPUB 文件内容."""
         await self.prepare()
+
+        # 提取内容
         self.ncxs = self.extract_ncx()
         self.html_contents = self.extract_html()
+
+        # 串行处理 HTML 内容
         for name, content in self.html_contents.items():
             translated_content = await self.html_processor.process(content)
             await self.update_content(name, translated_content)
+            # 每个文件处理完后保存一次，避免数据丢失
+            self.save_epub()
 
+        # 串行处理 NCX 内容
         for name, content in self.ncxs.items():
             translated_content = await self.html_processor.process(
                 content, parser="lxml"
@@ -168,3 +176,5 @@ class EpubProcessor:
             await self.update_content(
                 name, translated_content, item_type=ebooklib.ITEM_NAVIGATION
             )
+            # 每个文件处理完后保存一次，避免数据丢失
+            self.save_epub()

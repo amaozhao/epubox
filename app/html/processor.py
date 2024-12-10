@@ -3,6 +3,8 @@ HTML processor module.
 Handles HTML content processing and transformation.
 """
 
+import asyncio
+import html
 import re
 from typing import Dict, List
 
@@ -67,6 +69,9 @@ SKIP_TAGS = {
 
 class HTMLProcessor:
     """Main class for processing HTML content."""
+
+    # 类级别的信号量，限制并发翻译请求
+    _translation_semaphore = asyncio.Semaphore(1)
 
     def __init__(
         self, translator, source_lang="en", target_lang="zh", max_chunk_size: int = 4500
@@ -145,26 +150,28 @@ class HTMLProcessor:
 
         # 如果是纯文本节点，直接翻译
         if isinstance(node, NavigableString):
-            translated_text = await self.translator.translate(
-                str(node),
-                source_lang=self.source_lang,
-                target_lang=self.target_lang,
-            )
+            async with HTMLProcessor._translation_semaphore:
+                translated_text = await self.translator.translate(
+                    str(node),
+                    source_lang=self.source_lang,
+                    target_lang=self.target_lang,
+                )
             node.replace_with(translated_text)
             return
 
         # 如果当前节点内容长度符合条件，直接翻译
         content = str(node)
         if len(content) <= self.max_chunk_size:
-            translated_text = await self.translator.translate(
-                content,
-                source_lang=self.source_lang,
-                target_lang=self.target_lang,
-            )
+            async with HTMLProcessor._translation_semaphore:
+                translated_text = await self.translator.translate(
+                    content,
+                    source_lang=self.source_lang,
+                    target_lang=self.target_lang,
+                )
             node.replace_with(BeautifulSoup(translated_text, "html.parser"))
             return
 
-        # 否则递归处理子节点
+        # 否则串行处理子节点
         for child in list(node.children):
             await self.process_node(child)
 
@@ -190,11 +197,12 @@ class HTMLProcessor:
 
         # 如果没有HTML标签，将纯文本作为一个任务
         if not root:
-            return await self.translator.translate(
+            translated_text = await self.translator.translate(
                 text=html_content,
                 source_lang=self.source_lang,
                 target_lang=self.target_lang,
             )
+            return html.unescape(translated_text)
 
         # 第一阶段：替换所有skip标签
         self.replace_skip_tags_recursive(root)
@@ -206,7 +214,8 @@ class HTMLProcessor:
         translated_html = str(root)
         translated_html = await self.restore_content(translated_html)
 
-        return translated_html
+        # 解除HTML转义
+        return html.unescape(translated_html)
 
     async def restore_content(self, translated_text: str) -> str:
         """

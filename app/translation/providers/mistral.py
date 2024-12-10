@@ -1,21 +1,34 @@
 """Mistral translation provider."""
 
+import asyncio
 from typing import Dict
 
 import tiktoken
 from mistralai import Mistral, models
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 from app.core.logging import get_logger
 from app.translation.errors import ConfigurationError, TranslationError
 from app.translation.models import LimitType
 from app.translation.models import TranslationProvider as TranslationProviderModel
-from app.translation.providers.base import TranslationProvider
+from app.translation.providers.base import TranslationProvider, log_retry_attempt
 
 logger = get_logger(__name__)
 
 
 class MistralProvider(TranslationProvider):
     """Mistral translation provider implementation."""
+
+    # 类级别的信号量，限制并发为1
+    _semaphore = asyncio.Semaphore(1)
+    # 类级别的上次请求时间记录
+    _last_request_time = 0
 
     def __init__(self, provider_model: TranslationProviderModel):
         super().__init__(provider_model)
@@ -62,23 +75,13 @@ class MistralProvider(TranslationProvider):
         messages = [
             models.UserMessage(
                 content=(
-                    f"Translate the following text from {source_lang} to {target_lang}. "
-                    "CRITICAL REQUIREMENTS:\n"
-                    "1. PRESERVE ALL HTML TAGS EXACTLY AS THEY APPEAR\n"
-                    "   - Keep all HTML tags unchanged\n"
-                    "   - Maintain all HTML attributes\n"
-                    "   - Only translate the text content between tags\n"
-                    "2. PRESERVE ALL PLACEHOLDERS\n"
-                    "   - Placeholders are in the format †number† (e.g., †0†, †1†)\n"
-                    "   - Keep them EXACTLY as they appear\n"
-                    "   - DO NOT translate them\n"
-                    "   - DO NOT change their format\n"
-                    "3. Return the complete text with all HTML structure and placeholders intact\n"
-                    "4. Do not add any explanations\n\n"
-                    "Example:\n"
-                    "Input: '<p>Hello †0†, <span class=\"name\">world</span>!</p>'\n"
-                    "Output: '<p>你好 †0†，<span class=\"name\">世界</span>！</p>'\n\n"
-                    f"Text to translate: {text}"
+                    f"将以下文本从{source_lang}翻译为{target_lang}。\n\n"
+                    "要求：\n"
+                    "1. 保持所有HTML标签完全不变\n"
+                    "2. 保持所有†数字†格式的占位符（如†0†, †1†）完全不变\n"
+                    "3. 只翻译标签之间的文本内容\n"
+                    "4. 直接返回翻译结果，不要添加任何解释\n\n"
+                    f"文本：{text}"
                 )
             )
         ]
@@ -93,3 +96,30 @@ class MistralProvider(TranslationProvider):
         except Exception as e:
             logger.error("Translation request failed", error=str(e))
             raise TranslationError(f"Translation failed: {str(e)}")
+
+    @retry(
+        wait=wait_fixed(2),  # 固定等待2秒
+        stop=stop_after_attempt(3),  # 最多重试3次
+        before_sleep=log_retry_attempt,
+        retry=retry_if_exception_type(TranslationError),
+    )
+    async def translate(
+        self, text: str, source_lang: str, target_lang: str, **kwargs
+    ) -> str:
+        """Translate text with rate limiting and concurrency control."""
+        async with self._semaphore:  # 使用信号量控制并发
+            # 确保距离上次请求至少有2秒
+            current_time = asyncio.get_event_loop().time()
+            time_since_last_request = current_time - self._last_request_time
+            if time_since_last_request < 2:
+                await asyncio.sleep(2 - time_since_last_request)
+
+            try:
+                result = await super().translate(
+                    text, source_lang, target_lang, **kwargs
+                )
+                self.__class__._last_request_time = asyncio.get_event_loop().time()
+                return result
+            except Exception as e:
+                self.__class__._last_request_time = asyncio.get_event_loop().time()
+                raise e
