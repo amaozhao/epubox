@@ -3,7 +3,7 @@ aiosqlite==0.20.0
 alembic==1.14.0
 amqp==5.3.1
 annotated-types==0.7.0
-anyio==4.6.2.post1
+anyio==4.7.0
 argon2-cffi==23.1.0
 argon2-cffi-bindings==21.2.0
 attrs==24.2.0
@@ -16,7 +16,7 @@ certifi==2024.8.30
 cffi==1.17.1
 charset-normalizer==3.4.0
 click==8.1.7
-coverage==7.6.8
+coverage==7.6.9
 croniter==5.0.1
 cryptography==44.0.0
 debtcollector==3.0.0
@@ -29,7 +29,7 @@ email_validator==2.2.0
 eval_type_backport==0.2.0
 eventlet==0.38.0
 fastapi==0.115.6
-fastapi-cli==0.0.5
+fastapi-cli==0.0.6
 fastapi-users==14.0.0
 fastapi-users-db-sqlalchemy==6.0.1
 fasteners==0.19
@@ -39,7 +39,7 @@ h11==0.14.0
 httpcore==1.0.7
 httptools==0.6.4
 httpx==0.27.2
-httpx-oauth==0.15.1
+httpx-oauth==0.16.0
 idna==3.10
 importlib_metadata==8.5.0
 iniconfig==2.0.0
@@ -56,7 +56,7 @@ kombu==5.4.2
 logutils==0.3.5
 lxml==5.3.0
 makefun==1.15.6
-Mako==1.3.6
+Mako==1.3.8
 markdown-it-py==3.0.0
 MarkupSafe==3.0.2
 mdurl==0.1.2
@@ -67,7 +67,7 @@ msgpack==1.1.0
 mypy-extensions==1.0.0
 netaddr==1.3.0
 networkx==3.4.2
-openai==1.56.0
+openai==1.57.0
 os-service-types==1.7.0
 oslo.cache==3.9.0
 oslo.concurrency==6.2.0
@@ -82,7 +82,7 @@ oslo.middleware==6.3.0
 oslo.policy==4.5.0
 oslo.serialization==5.6.0
 oslo.service==3.6.0
-oslo.utils==7.4.0
+oslo.utils==8.0.0
 osprofiler==4.2.0
 packaging==24.2
 paramiko==3.5.0
@@ -102,7 +102,7 @@ pwdlib==0.2.1
 pycadf==4.0.0
 pycparser==2.22
 pycryptodome==3.21.0
-pydantic==2.10.2
+pydantic==2.10.3
 pydantic-settings==2.6.1
 pydantic_core==2.27.1
 Pygments==2.18.0
@@ -118,19 +118,20 @@ python-keystoneclient==5.5.0
 python-multipart==0.0.17
 pytz==2024.2
 PyYAML==6.0.2
-redis==5.2.0
+redis==5.2.1
 referencing==0.35.1
 regex==2024.11.6
 repoze.lru==0.7
 requests==2.32.3
 rfc3986==2.0.0
 rich==13.9.4
+rich-toolkit==0.12.0
 Routes==2.5.1
-rpds-py==0.22.0
-setuptools==75.1.0
+rpds-py==0.22.3
+setuptools==75.6.0
 shellingham==1.5.4
 simplegeneric==0.8.1
-six==1.16.0
+six==1.17.0
 sniffio==1.3.1
 soupsieve==2.6
 SQLAlchemy==2.0.36
@@ -145,7 +146,7 @@ testtools==2.7.2
 tiktoken==0.8.0
 tooz==6.3.0
 tqdm==4.67.1
-typer==0.15.0
+typer==0.15.1
 typing-inspect==0.9.0
 typing_extensions==4.12.2
 tzdata==2024.2
@@ -158,7 +159,7 @@ watchfiles==1.0.0
 wcwidth==0.2.13
 WebOb==1.8.9
 websockets==14.1
-wheel==0.44.0
+wheel==0.45.1
 wrapt==1.17.0
 WSME==0.12.1
 yappi==1.6.10

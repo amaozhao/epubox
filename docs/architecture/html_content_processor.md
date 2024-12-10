@@ -33,10 +33,10 @@ SKIP_TAGS = {
     'script', 'style',
     
     # 代码相关
-    'code', 'pre', 'kbd', 'var', 'samp',
+    'code', 'kbd', 'var', 'samp',
     
     # 特殊内容
-    'svg', 'math', 'canvas',
+    'svg', 'math', 'canvas', 'address', 'applet',
     
     # 多媒体标签
     'img', 'audio', 'video', 'track', 'source',
@@ -45,7 +45,7 @@ SKIP_TAGS = {
     'input', 'button', 'select', 'option', 'textarea', 'form',
     
     # 元数据和链接
-    'meta', 'link', 'a',
+    'meta', 'link',
     
     # 嵌入内容
     'iframe', 'embed', 'object', 'param',
@@ -64,59 +64,38 @@ SKIP_TAGS = {
 }
 ```
 
-这些标签的内容将被完整保留，不进行翻译处理。对于这些标签：
-- 保持原始内容不变
-- 保持原始样式和属性
-- 将整个标签（包括其所有子内容）作为一个整体替换为占位符
-- 处理嵌套标签时，优先处理外层标签
-
-### 3.2 占位符设计
-
-1. **格式**
-   ```
-   †n†
-   ```
-   其中 n 为序号，例如：†0†, †1†, †2†
-
-2. **特点**
-   - 使用ASCII特殊字符 † 作为边界
-   - 在普通文本中出现概率极低
-   - 不太可能被翻译API误处理
-   - 具有良好的编码兼容性
-   - 视觉上容易识别
-   - 最小化占用空间
-
-### 3.3 处理流程
+### 3.2 处理流程
 
 ```
 1. 输入HTML内容
    ↓
-2. 递归处理skip标签
+2. 第一阶段：内容保护
    |
    ├── 从根节点开始递归查找skip标签
    |   ├── 找到skip标签：将整个标签及其内容替换为占位符
    |   └── 不是skip标签：继续递归处理子节点
    ↓
-3. 递归处理剩余内容
+3. 第二阶段：内容翻译
    |
-   ├── 检查节点内容
-   |   ├── 文本节点：添加到翻译任务
-   |   └── 元素节点：递归处理子节点
+   ├── 检查节点内容和大小
+   |   ├── 符合大小限制：直接翻译
+   |   └── 超过限制：递归处理子节点
    ↓
-4. 生成翻译任务列表
-   ↓
-5. 翻译完成后还原占位符
+4. 还原占位符内容
+   |
+   ├── 使用正则表达式匹配占位符
+   └── 替换为原始内容
 ```
 
-### 3.4 核心组件
+### 3.3 核心组件
 
-#### 3.4.1 HTMLContentProcessor 类
+#### 3.3.1 HTMLProcessor 类
 
 主要方法：
-- `process_html(html_content)`: 处理HTML内容
-- `_replace_skip_tags(node)`: 递归处理和替换skip标签
-- `_create_placeholder(content)`: 创建占位符
-- `_process_content(node, tasks)`: 递归处理待翻译内容
+- `process(html_content, parser="html.parser")`: 处理HTML内容
+- `replace_skip_tags_recursive(node)`: 递归处理和替换skip标签
+- `create_placeholder(content)`: 创建占位符
+- `process_node(node)`: 递归处理待翻译内容
 - `restore_content(translated_text)`: 还原占位符
 
 ## 4. 数据结构

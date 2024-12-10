@@ -16,7 +16,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from ..errors import ConfigurationError, ProviderError, RateLimitError, TranslationError
+from ..errors import ConfigurationError, TranslationError
 from ..models import LimitType
 from ..models import TranslationProvider as TranslationProviderModel
 

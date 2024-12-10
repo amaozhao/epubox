@@ -1,29 +1,21 @@
 """Mistral translation provider."""
 
 import asyncio
-import time
 from datetime import datetime, timedelta
-from typing import Optional
 
 import tiktoken
-from bs4 import BeautifulSoup
 from mistralai import Mistral, models
-from tenacity import (
-    AsyncRetrying,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
-from ..errors import ConfigurationError, RateLimitError, TranslationError
-from ..models import LimitType
-from .base import TranslationProvider
+from app.translation.errors import ConfigurationError, RateLimitError, TranslationError
+from app.translation.models import LimitType
+from app.translation.models import TranslationProvider as TranslationProviderModel
+from app.translation.providers.base import TranslationProvider
 
 
 class MistralProvider(TranslationProvider):
     """Mistral translation provider implementation."""
 
-    def __init__(self, provider_model: "TranslationProviderModel"):
+    def __init__(self, provider_model: TranslationProviderModel):
         super().__init__(provider_model)
         if provider_model.limit_type != LimitType.TOKENS:
             raise ValueError("Mistral provider must use token-based limits")
@@ -78,28 +70,20 @@ class MistralProvider(TranslationProvider):
         async with self._rate_limit_lock:
             self._last_error_time = datetime.now()
             # Mistral API 的限流是按小时计算的
-            self._rate_limit_reset = self._last_error_time + timedelta(hours=1)
+            self._rate_limit_reset = self._last_error_time + timedelta(seconds=5)
 
     async def _make_request(self, messages: list, **kwargs) -> str:
         """Make API request with retry logic."""
         await self.check_rate_limit()
         retries = 0
-        last_error = None
 
         while retries <= self.max_retries:
             try:
-                print(
-                    f"\nMaking API request (attempt {retries + 1}/{self.max_retries + 1}):"
-                )
-                print(f"Model: {self.model}")
-
                 response = await self.client.chat.complete_async(
                     model=self.model,
                     messages=messages,
                     **kwargs,
                 )
-
-                print(f"API Response: {response}")
                 return response.choices[0].message.content.strip()
 
             except models.SDKError as e:
@@ -172,10 +156,6 @@ class MistralProvider(TranslationProvider):
             ]
 
             translated = await self._make_request(messages, **kwargs)
-
-            print(f"\nDebug - Translation result:")
-            print(f"Original text: {text}")
-            print(f"Translated text: {translated}")
 
             return translated.strip()
 

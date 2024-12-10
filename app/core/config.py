@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import AnyHttpUrl, EmailStr, validator
+from pydantic import AnyHttpUrl, EmailStr, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     LOG_FILE: Optional[Path] = None
     LOG_RENDER_JSON_LOGS: bool = True
 
-    @validator("BACKEND_CORS_ORIGINS", pre=True)
+    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     def assemble_cors_origins(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str) and not v.startswith("["):
             return [i.strip() for i in v.split(",")]
@@ -51,7 +51,7 @@ class Settings(BaseSettings):
             return v
         raise ValueError(v)
 
-    @validator("LOG_FILE", pre=True)
+    @field_validator("LOG_FILE", mode="before")
     def assemble_log_file(cls, v: Optional[str]) -> Optional[Path]:
         if v:
             return Path(v)
