@@ -80,7 +80,7 @@ class HTMLProcessor:
         初始化HTML处理器.
 
         Args:
-            max_chunk_size: 单个翻译块的最大大小，默认4500字符
+            max_chunk_size: 单个翻译块的最大token数，默认4500 tokens
         """
         self.translator = translator
         self.source_lang = source_lang
@@ -137,41 +137,68 @@ class HTMLProcessor:
 
         Args:
             node: 当前HTML节点
-            translate_fn: 翻译接口函数
         """
         if not node:
             return
 
-        # 替换不可翻译的标签为占位符
+        # 1. 如果是 SKIP_TAGS 中的标签，直接替换为占位符并返回
         if isinstance(node, Tag) and node.name in SKIP_TAGS:
             placeholder = self.create_placeholder(str(node))
             node.replace_with(placeholder)
             return
 
-        # 如果是纯文本节点，直接翻译
+        # 2. 如果是纯文本节点且有实际内容，则翻译
         if isinstance(node, NavigableString):
-            async with HTMLProcessor._translation_semaphore:
-                translated_text = await self.translator.translate(
-                    str(node),
-                    source_lang=self.source_lang,
-                    target_lang=self.target_lang,
-                )
-            node.replace_with(translated_text)
+            text = str(node).strip()
+            # 检查是否为空白字符或只包含占位符
+            text_without_placeholders = re.sub(r"†\d+†", "", text)
+            if (
+                text_without_placeholders.strip()
+            ):  # 只有当文本非空且不只是占位符时才翻译
+                async with HTMLProcessor._translation_semaphore:
+                    translated_text = await self.translator.translate(
+                        str(node),
+                        source_lang=self.source_lang,
+                        target_lang=self.target_lang,
+                    )
+                node.replace_with(translated_text)
             return
 
-        # 如果当前节点内容长度符合条件，直接翻译
+        # 3. 对于其他节点（HTML标签），检查是否包含实际文本内容
+        content_text = "".join(node.stripped_strings)
+        # 移除所有占位符后检查是否还有实际内容
+        content_without_placeholders = re.sub(r"†\d+†", "", content_text)
+        if not content_without_placeholders.strip():
+            # 如果移除占位符后没有实际文本，保持原样
+            return
+
+        # 4. 如果节点内容较小且包含文本，检查是否需要整体翻译
         content = str(node)
-        if len(content) <= self.max_chunk_size:
-            async with HTMLProcessor._translation_semaphore:
-                translated_text = await self.translator.translate(
-                    content,
-                    source_lang=self.source_lang,
-                    target_lang=self.target_lang,
-                )
-            node.replace_with(BeautifulSoup(translated_text, "html.parser"))
-            return
+        # 获取 token 数
+        token_count = self.translator._count_tokens(content)
+        if token_count <= self.max_chunk_size and len(content_without_placeholders) > 0:
+            # 获取节点的所有直接文本内容（不包括子节点的文本）
+            direct_text = "".join(
+                str(child)
+                for child in node.children
+                if isinstance(child, NavigableString) and str(child).strip()
+            )
 
-        # 否则串行处理子节点
+            # 检查直接文本是否只包含占位符
+            direct_text_without_placeholders = re.sub(r"†\d+†", "", direct_text)
+            if (
+                direct_text_without_placeholders.strip()
+            ):  # 如果节点自身包含非占位符文本，整体翻译
+                async with HTMLProcessor._translation_semaphore:
+                    translated_text = await self.translator.translate(
+                        content,
+                        source_lang=self.source_lang,
+                        target_lang=self.target_lang,
+                    )
+                node.replace_with(BeautifulSoup(translated_text, "html.parser"))
+                return
+
+        # 5. 如果节点较大或没有直接文本内容，递归处理子节点
         for child in list(node.children):
             await self.process_node(child)
 
@@ -212,12 +239,12 @@ class HTMLProcessor:
 
         # 还原占位符内容
         translated_html = str(root)
-        translated_html = await self.restore_content(translated_html)
+        translated_html = self.restore_content(translated_html)
 
         # 解除HTML转义
         return html.unescape(translated_html)
 
-    async def restore_content(self, translated_text: str) -> str:
+    def restore_content(self, translated_text: str) -> str:
         """
         还原占位符内容.
 
@@ -227,9 +254,26 @@ class HTMLProcessor:
         Returns:
             str: 还原占位符后的文本
         """
-        result = translated_text
+        # 清理可能的额外文本
+        # 如果文本以翻译说明开头，尝试找到实际的翻译内容
+        text_lines = translated_text.split("\n")
+        cleaned_lines = []
+        for line in text_lines:
+            # 跳过可能的解释性文本
+            if any(
+                skip in line.lower()
+                for skip in ["翻译:", "翻译：", "translation:", "译文:", "译文："]
+            ):
+                continue
+            # 跳过空行
+            if not line.strip():
+                continue
+            cleaned_lines.append(line)
+
+        result = "\n".join(cleaned_lines)
         pattern = r"†(\d+)†"
 
+        # 还原所有占位符
         for match in re.finditer(pattern, result):
             placeholder = match.group(0)
             if placeholder in self.placeholders:

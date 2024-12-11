@@ -36,7 +36,7 @@ class MistralProvider(TranslationProvider):
             raise ValueError("Mistral provider must use token-based limits")
 
         self.api_key = self.config.get("api_key")
-        self.model = self.config.get("model", "mistral-tiny")
+        self.model = self.config.get("model", "mistral-large-latest")
         self.client = Mistral(api_key=self.api_key)
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -63,38 +63,43 @@ class MistralProvider(TranslationProvider):
         if not self.client:
             raise ConfigurationError("Mistral client not initialized")
 
-        if not text:
-            raise ValueError("Empty text provided for translation")
-
         token_count = self._count_tokens(text)
         if token_count > self.provider_model.limit_value:
             raise TranslationError(
                 f"Text length ({token_count} tokens) exceeds maximum allowed ({self.provider_model.limit_value} tokens)"
             )
 
-        messages = [
-            models.UserMessage(
-                content=(
-                    f"将以下文本从{source_lang}翻译为{target_lang}。\n\n"
-                    "要求：\n"
-                    "1. 保持所有HTML标签完全不变\n"
-                    "2. 保持所有†数字†格式的占位符（如†0†, †1†）完全不变\n"
-                    "3. 只翻译标签之间的文本内容\n"
-                    "4. 直接返回翻译结果，不要添加任何解释\n\n"
-                    f"文本：{text}"
-                )
-            )
-        ]
+        # 构建提示内容
+        prompt = f"Translate from {source_lang} to {target_lang}. Keep HTML tags and names in original English. Return only the translation.\n\n{text}"
+
+        messages = [models.UserMessage(content=prompt)]
 
         try:
             response = await self.client.chat.complete_async(
                 model=self.model,
                 messages=messages,
+                temperature=0.7,
                 **kwargs,
             )
-            return response.choices[0].message.content.strip()
+            result = response.choices[0].message.content.strip()
+
+            # 记录翻译结果
+            logger.info(
+                "Translation response",
+                response_text=result,
+                response_length=len(result),
+                request_text=text,
+                request_length=len(text),
+                request_preview=text[:200] + "..." if len(text) > 200 else text,
+            )
+
+            return result
         except Exception as e:
-            logger.error("Translation request failed", error=str(e))
+            logger.error(
+                "Translation request failed",
+                error=str(e),
+                text_preview=text[:100] + "..." if len(text) > 100 else text,
+            )
             raise TranslationError(f"Translation failed: {str(e)}")
 
     @retry(
@@ -108,11 +113,11 @@ class MistralProvider(TranslationProvider):
     ) -> str:
         """Translate text with rate limiting and concurrency control."""
         async with self._semaphore:  # 使用信号量控制并发
-            # 确保距离上次请求至少有2秒
+            # 确保距离上次请求至少有1秒
             current_time = asyncio.get_event_loop().time()
             time_since_last_request = current_time - self._last_request_time
-            if time_since_last_request < 2:
-                await asyncio.sleep(2 - time_since_last_request)
+            if time_since_last_request < 1:
+                await asyncio.sleep(1 - time_since_last_request)
 
             try:
                 result = await super().translate(
