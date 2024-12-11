@@ -6,7 +6,8 @@ from typing import Dict, Type
 
 import yaml
 
-from .models import TranslationProvider as TranslationProviderModel
+from app.db.models import TranslationProvider as TranslationProviderModel
+
 from .providers.base import TranslationProvider
 
 

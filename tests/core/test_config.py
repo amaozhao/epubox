@@ -13,7 +13,7 @@ def test_settings_default_values():
         FIRST_SUPERUSER_PASSWORD="admin123",
     )
 
-    assert settings.PROJECT_NAME == "EPUBox"  # 使用正确的大小写
+    assert settings.PROJECT_NAME == "Epubox"  # 使用正确的大小写
     assert settings.VERSION == "1.0.0"
     assert settings.API_V1_STR == "/api/v1"
     assert settings.ACCESS_TOKEN_EXPIRE_MINUTES == 30

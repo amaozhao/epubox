@@ -4,9 +4,9 @@ import pytest
 from bs4 import BeautifulSoup
 
 from app.core.config import settings
+from app.db.models import LimitType, TranslationProvider
 from app.html.processor import SKIP_TAGS, HTMLProcessor
 from app.translation.factory import ProviderFactory
-from app.translation.models import LimitType, TranslationProvider
 
 
 @pytest.fixture
@@ -93,7 +93,7 @@ class TestHTMLProcessor:
         original = "<script>test</script>"
         placeholder = processor.create_placeholder(original)
         translated = f"Some text {placeholder} more text"
-        restored = await processor.restore_content(translated)
+        restored = processor.restore_content(translated)
 
         assert original in restored
         assert placeholder not in restored

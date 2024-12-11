@@ -12,9 +12,9 @@ from ebooklib import epub
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.db.models import LimitType, TranslationProvider
 from app.html.processor import HTMLProcessor
 from app.translation.factory import ProviderFactory
-from app.translation.models import LimitType, TranslationProvider
 
 from .utils import ensure_directory
 

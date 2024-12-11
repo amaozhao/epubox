@@ -4,14 +4,15 @@ import time
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+import tenacity
 import tiktoken
 from mistralai import Mistral, models
 
 from app.core.config import settings
+from app.db.models import LimitType
+from app.db.models import TranslationProvider as ProviderModel
 from app.translation.errors import ConfigurationError, TranslationError
 from app.translation.factory import ProviderFactory
-from app.translation.models import LimitType
-from app.translation.models import TranslationProvider as ProviderModel
 from app.translation.providers.mistral import MistralProvider
 
 
@@ -170,18 +171,51 @@ async def test_translate_max_retries_exceeded(mock_mistral, provider):
     mock_mistral.return_value = mock_client
     provider.client = mock_client
 
-    # Mock API to always fail
+    # Mock API to always fail with SDKError
     mock_client.chat.complete_async.side_effect = models.SDKError(
         "API error", status_code=500
     )
 
-    # Verify that translation raises TranslationError after max retries
-    with pytest.raises(TranslationError) as exc_info:
+    # Verify that translation raises RetryError after max retries
+    with pytest.raises(tenacity.RetryError) as exc_info:
         await provider.translate(
             text="Hello, world!", source_lang="en", target_lang="zh"
         )
 
-    assert "Translation failed" in str(exc_info.value)
+    # 验证底层异常是 TranslationError
+    assert isinstance(exc_info.value.last_attempt.exception(), TranslationError)
+    # 验证错误消息
+    assert "Translation failed" in str(exc_info.value.last_attempt.exception())
+    # 只有 mistral.py 中的装饰器会处理 SDKError，所以只会重试3次
+    assert mock_client.chat.complete_async.call_count == 3
+
+
+@pytest.mark.asyncio
+@patch("mistralai.Mistral")
+async def test_translate_with_translation_error(mock_mistral, provider):
+    """Test translation with TranslationError."""
+    # Setup mock client
+    mock_client = AsyncMock()
+    mock_mistral.return_value = mock_client
+    provider.client = mock_client
+
+    # Mock API to fail with TranslationError
+    mock_client.chat.complete_async.side_effect = TranslationError(
+        "Translation limit exceeded"
+    )
+
+    # Verify that translation raises RetryError after max retries
+    with pytest.raises(tenacity.RetryError) as exc_info:
+        await provider.translate(
+            text="Hello, world!", source_lang="en", target_lang="zh"
+        )
+
+    # 验证底层异常是 TranslationError
+    assert isinstance(exc_info.value.last_attempt.exception(), TranslationError)
+    # 验证错误消息
+    assert "Translation limit exceeded" in str(exc_info.value.last_attempt.exception())
+    # 只有 base.py 中的装饰器会处理 TranslationError，所以只会重试3次
+    assert mock_client.chat.complete_async.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -190,15 +224,16 @@ async def test_limit_checking(provider):
     # Test with text under limit
     with patch.object(provider, "_count_tokens", return_value=2000):
         # Should not raise any exception
-        await provider.translate(text="Some text", source_lang="en", target_lang="zh")
+        await provider.check_limits("Some text")
 
     # Test with text over limit
     with patch.object(provider, "_count_tokens", return_value=3000):
         with pytest.raises(TranslationError) as exc_info:
-            await provider.translate(
-                text="Some text", source_lang="en", target_lang="zh"
-            )
-        assert "exceeds maximum allowed" in str(exc_info.value)
+            await provider.check_limits("Some text")
+
+        assert "Text length (3000 tokens) exceeds maximum allowed (2500)" in str(
+            exc_info.value
+        )
 
 
 @pytest.mark.asyncio

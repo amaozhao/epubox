@@ -10,13 +10,13 @@ from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_fixed,
+    wait_exponential,
 )
 
 from app.core.logging import get_logger
+from app.db.models import LimitType
+from app.db.models import TranslationProvider as TranslationProviderModel
 from app.translation.errors import ConfigurationError, TranslationError
-from app.translation.models import LimitType
-from app.translation.models import TranslationProvider as TranslationProviderModel
 from app.translation.providers.base import TranslationProvider, log_retry_attempt
 
 logger = get_logger(__name__)
@@ -103,10 +103,10 @@ class MistralProvider(TranslationProvider):
             raise TranslationError(f"Translation failed: {str(e)}")
 
     @retry(
-        wait=wait_fixed(2),  # 固定等待2秒
-        stop=stop_after_attempt(3),  # 最多重试3次
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
         before_sleep=log_retry_attempt,
-        retry=retry_if_exception_type(TranslationError),
+        retry=retry_if_exception_type(models.SDKError),
     )
     async def translate(
         self, text: str, source_lang: str, target_lang: str, **kwargs

@@ -4,9 +4,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from app.db.models import TranslationProvider as ProviderModel
 from app.translation.errors import ConfigurationError
 from app.translation.factory import ProviderFactory
-from app.translation.models import TranslationProvider as ProviderModel
 from app.translation.providers.base import TranslationProvider
 
 

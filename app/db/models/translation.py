@@ -1,30 +1,61 @@
 """
-Translation models module.
-Contains database models for translation records and providers.
-"""
+Database models for translation service."""
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import relationship
+import enum
+from datetime import datetime
+from typing import Optional
+
+from sqlalchemy import JSON, Boolean, Date, Enum, Float, ForeignKey, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..base import Base
 
 
+class LimitType(enum.Enum):
+    """限制类型"""
+
+    CHARS = "chars"  # 按字符数限制
+    TOKENS = "tokens"  # 按token数限制
+
+
 class TranslationProvider(Base):
-    """Translation provider model."""
+    """Translation provider configuration."""
 
     __tablename__ = "translation_providers"
 
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
-    provider_type = Column(String, nullable=False)
-    is_default = Column(Boolean, default=False)
-    enabled = Column(Boolean, default=True)
-    config = Column(Text, nullable=False)
-    rate_limit = Column(Integer, default=3)
-    retry_count = Column(Integer, default=3)
-    retry_delay = Column(Integer, default=60)
-    created_at = Column(DateTime, nullable=False)
-    updated_at = Column(DateTime, nullable=False)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    provider_type: Mapped[str] = mapped_column(String, nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    config: Mapped[dict] = mapped_column(JSON, nullable=False)
+    rate_limit: Mapped[int] = mapped_column(default=3)
+    retry_count: Mapped[int] = mapped_column(default=3)
+    retry_delay: Mapped[int] = mapped_column(default=5)
+    limit_type: Mapped[LimitType] = mapped_column(Enum(LimitType), nullable=False)
+    limit_value: Mapped[int] = mapped_column(nullable=False, default=4000)
+
+    stats = relationship("ProviderStats", back_populates="provider")
+
+
+class ProviderStats(Base):
+    """Provider statistics."""
+
+    __tablename__ = "provider_stats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider_id: Mapped[int] = mapped_column(
+        ForeignKey("translation_providers.id"), nullable=False
+    )
+    date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    total_requests: Mapped[int] = mapped_column(default=0)
+    success_count: Mapped[int] = mapped_column(default=0)
+    error_count: Mapped[int] = mapped_column(default=0)
+    rate_limit_hits: Mapped[int] = mapped_column(default=0)
+    avg_response_time: Mapped[float] = mapped_column(Float, default=0)
+    total_words: Mapped[int] = mapped_column(default=0)
+
+    provider = relationship("TranslationProvider", back_populates="stats")
 
 
 class TranslationRecord(Base):
@@ -32,18 +63,18 @@ class TranslationRecord(Base):
 
     __tablename__ = "translation_records"
 
-    id = Column(Integer, primary_key=True)
-    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
-    chapter_index = Column(Integer, nullable=False)
-    provider_id = Column(
-        Integer, ForeignKey("translation_providers.id"), nullable=False
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    chapter_index: Mapped[int] = mapped_column(nullable=False)
+    provider_id: Mapped[int] = mapped_column(
+        ForeignKey("translation_providers.id"), nullable=False
     )
-    source_text = Column(Text, nullable=False)
-    translated_text = Column(Text)
-    source_lang = Column(String, nullable=False)
-    target_lang = Column(String, nullable=False)
-    word_count = Column(Integer, nullable=False)
-    status = Column(String, nullable=False)
-    error_message = Column(Text)
-    created_at = Column(DateTime, nullable=False)
-    completed_at = Column(DateTime)
+    source_text: Mapped[str] = mapped_column(String, nullable=False)
+    translated_text: Mapped[Optional[str]] = mapped_column(String)
+    source_lang: Mapped[str] = mapped_column(String, nullable=False)
+    target_lang: Mapped[str] = mapped_column(String, nullable=False)
+    word_count: Mapped[int] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)

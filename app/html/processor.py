@@ -131,9 +131,112 @@ class HTMLProcessor:
                     # 递归处理子节点
                     self.replace_skip_tags_recursive(child)
 
+    async def _handle_skip_tag(self, node: Tag) -> None:
+        """处理需要跳过的标签。"""
+        placeholder = self.create_placeholder(str(node))
+        node.replace_with(placeholder)
+
+    async def _handle_text_node(self, node: NavigableString) -> None:
+        """处理纯文本节点。"""
+        text = str(node).strip()
+        text_without_placeholders = re.sub(r"†\d+†", "", text)
+        if text_without_placeholders.strip():
+            async with HTMLProcessor._translation_semaphore:
+                translated_text = await self.translator.translate(
+                    str(node),
+                    source_lang=self.source_lang,
+                    target_lang=self.target_lang,
+                )
+            node.replace_with(translated_text)
+
+    def _collect_child_info(self, node: Tag) -> List[Dict]:
+        """收集节点的子节点信息。"""
+        child_info = []
+        for child in node.children:
+            if isinstance(child, NavigableString):
+                text = str(child).strip()
+                if not re.sub(r"†\d+†", "", text).strip():
+                    continue
+            child_info.append(
+                {"node": child, "tokens": self.translator._count_tokens(str(child))}
+            )
+        return child_info
+
+    async def _translate_node_directly(self, node: Tag, content: str) -> None:
+        """直接翻译整个节点。"""
+        async with HTMLProcessor._translation_semaphore:
+            translated_text = await self.translator.translate(
+                content,
+                source_lang=self.source_lang,
+                target_lang=self.target_lang,
+            )
+            node.replace_with(BeautifulSoup(translated_text, "html.parser"))
+
+    async def _process_child_groups(self, child_info: List[Dict]) -> None:
+        """处理子节点分组。"""
+        current_group = []
+        current_tokens = 0
+
+        for info in child_info:
+            child_tokens = info["tokens"]
+
+            # 如果当前子节点过大，需要递归处理
+            if child_tokens > self.max_chunk_size:
+                # 先处理之前的组
+                if current_group:
+                    await self._translate_group(current_group)
+                    current_group = []
+                    current_tokens = 0
+                # 递归处理大节点
+                await self.process_node(info["node"])
+                continue
+
+            # 尝试添加到当前组
+            if current_tokens + child_tokens <= self.max_chunk_size:
+                current_group.append(info["node"])
+                current_tokens += child_tokens
+            else:
+                # 处理当前组
+                if current_group:
+                    await self._translate_group(current_group)
+                # 开始新组
+                current_group = [info["node"]]
+                current_tokens = child_tokens
+
+        # 处理最后一组
+        if current_group:
+            await self._translate_group(current_group)
+
+    async def _translate_group(self, nodes: List[PageElement]) -> None:
+        """翻译节点组。"""
+        # 合并节点内容
+        merged_content = "".join(str(node) for node in nodes)
+
+        # 翻译
+        async with HTMLProcessor._translation_semaphore:
+            translated_content = await self.translator.translate(
+                merged_content,
+                source_lang=self.source_lang,
+                target_lang=self.target_lang,
+            )
+
+        # 解析翻译结果
+        translated_soup = BeautifulSoup(translated_content, "html.parser")
+        translated_nodes = list(translated_soup.children)
+
+        # 替换原始节点
+        if len(translated_nodes) == len(nodes):
+            for original, translated in zip(nodes, translated_nodes):
+                original.replace_with(translated)
+        else:
+            # 如果节点数量不匹配，整体替换
+            nodes[0].parent.replace(nodes[0], translated_soup)
+            for node in nodes[1:]:
+                node.decompose()
+
     async def process_node(self, node: PageElement) -> None:
         """
-        递归处理HTML节点，检查长度并调用翻译接口替换内容.
+        递归处理HTML节点，检查长度并调用翻译接口替换内容。
 
         Args:
             node: 当前HTML节点
@@ -141,66 +244,28 @@ class HTMLProcessor:
         if not node:
             return
 
-        # 1. 如果是 SKIP_TAGS 中的标签，直接替换为占位符并返回
+        # 1. 处理跳过标签
         if isinstance(node, Tag) and node.name in SKIP_TAGS:
-            placeholder = self.create_placeholder(str(node))
-            node.replace_with(placeholder)
+            await self._handle_skip_tag(node)
             return
 
-        # 2. 如果是纯文本节点且有实际内容，则翻译
+        # 2. 处理文本节点
         if isinstance(node, NavigableString):
-            text = str(node).strip()
-            # 检查是否为空白字符或只包含占位符
-            text_without_placeholders = re.sub(r"†\d+†", "", text)
-            if (
-                text_without_placeholders.strip()
-            ):  # 只有当文本非空且不只是占位符时才翻译
-                async with HTMLProcessor._translation_semaphore:
-                    translated_text = await self.translator.translate(
-                        str(node),
-                        source_lang=self.source_lang,
-                        target_lang=self.target_lang,
-                    )
-                node.replace_with(translated_text)
+            await self._handle_text_node(node)
             return
 
-        # 3. 对于其他节点（HTML标签），检查是否包含实际文本内容
-        content_text = "".join(node.stripped_strings)
-        # 移除所有占位符后检查是否还有实际内容
-        content_without_placeholders = re.sub(r"†\d+†", "", content_text)
-        if not content_without_placeholders.strip():
-            # 如果移除占位符后没有实际文本，保持原样
-            return
-
-        # 4. 如果节点内容较小且包含文本，检查是否需要整体翻译
+        # 3. 检查当前节点的总token数
         content = str(node)
-        # 获取 token 数
-        token_count = self.translator._count_tokens(content)
-        if token_count <= self.max_chunk_size and len(content_without_placeholders) > 0:
-            # 获取节点的所有直接文本内容（不包括子节点的文本）
-            direct_text = "".join(
-                str(child)
-                for child in node.children
-                if isinstance(child, NavigableString) and str(child).strip()
-            )
+        total_tokens = self.translator._count_tokens(content)
 
-            # 检查直接文本是否只包含占位符
-            direct_text_without_placeholders = re.sub(r"†\d+†", "", direct_text)
-            if (
-                direct_text_without_placeholders.strip()
-            ):  # 如果节点自身包含非占位符文本，整体翻译
-                async with HTMLProcessor._translation_semaphore:
-                    translated_text = await self.translator.translate(
-                        content,
-                        source_lang=self.source_lang,
-                        target_lang=self.target_lang,
-                    )
-                node.replace_with(BeautifulSoup(translated_text, "html.parser"))
-                return
+        # 如果节点足够小，直接翻译
+        if total_tokens <= self.max_chunk_size:
+            await self._translate_node_directly(node, content)
+            return
 
-        # 5. 如果节点较大或没有直接文本内容，递归处理子节点
-        for child in list(node.children):
-            await self.process_node(child)
+        # 4. 收集并处理子节点信息
+        child_info = self._collect_child_info(node)
+        await self._process_child_groups(child_info)
 
     async def process(self, html_content: str, parser="html.parser") -> str:
         """

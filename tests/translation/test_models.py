@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.translation.models import LimitType, ProviderStats, TranslationProvider
+from app.db.models import LimitType, ProviderStats, TranslationProvider
 
 
 @pytest.mark.asyncio

@@ -7,9 +7,10 @@ from typing import Dict, Optional, Type
 from sqlalchemy.future import select
 from sqlalchemy.orm import Session
 
+from app.db.models import ProviderStats
+from app.db.models import TranslationProvider as ProviderModel
+
 from .errors import ConfigurationError, ProviderError
-from .models import ProviderStats
-from .models import TranslationProvider as ProviderModel
 from .providers.base import AsyncContextManager, TranslationProvider
 
 
@@ -29,24 +30,30 @@ class TranslationManager(AsyncContextManager["TranslationManager"]):
         result = await self.db.execute(stmt)
         providers = result.scalars().all()
 
+        print(f"Found providers: {len(providers)}")  # Debug log
+        print(f"Registered provider types: {self._providers}")  # Debug log
+
         for provider in providers:
+            print(
+                f"Processing provider: {provider.name}, type: {provider.provider_type}"
+            )  # Debug log
             if provider.is_default:
                 self._default_provider_id = provider.id
 
             provider_class = self._providers.get(provider.provider_type)
             if not provider_class:
+                print(
+                    f"No provider class found for type: {provider.provider_type}"
+                )  # Debug log
                 continue
 
             try:
-                config = json.loads(provider.config)
-                instance = provider_class(
-                    config=config,
-                    rate_limit=provider.rate_limit,
-                    retry_count=provider.retry_count,
-                    retry_delay=provider.retry_delay,
-                )
+                instance = provider_class(provider_model=provider)
                 await instance.initialize()
                 self._active_providers[provider.id] = instance
+                print(
+                    f"Successfully initialized provider: {provider.name}"
+                )  # Debug log
             except Exception as e:
                 # Log error but continue with other providers
                 print(f"Failed to initialize provider {provider.name}: {str(e)}")

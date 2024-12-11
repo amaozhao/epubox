@@ -19,13 +19,12 @@ from tenacity import (
 )
 
 from app.core.logging import get_logger
+from app.db.models import LimitType
+from app.db.models import TranslationProvider as TranslationProviderModel
 
 from ..errors import ConfigurationError, TranslationError
-from ..models import LimitType
-from ..models import TranslationProvider as TranslationProviderModel
 
 T = TypeVar("T")
-
 
 logger = get_logger(__name__)
 
@@ -145,7 +144,10 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
         stop=stop_after_attempt(3),  # 最多重试3次
         wait=wait_exponential(multiplier=1, min=4, max=10),  # 指数退避：4s, 8s, 16s
         before_sleep=log_retry_attempt,  # 使用自定义的日志函数
-        retry_error_callback=lambda retry_state: retry_state.outcome.result(),  # 返回最后一次尝试的结果
+        retry=(
+            retry_if_exception_type(TranslationError)
+            | retry_if_exception_type(ConfigurationError)
+        ),
     )
     async def translate(
         self, text: str, source_lang: str, target_lang: str, **kwargs
