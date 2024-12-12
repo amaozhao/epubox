@@ -4,6 +4,7 @@ Contains SQLAlchemy models for the application.
 """
 
 from .auth import OAuthAccount, OAuthProvider
+from .progress import TranslationProgress, TranslationStatus
 from .task import Task
 from .translation import (
     LimitType,
@@ -22,4 +23,6 @@ __all__ = [
     "TranslationRecord",
     "ProviderStats",
     "LimitType",
+    "TranslationProgress",
+    "TranslationStatus",
 ]
