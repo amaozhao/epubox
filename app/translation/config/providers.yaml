@@ -4,7 +4,22 @@ mistral:
   description: Mistral AI Translation Provider
   limit_type: tokens
   default_rate_limit: 1
-  default_max_units: 25000
+  default_max_units: 4000
+  retry:
+    max_attempts: 3
+    initial_delay: 1
+    max_delay: 10
+  features:
+    streaming: true
+    batch_translation: false
+
+groq:
+  module: app.translation.providers.groq
+  class: GroqProvider
+  description: Groq AI Translation Provider
+  limit_type: tokens
+  default_rate_limit: 1
+  default_max_units: 3000
   retry:
     max_attempts: 3
     initial_delay: 1
