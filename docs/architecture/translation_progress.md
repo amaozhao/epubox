@@ -5,9 +5,12 @@
 为 EPUB 翻译过程添加进度管理功能，支持：
 - 记录每个章节的翻译状态
 - 支持中断后继续翻译
-- 提供翻译进度查询
+- 提供翻译进度查询和更新
+- 计算整体翻译进度百分比
 
 ## 2. 数据模型设计
+
+### 2.1 TranslationProgress 模型
 
 ```python
 class TranslationProgress(Base):
@@ -16,97 +19,86 @@ class TranslationProgress(Base):
     __tablename__ = "translation_progress"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    book_id: Mapped[str] = mapped_column(String, nullable=False)  # epub 文件的唯一标识
-    chapters: Mapped[list] = mapped_column(JSON, nullable=False)  # 所有章节信息列表
-    provider_id: Mapped[int] = mapped_column(ForeignKey("translation_providers.id"), nullable=False)
-    status: Mapped[str] = mapped_column(String, nullable=False)  # pending/processing/completed
-    created: Mapped[datetime] = mapped_column(nullable=False)
-    updated: Mapped[datetime] = mapped_column(nullable=False)
+    book_id: Mapped[str] = mapped_column(String, nullable=False)
+    total_chapters: Mapped[Dict] = mapped_column(JSON, nullable=False)
+    completed_chapters: Mapped[Dict] = mapped_column(JSON, nullable=False, default_factory=dict)
+    status: Mapped[TranslationStatus] = mapped_column(Enum(TranslationStatus), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(nullable=True)
+    completed_at: Mapped[datetime] = mapped_column(nullable=True)
 ```
 
-### 章节信息结构 (JSON)
+### 2.2 章节信息结构
+
+total_chapters 和 completed_chapters 的数据结构：
 ```python
 {
-    "id": "chapter1.xhtml",     # 章节文件名
-    "type": "html",             # 类型：html/ncx
-    "name": "Chapter 1",        # 章节名称
-    "status": "pending",        # 状态：pending/completed
-    "completed_at": null        # 完成时间
+    "chapter_id": {
+        "id": "chapter_id",        # 章节ID
+        "type": "chapter",         # 类型
+        "name": "chapter1.xhtml"   # 章节文件名
+    }
 }
 ```
 
-## 3. 状态定义
+### 2.3 翻译状态枚举
 
-- pending: 等待翻译
-- processing: 翻译进行中
-- completed: 翻译完成
+```python
+class TranslationStatus(str, Enum):
+    """Translation status enum."""
+    
+    PENDING = "pending"         # 等待翻译
+    PROCESSING = "processing"   # 翻译进行中
+    COMPLETED = "completed"     # 翻译完成
+    FAILED = "failed"          # 翻译失败
+```
+
+## 3. 进度管理器设计
+
+### 3.1 ProgressManager 类
+
+```python
+class ProgressManager:
+    """Manager for handling translation progress updates."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create_progress(self, book_id: str, chapters: Dict) -> TranslationProgress:
+        """创建新的进度记录"""
+        
+    async def get_progress(self, book_id: str) -> TranslationProgress:
+        """获取指定书籍的进度记录"""
+        
+    async def update_chapter(self, book_id: str, chapter_id: str) -> None:
+        """更新章节完成状态"""
+        
+    async def start_translation(self, book_id: str) -> None:
+        """标记翻译开始"""
+        
+    async def complete_translation(self, book_id: str) -> None:
+        """标记翻译完成"""
+```
 
 ## 4. 与 EpubProcessor 的集成方案
 
 ### 4.1 初始化阶段
-```python
-async def prepare(self):
-    # 1. 复制原始文件到工作目录
-    # 2. 加载 EPUB 文件
-    # 3. 提取章节信息
-    # 4. 创建进度记录
-```
 
-### 4.2 翻译处理流程
-```python
-async def process(self):
-    # 1. 准备工作（prepare）
-    # 2. 遍历处理 HTML 内容
-    #    - 检查章节状态
-    #    - 翻译未完成章节
-    #    - 更新进度
-    # 3. 遍历处理 NCX 内容
-    #    - 检查章节状态
-    #    - 翻译未完成章节
-    #    - 更新进度
-    # 4. 更新整体状态
-```
+在 EpubProcessor 的 prepare 方法中：
+1. 加载 EPUB 文件并提取章节信息
+2. 使用 ProgressManager 创建进度记录
+3. 初始化 total_chapters 信息
 
-### 4.3 进度查询
-```python
-async def get_progress(self):
-    # 返回：
-    # - 总章节数
-    # - 已完成章节数
-    # - 完成百分比
-    # - 当前状态
-```
+### 4.2 翻译阶段
 
-## 5. 工作流程
+在 process 方法中：
+1. 调用 start_translation 标记开始
+2. 对每个章节翻译完成后，调用 update_chapter 更新进度
+3. 所有章节完成后，调用 complete_translation 标记完成
 
-1. 开始翻译：
-   - 创建进度记录
-   - 初始化所有章节状态为 pending
+## 5. 进度查询
 
-2. 翻译过程：
-   - 检查章节状态
-   - 翻译未完成章节
-   - 更新章节状态和时间戳
-
-3. 中断处理：
-   - 保存当前进度
-   - 下次启动时从未完成章节继续
-
-4. 完成处理：
-   - 所有章节完成后更新整体状态
-   - 记录完成时间
-
-## 6. 优点
-
-1. 简单清晰的数据结构
-2. 支持断点续传
-3. 可追踪每个章节的状态
-4. 易于集成到现有代码
-5. 支持进度查询
-
-## 7. 后续扩展可能
-
-1. 添加失败重试机制
-2. 添加翻译时间估算
-3. 支持暂停/继续功能
-4. 添加更详细的进度报告
+TranslationProgress 模型提供了以下方法：
+- get_progress_percentage(): 获取当前翻译进度百分比
+- is_completed(): 检查是否所有章节都已完成
+- get_pending_chapters(): 获取待翻译的章节列表
+- get_completed_chapters(): 获取已完成的章节列表

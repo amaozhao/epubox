@@ -57,3 +57,18 @@ deepl:
   features:
     streaming: false
     batch_translation: false
+
+caiyun:
+  module: app.translation.providers.caiyun
+  class: CaiyunProvider
+  description: Caiyun Translation Provider (Free API)
+  limit_type: chars
+  default_rate_limit: 30
+  default_max_units: 4000
+  retry:
+    max_attempts: 5
+    initial_delay: 4
+    max_delay: 10
+  features:
+    streaming: false
+    batch_translation: false

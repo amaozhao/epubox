@@ -90,21 +90,28 @@ class TranslationProgress(Base):
     ):
         """Update the status of a specific chapter."""
         if status == "completed" and chapter_id in self.total_chapters:
-            self.completed_chapters[chapter_id] = {
+            # Create a new dictionary to ensure SQLAlchemy detects the change
+            new_completed = dict(self.completed_chapters)
+            new_completed[chapter_id] = {
                 **self.total_chapters[chapter_id],
                 "status": status,
                 "completed_at": completed_at.isoformat() if completed_at else None,
             }
+            self.completed_chapters = new_completed
 
         # Update overall progress status
         if len(self.completed_chapters) == len(self.total_chapters):
             self.status = TranslationStatus.COMPLETED
-            self.completed_at = datetime.utcnow()
+            self.completed_at = datetime.now()
         elif len(self.completed_chapters) > 0:
             self.status = TranslationStatus.PROCESSING
 
     def get_progress_percentage(self) -> float:
-        """Calculate the progress percentage."""
+        """Calculate the progress percentage.
+
+        Returns:
+            float: Progress percentage (0-100)
+        """
         if not self.total_chapters:
             return 0.0
         return (len(self.completed_chapters) / len(self.total_chapters)) * 100
