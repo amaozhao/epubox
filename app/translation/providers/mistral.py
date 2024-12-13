@@ -1,17 +1,10 @@
 """Mistral translation provider."""
 
 import asyncio
-from typing import Dict
 
 import tiktoken
 from mistralai import Mistral, models
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.logging import get_logger
 from app.db.models import LimitType
@@ -36,7 +29,7 @@ class MistralProvider(TranslationProvider):
             raise ValueError("Mistral provider must use token-based limits")
 
         self.api_key = self.config.get("api_key")
-        self.model = self.config.get("model", "mistral-large-latest")
+        self.model = self.provider_model.model or "mistral-large-latest"
         self.client = Mistral(api_key=self.api_key)
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -65,48 +58,60 @@ class MistralProvider(TranslationProvider):
 
         token_count = self._count_tokens(text)
         if token_count > self.provider_model.limit_value:
-            raise TranslationError(
-                f"Text length ({token_count} tokens) exceeds maximum allowed ({self.provider_model.limit_value} tokens)"
+            logger.warning(
+                "Translation request exceeds limit",
+                request_length=token_count,
+                limit=self.provider_model.limit_value,
             )
 
         # 构建提示内容
-        prompt = f"Translate from {source_lang} to {target_lang}. Keep HTML tags and names in original English. Return only the translation.\n\n{text}"
+        prompt = (
+            f"Translate the following HTML from {source_lang} to {target_lang}.\n\n"
+            "Rules:\n"
+            "1. Keep ALL HTML tags unchanged\n"
+            "2. Only translate text between tags\n"
+            "3. DO NOT translate or modify these special markers:\n"
+            "   - Inline tag markers: ‹1›, ‹/1›, ‹2›, ‹/2›, etc.\n"
+            "   - Skip tag placeholders: †1†, †2†, etc.\n"
+            "4. Return ONLY the translated HTML\n\n"
+            f"HTML:\n{text}"
+        )
 
-        messages = [models.UserMessage(content=prompt)]
+        messages = [
+            models.SystemMessage(
+                content=(
+                    "You are an HTML-aware translation assistant. Your primary responsibility is to "
+                    "translate text while perfectly preserving all HTML tags and their structure. "
+                    "Never modify HTML tags or their attributes. Always maintain the exact count and "
+                    "position of tags."
+                )
+            ),
+            models.UserMessage(content=prompt),
+        ]
 
-        try:
-            response = await self.client.chat.complete_async(
-                model=self.model,
-                messages=messages,
-                temperature=0.7,
-                **kwargs,
-            )
-            result = response.choices[0].message.content.strip()
+        response = await self.client.chat.complete_async(
+            model=self.model,
+            messages=messages,
+            temperature=0.1,
+            **kwargs,
+        )
+        result = response.choices[0].message.content.strip()  # type: ignore
 
-            # 记录翻译结果
-            logger.info(
-                "Translation response",
-                response_text=result,
-                response_length=len(result),
-                request_text=text,
-                request_length=len(text),
-                request_preview=text[:200] + "..." if len(text) > 200 else text,
-            )
+        # 记录翻译结果
+        logger.info(
+            "Translation response",
+            request_length=token_count,
+            response_length=len(result),
+            response=result,
+        )
 
-            return result
-        except Exception as e:
-            logger.error(
-                "Translation request failed",
-                error=str(e),
-                text_preview=text[:100] + "..." if len(text) > 100 else text,
-            )
-            raise TranslationError(f"Translation failed: {str(e)}")
+        return result
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
+        stop=stop_after_attempt(100),
+        wait=wait_exponential(multiplier=2, min=10, max=30),
         before_sleep=log_retry_attempt,
-        retry=retry_if_exception_type(models.SDKError),
+        # retry=retry_if_exception_type(models.SDKError),
     )
     async def translate(
         self, text: str, source_lang: str, target_lang: str, **kwargs
@@ -119,12 +124,9 @@ class MistralProvider(TranslationProvider):
             if time_since_last_request < 1:
                 await asyncio.sleep(1 - time_since_last_request)
 
+            self.__class__._last_request_time = asyncio.get_event_loop().time()
+
             try:
-                result = await super().translate(
-                    text, source_lang, target_lang, **kwargs
-                )
-                self.__class__._last_request_time = asyncio.get_event_loop().time()
-                return result
+                return await self._translate(text, source_lang, target_lang, **kwargs)
             except Exception as e:
-                self.__class__._last_request_time = asyncio.get_event_loop().time()
-                raise e
+                raise TranslationError(f"Mistral Translation failed: {str(e)}")

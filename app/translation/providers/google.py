@@ -6,16 +6,16 @@ from google.cloud import translate_v2
 from google.oauth2 import service_account
 
 from ..errors import ConfigurationError
-from .base import TranslationProvider
+from .base import TranslationProvider, TranslationProviderModel
 
 
 class GoogleProvider(TranslationProvider):
     """Google Cloud Translation provider implementation."""
 
-    def __init__(self, config: dict, **kwargs):
-        super().__init__(config, **kwargs)
-        self.credentials_info = config.get("credentials")
-        self.project_id = config.get("project_id")
+    def __init__(self, provider_model: TranslationProviderModel):
+        super().__init__(provider_model)
+        self.credentials_info = self.config.get("credentials")
+        self.project_id = self.config.get("project_id")
         self.client: Optional[translate_v2.Client] = None
 
     def get_provider_type(self) -> str:

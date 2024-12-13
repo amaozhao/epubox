@@ -26,12 +26,7 @@ async def main():
         target_lang="zh",  # 目标语言为中文
     )
 
-    try:
-        # 执行翻译处理
-        await processor.process()
-        print(f"翻译完成！输出文件保存在: {output_dir}")
-    except Exception as e:
-        print(f"翻译过程中出现错误: {e}")
+    await processor.process()
 
 
 if __name__ == "__main__":

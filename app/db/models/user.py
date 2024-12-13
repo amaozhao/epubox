@@ -7,16 +7,16 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..base import Base
 
 
-class User(SQLAlchemyBaseUserTable[int], Base):
+class User(SQLAlchemyBaseUserTable[int], Base):  # type: ignore
     __tablename__ = "user"
 
     username: Mapped[str] = mapped_column(
         String(length=50), unique=True, index=True, nullable=False
     )
-    email: Mapped[str] = mapped_column(
-        String(length=320), unique=True, index=True, nullable=False
-    )
-    hashed_password: Mapped[str] = mapped_column(String(length=1024), nullable=False)
+    # email: Mapped[str] = mapped_column(
+    #     String(length=320), unique=True, index=True, nullable=False
+    # )
+    # hashed_password: Mapped[str] = mapped_column(String(length=1024), nullable=False)
     actived: Mapped[bool] = mapped_column(default=True, nullable=False)
     superuser: Mapped[bool] = mapped_column(default=False, nullable=False)
     verified: Mapped[bool] = mapped_column(default=False, nullable=False)
@@ -28,7 +28,7 @@ class User(SQLAlchemyBaseUserTable[int], Base):
     )
 
     # OAuth关联
-    oauth_accounts: Mapped[list["OAuthAccount"]] = relationship(
+    oauth_accounts: Mapped[list["OAuthAccount"]] = relationship(  # type: ignore
         "OAuthAccount",
         back_populates="user",
         cascade="all, delete-orphan",

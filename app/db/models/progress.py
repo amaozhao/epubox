@@ -42,9 +42,9 @@ class TranslationProgress(Base):
         book_id: str,
         total_chapters: Dict,
         status: TranslationStatus = TranslationStatus.PENDING,
-        completed_chapters: Dict = None,
-        started_at: datetime = None,
-        completed_at: datetime = None,
+        completed_chapters: Dict = {},
+        started_at=None,
+        completed_at=None,
     ):
         """Initialize translation progress."""
         self.book_id = book_id
@@ -52,7 +52,7 @@ class TranslationProgress(Base):
         self.total_chapters = total_chapters
         self.status = status  # 使用 property setter 进行验证
         self.completed_chapters = completed_chapters or {}
-        self.started_at = started_at or datetime.utcnow()
+        self.started_at = started_at or datetime.now()
         self.completed_at = completed_at
 
     @staticmethod

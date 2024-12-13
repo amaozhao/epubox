@@ -46,7 +46,7 @@ class AsyncContextManager(Generic[T]):
     async def __aenter__(self) -> T:
         """Initialize resources."""
         await self.initialize()
-        return self
+        return self  # type: ignore
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Cleanup resources."""
@@ -84,6 +84,7 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
         self.config = config
         self.retry_count = provider_model.retry_count
         self.retry_delay = provider_model.retry_delay
+        self.limit_value = provider_model.limit_value
         self._initialized = False
 
     @abstractmethod
@@ -92,7 +93,7 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
         pass
 
     @abstractmethod
-    def validate_config(self, config: dict):
+    def validate_config(self, config: dict) -> bool:
         """Validate provider configuration."""
         pass
 
@@ -141,7 +142,7 @@ class TranslationProvider(AsyncContextManager["TranslationProvider"], ABC):
         pass
 
     @retry(
-        stop=stop_after_attempt(3),  # 最多重试3次
+        stop=stop_after_attempt(5),  # 最多重试5次
         wait=wait_exponential(multiplier=1, min=4, max=10),  # 指数退避：4s, 8s, 16s
         before_sleep=log_retry_attempt,  # 使用自定义的日志函数
         retry=(

@@ -11,10 +11,10 @@ from .base import TranslationProvider
 class OpenAIProvider(TranslationProvider):
     """OpenAI translation provider implementation."""
 
-    def __init__(self, config: dict, **kwargs):
-        super().__init__(config, **kwargs)
-        self.api_key = config.get("api_key")
-        self.model = config.get("model", "gpt-3.5-turbo")
+    def __init__(self, provider_model: TranslationProviderModel):
+        super().__init__(provider_model)
+        self.api_key = self.config.get("api_key")
+        self.model = self.provider_model.model or "gpt-3.5-turbo"
         self.client: Optional[AsyncOpenAI] = None
 
     def get_provider_type(self) -> str:

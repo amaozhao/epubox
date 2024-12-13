@@ -34,6 +34,7 @@ class TranslationProvider(Base):
     retry_delay: Mapped[int] = mapped_column(default=5)
     limit_type: Mapped[LimitType] = mapped_column(Enum(LimitType), nullable=False)
     limit_value: Mapped[int] = mapped_column(nullable=False, default=4000)
+    model: Mapped[str] = mapped_column(String, nullable=True)
 
     stats = relationship("ProviderStats", back_populates="provider")
 

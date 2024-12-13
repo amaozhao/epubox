@@ -25,6 +25,7 @@ async def test_create_provider(db_session: AsyncSession):
         retry_delay=5,
         limit_type=LimitType.CHARS,
         limit_value=5000,
+        model="test-model",
     )
     db_session.add(provider)
     await db_session.commit()
@@ -41,6 +42,7 @@ async def test_create_provider(db_session: AsyncSession):
     assert provider.retry_delay == 5
     assert provider.limit_type == LimitType.CHARS
     assert provider.limit_value == 5000
+    assert provider.model == "test-model"
     assert isinstance(provider.created, datetime)
     assert isinstance(provider.updated, datetime)
 

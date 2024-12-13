@@ -22,7 +22,8 @@ def translator():
         retry_count=3,
         retry_delay=60,
         limit_type=LimitType.TOKENS,
-        limit_value=6000,
+        limit_value=3000,
+        model="mistral-large-latest",
     )
     factory = ProviderFactory()
     return factory.create_provider(provider_model)
@@ -174,3 +175,95 @@ class TestHTMLProcessor:
         assert "<!-- This is a comment -->" in result
         assert "<!-- Another comment -->" in result
         assert len(result) > 0
+
+    async def test_process_ncx(self, processor):
+        """Test NCX content processing."""
+        ncx = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
+<ncx version="2005-1" xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <head>
+    <meta name="dtb:uid" content="urn:uuid:12345678-1234-1234-1234-123456789012"/>
+    <meta name="dtb:depth" content="1"/>
+    <meta name="dtb:totalPageCount" content="0"/>
+    <meta name="dtb:maxPageNumber" content="0"/>
+  </head>
+  <docTitle>
+    <text>Test Book</text>
+  </docTitle>
+  <navMap>
+    <navPoint id="navPoint-1" playOrder="1">
+      <navLabel>
+        <text>Chapter 1</text>
+      </navLabel>
+      <content src="chapter1.html"/>
+    </navPoint>
+  </navMap>
+</ncx>"""
+
+        result = await processor.process(ncx, parser="lxml")
+
+        # 验证 XML 结构保持完整
+        assert '<?xml version="1.0" encoding="UTF-8"?>' in result
+        assert "<!DOCTYPE ncx PUBLIC" in result
+        assert (
+            '<ncx version="2005-1" xmlns="http://www.daisy.org/z3986/2005/ncx/">'
+            in result
+        )
+        assert '<meta name="dtb:uid"' in result
+        assert '<navPoint id="navPoint-1" playOrder="1">' in result
+        assert '<content src="chapter1.html"/>' in result
+
+        # 验证文本被翻译但 XML 结构未被破坏
+        soup = BeautifulSoup(result, "lxml")
+        nav_label = soup.find("navlabel")
+        assert nav_label is not None
+        text = nav_label.find("text")
+        assert text is not None
+        assert text.string != "Chapter 1"  # 文本应该被翻译
+
+    async def test_preserve_html_structure(self, processor):
+        """Test that HTML structure is preserved during translation."""
+        html = """
+        <div class="chapter">
+            <h1 id="title">Hello World</h1>
+            <p class="content">This is a <em>test</em> paragraph.</p>
+            <ul class="list">
+                <li>First item</li>
+                <li>Second item</li>
+            </ul>
+        </div>
+        """
+
+        result = await processor.process(html)
+
+        # 验证 HTML 结构保持不变
+        soup = BeautifulSoup(result, "html.parser")
+
+        # 检查 div 及其属性
+        div = soup.find("div")
+        assert div is not None
+        assert div["class"] == ["chapter"]
+
+        # 检查 h1 及其属性
+        h1 = div.find("h1")
+        assert h1 is not None
+        assert h1["id"] == "title"
+        assert h1.string != "Hello World"  # 文本应该被翻译
+
+        # 检查段落及其结构
+        p = div.find("p")
+        assert p is not None
+        assert p["class"] == ["content"]
+        em = p.find("em")
+        assert em is not None
+        assert em.string != "test"  # 文本应该被翻译
+
+        # 检查列表结构
+        ul = div.find("ul")
+        assert ul is not None
+        assert ul["class"] == ["list"]
+        lis = ul.find_all("li")
+        assert len(lis) == 2
+        assert all(
+            li.string != item for li, item in zip(lis, ["First item", "Second item"])
+        )  # 文本应该被翻译

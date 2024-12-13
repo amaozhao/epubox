@@ -47,7 +47,7 @@ class EpubProcessor:
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.translator = self.init_translator(translator)
-        self.book = None
+        # self.book = None
         self.original_name = self.file_path.name
         self.work_file = self.work_dir / self.original_name
         self.html_contents: Dict[str, str] = {}
@@ -66,10 +66,11 @@ class EpubProcessor:
             enabled=True,
             is_default=True,
             rate_limit=2,  # 降低速率限制
-            retry_count=3,
+            retry_count=5,
             retry_delay=60,  # 增加重试延迟到60秒
             limit_type=LimitType.TOKENS,  # Mistral 需要使用基于token的限制
-            limit_value=6000,  # 每次请求的token限制
+            limit_value=3000,  # 每次请求的token限制
+            model="mistral-large-latest",  # 添加model字段
         )
 
         # 初始化翻译提供者
@@ -114,9 +115,6 @@ class EpubProcessor:
     def save_epub(self) -> None:
         """
         保存EPUB文件.
-
-        Returns:
-            bool: 保存是否成功
         """
         epub.write_epub(str(self.work_file), self.book)
 
@@ -163,6 +161,8 @@ class EpubProcessor:
 
         # 串行处理 HTML 内容
         for name, content in self.html_contents.items():
+            logger.info(f"Processing HTML name: {name}", name=name)
+            logger.info(f"content: {content}")
             translated_content = await self.html_processor.process(content)
             await self.update_content(name, translated_content)
             # 每个文件处理完后保存一次，避免数据丢失
