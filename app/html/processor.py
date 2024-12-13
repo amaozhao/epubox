@@ -161,7 +161,7 @@ class HTMLProcessor:
         )
 
         # 3. 解析 HTML 并获取纯文本
-        soup = BeautifulSoup(content_without_markers, "html.parser")
+        soup = BeautifulSoup(content_without_markers, "lxml")
         text = soup.get_text().strip()
 
         # 如果纯文本为空，说明不需要翻译
@@ -231,7 +231,7 @@ class HTMLProcessor:
                     need_recursive = True
                     break
                 # 创建新的 soup 对象处理当前节点
-                node_soup = BeautifulSoup(str(node), "html.parser")
+                node_soup = BeautifulSoup(str(node), "lxml")
                 content, inline_tags = self._handle_inline_tags(str(node), node_soup)
                 all_inline_tags.update(inline_tags)
                 processed_contents.append(content)
@@ -261,10 +261,10 @@ class HTMLProcessor:
         # 5. 更新原始节点
         if len(nodes) == 1:
             nodes[0].clear()  # type: ignore
-            nodes[0].append(BeautifulSoup(restored_content, "html.parser"))
+            nodes[0].append(BeautifulSoup(restored_content, "lxml"))
         else:
             # 如果有多个节点，用第一个节点替换所有内容
-            nodes[0].replace_with(BeautifulSoup(restored_content, "html.parser"))
+            nodes[0].replace_with(BeautifulSoup(restored_content, "lxml"))
             for node in nodes[1:]:
                 node.decompose()  # type: ignore
 
@@ -288,7 +288,7 @@ class HTMLProcessor:
                 restored_text = await self.restore_content(translated_text)
 
                 # 解析还原后的内容
-                node.replace_with(BeautifulSoup(restored_text, "html.parser"))
+                node.replace_with(BeautifulSoup(restored_text, "lxml"))
             return
 
         if not isinstance(node, Tag):
@@ -303,7 +303,7 @@ class HTMLProcessor:
             # 保留 head 标签的属性
             attrs = node.attrs
             # 创建新的 head 标签
-            new_head = BeautifulSoup(features="html.parser").new_tag("head")
+            new_head = BeautifulSoup(features="lxml").new_tag("head")
             # 复制原始属性
             for key, value in attrs.items():
                 new_head[key] = value
@@ -333,7 +333,7 @@ class HTMLProcessor:
 
             # 解析还原后的内容
             node.clear()
-            node.append(BeautifulSoup(restored_text, "html.parser"))
+            node.append(BeautifulSoup(restored_text, "lxml"))
             return
 
         # token 超限，使用分组翻译

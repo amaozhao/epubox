@@ -34,9 +34,11 @@ class Settings(BaseSettings):
     FIRST_SUPERUSER_PASSWORD: str
 
     # AI API Keys
-    MISTRAL_API_KEY: Optional[str] = None
+    MISTRAL_API_KEY: str = ""
+    GOOGLE_API_KEY: str = ""
+    GOOGLE_PROJECT_ID: str = ""
+    GROQ_API_KEY: str = ""
     OPENAI_API_KEY: Optional[str] = None
-    GROQ_API_KEY: Optional[str] = None
 
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"

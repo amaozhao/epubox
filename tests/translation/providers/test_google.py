@@ -64,7 +64,9 @@ async def test_translate_with_html_and_placeholders(provider):
     test_text = "<p>Hello {name}!</p>"
     mock_response = AsyncMock()
     mock_response.status_code = 200
-    mock_response.json = MagicMock(return_value={"sentences": [{"trans": "<p>你好 {name}！</p>"}]})
+    mock_response.json = MagicMock(
+        return_value={"sentences": [{"trans": "<p>你好 {name}！</p>"}]}
+    )
 
     # Mock httpx client's post method
     provider.client.post = AsyncMock(return_value=mock_response)
@@ -93,9 +95,7 @@ async def test_translate_max_retries_exceeded(provider):
     """Test translation when max retries are exceeded."""
     test_text = "Hello"
     # All requests fail
-    provider.client.post = AsyncMock(
-        side_effect=httpx.HTTPError("Test error")
-    )
+    provider.client.post = AsyncMock(side_effect=httpx.HTTPError("Test error"))
     with pytest.raises(tenacity.RetryError):
         await provider.translate(test_text, "en", "zh")
 

@@ -59,24 +59,53 @@ class EpubProcessor:
         )
 
     def init_translator(self, translator):
+        """
+        初始化翻译提供者
+
+        Args:
+            translator: 翻译提供者名称 ('mistral', 'google', 'groq')
+
+        Returns:
+            TranslationProvider: 翻译提供者实例
+        """
+        # 获取 API key 配置
+        api_key_configs = {
+            "mistral": settings.MISTRAL_API_KEY,
+            "google": settings.GOOGLE_API_KEY,
+            "groq": settings.GROQ_API_KEY,
+        }
+
+        # 默认模型配置
+        default_models = {
+            "mistral": "mistral-large-latest",
+            "groq": "mixtral-8x7b-32768",
+            "google": None,  # Google Translate 不需要指定模型
+        }
+
+        # 检查提供者是否支持
+        if translator not in api_key_configs:
+            raise ValueError(f"Unsupported translator: {translator}")
+
+        # 从配置文件加载提供者配置
+        factory = ProviderFactory()
+        provider_config = factory.get_provider_config(translator)
+
+        # 创建提供者模型
         provider_model = TranslationProvider(
             name=translator,
             provider_type=translator,
-            config={"api_key": settings.MISTRAL_API_KEY},
+            config={"api_key": api_key_configs[translator]},
             enabled=True,
-            is_default=True,
-            rate_limit=2,  # 降低速率限制
-            retry_count=5,
-            retry_delay=60,  # 增加重试延迟到60秒
-            limit_type=LimitType.TOKENS,  # Mistral 需要使用基于token的限制
-            limit_value=3000,  # 每次请求的token限制
-            model="mistral-large-latest",  # 添加model字段
+            is_default=False,
+            rate_limit=provider_config.get("default_rate_limit", 3),
+            retry_count=provider_config.get("retry", {}).get("max_attempts", 3),
+            retry_delay=provider_config.get("retry", {}).get("initial_delay", 5),
+            limit_type=LimitType[provider_config.get("limit_type", "CHARS").upper()],
+            limit_value=provider_config.get("default_max_units", 4000),
+            model=default_models[translator],
         )
 
-        # 初始化翻译提供者
-        factory = ProviderFactory()
-        translator = factory.create_provider(provider_model)
-        return translator
+        return factory.create_provider(provider_model)
 
     def load_epub(self) -> None:
         """
@@ -163,7 +192,10 @@ class EpubProcessor:
         for name, content in self.html_contents.items():
             logger.info(f"Processing HTML name: {name}", name=name)
             logger.info(f"content: {content}")
-            translated_content = await self.html_processor.process(content)
+            # 统一使用 lxml 解析器
+            translated_content = await self.html_processor.process(
+                content, parser="lxml"
+            )
             await self.update_content(name, translated_content)
             # 每个文件处理完后保存一次，避免数据丢失
             self.save_epub()

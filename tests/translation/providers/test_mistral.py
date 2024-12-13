@@ -186,8 +186,8 @@ async def test_translate_max_retries_exceeded(mock_mistral, provider):
     assert isinstance(exc_info.value.last_attempt.exception(), TranslationError)
     # 验证错误消息
     assert "Translation failed" in str(exc_info.value.last_attempt.exception())
-    # 只有 mistral.py 中的装饰器会处理 SDKError，所以只会重试3次
-    assert mock_client.chat.complete_async.call_count == 3
+    # MistralProvider 的 translate 方法设置了重试 10 次
+    assert mock_client.chat.complete_async.call_count == 10
 
 
 @pytest.mark.asyncio
@@ -214,8 +214,8 @@ async def test_translate_with_translation_error(mock_mistral, provider):
     assert isinstance(exc_info.value.last_attempt.exception(), TranslationError)
     # 验证错误消息
     assert "Translation limit exceeded" in str(exc_info.value.last_attempt.exception())
-    # 只有 base.py 中的装饰器会处理 TranslationError，所以只会重试3次
-    assert mock_client.chat.complete_async.call_count == 3
+    # MistralProvider 的 translate 方法设置了重试 10 次
+    assert mock_client.chat.complete_async.call_count == 10
 
 
 @pytest.mark.asyncio

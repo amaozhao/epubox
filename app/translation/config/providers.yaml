@@ -42,3 +42,18 @@ google:
   features:
     streaming: false
     batch_translation: false
+
+deepl:
+  module: app.translation.providers.deepl
+  class: DeepLProvider
+  description: DeepL Translation Provider (Free API)
+  limit_type: chars
+  default_rate_limit: 30
+  default_max_units: 4000
+  retry:
+    max_attempts: 10
+    initial_delay: 1
+    max_delay: 10
+  features:
+    streaming: false
+    batch_translation: false
