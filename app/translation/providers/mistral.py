@@ -108,7 +108,7 @@ class MistralProvider(TranslationProvider):
         return result
 
     @retry(
-        stop=stop_after_attempt(100),
+        stop=stop_after_attempt(10),
         wait=wait_exponential(multiplier=2, min=10, max=30),
         before_sleep=log_retry_attempt,
         # retry=retry_if_exception_type(models.SDKError),

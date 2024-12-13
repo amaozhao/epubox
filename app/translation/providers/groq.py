@@ -1,17 +1,10 @@
 """Groq translation provider."""
 
 import asyncio
-from typing import Dict
 
 import tiktoken
 from groq import AsyncGroq
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.logging import get_logger
 from app.db.models import LimitType
@@ -119,7 +112,7 @@ class GroqProvider(TranslationProvider):
             raise TranslationError(f"Translation failed: {str(e)}")
 
     @retry(
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(10),
         wait=wait_exponential(multiplier=1, min=4, max=10),
         before_sleep=log_retry_attempt,
     )

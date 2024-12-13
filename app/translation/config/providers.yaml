@@ -21,9 +21,24 @@ groq:
   default_rate_limit: 1
   default_max_units: 3000
   retry:
-    max_attempts: 3
+    max_attempts: 10
     initial_delay: 1
     max_delay: 10
   features:
     streaming: true
+    batch_translation: false
+
+google:
+  module: app.translation.providers.google
+  class: GoogleProvider
+  description: Google Translate (Free API)
+  limit_type: chars
+  default_rate_limit: 30
+  default_max_units: 4000
+  retry:
+    max_attempts: 10
+    initial_delay: 1
+    max_delay: 10
+  features:
+    streaming: false
     batch_translation: false
