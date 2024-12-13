@@ -15,7 +15,7 @@ class ProgressManager:
 
     async def create_progress(
         self, book_id: str, chapters: Dict
-    ) -> TranslationProgress:
+    ) -> None | TranslationProgress:
         """Create a new progress record.
 
         Args:
