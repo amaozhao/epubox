@@ -251,9 +251,7 @@ class HTMLProcessor:
             soup = BeautifulSoup(node_str, "lxml")
             processed_content, tags = self._handle_inline_tags(node_str, soup)
             inline_tags_map.update(tags)
-            text_to_translate += (
-                f"{item['separator']}{processed_content}{item['separator']}\n"
-            )
+            text_to_translate += f"{item['separator']}{processed_content}{item['separator']}\n"
 
         # 翻译
         translated = await self.translator.translate(
@@ -419,15 +417,16 @@ class HTMLProcessor:
 
         return text.strip()
 
-    def _handle_inline_tags(
-        self, content: str, soup: BeautifulSoup
-    ) -> Tuple[str, Dict[int, Tag]]:
+    def _handle_inline_tags(self, content: str, soup: BeautifulSoup) -> Tuple[str, Dict[int, Tag]]:
         """处理内联标签，返回处理后的内容和标签映射"""
         inline_tags = {}  # 存储 marker -> tag 的映射
         counter = 0
 
+        # 获取实际内容节点
+        content_node = soup.body or soup
+
         # 处理所有内联标签
-        for tag in soup.find_all(self.INLINE_TAGS):
+        for tag in content_node.find_all(self.INLINE_TAGS):
             # 生成开始和结束标记
             start_marker = f"‹{counter}›"
             end_marker = f"‹/{counter}›"
@@ -442,7 +441,8 @@ class HTMLProcessor:
 
             counter += 1
 
-        return str(soup), inline_tags
+        # 只返回实际内容部分
+        return str(content_node.decode_contents()), inline_tags
 
     def _restore_inline_tags(self, content: str, inline_tags: Dict[int, Tag]) -> str:
         """还原内联标签"""

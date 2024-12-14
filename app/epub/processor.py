@@ -191,7 +191,6 @@ class EpubProcessor:
         # 串行处理 HTML 内容
         for name, content in self.html_contents.items():
             logger.info(f"Processing HTML name: {name}", name=name)
-            logger.info(f"content: {content}")
             # 统一使用 lxml 解析器
             translated_content = await self.html_processor.process(
                 content, parser="lxml"
