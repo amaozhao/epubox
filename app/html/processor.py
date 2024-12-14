@@ -21,7 +21,7 @@ SKIP_TAGS = {
     "style",
     # 代码相关
     "code",
-    # "pre",
+    "pre",
     "kbd",
     "var",
     "samp",
@@ -126,19 +126,6 @@ class HTMLProcessor:
             node: 当前HTML节点
         """
         if not node or isinstance(node, NavigableString):
-            return
-
-        # 遍历当前节点的子节点
-        if node.name == "head":
-            # 特别处理 head 标签
-            for child in list(node.children):
-                if isinstance(child, Tag):
-                    if child.name in {"meta", "link"}:  # 只替换 meta 和 link 标签
-                        placeholder = self.create_placeholder(str(child))
-                        child.replace_with(placeholder)
-                    else:
-                        # 递归处理其他标签（比如 title）
-                        self.replace_skip_tags_recursive(child)
             return
 
         for child in list(
