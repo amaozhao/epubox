@@ -1,150 +1,157 @@
-# """Test translation providers."""
+"""Test translation providers."""
 
-# import asyncio
-# from unittest.mock import AsyncMock, patch
+import asyncio
+from unittest.mock import AsyncMock, patch
 
-# import pytest
+import pytest
 
-# from app.translation.providers import (
-#     GoogleProvider,
-#     OpenAIProvider,
-#     RateLimiter,
-#     RateLimitError,
-#     TranslationProvider,
-# )
-# from app.translation.errors import ConfigurationError
-
-
-# async def test_rate_limiter():
-#     """Test rate limiter functionality."""
-#     limiter = RateLimiter(rate_limit=2, time_window=1)
-
-#     # First two requests should succeed
-#     await limiter.acquire()
-#     await limiter.acquire()
-
-#     # Third request should fail
-#     with pytest.raises(RateLimitError):
-#         await limiter.acquire()
-
-#     # Wait for tokens to replenish
-#     await asyncio.sleep(1)
-
-#     # Should be able to make another request
-#     await limiter.acquire()
+from app.translation.errors import ConfigurationError
+from app.translation.providers import (
+    GoogleProvider,
+    OpenAIProvider,
+    RateLimiter,
+    RateLimitError,
+    TranslationProvider,
+)
 
 
-# class TestOpenAIProvider:
-#     """Test OpenAI translation provider."""
+class TestRateLimiter:
+    """Test cases for RateLimiter."""
 
-#     @pytest.fixture
-#     async def provider(self):
-#         """Create an OpenAI provider instance."""
-#         config = {"api_key": "test-key", "model": "gpt-3.5-turbo"}
-#         provider = OpenAIProvider(config)
-#         await provider.initialize()
-#         yield provider
-#         await provider.cleanup()
+    async def test_rate_limiter(self):
+        """Test rate limiter functionality."""
+        limiter = RateLimiter(rate_limit=2, time_window=1)
 
-#     def test_provider_type(self, provider):
-#         """Test provider type identification."""
-#         assert provider.get_provider_type() == "openai"
+        # First two requests should succeed
+        await limiter.acquire()
+        await limiter.acquire()
 
-#     def test_validate_config(self, provider):
-#         """Test configuration validation."""
-#         # Valid config
-#         assert provider.validate_config({"api_key": "key"})
+        # Third request should fail
+        with pytest.raises(RateLimitError):
+            await limiter.acquire()
 
-#         # Invalid config
-#         assert not provider.validate_config({})
-#         assert not provider.validate_config({"wrong_key": "value"})
+        # Wait for tokens to replenish
+        await asyncio.sleep(1)
 
-#     @patch("openai.AsyncOpenAI")
-#     async def test_translate(self, mock_openai, provider):
-#         """Test translation functionality."""
-#         mock_client = AsyncMock()
-#         mock_openai.return_value = mock_client
-
-#         mock_response = AsyncMock()
-#         mock_response.choices[0].message.content = "翻译后的文本"
-#         mock_client.chat.completions.create.return_value = mock_response
-
-#         result = await provider.translate(
-#             text="Hello, world!", source_lang="en", target_lang="zh"
-#         )
-
-#         assert result == "翻译后的文本"
-#         mock_client.chat.completions.create.assert_called_once()
+        # Should be able to make another request
+        await limiter.acquire()
 
 
-# class TestGoogleProvider:
-#     """Test Google translation provider."""
+class TestOpenAIProvider:
+    """Test OpenAI translation provider."""
 
-#     @pytest.fixture
-#     async def provider(self):
-#         """Create a Google provider instance."""
-#         config = {"api_key": "test-key"}
-#         provider = GoogleProvider(config)
-#         await provider.initialize()
-#         yield provider
-#         await provider.cleanup()
+    @pytest.fixture
+    async def provider(self):
+        """Create an OpenAI provider instance."""
+        config = {"api_key": "test-key", "model": "gpt-3.5-turbo"}
+        provider = OpenAIProvider(config)
+        await provider.initialize()
+        yield provider
+        await provider.cleanup()
 
-#     def test_provider_type(self, provider):
-#         """Test provider type identification."""
-#         assert provider.get_provider_type() == "google"
+    def test_provider_type(self, provider):
+        """Test provider type identification."""
+        assert provider.get_provider_type() == "openai"
 
-#     def test_validate_config(self, provider):
-#         """Test configuration validation."""
-#         # Valid config
-#         assert provider.validate_config({"api_key": "key"})
+    def test_validate_config(self, provider):
+        """Test configuration validation."""
+        # Valid config
+        assert provider.validate_config({"api_key": "key"})
 
-#         # Invalid config
-#         assert not provider.validate_config({})
-#         assert not provider.validate_config({"wrong_key": "value"})
+        # Invalid config
+        assert not provider.validate_config({})
+        assert not provider.validate_config({"wrong_key": "value"})
 
-#     @patch("google.cloud.translate_v2.Client")
-#     async def test_translate(self, mock_client, provider):
-#         """Test translation functionality."""
-#         mock_instance = mock_client.return_value
-#         mock_instance.translate.return_value = {"translatedText": "翻译后的文本"}
+    @patch("openai.AsyncOpenAI")
+    async def test_translate(self, mock_openai, provider):
+        """Test translation functionality."""
+        mock_client = AsyncMock()
+        mock_openai.return_value = mock_client
 
-#         result = await provider.translate(
-#             text="Hello, world!", source_lang="en", target_lang="zh"
-#         )
+        mock_response = AsyncMock()
+        mock_response.choices[0].message.content = "翻译后的文本"
+        mock_client.chat.completions.create.return_value = mock_response
 
-#         assert result == "翻译后的文本"
-#         mock_instance.translate.assert_called_once_with(
-#             "Hello, world!", source_language="en", target_language="zh"
-#         )
+        result = await provider.translate(
+            text="Hello, world!", source_lang="en", target_lang="zh"
+        )
 
-
-# async def test_retry_on_error():
-#     """Test retry mechanism."""
-#     mock_func = AsyncMock()
-#     mock_func.side_effect = [
-#         ConfigurationError("First error"),
-#         ConfigurationError("Second error"),
-#         "success",
-#     ]
-
-#     provider = OpenAIProvider({"api_key": "test"})
-#     provider.translate = mock_func
-
-#     result = await provider.translate(text="test", source_lang="en", target_lang="zh")
-
-#     assert result == "success"
-#     assert mock_func.call_count == 3  # Called three times before succeeding
+        assert result == "翻译后的文本"
+        mock_client.chat.completions.create.assert_called_once()
 
 
-# async def test_retry_max_attempts():
-#     """Test retry mechanism reaches max attempts."""
-#     mock_func = AsyncMock()
-#     mock_func.side_effect = ConfigurationError("Persistent error")
+class TestGoogleProvider:
+    """Test Google translation provider."""
 
-#     provider = OpenAIProvider({"api_key": "test"})
-#     provider.translate = mock_func
+    @pytest.fixture
+    async def provider(self):
+        """Create a Google provider instance."""
+        config = {"api_key": "test-key"}
+        provider = GoogleProvider(config)
+        await provider.initialize()
+        yield provider
+        await provider.cleanup()
 
-#     with pytest.raises(ConfigurationError):
-#         await provider.translate(text="test", source_lang="en", target_lang="zh")
+    def test_provider_type(self, provider):
+        """Test provider type identification."""
+        assert provider.get_provider_type() == "google"
 
-#     assert mock_func.call_count == 3  # Default retry count is 3
+    def test_validate_config(self, provider):
+        """Test configuration validation."""
+        # Valid config
+        assert provider.validate_config({"api_key": "key"})
+
+        # Invalid config
+        assert not provider.validate_config({})
+        assert not provider.validate_config({"wrong_key": "value"})
+
+    @patch("google.cloud.translate_v2.Client")
+    async def test_translate(self, mock_client, provider):
+        """Test translation functionality."""
+        mock_instance = mock_client.return_value
+        mock_instance.translate.return_value = {"translatedText": "翻译后的文本"}
+
+        result = await provider.translate(
+            text="Hello, world!", source_lang="en", target_lang="zh"
+        )
+
+        assert result == "翻译后的文本"
+        mock_instance.translate.assert_called_once_with(
+            "Hello, world!", source_language="en", target_language="zh"
+        )
+
+
+class TestRetryMechanism:
+    """Test retry mechanism."""
+
+    async def test_retry_on_error(self):
+        """Test retry mechanism."""
+        mock_func = AsyncMock()
+        mock_func.side_effect = [
+            ConfigurationError("First error"),
+            ConfigurationError("Second error"),
+            "success",
+        ]
+
+        provider = OpenAIProvider({"api_key": "test"})
+        provider.translate = mock_func
+
+        result = await provider.translate(
+            text="test", source_lang="en", target_lang="zh"
+        )
+
+        assert result == "success"
+        assert mock_func.call_count == 3  # Called three times before succeeding
+
+    async def test_retry_max_attempts(self):
+        """Test retry mechanism reaches max attempts."""
+        mock_func = AsyncMock()
+        mock_func.side_effect = ConfigurationError("Persistent error")
+
+        provider = OpenAIProvider({"api_key": "test"})
+        provider.translate = mock_func
+
+        with pytest.raises(ConfigurationError):
+            await provider.translate(text="test", source_lang="en", target_lang="zh")
+
+        assert mock_func.call_count == 3  # Default retry count is 3

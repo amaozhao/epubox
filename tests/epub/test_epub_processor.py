@@ -12,15 +12,14 @@ from app.core.config import settings
 from app.epub.processor import EpubProcessor
 
 
-@pytest.fixture
-def processor(create_test_epub, temp_work_dir):
-    """创建EpubProcessor实例."""
-    epub_path = create_test_epub("<p>Original content</p>")
-    return EpubProcessor(str(epub_path), str(temp_work_dir), "mistral")
-
-
 class TestEpubProcessor:
     """Test cases for EpubProcessor class."""
+
+    @pytest.fixture
+    def processor(self, create_test_epub, temp_work_dir):
+        """创建EpubProcessor实例."""
+        epub_path = create_test_epub("<p>Original content</p>")
+        return EpubProcessor(str(epub_path), str(temp_work_dir), "mistral")
 
     async def test_prepare_success(self, processor):
         """测试prepare方法 - 成功场景."""

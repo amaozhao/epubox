@@ -9,36 +9,37 @@ from app.html.processor import SKIP_TAGS, HTMLProcessor
 from app.translation.factory import ProviderFactory
 
 
-@pytest.fixture
-def translator():
-    """创建翻译器实例."""
-    provider_model = TranslationProvider(
-        name="mistral",
-        provider_type="mistral",
-        config={"api_key": settings.MISTRAL_API_KEY},
-        enabled=True,
-        is_default=True,
-        rate_limit=2,
-        retry_count=3,
-        retry_delay=60,
-        limit_type=LimitType.TOKENS,
-        limit_value=3000,
-        model="mistral-large-latest",
-    )
-    factory = ProviderFactory()
-    return factory.create_provider(provider_model)
-
-
-@pytest.fixture
-def processor(translator):
-    """Create a processor instance for testing."""
-    return HTMLProcessor(
-        translator=translator, source_lang="en", target_lang="zh", max_chunk_size=4500
-    )
-
-
 class TestHTMLProcessor:
     """Test cases for TestHTMLProcessor class."""
+
+    @pytest.fixture
+    def translator(self):
+        """创建翻译器实例."""
+        provider_model = TranslationProvider(
+            name="mistral",
+            provider_type="mistral",
+            config={"api_key": settings.MISTRAL_API_KEY},
+            enabled=True,
+            is_default=True,
+            rate_limit=2,
+            retry_count=3,
+            retry_delay=60,
+            limit_type=LimitType.TOKENS,
+            limit_value=3000,
+            model="mistral-large-latest",
+        )
+        factory = ProviderFactory()
+        return factory.create_provider(provider_model)
+
+    @pytest.fixture
+    def processor(self, translator):
+        """Create a processor instance for testing."""
+        return HTMLProcessor(
+            translator=translator,
+            source_lang="en",
+            target_lang="zh",
+            max_chunk_size=4500,
+        )
 
     async def test_create_placeholder(self, processor):
         """Test placeholder creation."""

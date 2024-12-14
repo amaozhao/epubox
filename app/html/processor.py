@@ -425,10 +425,6 @@ class HTMLProcessor:
         Returns:
             str: 还原占位符后的文本
         """
-        # 处理空内容
-        if not html_content.strip():
-            return html_content
-
         # 解析HTML
         soup = BeautifulSoup(html_content, parser)
 
@@ -461,13 +457,21 @@ class HTMLProcessor:
         translated_html = str(root)
         translated_html = await self.restore_content(translated_html)
 
-        # 如果是 body 节点，需要把内容放回原始的 HTML 结构中
+        # 根据不同类型的文档处理结果
         if body and body == root:
+            # 如果是 body 节点，需要把内容放回原始的 HTML 结构中
             body.replace_with(BeautifulSoup(translated_html, parser).body)  # type: ignore
             translated_html = str(soup)
+        elif root.name in ["ncx", "package"]:
+            # 如果是 ncx 或 package 文档，保留原始结构
+            new_root = BeautifulSoup(translated_html, parser).find(root.name)
+            if new_root:
+                root.replace_with(new_root)
+                translated_html = str(soup)
 
-        # 解除HTML转义
-        return html.unescape(translated_html)
+        # 解除HTML转义并清理结果
+        translated_html = self._clean_translation_result(html.unescape(translated_html))
+        return translated_html
 
     async def restore_content(self, translated_text: str) -> str:
         """
