@@ -4,8 +4,9 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
-from ..errors import ConfigurationError
-from .base import TranslationProvider
+from app.db.models import TranslationProvider as TranslationProviderModel
+from app.translation.errors import ConfigurationError
+from app.translation.providers.base import TranslationProvider
 
 
 class OpenAIProvider(TranslationProvider):

@@ -6,9 +6,13 @@ Handles HTML content processing and transformation.
 import copy
 import html
 import re
-from typing import Dict, List, Tuple, Union
+from typing import Dict, Tuple
 
-from bs4 import BeautifulSoup, NavigableString, PageElement, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
+
+from app.core.logging import get_logger
+
+log = get_logger(__name__)
 
 # 不需要翻译的标签集合
 SKIP_TAGS = {
@@ -108,6 +112,12 @@ class HTMLProcessor:
         self.placeholder_counter += 1
         return placeholder
 
+    def create_node_separator(self) -> str:
+        """创建节点分隔符"""
+        separator = f"‡{self.placeholder_counter}‡"
+        self.placeholder_counter += 1
+        return separator
+
     def replace_skip_tags_recursive(self, node: Tag) -> None:
         """
         递归替换HTML中的不可翻译标签为占位符.
@@ -167,179 +177,232 @@ class HTMLProcessor:
         # 如果纯文本为空，说明不需要翻译
         return bool(text)
 
-    def _group_nodes(self, node: Tag) -> List[List[PageElement]]:
-        """
-        智能分组节点，将相邻的可翻译节点组合在一起。
+    async def _group_nodes(self, node: Tag, parent_tags: list = []) -> list:
+        """分组处理节点，返回分组结果"""
+        if parent_tags is None:
+            parent_tags = []
 
-        Args:
-            node: 当前HTML节点
-
-        Returns:
-            List[List[PageElement]]: 分组后的节点列表
-        """
         groups = []
         current_group = []
-        current_content = ""
+        current_tokens = 0
 
-        for child in node.children:
-            # 跳过空白文本节点
-            if isinstance(child, NavigableString) and not child.strip():
-                continue
+        async def process_node_and_siblings(nodes, current_tags):
+            """处理节点及其兄弟节点"""
+            nonlocal current_group, current_tokens, groups
 
-            # 检查节点是否需要翻译
-            content = str(child)
-            if not self._needs_translation(content):
-                continue
+            for node in nodes:
+                if isinstance(node, NavigableString) and not node.strip():
+                    continue
 
-            # 检查当前组加上新内容是否超过限制
-            test_content = current_content + content if current_content else content
-            tokens = self.translator._count_tokens(test_content)
-            if tokens <= self.translator.limit_value:
-                current_group.append(child)
-                current_content = test_content
-            else:
-                if current_group:
-                    groups.append(current_group)
-                current_group = [child]
-                current_content = content
+                # 计算当前节点的token
+                separator = self.create_node_separator()
+                content = str(node)
+                text = f"{separator}{content}{separator}"
+                tokens = self.translator._count_tokens(text)
 
-        # 添加最后一个组
+                # 如果是Tag节点且超限，递归处理其子节点
+                if isinstance(node, Tag) and tokens > self.translator.limit_value:
+                    # 先保存当前组
+                    if current_group:
+                        groups.append(current_group)
+                        current_group = []
+                        current_tokens = 0
+
+                    # 递归处理子节点
+                    current_tags.append(node.name)
+                    await process_node_and_siblings(node.children, current_tags)
+                    current_tags.pop()
+                    continue
+
+                # 检查是否可以加入当前组
+                if current_tokens + tokens <= self.translator.limit_value:
+                    current_group.append(
+                        {
+                            "node": node,
+                            "separator": separator,
+                            "parent_tags": current_tags.copy(),
+                        }
+                    )
+                    current_tokens += tokens
+                else:
+                    # 当前组满了，开始新组
+                    if current_group:
+                        groups.append(current_group)
+                    current_group = [
+                        {
+                            "node": node,
+                            "separator": separator,
+                            "parent_tags": current_tags.copy(),
+                        }
+                    ]
+                    current_tokens = tokens
+
+        # 开始处理节点
+        if isinstance(node, Tag):
+            parent_tags.append(node.name)
+            await process_node_and_siblings(node.children, parent_tags)
+            parent_tags.pop()
+        else:
+            await process_node_and_siblings([node], parent_tags)
+
+        # 添加最后一组
         if current_group:
             groups.append(current_group)
 
         return groups
 
-    async def _translate_group(self, nodes: List[Union[Tag, NavigableString]]) -> None:
-        """翻译节点组"""
-        if not nodes:
-            return
+    async def _translate_group(self, group: list) -> str:
+        """只负责翻译，返回翻译结果"""
+        if not group:
+            return ""
 
-        # 1. 处理每个节点
-        processed_contents = []
-        all_inline_tags = {}
-        need_recursive = False
+        # 构造翻译文本，处理内联标签
+        text_to_translate = ""
+        inline_tags_map = {}
+        for item in group:
+            node_str = str(item["node"])
+            soup = BeautifulSoup(node_str, "lxml")
+            processed_content, tags = self._handle_inline_tags(node_str, soup)
+            inline_tags_map.update(tags)
+            text_to_translate += (
+                f"{item['separator']}{processed_content}{item['separator']}\n"
+            )
 
-        for node in nodes:
-            if isinstance(node, NavigableString):
-                processed_contents.append(str(node))
-            else:
-                # 检查节点是否太大
-                content = str(node)
-                tokens = self.translator._count_tokens(content)
-                if tokens > self.translator.limit_value:
-                    # 如果节点太大，标记需要递归处理
-                    need_recursive = True
-                    break
-                # 创建新的 soup 对象处理当前节点
-                node_soup = BeautifulSoup(str(node), "lxml")
-                content, inline_tags = self._handle_inline_tags(str(node), node_soup)
-                all_inline_tags.update(inline_tags)
-                processed_contents.append(content)
-
-        # 如果需要递归处理
-        if need_recursive:
-            for node in nodes:
-                if isinstance(node, Tag):
-                    await self.process_node(node)
-            return
-
-        # 2. 合并处理后的内容
-        merged_content = "".join(processed_contents)
-
-        # 3. 翻译处理后的内容
-        translated_content = await self.translator.translate(
-            merged_content,
+        # 翻译
+        translated = await self.translator.translate(
+            text_to_translate,
             source_lang=self.source_lang,
             target_lang=self.target_lang,
         )
 
-        # 4. 还原内联标签
-        restored_content = self._restore_inline_tags(
-            translated_content, all_inline_tags
-        )
+        # 还原内联标签
+        return self._restore_inline_tags(translated, inline_tags_map)
 
-        # 5. 更新原始节点
-        if len(nodes) == 1:
-            nodes[0].clear()  # type: ignore
-            nodes[0].append(BeautifulSoup(restored_content, "lxml"))
-        else:
-            # 如果有多个节点，用第一个节点替换所有内容
-            nodes[0].replace_with(BeautifulSoup(restored_content, "lxml"))
-            for node in nodes[1:]:
-                node.decompose()  # type: ignore
+    async def _process_translated_groups(self, groups: list) -> None:
+        """处理翻译后的分组，负责节点替换"""
+        for group in groups:
+            translated = await self._translate_group(group)
+            if not translated:
+                continue
 
-    async def process_node(self, node: PageElement) -> None:
-        """
-        处理HTML节点，检查长度并调用翻译接口替换内容.
+            # 替换节点
+            for item in group:
+                node = item["node"]
+                separator = item["separator"]
+                parent_tags = item["parent_tags"]
 
-        Args:
-            node: 当前HTML节点
-        """
+                # 从翻译结果中提取对应内容
+                pattern = f"{separator}(.*?){separator}"
+                match = re.search(pattern, translated)
+                if match:
+                    translated_content = match.group(1)
+
+                    # 重建HTML结构
+                    for tag in reversed(parent_tags[:-1]):  # 除了最后一个tag
+                        translated_content = f"<{tag}>{translated_content}</{tag}>"
+
+                    # 创建新节点并替换
+                    new_node = BeautifulSoup(translated_content, features="lxml").find()
+                    node.replace_with(new_node)
+
+    async def process_node(self, node: Tag) -> None:
+        """入口函数，处理HTML节点"""
         if isinstance(node, NavigableString):
-            if self._needs_translation(str(node)):
-                translated_text = await self.translator.translate(
-                    str(node),
-                    source_lang=self.source_lang,
-                    target_lang=self.target_lang,
-                )
-                translated_text = self._clean_translation_result(translated_text)
-
-                # 还原占位符内容
-                restored_text = await self.restore_content(translated_text)
-
-                # 解析还原后的内容
-                node.replace_with(BeautifulSoup(restored_text, "lxml"))
+            # 处理纯文本节点
+            content = str(node)
+            if content.strip():
+                # 创建新的文本节点并替换
+                new_string = NavigableString(content)
+                node.replace_with(new_string)
             return
 
         if not isinstance(node, Tag):
             return
 
-        # 如果是 SKIP_TAGS，则跳过
         if node.name in SKIP_TAGS:
             return
 
-        # 特别处理 head 标签
-        if node.name == "head":
-            # 保留 head 标签的属性
-            attrs = node.attrs
-            # 创建新的 head 标签
-            new_head = BeautifulSoup(features="lxml").new_tag("head")
-            # 复制原始属性
-            for key, value in attrs.items():
-                new_head[key] = value
-            # 替换原始节点
-            node.replace_with(new_head)
-            return
+        # 调用分组处理
+        groups = await self._group_nodes(node)
+        # 处理翻译结果
+        await self._process_translated_groups(groups)
 
-        # 获取节点的文本内容
-        content = str(node)
+    async def process(self, html_content: str, parser="lxml") -> str:
+        """处理HTML内容，生成翻译任务列表.
 
-        if not content.strip():
-            return
+        Args:
+            html_content: HTML内容字符串
 
-        # 计算token数量
-        tokens = self.translator._count_tokens(content)
-        if tokens <= self.translator.limit_value:
-            # token 数量合适，直接翻译
+        Returns:
+            str: 还原占位符后的文本
+        """
+        # 解析HTML
+        soup = BeautifulSoup(html_content, parser)
+
+        # 如果是 HTML 文档，只处理 body 内容
+        body = soup.find("body")
+        if body:
+            root = body
+        else:
+            # 如果不是 HTML 文档（比如 ncx），则处理整个文档
+            root = soup.find("ncx") or soup.find("package")
+            if not root:
+                root = soup
+
+        # 如果没有任何内容，将纯文本作为一个任务
+        if not root:
             translated_text = await self.translator.translate(
-                content,
+                html_content,
                 source_lang=self.source_lang,
                 target_lang=self.target_lang,
             )
-            translated_text = self._clean_translation_result(translated_text)
+            return html.unescape(translated_text)
 
-            # 还原占位符内容
-            restored_text = await self.restore_content(translated_text)
+        # 第一阶段：替换所有skip标签
+        self.replace_skip_tags_recursive(root)  # type: ignore
 
-            # 解析还原后的内容
-            node.clear()
-            node.append(BeautifulSoup(restored_text, "lxml"))
-            return
+        # 第二阶段：处理剩余内容，生成翻译结果
+        await self.process_node(root)  # type: ignore
 
-        # token 超限，使用分组翻译
-        groups = self._group_nodes(node)
-        for group in groups:
-            await self._translate_group(group)  # type: ignore
+        # 还原占位符内容
+        translated_html = str(root)
+        translated_html = await self.restore_content(translated_html)
+
+        # 根据不同类型的文档处理结果
+        if body and body == root:
+            # 如果是 body 节点，需要把内容放回原始的 HTML 结构中
+            body.replace_with(BeautifulSoup(translated_html, parser).body)  # type: ignore
+            translated_html = str(soup)
+        elif root.name in ["ncx", "package"]:
+            # 如果是 ncx 或 package 文档，保留原始结构
+            new_root = BeautifulSoup(translated_html, parser).find(root.name)
+            if new_root:
+                root.replace_with(new_root)
+                translated_html = str(soup)
+
+        # 解除HTML转义并清理结果
+        translated_html = self._clean_translation_result(html.unescape(translated_html))
+        return translated_html
+
+    async def restore_content(self, translated_text: str) -> str:
+        """
+        还原占位符内容.
+
+        Args:
+            translated_text: 翻译后的文本
+
+        Returns:
+            str: 还原占位符后的文本
+        """
+        result = translated_text
+        pattern = r"†(\d+)†"
+
+        for match in re.finditer(pattern, result):
+            placeholder = match.group(0)
+            if placeholder in self.placeholders:
+                result = result.replace(placeholder, self.placeholders[placeholder])
+
+        return result
 
     def _clean_translation_result(self, text: str) -> str:
         """清理翻译结果中的代码标记.
@@ -415,80 +478,3 @@ class HTMLProcessor:
             content = re.sub(pattern, replace, content, flags=re.DOTALL)
 
         return content
-
-    async def process(self, html_content: str, parser="lxml") -> str:
-        """处理HTML内容，生成翻译任务列表.
-
-        Args:
-            html_content: HTML内容字符串
-
-        Returns:
-            str: 还原占位符后的文本
-        """
-        # 解析HTML
-        soup = BeautifulSoup(html_content, parser)
-
-        # 如果是 HTML 文档，只处理 body 内容
-        body = soup.find("body")
-        if body:
-            root = body
-        else:
-            # 如果不是 HTML 文档（比如 ncx），则处理整个文档
-            root = soup.find("ncx") or soup.find("package")
-            if not root:
-                root = soup
-
-        # 如果没有任何内容，将纯文本作为一个任务
-        if not root:
-            translated_text = await self.translator.translate(
-                html_content,
-                source_lang=self.source_lang,
-                target_lang=self.target_lang,
-            )
-            return html.unescape(translated_text)
-
-        # 第一阶段：替换所有skip标签
-        self.replace_skip_tags_recursive(root)  # type: ignore
-
-        # 第二阶段：处理剩余内容，生成翻译结果
-        await self.process_node(root)
-
-        # 还原占位符内容
-        translated_html = str(root)
-        translated_html = await self.restore_content(translated_html)
-
-        # 根据不同类型的文档处理结果
-        if body and body == root:
-            # 如果是 body 节点，需要把内容放回原始的 HTML 结构中
-            body.replace_with(BeautifulSoup(translated_html, parser).body)  # type: ignore
-            translated_html = str(soup)
-        elif root.name in ["ncx", "package"]:
-            # 如果是 ncx 或 package 文档，保留原始结构
-            new_root = BeautifulSoup(translated_html, parser).find(root.name)
-            if new_root:
-                root.replace_with(new_root)
-                translated_html = str(soup)
-
-        # 解除HTML转义并清理结果
-        translated_html = self._clean_translation_result(html.unescape(translated_html))
-        return translated_html
-
-    async def restore_content(self, translated_text: str) -> str:
-        """
-        还原占位符内容.
-
-        Args:
-            translated_text: 翻译后的文本
-
-        Returns:
-            str: 还原占位符后的文本
-        """
-        result = translated_text
-        pattern = r"†(\d+)†"
-
-        for match in re.finditer(pattern, result):
-            placeholder = match.group(0)
-            if placeholder in self.placeholders:
-                result = result.replace(placeholder, self.placeholders[placeholder])
-
-        return result

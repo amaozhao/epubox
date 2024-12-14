@@ -53,7 +53,7 @@ class TestHTMLProcessor:
     async def test_replace_skip_tags_recursive(self, processor):
         """Test recursive replacement of skip tags."""
         html = "<div><script>test</script><p>Hello</p><style>css</style></div>"
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, "lxml")
         processor.replace_skip_tags_recursive(soup)
 
         # 验证skip标签被替换为占位符
@@ -68,7 +68,7 @@ class TestHTMLProcessor:
     async def test_process_node(self, processor):
         """Test node processing."""
         html = "<p>Hello World</p>"
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, "lxml")
         await processor.process_node(soup.p)
 
         # 验证节点被处理
@@ -226,7 +226,7 @@ class TestHTMLProcessor:
         result = await processor.process(html)
 
         # 验证 HTML 结构保持不变
-        soup = BeautifulSoup(result, "html.parser")
+        soup = BeautifulSoup(result, "lxml")
 
         # 检查 div 及其属性
         div = soup.find("div")
@@ -237,7 +237,7 @@ class TestHTMLProcessor:
         h1 = div.find("h1")
         assert h1 is not None
         assert h1["id"] == "title"
-        assert h1.string != "Hello World"  # 文本应该被翻译
+        assert h1.string == "你好世界"  # 验证具体的翻译结果
 
         # 检查段落及其结构
         p = div.find("p")
@@ -245,7 +245,7 @@ class TestHTMLProcessor:
         assert p["class"] == ["content"]
         em = p.find("em")
         assert em is not None
-        assert em.string != "test"  # 文本应该被翻译
+        assert em.string == "测试"  # 验证具体的翻译结果
 
         # 检查列表结构
         ul = div.find("ul")
@@ -253,6 +253,5 @@ class TestHTMLProcessor:
         assert ul["class"] == ["list"]
         lis = ul.find_all("li")
         assert len(lis) == 2
-        assert all(
-            li.string != item for li, item in zip(lis, ["First item", "Second item"])
-        )  # 文本应该被翻译
+        assert lis[0].string == "第一项"  # 验证具体的翻译结果
+        assert lis[1].string == "第二项"  # 验证具体的翻译结果
