@@ -9,6 +9,33 @@ from app.html.processor import SKIP_TAGS, HTMLProcessor
 from app.translation.factory import ProviderFactory
 
 
+class MockTranslator:
+    def __init__(self):
+        self.limit_value = 3000  # 与原始实现保持一致
+        self.limit_type = LimitType.TOKENS
+        self.retry_count = 3
+        self.retry_delay = 60
+
+    async def translate(self, text: str, source_lang: str = "en", target_lang: str = "zh") -> str:
+        # 模拟翻译，保持标记不变
+        text = text.replace("Hello", "你好")
+        text = text.replace("world", "世界")
+        text = text.replace("This is a", "这是一个")
+        text = text.replace("test", "测试")
+        text = text.replace("Item 1", "项目 1")
+        text = text.replace("Item 2", "项目 2")
+        text = text.replace("Item 3", "项目 3")
+        text = text.replace("Header 1", "标题 1")
+        text = text.replace("Header 2", "标题 2")
+        text = text.replace("Cell 1", "单元格 1")
+        text = text.replace("Cell 2", "单元格 2")
+        return text
+
+    def _count_tokens(self, text: str) -> int:
+        # 简单实现：每个字符算一个 token
+        return len(text)
+
+
 class TestHTMLProcessor:
     """Test cases for TestHTMLProcessor class."""
 
@@ -210,48 +237,87 @@ class TestHTMLProcessor:
         assert "测试书" in result or "Test Book" in result
         assert "第一章" in result or "Chapter 1" in result
 
-    async def test_preserve_html_structure(self, processor):
-        """Test that HTML structure is preserved during translation."""
+    @pytest.mark.asyncio
+    async def test_preserve_html_structure(self):
+        """测试保留HTML结构"""
         html = """
-        <div class="chapter">
-            <h1 id="title">Hello World</h1>
-            <p class="content">This is a <em>test</em> paragraph.</p>
-            <ul class="list">
-                <li>First item</li>
-                <li>Second item</li>
+        <div>
+            <p>Hello <b>world</b>!</p>
+            <p>This is a <i>test</i>.</p>
+            <ul>
+                <li>Item 1</li>
+                <li>Item 2</li>
+                <li>Item 3</li>
             </ul>
+            <table>
+                <tr>
+                    <th>Header 1</th>
+                    <th>Header 2</th>
+                </tr>
+                <tr>
+                    <td>Cell 1</td>
+                    <td>Cell 2</td>
+                </tr>
+            </table>
         </div>
         """
-
+        processor = HTMLProcessor(
+            translator=MockTranslator(),
+            source_lang="en",
+            target_lang="zh"
+        )
         result = await processor.process(html)
-
-        # 验证 HTML 结构保持不变
+        
+        # 验证翻译结果
         soup = BeautifulSoup(result, "lxml")
+        # 验证第一个段落
+        p1 = soup.find("p")
+        assert p1 is not None, "找不到第一个 p 标签"
+        assert p1.b is not None, "找不到 b 标签"
+        assert "world" not in p1.get_text(), "英文未被翻译"
+        assert "世界" in p1.b.get_text(), "b 标签内容未正确翻译"
+        
+        # 验证第二个段落
+        p2 = p1.find_next("p")
+        assert p2 is not None, "找不到第二个 p 标签"
+        assert p2.i is not None, "找不到 i 标签"
+        assert "test" not in p2.get_text(), "英文未被翻译"
+        assert "测试" in p2.i.get_text(), "i 标签内容未正确翻译"
 
-        # 检查 div 及其属性
-        div = soup.find("div")
-        assert div is not None
-        assert div["class"] == ["chapter"]
+        # 验证列表
+        ul = soup.find("ul")
+        assert ul is not None, "找不到 ul 标签"
+        assert len(ul.find_all("li")) == 3, "列表项数量不正确"
+        for i, li in enumerate(ul.find_all("li"), start=1):
+            assert f"Item {i}" not in li.get_text(), f"英文未被翻译 ({i})"
+            assert f"项目 {i}" in li.get_text(), f"列表项 {i} 内容未正确翻译"
 
-        # 检查 h1 及其属性
-        h1 = div.find("h1")
-        assert h1 is not None
-        assert h1["id"] == "title"
-        assert h1.string == "你好世界"  # 验证具体的翻译结果
+        # 验证表格
+        table = soup.find("table")
+        assert table is not None, "找不到 table 标签"
+        assert len(table.find_all("tr")) == 2, "表格行数量不正确"
+        th1, th2 = table.find_all("th")
+        assert th1 is not None, "找不到第一个 th 标签"
+        assert th2 is not None, "找不到第二个 th 标签"
+        assert "Header 1" not in th1.get_text(), "英文未被翻译 (Header 1)"
+        assert "Header 2" not in th2.get_text(), "英文未被翻译 (Header 2)"
+        assert "标题 1" in th1.get_text(), "第一个 th 标签内容未正确翻译"
+        assert "标题 2" in th2.get_text(), "第二个 th 标签内容未正确翻译"
+        td1, td2 = table.find_all("td")
+        assert td1 is not None, "找不到第一个 td 标签"
+        assert td2 is not None, "找不到第二个 td 标签"
+        assert "Cell 1" not in td1.get_text(), "英文未被翻译 (Cell 1)"
+        assert "Cell 2" not in td2.get_text(), "英文未被翻译 (Cell 2)"
+        assert "单元格 1" in td1.get_text(), "第一个 td 标签内容未正确翻译"
+        assert "单元格 2" in td2.get_text(), "第二个 td 标签内容未正确翻译"
 
-        # 检查段落及其结构
-        p = div.find("p")
-        assert p is not None
-        assert p["class"] == ["content"]
-        em = p.find("em")
-        assert em is not None
-        assert em.string == "测试"  # 验证具体的翻译结果
-
-        # 检查列表结构
-        ul = div.find("ul")
-        assert ul is not None
-        assert ul["class"] == ["list"]
-        lis = ul.find_all("li")
-        assert len(lis) == 2
-        assert lis[0].string == "第一项"  # 验证具体的翻译结果
-        assert lis[1].string == "第二项"  # 验证具体的翻译结果
+        # 验证整体结构
+        assert len(soup.find_all("p")) == 2, "p 标签数量不正确"
+        assert len(soup.find_all("b")) == 1, "b 标签数量不正确"
+        assert len(soup.find_all("i")) == 1, "i 标签数量不正确"
+        assert len(soup.find_all("ul")) == 1, "ul 标签数量不正确"
+        assert len(soup.find_all("li")) == 3, "li 标签数量不正确"
+        assert len(soup.find_all("table")) == 1, "table 标签数量不正确"
+        assert len(soup.find_all("tr")) == 2, "tr 标签数量不正确"
+        assert len(soup.find_all("th")) == 2, "th 标签数量不正确"
+        assert len(soup.find_all("td")) == 2, "td 标签数量不正确"

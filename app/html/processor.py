@@ -6,9 +6,9 @@ Handles HTML content processing and transformation.
 import copy
 import html
 import re
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag, Comment
 
 from app.core.logging import get_logger
 
@@ -178,51 +178,41 @@ class HTMLProcessor:
             nonlocal current_group, current_tokens, groups
 
             for node in nodes:
-                if isinstance(node, NavigableString) and not node.strip():
+                if isinstance(node, Comment):
+                    # 注释节点，保持原样
                     continue
+                elif isinstance(node, NavigableString):
+                    if not node.strip():
+                        continue
+                    # 处理文本节点
+                    separator = self.create_node_separator()
+                    text = f"{separator}{node}{separator}"
+                    tokens = self.translator._count_tokens(text)
 
-                # 计算当前节点的token
-                separator = self.create_node_separator()
-                content = str(node)
-                text = f"{separator}{content}{separator}"
-                tokens = self.translator._count_tokens(text)
-
-                # 如果是Tag节点且超限，递归处理其子节点
-                if isinstance(node, Tag) and tokens > self.translator.limit_value:
-                    # 先保存当前组
-                    if current_group:
-                        groups.append(current_group)
-                        current_group = []
-                        current_tokens = 0
-
-                    # 递归处理子节点
+                    if current_tokens + tokens <= self.translator.limit_value:
+                        current_group.append({
+                            "node": node,
+                            "separator": separator,
+                            "parent_tags": current_tags.copy(),
+                        })
+                        current_tokens += tokens
+                    else:
+                        if current_group:
+                            groups.append(current_group)
+                        current_group = [{
+                            "node": node,
+                            "separator": separator,
+                            "parent_tags": current_tags.copy(),
+                        }]
+                        current_tokens = tokens
+                elif isinstance(node, Tag):
+                    # 对于标签节点，递归处理其子节点
+                    if node.name in SKIP_TAGS:
+                        continue
+                        
                     current_tags.append(node.name)
                     await process_node_and_siblings(node.children, current_tags)
                     current_tags.pop()
-                    continue
-
-                # 检查是否可以加入当前组
-                if current_tokens + tokens <= self.translator.limit_value:
-                    current_group.append(
-                        {
-                            "node": node,
-                            "separator": separator,
-                            "parent_tags": current_tags.copy(),
-                        }
-                    )
-                    current_tokens += tokens
-                else:
-                    # 当前组满了，开始新组
-                    if current_group:
-                        groups.append(current_group)
-                    current_group = [
-                        {
-                            "node": node,
-                            "separator": separator,
-                            "parent_tags": current_tags.copy(),
-                        }
-                    ]
-                    current_tokens = tokens
 
         # 开始处理节点
         if isinstance(node, Tag):
@@ -239,56 +229,60 @@ class HTMLProcessor:
         return groups
 
     async def _translate_group(self, group: list) -> str:
-        """只负责翻译，返回翻译结果"""
         if not group:
             return ""
 
-        # 构造翻译文本，处理内联标签
         text_to_translate = ""
         inline_tags_map = {}
-        for item in group:
-            node_str = str(item["node"])
-            soup = BeautifulSoup(node_str, "lxml")
-            processed_content, tags = self._handle_inline_tags(node_str, soup)
-            inline_tags_map.update(tags)
-            text_to_translate += f"{item['separator']}{processed_content}{item['separator']}\n"
+        # 使用唯一的分隔符
+        for i, item in enumerate(group):
+            node = item["node"]
+            if isinstance(node, Comment):
+                # 注释节点，跳过处理
+                continue
+            elif isinstance(node, Tag):
+                processed_content, tags = self._handle_inline_tags(node)
+                inline_tags_map.update(tags)
+            else:
+                # 如果是普通文本节点，直接使用其内容
+                processed_content = str(node)
+            
+            # 使用索引作为唯一标识符
+            separator = f"‹GROUP_{i}›"
+            item["separator"] = separator  # 更新 item 的 separator
+            text_to_translate += f"{separator}{processed_content}{separator}\n"
 
-        # 翻译
+        # 调用翻译服务
         translated = await self.translator.translate(
             text_to_translate,
             source_lang=self.source_lang,
             target_lang=self.target_lang,
         )
 
-        # 还原内联标签
         return self._restore_inline_tags(translated, inline_tags_map)
 
     async def _process_translated_groups(self, groups: list) -> None:
-        """处理翻译后的分组，负责节点替换"""
+        """处理翻译后的文本组"""
         for group in groups:
             translated = await self._translate_group(group)
-            if not translated:
-                continue
-
-            # 替换节点
+            
             for item in group:
                 node = item["node"]
-                separator = item["separator"]
-                parent_tags = item["parent_tags"]
-
-                # 从翻译结果中提取对应内容
-                pattern = f"{separator}(.*?){separator}"
-                match = re.search(pattern, translated)
+                separator = item["separator"]  # 现在每个 item 都有唯一的 separator
+                
+                pattern = f"{re.escape(separator)}(.*?){re.escape(separator)}"
+                match = re.search(pattern, translated, re.DOTALL)
                 if match:
                     translated_content = match.group(1)
-
-                    # 重建HTML结构
-                    for tag in reversed(parent_tags[:-1]):  # 除了最后一个tag
-                        translated_content = f"<{tag}>{translated_content}</{tag}>"
-
-                    # 创建新节点并替换
-                    new_node = BeautifulSoup(translated_content, features="lxml").find()
-                    node.replace_with(new_node)
+                    # 如果是文本节点，直接替换
+                    if isinstance(node, NavigableString):
+                        node.replace_with(NavigableString(translated_content))
+                    else:
+                        # 如果是标签节点，更新第一个文本节点
+                        for content in node.contents:
+                            if isinstance(content, NavigableString):
+                                content.replace_with(NavigableString(translated_content))
+                                break
 
     async def process_node(self, node: Tag) -> None:
         """入口函数，处理HTML节点"""
@@ -353,18 +347,6 @@ class HTMLProcessor:
         translated_html = str(root)
         translated_html = await self.restore_content(translated_html)
 
-        # 根据不同类型的文档处理结果
-        if body and body == root:
-            # 如果是 body 节点，需要把内容放回原始的 HTML 结构中
-            body.replace_with(BeautifulSoup(translated_html, parser).body)  # type: ignore
-            translated_html = str(soup)
-        elif root.name in ["ncx", "package"]:
-            # 如果是 ncx 或 package 文档，保留原始结构
-            new_root = BeautifulSoup(translated_html, parser).find(root.name)
-            if new_root:
-                root.replace_with(new_root)
-                translated_html = str(soup)
-
         # 解除HTML转义并清理结果
         translated_html = self._clean_translation_result(html.unescape(translated_html))
         return translated_html
@@ -417,50 +399,44 @@ class HTMLProcessor:
 
         return text.strip()
 
-    def _handle_inline_tags(self, content: str, soup: BeautifulSoup) -> Tuple[str, Dict[int, Tag]]:
-        """处理内联标签，返回处理后的内容和标签映射"""
-        inline_tags = {}  # 存储 marker -> tag 的映射
+    def _handle_inline_tags(self, node: Tag) -> Tuple[str, Dict[int, Dict[str, Any]]]:
+        """处理内联标签，返回处理后的文本和标签映射"""
+        inline_tags = {}
         counter = 0
+        text_content = str(node.get_text())  # 获取纯文本内容
 
-        # 获取实际内容节点
-        content_node = soup.body or soup
-
-        # 处理所有内联标签
-        for tag in content_node.find_all(self.INLINE_TAGS):
-            # 生成开始和结束标记
+        # 收集内联标签信息但不修改原始节点
+        for tag in node.find_all(self.INLINE_TAGS):
             start_marker = f"‹{counter}›"
             end_marker = f"‹/{counter}›"
-
-            # 保存标签信息
-            inline_tags[counter] = tag
-
-            # 替换标签为标记，但保留内容
-            tag.insert_before(start_marker)
-            tag.insert_after(end_marker)
-            tag.unwrap()  # 移除标签但保留内容
-
+            # 保存标签和它的位置信息
+            inline_tags[counter] = {
+                'tag': tag,
+                'text': tag.get_text()
+            }
+            # 在文本内容中添加标记
+            text_content = text_content.replace(tag.get_text(), f"{start_marker}{tag.get_text()}{end_marker}")
             counter += 1
 
-        # 只返回实际内容部分
-        return str(content_node.decode_contents()), inline_tags
+        return text_content, inline_tags
 
-    def _restore_inline_tags(self, content: str, inline_tags: Dict[int, Tag]) -> str:
-        """还原内联标签"""
+    def _restore_inline_tags(self, content: str, inline_tags: Dict[int, Dict[str, Any]]) -> str:
+        """还原内联标签，使用原始标签"""
         # 按标记号从大到小还原，避免嵌套标记的干扰
         for i in sorted(inline_tags.keys(), reverse=True):
             start_marker = f"‹{i}›"
             end_marker = f"‹/{i}›"
-            tag = inline_tags[i]
+            tag_info = inline_tags[i]
+            original_tag = tag_info['tag']
 
             # 构建正则表达式匹配标记及其内容
             pattern = f"{re.escape(start_marker)}(.*?){re.escape(end_marker)}"
-
-            # 还原标签
+            
+            # 还原标签，直接使用原始标签
             def replace(match):
                 inner_content = match.group(1)
-                new_tag = copy.copy(tag)  # 复制原标签保留属性
-                new_tag.string = inner_content
-                return str(new_tag)
+                original_tag.string = inner_content
+                return str(original_tag)
 
             content = re.sub(pattern, replace, content, flags=re.DOTALL)
 
