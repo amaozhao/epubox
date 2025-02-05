@@ -55,7 +55,7 @@ class TestEpubProcessor:
         processor.html_contents = processor.extract_html()
         # 处理单个HTML内容
         for name, content in processor.html_contents.items():
-            translated_content = await processor.html_processor.process(content)
+            translated_content = await processor.tree_processor.process(content)
             await processor.update_content(name, translated_content)
         assert len(processor.html_contents) > 0
         assert all(len(content) > 0 for content in processor.html_contents.values())
@@ -66,7 +66,7 @@ class TestEpubProcessor:
         processor.ncxs = processor.extract_ncx()
         # 处理单个NCX内容
         for name, content in processor.ncxs.items():
-            translated_content = await processor.html_processor.process(
+            translated_content = await processor.tree_processor.process(
                 content, parser="lxml"
             )
             await processor.update_content(

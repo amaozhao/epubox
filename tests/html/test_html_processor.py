@@ -16,7 +16,9 @@ class MockTranslator:
         self.retry_count = 3
         self.retry_delay = 60
 
-    async def translate(self, text: str, source_lang: str = "en", target_lang: str = "zh") -> str:
+    async def translate(
+        self, text: str, source_lang: str = "en", target_lang: str = "zh"
+    ) -> str:
         # 模拟翻译，保持标记不变
         text = text.replace("Hello", "你好")
         text = text.replace("world", "世界")
@@ -262,12 +264,10 @@ class TestHTMLProcessor:
         </div>
         """
         processor = HTMLProcessor(
-            translator=MockTranslator(),
-            source_lang="en",
-            target_lang="zh"
+            translator=MockTranslator(), source_lang="en", target_lang="zh"
         )
         result = await processor.process(html)
-        
+
         # 验证翻译结果
         soup = BeautifulSoup(result, "lxml")
         # 验证第一个段落
@@ -276,7 +276,7 @@ class TestHTMLProcessor:
         assert p1.b is not None, "找不到 b 标签"
         assert "world" not in p1.get_text(), "英文未被翻译"
         assert "世界" in p1.b.get_text(), "b 标签内容未正确翻译"
-        
+
         # 验证第二个段落
         p2 = p1.find_next("p")
         assert p2 is not None, "找不到第二个 p 标签"

@@ -1,6 +1,7 @@
 """Mistral translation provider."""
 
 import asyncio
+import html
 
 import tiktoken
 from mistralai import Mistral, models
@@ -100,9 +101,10 @@ class MistralProvider(TranslationProvider):
         # 记录翻译结果
         logger.info(
             "Translation response",
+            # request_text=text,
             request_length=token_count,
             response_length=len(result),
-            response=result,
+            response=result[:400],
         )
 
         return result
@@ -121,8 +123,8 @@ class MistralProvider(TranslationProvider):
             # 确保距离上次请求至少有1秒
             current_time = asyncio.get_event_loop().time()
             time_since_last_request = current_time - self._last_request_time
-            if time_since_last_request < 1:
-                await asyncio.sleep(1 - time_since_last_request)
+            if time_since_last_request < 3:
+                await asyncio.sleep(3 - time_since_last_request)
 
             self.__class__._last_request_time = asyncio.get_event_loop().time()
 
