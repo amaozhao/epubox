@@ -17,7 +17,7 @@ from app.core.logging import get_logger
 from app.db.models import LimitType, TranslationProvider
 
 # from app.html.processor import HTMLProcessor
-from app.html.tree2 import TreeProcessor
+from app.html.tree import TreeProcessor
 from app.translation.factory import ProviderFactory
 
 from .utils import ensure_directory
@@ -120,10 +120,10 @@ class EpubProcessor:
         file_list = input_archive.infolist()
         epub_dict = {}
         for x in range(0, len(file_list)):
-            item = input_archive.open(file_list[x])
-            content = item.read()
-            if file_list[x].filename.endswith(".xhtml"):
+            if file_list[x].filename.endswith(".xhtml") or file_list[x].filename.endswith(".html"):
                 name = file_list[x].filename.rsplit("/")[-1]
+                item = input_archive.open(file_list[x])
+                content = item.read()
                 epub_dict[name] = content
         return epub_dict
 
@@ -134,6 +134,7 @@ class EpubProcessor:
             Dict[str, Tuple[str, int]]: 内容字典，键为文件名，值为内容和类型的元组
         """
         contents = {}
+        _contents = self.get_epub_files()
         for item in self.book.get_items():
             logger.info(f"Extracting item: {item.get_name()}, Type: {item.get_type()}")
             
@@ -141,7 +142,7 @@ class EpubProcessor:
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
                 logger.info("Found document item")
                 contents[item.get_name()] = (
-                    item.get_content().decode('utf-8'),
+                    _contents[item.get_name()].decode('utf-8'),
                     ebooklib.ITEM_DOCUMENT,
                 )
             elif item.get_type() == ebooklib.ITEM_NAVIGATION:
@@ -165,7 +166,8 @@ class EpubProcessor:
         self.work_file.parent.mkdir(parents=True, exist_ok=True)
         
         # 保存文件
-        epub.write_epub(str(self.work_file), self.book)
+        options = {'html_write_using_document_content': True}
+        epub.write_epub(str(self.work_file), self.book, options)
 
     def genarate_content(self, original_content, translated_content, parser, item_type):
         """
@@ -205,12 +207,12 @@ class EpubProcessor:
                     translated_soup = BeautifulSoup(translated_content, parser)
 
                     if item_type == ebooklib.ITEM_DOCUMENT:
-                        if translated_soup.find("body"):
-                            original_soup.find('body').replace_with(translated_soup.find("body"))
+                        if name in ('cover.xhtml', 'cover.html'):
+                            item.set_content(str(original_soup).encode())
+                            break
                         else:
-                            if name == 'cover.xhtml':
-                                item.set_content(str(original_soup).encode())
-                                break
+                            if translated_soup.find("body"):
+                                original_soup.find('body').replace_with(translated_soup.find("body"))
                             else:
                                 original_soup.find('body').replace_with(translated_soup)
                     elif item_type == ebooklib.ITEM_NAVIGATION:

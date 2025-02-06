@@ -2,26 +2,26 @@
 
 ## 1. 概述
 
-本文档描述了EPUB电子书HTML内容处理的设计方案。该方案基于HTML结构进行内容提取和分割，确保翻译内容不超过API限制的同时保持文档结构的完整性。
+本文档描述了EPUB电子书HTML内容处理的设计方案。该方案基于树结构进行内容提取和分割，确保翻译内容不超过API限制的同时保持文档结构的完整性。
 
 ## 2. 核心设计
 
 ### 2.1 基本原则
 
-1. **基于HTML结构**
-   - 使用HTML标签作为内容分割的基本单位
-   - 保持文档结构的完整性
-   - 避免破坏HTML标签的语义
+1. **基于树结构**
+   - 将HTML文档转换为树形结构进行处理
+   - 使用节点类型区分叶节点和非叶节点
+   - 保持文档结构的完整性和层次关系
 
-2. **占位符机制**
-   - 使用特殊字符组合作为占位符
-   - 确保占位符不会被翻译API误处理
-   - 维护占位符和原始内容的映射关系
+2. **翻译一致性**
+   - 维护特殊词汇的翻译映射
+   - 确保专业术语翻译的一致性
+   - 支持自定义翻译词典
 
 3. **递归处理**
-   - 从根节点开始递归处理HTML内容
-   - 优先处理需要跳过的标签，整体替换为占位符
-   - 对剩余内容进行翻译任务划分
+   - 从根节点开始递归构建树结构
+   - 合并相邻的文本节点
+   - 对叶节点进行翻译处理
 
 ## 3. 详细设计
 
@@ -33,7 +33,7 @@ SKIP_TAGS = {
     'script', 'style',
     
     # 代码相关
-    'code', 'kbd', 'var', 'samp',
+    'code', 'pre', 'kbd', 'var', 'samp',
     
     # 特殊内容
     'svg', 'math', 'canvas', 'address', 'applet',
@@ -69,90 +69,106 @@ SKIP_TAGS = {
 ```
 1. 输入HTML内容
    ↓
-2. 初始化和清理
+2. 初始化处理器
    |
-   ├── 设置最大块大小 (max_chunk_size，默认4500 tokens)
-   ├── 清理占位符计数器和映射
+   ├── 创建翻译提供者（TranslatorProvider）
+   ├── 设置源语言和目标语言
+   ├── 初始化跳过标签集合
    ↓
-3. 第一阶段：内容保护
+3. 构建树结构
    |
-   ├── 从根节点开始递归处理
-   |   ├── 对于skip标签：调用_handle_skip_tag替换为占位符
-   |   ├── 对于文本节点：调用_handle_text_node直接翻译
-   |   └── 对于其他节点：检查token数量
+   ├── 创建根节点
+   ├── 解析HTML内容（BeautifulSoup）
+   ├── 替换需要跳过的标签
+   ├── 递归遍历HTML节点
+   |   ├── 收集并合并可合并的节点
+   |   └── 构建树节点关系
    ↓
-4. 第二阶段：内容翻译
+4. 翻译处理
    |
-   ├── 检查节点大小
-   |   ├── 如果小于等于max_chunk_size：直接翻译整个节点
-   |   └── 如果大于max_chunk_size：
-   |       ├── 收集子节点信息
-   |       └── 递归处理子节点组
+   ├── 递归遍历树节点
+   |   ├── 对叶节点进行翻译
+   |   └── 保持非叶节点的结构
    ↓
-5. 还原占位符内容
+5. 重建HTML内容
    |
-   ├── 清理翻译结果中的额外文本（如"翻译："等前缀）
-   ├── 使用正则表达式匹配占位符
-   └── 替换为原始内容
+   ├── 递归处理树节点
+   ├── 还原HTML结构
+   └── 输出处理后的内容
 ```
-
-### 3.3 节点处理策略
-
-1. **Skip标签处理**
-   - 直接替换为占位符
-   - 保留原始内容以供还原
-
-2. **文本节点处理**
-   - 直接调用翻译API
-   - 保持文本节点的独立性
-
-3. **普通节点处理**
-   - 检查节点的token数量
-   - 如果在限制范围内，保持节点完整性，直接翻译
-   - 如果超出限制，才拆分处理子节点
-
-4. **子节点组处理**
-   - 收集所有子节点信息
-   - 尝试合并处理符合大小限制的子节点
-   - 对超出限制的子节点递归处理
 
 ### 3.3 核心组件
 
-#### 3.3.1 HTMLProcessor 类
+#### 3.3.1 TreeNode 类
+
+表示树结构中的节点：
+
+```python
+class TreeNode:
+    def __init__(self, node_type: str, content: str, token_count: int, parent: Optional['TreeNode'] = None):
+        self.node_type: str = node_type  # 节点类型：leaf 或 non-leaf
+        self.content: str = content      # 节点内容
+        self.token_count: int = token_count  # token 数量
+        self.parent: Optional[TreeNode] = parent  # 父节点
+        self.children: list[TreeNode] = []  # 子节点列表
+        self.translated: Optional[str] = None  # 翻译后的内容
+```
+
+#### 3.3.2 TranslatorProvider 类
+
+提供翻译服务和词汇映射：
+
+```python
+class TranslatorProvider:
+    def __init__(self, limit_value):
+        self.limit_value = limit_value
+        self.translations = {
+            # 预定义的翻译映射
+            "Preface": "前言",
+            "Chapter": "章节",
+            # ... 更多映射
+        }
+    
+    async def translate(self, content: str, source_lang: str, target_lang: str) -> str:
+        # 实现翻译逻辑
+        pass
+```
+
+#### 3.3.3 TreeProcessor 类
+
+处理HTML内容的主要类：
 
 主要方法：
-- `process(html_content, parser="html.parser")`: 处理HTML内容
-- `replace_skip_tags_recursive(node)`: 递归处理和替换skip标签
-- `create_placeholder(content)`: 创建占位符
-- `process_node(node)`: 递归处理待翻译内容
-- `restore_content(translated_text)`: 还原占位符内容
-
-内部方法：
-- `_handle_skip_tag(node)`: 处理需要跳过的标签
-- `_handle_text_node(node)`: 处理纯文本节点
-- `_translate_node_directly(node, content)`: 直接翻译整个节点
-- `_collect_child_info(node)`: 收集节点的子节点信息
-- `_process_child_groups(child_info)`: 处理子节点分组
-- `_translate_group(nodes)`: 翻译节点组
+- `process(content: str, parser='html.parser')`: 处理HTML内容
+- `_traverse(node, parent: Optional[TreeNode])`: 递归遍历节点
+- `_collect_mergeable_nodes(node)`: 收集可合并的节点
+- `_translate_nodes(node: TreeNode)`: 翻译节点
+- `restore_html(node: TreeNode, parser: str)`: 重建HTML内容
 
 ## 4. 数据结构
 
-### 4.1 翻译任务结构
+### 4.1 树节点结构
 
 ```python
 {
-    'content': str,  # 需要翻译的内容
-    'node': NavigableString  # 对应的文本节点
+    'node_type': str,      # 节点类型（'leaf' 或 'non-leaf'）
+    'content': str,        # 节点内容
+    'token_count': int,    # token 数量
+    'parent': TreeNode,    # 父节点引用
+    'children': list,      # 子节点列表
+    'translated': str      # 翻译后的内容（仅叶节点）
 }
 ```
 
-### 4.2 占位符映射结构
+### 4.2 翻译映射结构
 
 ```python
 {
-    '†0†': '原始内容1',
-    '†1†': '原始内容2',
-    ...
+    'Preface': '前言',
+    'Chapter': '章节',
+    'FastAPI': 'FastAPI',
+    'Python': 'Python',
+    # ... 更多映射
 }
 ```
 
@@ -164,50 +180,40 @@ SKIP_TAGS = {
    - 支持多种HTML解析器（html.parser, lxml）
 
 2. **节点处理**
-   - 正确识别和处理不同类型的节点（Tag, NavigableString）
-   - 维护节点的父子关系
-   - 确保节点替换操作的安全性
+   - 正确识别和处理不同类型的节点
+   - 维护树结构的完整性
+   - 确保节点关系的正确性
 
-3. **翻译结果处理**
-   - 清理翻译结果中的额外文本
-   - 处理翻译API返回的HTML转义字符
-   - 处理节点数量不匹配的情况
-
-4. **大小控制**
-   - 准确计算节点的token数量
-   - 确保不超过翻译API的限制
-   - 合理拆分过大的节点
+3. **翻译处理**
+   - 处理翻译失败的情况
+   - 保持专业术语的一致性
+   - 处理特殊字符和HTML实体
 
 ## 6. 性能考虑
 
-1. **节点处理策略**
-   - 优先处理整体节点，减少不必要的拆分
-   - 只在节点超过限制时才进行递归处理
-   - 避免过度分割导致的上下文丢失
+1. **树结构优化**
+   - 合理合并相邻文本节点
+   - 避免过度分割树结构
+   - 优化节点存储和访问
 
 2. **翻译优化**
-   - 使用信号量控制并发翻译请求
-   - 减少不必要的API调用
-   - 保持翻译块的合理大小
+   - 使用预定义的翻译映射
+   - 避免重复翻译相同内容
+   - 优化token计算方法
 
 3. **内存管理**
    - 及时清理不需要的节点
-   - 优化占位符存储结构
-   - 避免重复创建BeautifulSoup对象
+   - 优化树结构的内存占用
+   - 避免创建过多的临时对象
 
 ## 7. 限制和约束
 
 1. **HTML兼容性**
    - 支持标准HTML5标签
-   - 处理EPUB特有标签
-   - 支持多种HTML解析器
+   - 保持EPUB特有标签的处理
+   - 确保输出的HTML有效性
 
 2. **翻译限制**
-   - 单个翻译块不超过max_chunk_size（默认4500 tokens）
-   - 保持HTML标签的完整性
-   - 维护文档结构的层次关系
-
-3. **占位符处理**
-   - 使用特殊字符组合（†数字†）作为占位符
-   - 确保占位符不会被翻译API误处理
-   - 维护占位符和原始内容的映射关系
+   - 遵守翻译API的限制
+   - 保持专业术语的准确性
+   - 维护文档的可读性

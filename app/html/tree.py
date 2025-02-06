@@ -151,7 +151,7 @@ class TreeProcessor:
         self.translator = translator
         self.source_lang = source_lang
         self.target_lang = target_lang
-        self.skip_tags = {'script', 'style', 'code', 'pre'}  # 跳过这些标签的内容
+        self.skip_tags = {'script', 'style', 'code', 'pre', 'link'}  # 跳过这些标签的内容
         self.placeholder_counter = 0  # 占位符计数器
         self.root = None
         self.soup = None
@@ -163,6 +163,7 @@ class TreeProcessor:
         Args:
             content: HTML内容字符串
         """
+        print("原始内容：", content[:200])  # 输出原始内容
         self.root = TreeNode(node_type='root', content=content, token_count=0)
         self.soup = BeautifulSoup(content, parser)
         self.replace_skip_tags_recursive(self.soup)
@@ -176,6 +177,10 @@ class TreeProcessor:
         
         # 翻译所有叶节点
         await self._translate_nodes(self.root)
+        
+        # 输出处理后的内容
+        result = self.restore_html(self.root, parser)
+        print("处理后内容：", result[:200])
 
     async def _traverse(self, node, parent: Optional[TreeNode] = None) -> None:
         """递归遍历 HTML 节点，合并和处理文本节点。"""
@@ -225,10 +230,23 @@ class TreeProcessor:
                 if text:
                     # 先计算单个节点的 token 数
                     tokens = self.translator._count_tokens(text)
-                    all_text_nodes.append((text, tokens))
+                    # 获取父节点的标签名和属性
+                    parent_tag = node.parent
+                    if parent_tag and isinstance(parent_tag, Tag):
+                        # 创建一个新的标签包含文本
+                        new_tag = self.soup.new_tag(parent_tag.name, **parent_tag.attrs)
+                        new_tag.string = text
+                        all_text_nodes.append((str(new_tag), tokens))
+                    else:
+                        all_text_nodes.append((text, tokens))
             elif isinstance(node, Tag):
-                for child in node.children:
-                    collect_text(child)
+                if node.name in self.skip_tags:
+                    # 如果是需要跳过的标签，保存整个标签
+                    all_text_nodes.append((str(node), 0))
+                else:
+                    # 否则递归处理子节点
+                    for child in node.children:
+                        collect_text(child)
         
         collect_text(node)
         
@@ -240,6 +258,19 @@ class TreeProcessor:
         current_tokens = 0
         
         for text, tokens in all_text_nodes:
+            # 如果是需要跳过的标签，直接添加
+            if any(f"<{tag}" in text for tag in self.skip_tags):
+                if current_texts:
+                    # 保存当前累积的节点
+                    merged_text = ' '.join(current_texts)
+                    result.append((merged_text, current_tokens))
+                    # 重置状态
+                    current_texts = []
+                    current_tokens = 0
+                # 添加标签内容
+                result.append((text, 0))
+                continue
+            
             # 先检查合并后是否会超过限制
             test_tokens = self.translator._count_tokens(' '.join(current_texts + [text]))
             
@@ -270,6 +301,8 @@ class TreeProcessor:
             return
             
         if node.node_type == 'leaf':
+            print(f"\n节点类型: {node.node_type}")
+            print(f"原始内容: {node.content}")
             translated = await self.translator.translate(
                 node.content,
                 source_lang=self.source_lang,
@@ -277,6 +310,8 @@ class TreeProcessor:
             )
             translated = self._clean_translation_result(translated)
             node.translated = translated
+            print(f"翻译内容: {node.translated}")
+            print("-" * 50)
         else:
             for child in node.children:
                 await self._translate_nodes(child)
@@ -297,7 +332,7 @@ class TreeProcessor:
                     self.replace_skip_tags_recursive(child)
 
     def _generate_placeholder(self, node: Tag) -> str:
-        """生成占位符，并存储占位符到原始内容的映射。
+        """生成占位符，并存储占位符到原始内容的映射.
         
         Args:
             node: 需要替换的标签
