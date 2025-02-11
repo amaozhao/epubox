@@ -3,6 +3,7 @@
 import asyncio
 import json
 import random
+import re
 import time
 from typing import Optional
 
@@ -140,7 +141,7 @@ class DeepLProvider(TranslationProvider):
 
             result = response.json()
             try:
-                translated_text = result["result"]["texts"][0]["text"]
+                translated_text = result["result"]["translations"][0]["text"]
             except (KeyError, IndexError) as e:
                 logger.error(
                     "Invalid response format from DeepL",
@@ -148,6 +149,10 @@ class DeepLProvider(TranslationProvider):
                     response=result,
                 )
                 raise TranslationError(f"Invalid response format from DeepL: {result}")
+
+            # 还原占位符的格式
+            translated_text = re.sub(r"‹(\d+)›", r"{\1}", translated_text)
+            translated_text = re.sub(r"{{(.*?)}}", r"{\1}", translated_text)
 
             logger.info(
                 "Translation successful",

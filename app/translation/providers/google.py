@@ -78,9 +78,7 @@ class GoogleProvider(TranslationProvider):
             response.raise_for_status()
             result = response.json()
 
-            translated_text = "".join(
-                [sentence.get("trans", "") for sentence in result["sentences"]]
-            )
+            translated_text = result["target"]
 
             # 清理文本
             translated_text = re.sub(r"\n{3,}", "\n\n", translated_text)

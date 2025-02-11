@@ -4,12 +4,12 @@ Handles the core EPUB processing functionality.
 """
 
 import shutil
+import zipfile
 from pathlib import Path
 from typing import Dict, Tuple
-import zipfile
 
-from bs4 import BeautifulSoup
 import ebooklib
+from bs4 import BeautifulSoup
 from ebooklib import epub
 
 from app.core.config import settings
@@ -120,7 +120,9 @@ class EpubProcessor:
         file_list = input_archive.infolist()
         epub_dict = {}
         for x in range(0, len(file_list)):
-            if file_list[x].filename.endswith(".xhtml") or file_list[x].filename.endswith(".html"):
+            if file_list[x].filename.endswith(".xhtml") or file_list[
+                x
+            ].filename.endswith(".html"):
                 name = file_list[x].filename.rsplit("/")[-1]
                 item = input_archive.open(file_list[x])
                 content = item.read()
@@ -137,21 +139,21 @@ class EpubProcessor:
         _contents = self.get_epub_files()
         for item in self.book.get_items():
             logger.info(f"Extracting item: {item.get_name()}, Type: {item.get_type()}")
-            
+
             # 检查是否是文档或导航
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
                 logger.info("Found document item")
                 contents[item.get_name()] = (
-                    _contents[item.get_name()].decode('utf-8'),
+                    _contents[item.get_name()].decode("utf-8"),
                     ebooklib.ITEM_DOCUMENT,
                 )
             elif item.get_type() == ebooklib.ITEM_NAVIGATION:
                 logger.info("Found navigation item")
                 contents[item.get_name()] = (
-                    item.get_content().decode('utf-8'),
+                    item.get_content().decode("utf-8"),
                     ebooklib.ITEM_NAVIGATION,
                 )
-        
+
         return contents
 
     def save_epub(self) -> None:
@@ -161,12 +163,12 @@ class EpubProcessor:
             # if item.get_type() == ebooklib.ITEM_DOCUMENT:
             #     content = item.get_content().decode('utf-8')
             #     logger.info(f"Content preview: {content[:200]}")
-        
+
         # 确保工作目录存在
         self.work_file.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # 保存文件
-        options = {'html_write_using_document_content': True}
+        options = {"html_write_using_document_content": True}
         epub.write_epub(str(self.work_file), self.book, options)
 
     def genarate_content(self, original_content, translated_content, parser, item_type):
@@ -207,21 +209,27 @@ class EpubProcessor:
                     translated_soup = BeautifulSoup(translated_content, parser)
 
                     if item_type == ebooklib.ITEM_DOCUMENT:
-                        if name in ('cover.xhtml', 'cover.html'):
+                        if name in ("cover.xhtml", "cover.html"):
                             item.set_content(str(original_soup).encode())
                             break
                         else:
                             if translated_soup.find("body"):
-                                original_soup.find('body').replace_with(translated_soup.find("body"))
+                                original_soup.find("body").replace_with(
+                                    translated_soup.find("body")
+                                )
                             else:
-                                original_soup.find('body').replace_with(translated_soup)
+                                original_soup.find("body").replace_with(translated_soup)
                     elif item_type == ebooklib.ITEM_NAVIGATION:
                         if translated_soup.find("ncx"):
-                            original_soup.find('ncx').replace_with(translated_soup.find("ncx"))
+                            original_soup.find("ncx").replace_with(
+                                translated_soup.find("ncx")
+                            )
                         elif translated_soup.find("package"):
-                            original_soup.find('package').replace_with(translated_soup.find("package"))
+                            original_soup.find("package").replace_with(
+                                translated_soup.find("package")
+                            )
                         else:
-                            original_soup.find('ncx').replace_with(translated_soup)
+                            original_soup.find("ncx").replace_with(translated_soup)
 
                     # 将处理后的内容设置回项目
                     item.set_content(str(original_soup).encode())
@@ -254,10 +262,10 @@ class EpubProcessor:
         """处理 EPUB 文件。"""
         logger.info("开始处理 EPUB 文件...")
         await self.prepare()
-        
+
         # 提取需要处理的内容
         contents = self.extract()
-        
+
         # 处理每个文档项
         for name, (content, item_type) in contents.items():
             # 创建处理器
@@ -266,11 +274,11 @@ class EpubProcessor:
                 self.source_lang,
                 self.target_lang,
             )
-            
+
             # 处理内容
             await processor.process(content)
             translated = processor.restore_html(processor.root)
-            
+
             # 更新内容
             await self.update_content(
                 name,
@@ -278,13 +286,13 @@ class EpubProcessor:
                 translated,
                 item_type,
             )
-            
+
             # 检查更新后的内容
             for item in self.book.get_items():
                 if item.get_name() == name:
-                    updated_content = item.get_content().decode('utf-8')
+                    updated_content = item.get_content().decode("utf-8")
                     break
-            
+
             # 保存文件
             self.save_epub()
             logger.info(f"保存文件: {name}")

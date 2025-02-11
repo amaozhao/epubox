@@ -72,6 +72,7 @@ class MistralProvider(TranslationProvider):
             "1. Keep ALL HTML tags unchanged\n"
             "2. Only translate text between tags\n"
             "3. DO NOT translate or modify these special markers:\n"
+            "   - Placeholder markers: {1}, {2}, {3}, etc.\n"
             "   - Inline tag markers: ‹1›, ‹/1›, ‹2›, ‹/2›, etc.\n"
             "   - Skip tag placeholders: †1†, †2†, etc.\n"
             "4. Return ONLY the translated HTML\n\n"

@@ -7,8 +7,9 @@ import html
 import re
 from typing import Any, Dict, Tuple
 
-from app.core.logging import get_logger
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+
+from app.core.logging import get_logger
 
 log = get_logger(__name__)
 

@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import re
+import sre_compile
 from typing import Optional
 
 import httpx
@@ -101,10 +103,8 @@ class CaiyunProvider(TranslationProvider):
 
             translated_text = result["target"]
 
-            # 处理多行文本的特殊情况
-            text_lines = text.splitlines()
-            if len(text_lines) > 1 and text_lines[0].isdigit():
-                translated_text = text_lines[0] + "\n" + translated_text
+            # 还原占位符的格式
+            translated_text = re.sub(r"‹(\d+)›", r"{\1}", translated_text)
 
             logger.info(
                 "Translation successful",

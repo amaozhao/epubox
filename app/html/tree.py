@@ -1,8 +1,8 @@
 import asyncio
-import html
-from bs4 import BeautifulSoup, Tag, NavigableString, Comment
+import re
 from typing import Optional
 
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 # 不需要翻译的标签集合
 SKIP_TAGS = {
@@ -85,15 +85,15 @@ class TranslatorProvider:
             "ORM": "ORM",
             "CRUD": "增删改查",
             "LLM": "大语言模型",
-            "RAG": "检索增强生成"
+            "RAG": "检索增强生成",
         }
 
     def _count_tokens(self, content: str) -> int:
         """计算文本的token数量，这里使用简单的空格分词。
-        
+
         Args:
             content: 要计算的文本内容
-            
+
         Returns:
             token数量
         """
@@ -101,22 +101,22 @@ class TranslatorProvider:
 
     async def translate(self, content: str, source_lang: str, target_lang: str) -> str:
         """翻译文本内容。
-        
+
         Args:
             content: 要翻译的文本
             source_lang: 源语言
             target_lang: 目标语言
-            
+
         Returns:
             翻译后的文本
         """
         tokens = self._count_tokens(content)
-        
+
         # 保持特殊词汇的翻译一致性
         result = content
         for en, zh in self.translations.items():
             result = result.replace(en, zh)
-            
+
         # 将剩余的英文转换为中文（这里用大写模拟翻译效果）
         if result == content:  # 如果没有特殊词汇匹配，才进行通用翻译
             result = content.upper()
@@ -125,22 +125,33 @@ class TranslatorProvider:
 
 
 class TreeNode:
-    def __init__(self, node_type: str, content: str, token_count: int, parent: Optional['TreeNode'] = None):
+    def __init__(
+        self,
+        node_type: str,
+        content: str,
+        token_count: int,
+        parent: Optional["TreeNode"] = None,
+    ):
         self.node_type: str = node_type  # 节点类型：leaf 或 non-leaf
         self.content: str = content  # 节点内容
         self.token_count: int = token_count  # token 数量
         self.parent: Optional[TreeNode] = parent  # 父节点
         self.children: list[TreeNode] = []  # 子节点列表
         self.translated: Optional[str] = None  # 翻译后的内容，仅叶节点使用
-        
-    def add_child(self, child: 'TreeNode'):
+
+    def add_child(self, child: "TreeNode"):
         """添加子节点"""
         self.children.append(child)
         child.parent = self
 
 
 class TreeProcessor:
-    def __init__(self, translator: TranslatorProvider, source_lang: str = "en", target_lang: str = "zh"):
+    def __init__(
+        self,
+        translator: TranslatorProvider,
+        source_lang: str = "en",
+        target_lang: str = "zh",
+    ):
         """初始化树处理器。
 
         Args:
@@ -151,162 +162,131 @@ class TreeProcessor:
         self.translator = translator
         self.source_lang = source_lang
         self.target_lang = target_lang
-        self.skip_tags = {'script', 'style', 'code', 'pre', 'link'}  # 跳过这些标签的内容
+        self.skip_tags = {
+            "script",
+            "style",
+            "code",
+            "pre",
+            "link",
+        }  # 跳过这些标签的内容
         self.placeholder_counter = 0  # 占位符计数器
         self.root = None
         self.soup = None
-        self.placeholders = {}
+        self.placeholders = {}  # 存储占位符到原始内容的映射，键是占位符字符串（如 {1}）
 
-    async def process(self, content: str, parser='html.parser') -> None:
+    async def process(self, content: str, parser="html.parser") -> str:
         """处理HTML内容。
-        
+
         Args:
             content: HTML内容字符串
-        """
-        print("原始内容：", content[:200])  # 输出原始内容
-        self.root = TreeNode(node_type='root', content=content, token_count=0)
-        self.soup = BeautifulSoup(content, parser)
-        self.replace_skip_tags_recursive(self.soup)
-        
-        # 根据解析器类型找到根标签
-        body = self.soup.find('body')
-        root_tag = body if body else self.soup
-        
-        # 递归处理所有节点
-        await self._traverse(root_tag, self.root)
-        
-        # 翻译所有叶节点
-        await self._translate_nodes(self.root)
-        
-        # 输出处理后的内容
-        result = self.restore_html(self.root, parser)
-        print("处理后内容：", result[:200])
+            parser: HTML解析器类型
 
-    async def _traverse(self, node, parent: Optional[TreeNode] = None) -> None:
-        """递归遍历 HTML 节点，合并和处理文本节点。"""
-        if isinstance(node, str):
+        Returns:
+            处理后的HTML内容字符串
+        """
+        # 重置状态
+        self.reset_state()
+
+        # 解析HTML
+        self.soup = BeautifulSoup(content, parser)
+
+        # 创建根节点
+        self.root = TreeNode("root", str(self.soup), 0)
+
+        # 处理body标签内的内容
+        body = self.soup.find("body")
+        if body:
+            # 递归替换不可翻译标签
+            self.replace_skip_tags_recursive(body)
+            # 构建树结构
+            await self._traverse(body, self.root)
+            # 翻译叶子节点
+            await self._translate_nodes(self.root)
+            # 重建HTML并还原占位符
+            result = self.restore_html(self.root, parser)
+            return self.restore_content(result)
+        return content
+
+    def reset_state(self) -> None:
+        """重置处理器状态，清除所有占位符和计数器。"""
+        print(f"重置状态：清除 {len(self.placeholders)} 个占位符")
+        self.placeholder_counter = 0
+        self.placeholders.clear()
+        self.root = None
+        self.soup = None
+
+    async def _traverse(self, node: Tag, parent: TreeNode) -> None:
+        """
+        递归遍历HTML节点，构建树结构
+        """
+        # 如果是注释节点，直接跳过
+        if isinstance(node, Comment):
             return
 
-        # 收集并合并当前节点下的所有文本
-        merged_nodes = self._collect_mergeable_nodes(node)
-        
-        if merged_nodes:
-            for text, tokens in merged_nodes:
-                leaf = TreeNode(
-                    node_type='leaf',
-                    content=text,
-                    token_count=tokens,
-                    parent=parent
-                )
-                parent.add_child(leaf)
-        else:
-            # 如果没有文本节点，继续处理子节点
-            for child in node.children:
-                if isinstance(child, Tag):
-                    child_node = TreeNode(
-                        node_type='non-leaf',
-                        content=str(child),
-                        token_count=len(str(child)),
-                        parent=parent
-                    )
-                    parent.add_child(child_node)
-                    await self._traverse(child, child_node)
+        # 如果是文本节点，直接返回，因为我们只处理完整的标签
+        if isinstance(node, NavigableString):
+            return
 
-    def _collect_mergeable_nodes(self, node) -> list[tuple[str, int]]:
-        """收集并合并文本节点，确保最大化合并同时不超过token限制。
-        
-        Args:
-            node: 当前节点
-            
-        Returns:
-            list of (text, tokens) tuples，每个tuple的tokens都不超过limit_value
-        """
-        # 先收集所有文本节点
-        all_text_nodes = []
-        
-        def collect_text(node) -> None:
-            if isinstance(node, NavigableString) and not isinstance(node, Comment):
-                text = str(node).strip()
-                if text:
-                    # 先计算单个节点的 token 数
-                    tokens = self.translator._count_tokens(text)
-                    # 获取父节点的标签名和属性
-                    parent_tag = node.parent
-                    if parent_tag and isinstance(parent_tag, Tag):
-                        # 创建一个新的标签包含文本
-                        new_tag = self.soup.new_tag(parent_tag.name, **parent_tag.attrs)
-                        new_tag.string = text
-                        all_text_nodes.append((str(new_tag), tokens))
-                    else:
-                        all_text_nodes.append((text, tokens))
-            elif isinstance(node, Tag):
-                if node.name in self.skip_tags:
-                    # 如果是需要跳过的标签，保存整个标签
-                    all_text_nodes.append((str(node), 0))
-                else:
-                    # 否则递归处理子节点
-                    for child in node.children:
-                        collect_text(child)
-        
-        collect_text(node)
-        
-        if not all_text_nodes:
-            return []
-            
-        result = []
-        current_texts = []
-        current_tokens = 0
-        
-        for text, tokens in all_text_nodes:
-            # 如果是需要跳过的标签，直接添加
-            if any(f"<{tag}" in text for tag in self.skip_tags):
-                if current_texts:
-                    # 保存当前累积的节点
-                    merged_text = ' '.join(current_texts)
-                    result.append((merged_text, current_tokens))
-                    # 重置状态
-                    current_texts = []
-                    current_tokens = 0
-                # 添加标签内容
-                result.append((text, 0))
-                continue
-            
-            # 先检查合并后是否会超过限制
-            test_tokens = self.translator._count_tokens(' '.join(current_texts + [text]))
-            
-            if test_tokens > self.translator.limit_value:
-                if current_texts:
-                    # 保存当前累积的节点
-                    merged_text = ' '.join(current_texts)
-                    result.append((merged_text, current_tokens))
-                    # 重置状态
-                    current_texts = [text]
-                    current_tokens = tokens
-            else:
-                # 可以安全合并
-                current_texts.append(text)
-                current_tokens = test_tokens
-        
-        # 处理剩余节点
-        if current_texts:
-            merged_text = ' '.join(current_texts)
-            final_tokens = self.translator._count_tokens(merged_text)
-            result.append((merged_text, final_tokens))
-        
-        return result
+        # 获取当前节点的完整HTML内容
+        current_html = str(node)
+        current_tokens = self.translator._count_tokens(current_html)
+
+        # 如果当前节点的token数量已经超过限制，需要递归处理它的子节点
+        if current_tokens > self.translator.limit_value:
+            # 创建非叶子节点
+            attrs = (
+                "".join([f' {k}="{v}"' for k, v in node.attrs.items()])
+                if hasattr(node, "attrs")
+                else ""
+            )
+            current = TreeNode(
+                node_type="non-leaf",
+                content=f"<{node.name}{attrs}>",
+                token_count=0,
+                parent=parent,
+            )
+            parent.add_child(current)
+
+            # 递归处理所有子节点
+            for child in node.contents:
+                await self._traverse(child, current)
+
+            # 添加结束标签
+            current.content += f"</{node.name}>"
+            return
+
+        # 尝试和前一个叶子节点合并
+        if parent.children and parent.children[-1].node_type == "leaf":
+            last_leaf = parent.children[-1]
+            merged_html = last_leaf.content + current_html
+            merged_tokens = self.translator._count_tokens(merged_html)
+
+            if merged_tokens <= self.translator.limit_value:
+                # 可以合并
+                last_leaf.content = merged_html
+                last_leaf.token_count = merged_tokens
+                return
+
+        # 不能合并，创建新的叶子节点
+        leaf = TreeNode(
+            node_type="leaf",
+            content=current_html,
+            token_count=current_tokens,
+            parent=parent,
+        )
+        parent.add_child(leaf)
 
     async def _translate_nodes(self, node: TreeNode) -> None:
         """递归翻译所有叶节点。"""
         if not node:
             return
-            
-        if node.node_type == 'leaf':
+
+        if node.node_type == "leaf":
             print(f"\n节点类型: {node.node_type}")
             print(f"原始内容: {node.content}")
+            print(f"Token数量: {node.token_count}")
             translated = await self.translator.translate(
-                node.content,
-                source_lang=self.source_lang,
-                target_lang=self.target_lang
+                node.content, source_lang=self.source_lang, target_lang=self.target_lang
             )
             translated = self._clean_translation_result(translated)
             node.translated = translated
@@ -316,6 +296,98 @@ class TreeProcessor:
             for child in node.children:
                 await self._translate_nodes(child)
 
+    def _extract_content(self, html_str: str, parser="html.parser") -> str:
+        """提取HTML字符串中的实际内容，去除外层标签。"""
+        if not html_str:
+            return ""
+        soup = BeautifulSoup(html_str, parser)
+        body = soup.find("body")
+        if body:
+            return "".join(str(child) for child in body.contents)
+        return html_str
+
+    def _merge_contents(self, tag: Tag, content: str, parser="html.parser") -> None:
+        """安全地合并内容到标签中。"""
+        if not content.strip():
+            return
+        new_soup = BeautifulSoup(content, parser)
+        if new_soup.contents:
+            tag.extend(new_soup.contents)
+
+    def restore_html(self, node: TreeNode, parser="html.parser") -> str:
+        """重建HTML内容。"""
+        if not node:
+            return ""
+
+        # 处理叶子节点
+        if node.node_type == "leaf":
+            content = node.translated if node.translated else node.content
+            # 在叶子节点级别就进行占位符还原
+            return self.restore_content(content)
+
+        # 收集子节点内容
+        contents = []
+        for child in node.children:
+            content = self.restore_html(child, parser)
+            if content.strip():
+                contents.append(self._extract_content(content))
+
+        merged_content = "".join(contents)
+
+        # 处理根节点
+        if node.node_type == "root":
+            soup = self.soup
+            if merged_content:
+                body = soup.find("body")
+                if body:
+                    body.clear()
+                    self._merge_contents(body, merged_content, parser)
+            return str(soup)
+
+        # 处理普通节点
+        if not node.content:
+            return merged_content
+
+        # 处理有标签的节点
+        if merged_content:
+            soup = BeautifulSoup(node.content, parser)
+            tag = soup.find()
+            if tag:
+                tag.clear()
+                self._merge_contents(tag, merged_content, parser)
+                return str(tag)
+
+        return node.content
+
+    def _update_node_content(self, tag: Tag, node: TreeNode) -> None:
+        """更新标签内容。
+
+        Args:
+            tag: BeautifulSoup标签
+            node: TreeNode节点
+        """
+        if not node.children:
+            return
+
+        # 保存原始属性
+        original_attrs = dict(tag.attrs) if hasattr(tag, "attrs") else {}
+
+        # 清空标签内容
+        tag.clear()
+
+        # 恢复属性
+        tag.attrs.update(original_attrs)
+
+        # 添加所有子节点的内容
+        for child in node.children:
+            content = self.restore_html(child, "html.parser")
+            if content.strip():
+                # 解析子节点的HTML内容
+                child_soup = BeautifulSoup(content, "html.parser")
+                # 将子节点的内容添加到父节点
+                for element in child_soup.contents:
+                    tag.append(element)
+
     def replace_skip_tags_recursive(self, node: Tag) -> None:
         """
         递归替换HTML中的不可翻译标签为占位符.
@@ -323,7 +395,7 @@ class TreeProcessor:
         Args:
             node: 当前处理的节点
         """
-        for child in list(node.children):
+        for child in list(node.contents):
             if isinstance(child, Tag):
                 if child.name in SKIP_TAGS:
                     placeholder = self._generate_placeholder(child)
@@ -333,17 +405,55 @@ class TreeProcessor:
 
     def _generate_placeholder(self, node: Tag) -> str:
         """生成占位符，并存储占位符到原始内容的映射.
-        
+
         Args:
             node: 需要替换的标签
-            
+
         Returns:
             占位符字符串
         """
+        self.placeholder_counter += 1
         placeholder = f"{{{self.placeholder_counter}}}"
         self.placeholders[placeholder] = str(node)
-        self.placeholder_counter += 1
+        print(f"生成占位符：{placeholder} -> {node.name} 标签")
         return placeholder
+
+    def restore_content(self, content: str) -> str:
+        """
+        还原占位符内容，保留原始的 HTML 标签。
+
+        Args:
+            content: 包含占位符的内容
+
+        Returns:
+            str: 还原后的内容
+        """
+        if not content:
+            return content
+
+        # 使用正则表达式替换所有占位符
+        def replace_placeholder(match):
+            placeholder = match.group(0)  # 获取完整的占位符
+            if placeholder not in self.placeholders:
+                print(f"警告：找不到占位符 {placeholder} 的原始内容")
+                return placeholder
+            print(f"还原占位符：{placeholder}")
+            return self.placeholders[placeholder]
+
+        # 循环替换直到没有更多占位符
+        prev_content = None
+        result = content
+        while prev_content != result:
+            prev_content = result
+            result = re.sub(r"\{(\d+)\}", replace_placeholder, result)
+
+        remaining_placeholders = re.findall(r"\{(\d+)\}", result)
+        if remaining_placeholders:
+            print(
+                f"警告：还有 {len(remaining_placeholders)} 个占位符未被还原：{remaining_placeholders}"
+            )
+
+        return result
 
     def _clean_translation_result(self, text: str) -> str:
         """清理翻译结果中的代码标记.
@@ -354,6 +464,9 @@ class TreeProcessor:
         Returns:
             清理后的文本
         """
+        if not text:
+            return text
+
         text = text.strip()
         # 处理开头的代码块标记
         # 可能的格式：```html、```xml、```、等
@@ -373,102 +486,21 @@ class TreeProcessor:
 
         return text.strip()
 
-    def restore_html(self, node: TreeNode, parser='html.parser') -> str:
-        """根据树结构恢复HTML。
-        
-        Args:
-            node: 树节点
-            parser: HTML解析器类型
-            
-        Returns:
-            恢复后的HTML内容
-        """
-        if not node:
-            return ""
-        
-        # 如果是根节点，直接使用原始内容作为模板
-        if node.node_type == 'root':
-            soup = BeautifulSoup(node.content, parser)
-            root_tag = soup.find('body') if soup.find('body') else soup
-            
-            # 递归更新每个标签的文本内容
-            self._update_node_content(root_tag, node, parser)
-            return html.unescape(str(soup))
-            
-        # 处理叶节点
-        if node.node_type == 'leaf':
-            content = node.translated if node.translated else node.content
-            return self.restore_content(content)
-            
-        # 处理非叶节点
-        soup = BeautifulSoup(node.content, parser)
-        top_tag = soup.find()  # 获取第一个标签
-        if not top_tag:
-            return node.content
-            
-        # 递归更新标签内容
-        self._update_node_content(top_tag, node, parser)
-        return str(soup)
 
-    def _update_node_content(self, tag: Tag, node: TreeNode, parser='html.parser') -> None:
-        """递归更新标签的内容.
-        
-        Args:
-            tag: BeautifulSoup标签
-            node: TreeNode节点
-        """
-        
-        # 如果节点有子节点，递归处理
-        if node.children:
-            # 保存原始属性
-            original_attrs = dict(tag.attrs) if hasattr(tag, 'attrs') else {}
-            
-            # 清空标签内容，准备重新填充
-            tag.clear()
-            
-            # 恢复原始属性
-            tag.attrs.update(original_attrs)
-            
-            # 处理每个子节点
-            for child_node in node.children:
-                if child_node.node_type == 'leaf':
-                    # 处理叶节点（文本内容）
-                    content = child_node.translated if child_node.translated else child_node.content
-                    tag.append(NavigableString(self.restore_content(content)))
-                else:
-                    # 处理非叶节点（标签）
-                    child_soup = BeautifulSoup(child_node.content, parser)
-                    child_tag = child_soup.find()
-                    if child_tag:
-                        self._update_node_content(child_tag, child_node, parser)
-                        tag.append(child_tag)
+if __name__ == "__main__":
 
-    def restore_content(self, content: str) -> str:
-        """
-        还原占位符内容，保留原始的 HTML 标签。
-        
-        Args:
-            content: 包含占位符的内容
-            
-        Returns:
-            str: 还原后的内容
-        """
-        # 还原占位符，保留 HTML 标签
-        for placeholder, original_content in self.placeholders.items():
-            # 如果原始内容是 HTML 标签，直接替换
-            if original_content.startswith('<') and original_content.endswith('>'):
-                content = content.replace(placeholder, original_content)
-            else:
-                # 对于非 HTML 标签的内容，保持原样
-                content = content.replace(placeholder, original_content)
-        return content
-
-if __name__ == '__main__':
     async def main():
-        with open("/Users/amaozhao/workspace/epubox/app/html/B21025_FM.xhtml", "r") as f:
+        with open(
+            "/Users/amaozhao/workspace/epubox/app/html/B21025_FM.xhtml", "r"
+        ) as f:
             content = f.read()
-        processor = TreeProcessor(translator=TranslatorProvider(limit_value=1000), source_lang='en', target_lang='zh')
-        await processor.process(content)
-        print(processor.restore_html(processor.root))
-        
+        processor = TreeProcessor(
+            translator=TranslatorProvider(limit_value=4000),
+            source_lang="en",
+            target_lang="zh",
+        )
+        result = await processor.process(content)
+        with open("/Users/amaozhao/workspace/epubox/app/html/restored.xhtml", "w") as f:
+            f.write(result)
+
     asyncio.run(main())

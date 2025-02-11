@@ -73,10 +73,11 @@ class GroqProvider(TranslationProvider):
             f"You are a translator. Translate the following text from {source_lang} to {target_lang}.\n"
             "Important rules:\n"
             "1. Preserve all HTML tags exactly as they appear\n"
-            "2. Do not add any formatting or markup\n"
-            "3. Do not add any explanations or notes\n"
-            "4. Keep all proper names in their original form\n"
-            "5. Return only the translated text\n\n"
+            "2. Do not modify any placeholders like {1}, {2}, {3}, etc.\n"
+            "3. Do not add any formatting or markup\n"
+            "4. Do not add any explanations or notes\n"
+            "5. Keep all proper names in their original form\n"
+            "6. Return only the translated text\n\n"
             f"Text to translate:\n{text}"
         )
 
