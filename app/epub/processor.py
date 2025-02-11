@@ -120,13 +120,14 @@ class EpubProcessor:
         file_list = input_archive.infolist()
         epub_dict = {}
         for x in range(0, len(file_list)):
-            if file_list[x].filename.endswith(".xhtml") or file_list[
-                x
-            ].filename.endswith(".html"):
-                name = file_list[x].filename.rsplit("/")[-1]
+            filename = file_list[x].filename
+            if filename.endswith(".xhtml") or filename.endswith(".html"):
+                # 标准化路径格式
+                name = filename.replace("\\", "/").lstrip("/")
                 item = input_archive.open(file_list[x])
                 content = item.read()
                 epub_dict[name] = content
+                logger.info(f"已加载文件：{name}")
         return epub_dict
 
     def extract(self) -> Dict[str, Tuple[str, int]]:
@@ -138,38 +139,70 @@ class EpubProcessor:
         contents = {}
         _contents = self.get_epub_files()
         for item in self.book.get_items():
-            logger.info(f"Extracting item: {item.get_name()}, Type: {item.get_type()}")
+            # 标准化路径格式
+            name = item.get_name().replace("\\", "/").lstrip("/")
+            logger.info(f"处理项目：{name}, 类型：{item.get_type()}")
 
             # 检查是否是文档或导航
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                logger.info("Found document item")
-                contents[item.get_name()] = (
-                    _contents[item.get_name()].decode("utf-8"),
-                    ebooklib.ITEM_DOCUMENT,
-                )
+                logger.info(f"找到文档项目：{name}")
+                
+                # 尝试不同的路径格式
+                possible_paths = [
+                    name,  # 原始路径
+                    f"OEBPS/{name}",  # 添加 OEBPS 前缀
+                    name.replace("Text/", "OEBPS/Text/"),  # 替换 Text 为 OEBPS/Text
+                ]
+                
+                content_found = False
+                for path in possible_paths:
+                    if path in _contents:
+                        contents[name] = (
+                            _contents[path].decode("utf-8"),
+                            ebooklib.ITEM_DOCUMENT,
+                        )
+                        logger.info(f"已提取文档内容：{name} (从路径：{path})")
+                        content_found = True
+                        break
+                
+                if not content_found:
+                    logger.warning(f"找不到文件内容：{name}")
+                    logger.debug(f"尝试的路径：{possible_paths}")
+                    logger.debug(f"可用的文件：{list(_contents.keys())}")
+                    
             elif item.get_type() == ebooklib.ITEM_NAVIGATION:
-                logger.info("Found navigation item")
-                contents[item.get_name()] = (
+                logger.info(f"找到导航项目：{name}")
+                contents[name] = (
                     item.get_content().decode("utf-8"),
                     ebooklib.ITEM_NAVIGATION,
                 )
+                logger.info(f"已提取导航内容：{name}")
 
         return contents
 
     def save_epub(self) -> None:
         """保存 EPUB 文件。"""
+        # 在保存之前确保所有项目的路径格式正确
         for item in self.book.get_items():
-            content = item.get_content()
-            # if item.get_type() == ebooklib.ITEM_DOCUMENT:
-            #     content = item.get_content().decode('utf-8')
-            #     logger.info(f"Content preview: {content[:200]}")
+            if hasattr(item, 'file_name'):
+                # 标准化文件路径
+                original_path = item.file_name
+                normalized_path = original_path.replace("\\", "/").lstrip("/")
+                if original_path != normalized_path:
+                    logger.info(f"标准化文件路径：{original_path} -> {normalized_path}")
+                    item.file_name = normalized_path
 
         # 确保工作目录存在
         self.work_file.parent.mkdir(parents=True, exist_ok=True)
 
         # 保存文件
-        options = {"html_write_using_document_content": True}
-        epub.write_epub(str(self.work_file), self.book, options)
+        try:
+            options = {"html_write_using_document_content": True}
+            epub.write_epub(str(self.work_file), self.book, options)
+            logger.info(f"成功保存EPUB文件：{self.work_file}")
+        except Exception as e:
+            logger.error(f"保存EPUB文件失败：{e}")
+            raise
 
     def genarate_content(self, original_content, translated_content, parser, item_type):
         """
@@ -201,7 +234,10 @@ class EpubProcessor:
         """
         for item in self.book.get_items():
             if item.get_type() == item_type:
-                name = item.get_name()
+                # 标准化路径格式，移除开头的斜杠
+                name = item.get_name().lstrip('/')
+                item_name = item_name.lstrip('/')
+                
                 if name == item_name:
                     parser = self.get_parser(item_type)
                     # 使用 BeautifulSoup 解析和处理内容
@@ -233,6 +269,7 @@ class EpubProcessor:
 
                     # 将处理后的内容设置回项目
                     item.set_content(str(original_soup).encode())
+                    logger.info(f"已更新内容：{name}")
                     break
 
     async def prepare(self) -> None:
@@ -263,36 +300,55 @@ class EpubProcessor:
         logger.info("开始处理 EPUB 文件...")
         await self.prepare()
 
-        # 提取需要处理的内容
-        contents = self.extract()
+        try:
+            # 提取需要处理的内容
+            contents = self.extract()
+            logger.info(f"提取到 {len(contents)} 个文件需要处理")
 
-        # 处理每个文档项
-        for name, (content, item_type) in contents.items():
-            # 创建处理器
-            processor = TreeProcessor(
-                self.translator,
-                self.source_lang,
-                self.target_lang,
-            )
+            # 处理每个文档项
+            for name, (content, item_type) in contents.items():
+                logger.info(f"处理文件：{name}")
+                
+                # 创建处理器
+                processor = TreeProcessor(
+                    self.translator,
+                    self.source_lang,
+                    self.target_lang,
+                )
 
-            # 处理内容
-            await processor.process(content)
-            translated = processor.restore_html(processor.root)
+                try:
+                    # 处理内容
+                    await processor.process(content)
+                    translated = processor.restore_html(processor.root)
 
-            # 更新内容
-            await self.update_content(
-                name,
-                content,
-                translated,
-                item_type,
-            )
+                    # 更新内容
+                    await self.update_content(
+                        name,
+                        content,
+                        translated,
+                        item_type,
+                    )
 
-            # 检查更新后的内容
-            for item in self.book.get_items():
-                if item.get_name() == name:
-                    updated_content = item.get_content().decode("utf-8")
-                    break
+                    # 检查更新后的内容
+                    updated = False
+                    for item in self.book.get_items():
+                        if item.get_name().replace("\\", "/").lstrip("/") == name:
+                            updated_content = item.get_content().decode("utf-8")
+                            updated = True
+                            logger.info(f"已确认更新：{name}")
+                            break
+                    
+                    if not updated:
+                        logger.warning(f"未能确认更新：{name}")
+
+                except Exception as e:
+                    logger.error(f"处理文件 {name} 时出错：{e}")
+                    raise
 
             # 保存文件
             self.save_epub()
-            logger.info(f"保存文件: {name}")
+            logger.info("EPUB 文件处理完成")
+
+        except Exception as e:
+            logger.error(f"处理 EPUB 文件时出错：{e}")
+            raise

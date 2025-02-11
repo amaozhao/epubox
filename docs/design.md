@@ -20,25 +20,48 @@ EPUB处理器负责处理EPUB文件的整体流程：
 - **文件保存**：
   - 将处理后的内容写回EPUB文件
 
-### 2. HTML 处理器 (HTMLProcessor)
+### 2. HTML 处理器 (TreeProcessor)
 
-HTML处理器采用两阶段处理策略，确保HTML内容的正确翻译：
+HTML处理器采用树形结构处理策略，确保HTML内容的正确翻译：
 
 #### 第一阶段：内容保护
 
 - 使用占位符机制保护不需要翻译的内容：
   - 脚本和样式标签 (script, style)
-  - 多媒体标签 (img, audio, video)
-  - 表单元素 (input, button, textarea)
-  - 特殊内容 (svg, math, canvas)
-  - EPUB特有标签
+  - 代码相关标签 (code, pre, kbd, var, samp)
+  - 多媒体标签 (img, audio, video, track, source)
+  - 表单元素 (input, button, select, textarea, form)
+  - 特殊内容 (svg, math, canvas, address, applet)
+  - 元数据和链接 (meta, link)
+  - 嵌入内容 (iframe, embed, object, param)
+  - 技术标记 (time, data, meter, progress)
+  - XML相关 (xml, xmlns)
+  - EPUB特有标签 (epub:switch, epub:case, epub:default)
+  - 注释标签 (annotation, note)
 
-#### 第二阶段：内容翻译
+#### 第二阶段：树形处理
 
-- 递归处理HTML节点：
-  - 对于符合大小限制的节点，直接翻译
-  - 对于超过限制的节点，递归处理其子节点
+- 构建文档树结构：
+  - 创建根节点保存整个文档
+  - 递归遍历HTML节点构建树
+  - 根据token数量决定节点类型（叶子节点或非叶子节点）
+  - 尝试合并相邻的小节点以优化处理
+
+#### 第三阶段：内容翻译
+
+- 递归处理树节点：
+  - 对于叶子节点，直接翻译内容
+  - 保持特殊词汇翻译的一致性（如技术术语）
+  - 清理翻译结果中的代码标记
   - 翻译完成后还原占位符内容
+
+#### 第四阶段：HTML重建
+
+- 从树结构重建HTML：
+  - 递归处理每个节点
+  - 合并子节点内容
+  - 保持原始HTML标签和属性
+  - 还原所有占位符内容
 
 ### 3. 翻译服务
 
