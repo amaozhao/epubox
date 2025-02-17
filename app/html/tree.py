@@ -4,6 +4,8 @@ from typing import Optional
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
+from app.html.attr_processor import AttributeProcessor
+
 # 不需要翻译的标签集合
 SKIP_TAGS = {
     # 脚本和样式
@@ -173,39 +175,7 @@ class TreeProcessor:
         self.root = None
         self.soup = None
         self.placeholders = {}  # 存储占位符到原始内容的映射，键是占位符字符串（如 {1}）
-
-    async def process(self, content: str, parser="html.parser") -> str:
-        """处理HTML内容。
-
-        Args:
-            content: HTML内容字符串
-            parser: HTML解析器类型
-
-        Returns:
-            处理后的HTML内容字符串
-        """
-        # 重置状态
-        self.reset_state()
-
-        # 解析HTML
-        self.soup = BeautifulSoup(content, parser)
-
-        # 创建根节点
-        self.root = TreeNode("root", str(self.soup), 0)
-
-        # 处理body标签内的内容
-        body = self.soup.find("body")
-        if body:
-            # 递归替换不可翻译标签
-            self.replace_skip_tags_recursive(body)
-            # 构建树结构
-            await self._traverse(body, self.root)
-            # 翻译叶子节点
-            await self._translate_nodes(self.root)
-            # 重建HTML并还原占位符
-            result = self.restore_html(self.root, parser)
-            return self.restore_content(result)
-        return content
+        self.attr_processor = AttributeProcessor()  # 属性处理器
 
     def reset_state(self) -> None:
         """重置处理器状态，清除所有占位符和计数器。"""
@@ -214,6 +184,67 @@ class TreeProcessor:
         self.placeholders.clear()
         self.root = None
         self.soup = None
+        self.attr_processor.reset()  # 重置属性处理器
+
+    async def process(self, content: str, parser="html.parser") -> str:
+        """处理HTML内容。"""
+        self.reset_state()
+        self.soup = BeautifulSoup(content, parser)
+
+        body = self.soup.find("body")
+        if not body:
+            return content
+
+        # ===== 解析阶段 =====
+        # 1. 首先处理占位符替换
+        self.replace_skip_tags_recursive(body)
+
+        # 2. 压缩剩余标签的属性
+        for tag in body.find_all(True):
+            # 跳过已经被替换为占位符的标签
+            if not (
+                isinstance(tag.string, NavigableString)
+                and re.match(r"\{\d+\}", str(tag.string))
+            ):
+                self._compress_tag_attrs(tag)
+
+        # 3. 创建树结构
+        self.root = TreeNode("root", str(self.soup), 0)
+
+        # 4. 遍历和翻译
+        await self._traverse(body, self.root)
+        await self._translate_nodes(self.root)
+
+        # ===== 恢复阶段 =====
+        # 1. 重建基本HTML结构
+        result = self.restore_html(self.root, parser)
+
+        # 2. 解析重建后的HTML
+        restored_soup = BeautifulSoup(result, parser)
+
+        # 3. 解压缩所有属性
+        for tag in restored_soup.find_all(True):
+            # 跳过占位符节点
+            if not (
+                isinstance(tag.string, NavigableString)
+                and re.match(r"\{\d+\}", str(tag.string))
+            ):
+                self._decompress_tag_attrs(tag)
+
+        # 4. 最后还原占位符
+        final_result = self.restore_content(str(restored_soup))
+
+        return final_result
+
+    def _compress_tag_attrs(self, tag: Tag) -> None:
+        """压缩标签属性。"""
+        if hasattr(tag, "attrs") and tag.attrs:
+            tag.attrs = self.attr_processor.compress_attrs(tag.attrs)
+
+    def _decompress_tag_attrs(self, tag: Tag) -> None:
+        """解压缩标签属性。"""
+        if hasattr(tag, "attrs") and tag.attrs:
+            tag.attrs = self.attr_processor.decompress_attrs(tag.attrs)
 
     async def _traverse(self, node: Tag, parent: TreeNode) -> None:
         """

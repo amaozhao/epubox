@@ -1,111 +1,1050 @@
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+
+<html lang="en" xml:lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+
 <head>
-<title>Chapter 1: First Steps with FastAPI</title>
-<link href="css/style-JRserifv6.css" rel="stylesheet" type="text/css"/>
+  <title>Learning LangChain</title>
+  <link href="override_v1.css" rel="stylesheet" type="text/css" />
+  <link href="epub.css" rel="stylesheet" type="text/css" />
 </head>
-<body><div id="sbo-rt-content"><div id="_idContainer005"><h1 class="chapter-number" id="_idParaDest-21"><a id="_idTextAnchor020"></a>1</h1><h1 id="_idParaDest-22"><a id="_idTextAnchor021"></a>First Steps with FastAPI</h1><p>Welcome to the exciting world of <strong class="bold">FastAPI</strong>, a modern, high-performance framework for building API and web applications in <strong class="bold">Python</strong>. This first chapter is your gateway to understanding and harnessing the power of FastAPI. Here, you’ll take your initial steps into setting up your development environment, creating your very first FastAPI project, and exploring its <span class="No-Break">fundamental concepts.</span></p><p>FastAPI stands out for its speed, ease of use, and comprehensive documentation, making it a preferred choice for developers looking to build scalable and efficient web applications. In this chapter, you’ll practically engage in setting up FastAPI, learning how to navigate its architecture, and understanding its core components. You’ll gain hands-on experience by defining simple API endpoints, handling HTTP methods, and learning about request and response handling. These foundational skills are crucial for any developer stepping into the world of modern web development <span class="No-Break">with FastAPI.</span></p><p>By the end of this chapter, you will have a solid understanding of FastAPI’s basic structure and capabilities. You’ll be able to set up a new project, define API endpoints, and have a grasp on handling data with FastAPI. This knowledge sets the stage for more advanced topics and complex applications you’ll encounter as you progress through <span class="No-Break">the book.</span></p><p>In this chapter, we’re going to cover the <span class="No-Break">following recipes:</span></p><ul>
-<li>Setting up your <span class="No-Break">development environment</span></li>
-<li>Creating a new <span class="No-Break">FastAPI project</span></li>
-<li>Understanding <span class="No-Break">FastAPI basics</span></li>
-<li>Defining your first <span class="No-Break">API endpoint</span></li>
-<li>Working with path and <span class="No-Break">query parameters</span></li>
-<li>Defining and using request and <span class="No-Break">response models</span></li>
-<li>Handling errors <span class="No-Break">and exceptions</span></li>
-</ul><p>Each recipe is designed to provide you with practical knowledge and direct experience, ensuring that by the end of this chapter, you’ll be well equipped to start building your own <span class="No-Break">FastAPI applications.</span></p><h1 id="_idParaDest-23"><a id="_idTextAnchor022"></a>Technical requirements</h1><p>To embark on your journey with FastAPI, you’ll need to set up an environment that supports Python development and FastAPI’s functionalities. Here’s a list of the technical requirements and installations needed for <span class="No-Break">this chapter:</span></p><ul>
-<li><strong class="bold">Python</strong>: FastAPI is built on Python, so you’ll need a Python version compatible with your FastAPI version. You can download the latest version of it <span class="No-Break">from </span><a href="http://python.org"><span class="No-Break">python.org</span></a><span class="No-Break">.</span></li>
-<li><strong class="bold">FastAPI</strong>: Install FastAPI using <strong class="source-inline">pip</strong>, Python’s package manager. You can do it by running <strong class="source-inline">pip install fastapi</strong> from the <span class="No-Break">command terminal.</span></li>
-<li><strong class="bold">Uvicorn</strong>: FastAPI requires an <strong class="bold">Asynchronous Server Gateway Interface</strong> (<strong class="bold">ASGI</strong>) server, and Uvicorn is a lightning-fast ASGI server implementation. Install it using <strong class="source-inline">pip </strong><span class="No-Break"><strong class="source-inline">install uvicorn</strong></span><span class="No-Break">.</span></li>
-<li><strong class="bold">Integrated development environment (IDE)</strong>: An IDE such as <strong class="bold">Visual Studio Code</strong> (<strong class="bold">VS Code</strong>), PyCharm, or any other IDE that supports Python development will be necessary for writing and testing <span class="No-Break">your code.</span></li>
-<li><strong class="bold">Postman or Swagger UI</strong>: For testing API endpoints. FastAPI automatically generates and hosts Swagger UI, so you can use it right out of <span class="No-Break">the box.</span></li>
-<li><strong class="bold">Git</strong>: Version control is essential, and Git is a widely used system. If not already installed, you can get it <span class="No-Break">from </span><a href="http://git-scm.com"><span class="No-Break">git-scm.com</span></a><span class="No-Break">.</span></li>
-<li><strong class="bold">GitHub account</strong>: A GitHub account is required to access the code repositories. Sign up at <a href="http://github.com">github.com</a> if you <span class="No-Break">haven’t already.</span></li>
-</ul><p>The code used in the chapter is available on GitHub at the following address: <a href="https://github.com/PacktPublishing/FastAPI-Cookbook/tree/main/章节01">https://github.com/PacktPublishing/FastAPI-Cookbook/tree/main/章节01</a>. You can clone or download the repository at <a href="https://github.com/PacktPublishing/FastAPI-Cookbook">https://github.com/PacktPublishing/FastAPI-Cookbook</a> to follow along on your <span class="No-Break">local machine.</span></p><h1 id="_idParaDest-24"><a id="_idTextAnchor023"></a>Setting up your development environment</h1><p>This recipe, dedicated to setting up your development environment, is a critical foundation for any successful project in web development. Here, you’ll learn how to install and configure all the<a id="_idIndexMarker000"></a> essential tools needed to start building <span class="No-Break">with FastAPI.</span></p><p>We begin by guiding you through the installation of Python, the core language behind FastAPI. Next, we’ll move on to installing FastAPI itself, along with Uvicorn, a lightning-fast ASGI server, which serves as the bedrock for running your <span class="No-Break">FastAPI applications.</span></p><p>Setting up an IDE is our next stop. Whether you prefer VS Code, PyCharm, or any other Python-friendly IDE, we’ll provide tips to make your development process smoother and <span class="No-Break">more efficient.</span></p><p>Lastly, we’ll introduce you to Git and GitHub – indispensable tools for version control and collaboration in modern software development. Understanding how to use these tools will not only help you manage your code effectively but also open doors to the vast world of community-driven development <span class="No-Break">and resources.</span></p><h2 id="_idParaDest-25"><a id="_idTextAnchor024"></a>Getting ready</h2><p>FASTAPI WORKS WITH PYTHON, SO YOU NEED TO CHECK YOUR PYTHON VERSION BEFORE USING IT. THIS IS AN IMPORTANT STEP FOR SETTING UP FASTAPI. WE WILL GUIDE YOU THROUGH HOW TO <span class="NO-BREAK">INSTALL IT.</span></p><h4>WINDOWS INSTALLATION</h4><p>IF YOU WORK ON WINDOWS, FOLLOW<a id="_IDINDEXMARKER001"></a> THESE STEPS TO <span class="NO-BREAK">INSTALL PYTHON:</span></p><ol>
-<li>VISIT THE OFFICIAL PYTHON <span class="NO-BREAK">WEBSITE: </span><a href="HTTP://PYTHON.ORG"><span class="NO-BREAK">PYTHON.ORG</span></a><span class="NO-BREAK">.</span></li>
-<li>DOWNLOAD THE LATEST VERSION OF PYTHON OR ANY OTHER VERSION HIGHER <span class="NO-BREAK">THAN 3.9.</span></li>
-<li>RUN THE INSTALLER. ENSURE TO CHECK THE BOX THAT SAYS <strong class="BOLD">ADD PYTHON TO PATH</strong> BEFORE CLICKING <span class="NO-BREAK"><strong class="BOLD">INSTALL NOW</strong></span><span class="NO-BREAK">.</span></li>
-<li>AFTER THE INSTALLATION, OPEN COMMAND PROMPT AND TYPE <strong class="SOURCE-INLINE">PYTHON --VERSION</strong> TO CONFIRM <span class="NO-BREAK">THE</span><span class="NO-BREAK"><a id="_IDINDEXMARKER002"></a></span><span class="NO-BREAK"> INSTALLATION.</span></li>
-</ol><h4>MACOS/LINUX INSTALLATION</h4><p>MACOS USUALLY COMES WITH <a id="_IDINDEXMARKER003"></a>PYTHON PRE-INSTALLED; HOWEVER, IT MIGHT NOT BE THE <span class="NO-BREAK">LATEST VERSION.</span></p><p>YOU CAN USE <strong class="SOURCE-INLINE">HOMEBREW</strong> (A PACKAGE MANAGER FOR MACOS). TO INSTALL IT, OPEN THE TERMINAL AND <span class="NO-BREAK">RUN IT:</span></p><p>THEN, YOU CAN INSTALL PYTHON – STILL FROM THE TERMINAL – WITH THE <span class="NO-BREAK">FOLLOWING COMMAND:</span></p><p>ON LINUX, YOU CAN INSTALL PYTHON USING THE PACKAGE MANAGER BY RUNNING THE <span class="NO-BREAK">FOLLOWING COMMAND:</span></p><p>THAT’S ALL YOU NEED TO INSTALL PYTHON ON MACOS AND <span class="NO-BREAK">LINUX SYSTEMS.</span></p><h4>CHECKING THE INSTALLATION</h4><p>YOU CAN THEN CHECK THAT <a id="_IDINDEXMARKER004"></a>PYTHON IS CORRECTLY INSTALLED BY RUNNING THE FOLLOWING COMMAND IN <span class="NO-BREAK">THE TERMINAL:</span></p><p>IF YOU INSTALLED IT ON LINUX, THE BINARY COMMAND IS <strong class="SOURCE-INLINE">PYTHON3</strong>, SO YOU CAN CHECK THAT PYTHON IS CORRECTLY INSTALLED BY RUNNING THE <span class="NO-BREAK">FOLLOWING COMMAND:</span></p><p>ONCE PYTHON IS INSTALLED, WE WANT TO MAKE SURE THAT THE PYTHON’S PACKAGE MANAGER IS CORRECTLY INSTALLED. IT COMES WITH PYTHON’S INSTALLATION, AND IT’S <span class="NO-BREAK">CALLED </span><span class="NO-BREAK"><strong class="SOURCE-INLINE">PIP</strong></span><span class="NO-BREAK">.</span></p><p>FROM A TERMINAL WINDOW, RUN THE <span class="NO-BREAK">FOLLOWING COMMAND:</span></p><p>ON LINUX, RUN THE <span class="NO-BREAK">FOLLOWING COMMAND:</span></p><p>ONCE PYTHON IS<a id="_IDINDEXMARKER005"></a> INSTALLED ON YOUR COMPUTER, YOU CAN NOW CONSIDER <span class="NO-BREAK">INSTALLING FASTAPI.</span></p><h2 id="_IDPARADEST-26"><a id="_IDTEXTANCHOR025"></a>HOW TO DO IT...</h2><p>WHEN YOU HAVE PYTHON AND <strong class="SOURCE-INLINE">PIP</strong> READY, WE CAN CONTINUE WITH INSTALLING FASTAPI, THE IDE. THEN, WE WILL <span class="NO-BREAK">CONFIGURE GIT.</span></p><p>WE WILL DO IT BY FOLLOWING <span class="NO-BREAK">THESE STEPS:</span></p><ol>
-<li>INSTALLING FASTAPI <span class="NO-BREAK">AND UVICORN</span></li>
-<li>SETTING UP YOUR IDE (VS CODE <span class="NO-BREAK">OR PYCHARM)</span></li>
-<li>SETTING UP GIT AND GITHUB TO TRACK <span class="NO-BREAK">YOUR PROJECT</span></li>
-</ol><h3>INSTALLING FASTAPI AND UVICORN</h3><p>WITH PYTHON SET UP, THE <a id="_IDINDEXMARKER006"></a>NEXT STEP IS INSTALLING FASTAPI AND UVICORN. FASTAPI IS THE<a id="_IDINDEXMARKER007"></a> FRAMEWORK WE’LL USE TO BUILD OUR APPLICATIONS, AND UVICORN IS AN ASGI SERVER THAT RUNS AND SERVES OUR <span class="NO-BREAK">FASTAPI APPLICATIONS.</span></p><p>OPEN YOUR COMMAND-LINE INTERFACE AND INSTALL FASTAPI AND UVICORN TOGETHER BY RUNNING THE <span class="NO-BREAK">FOLLOWING COMMAND:</span></p><p>THIS COMMAND INSTALLS FASTAPI ALONG WITH ITS RECOMMENDED DEPENDENCIES, <span class="NO-BREAK">INCLUDING UVICORN.</span></p><p>TO VERIFY THE INSTALLATION, YOU CAN SIMPLY RUN <strong class="SOURCE-INLINE">UVICORN --VERSION</strong> FROM <span class="NO-BREAK">THE TERMINAL.</span></p><h3>SETTING UP YOUR IDE</h3><p>CHOOSING THE RIGHT IDE IS A CRUCIAL STEP IN YOUR FASTAPI JOURNEY. AN IDE IS MORE THAN JUST A TEXT EDITOR; IT’S A SPACE <a id="_IDINDEXMARKER008"></a>WHERE YOU WRITE, DEBUG, AND TEST <span class="NO-BREAK">YOUR CODE.</span></p><p>A GOOD IDE CAN SIGNIFICANTLY ENHANCE YOUR CODING EXPERIENCE AND PRODUCTIVITY. FOR FASTAPI DEVELOPMENT AND PYTHON IN GENERAL, TWO POPULAR CHOICES ARE VS CODE <span class="NO-BREAK">AND PYCHARM.</span></p><h4>VS CODE</h4><p><strong class="BOLD">VS CODE</strong> IS A FREE, OPEN<a id="_IDINDEXMARKER009"></a> SOURCE, LIGHTWEIGHT IDE WITH POWERFUL FEATURES. IT OFFERS EXCELLENT<a id="_IDINDEXMARKER010"></a> PYTHON SUPPORT AND IS <span class="NO-BREAK">HIGHLY CUSTOMIZABLE.</span></p><p>YOU CAN DOWNLOAD AND INSTALL VS CODE FROM THE OFFICIAL WEBSITE (<strong class="SOURCE-INLINE">CODE.VISUALSTUDIO.COM</strong>). THE INSTALLATION IS QUITE STRAIGHTFORWARD. ONCE INSTALLED, OPEN VS CODE, GO TO <strong class="BOLD">EXTENSIONS</strong> (A SQUARE ICON ON THE LEFT BAR), AND SEARCH FOR <strong class="SOURCE-INLINE">PYTHON</strong>. INSTALL THE MICROSOFT VERSION, AND THAT <span class="NO-BREAK">IS IT.</span></p><h4>PYCHARM</h4><p><strong class="BOLD">PYCHARM</strong>, CREATED BY JETBRAINS, IS SPECIFICALLY <a id="_IDINDEXMARKER011"></a>TAILORED FOR PYTHON DEVELOPMENT. IT OFFERS A BROAD RANGE OF TOOLS FOR <a id="_IDINDEXMARKER012"></a>PROFESSIONAL DEVELOPERS, INCLUDING EXCELLENT SUPPORT FOR WEB DEVELOPMENT FRAMEWORKS SUCH <span class="NO-BREAK">AS FASTAPI.</span></p><p>YOU CAN CHOOSE BETWEEN A COMMUNITY FREE EDITION AND A PROFESSIONAL PAID VERSION. FOR THE SCOPE OF THE BOOK, THE COMMUNITY EDITION IS LARGELY SUFFICIENT, AND IT CAN BE DOWNLOADED ON THE JETBRAINS <span class="NO-BREAK">WEBSITE: </span><a href="HTTPS://WWW.JETBRAINS.COM/PYCHARM/DOWNLOAD/"><span class="NO-BREAK">HTTPS://WWW.JETBRAINS.COM/PYCHARM/DOWNLOAD/</span></a><span class="NO-BREAK">.</span></p><p>FOR PYCHARM AS WELL, THE INSTALLATION <span class="NO-BREAK">IS STRAIGHTFORWARD.</span></p><h4>ENHANCING YOUR DEVELOPMENT EXPERIENCE</h4><p>FOR BOTH IDES – AND IF YOU USE <a id="_IDINDEXMARKER013"></a>ANOTHER OF YOUR CHOICE – MAKE SURE TO LEVERAGE BASIC PERKS TO IMPROVE YOUR EXPERIENCE AS A DEVELOPER AND BE MORE EFFICIENT. HERE IS A SHORT CHECKLIST THAT I USE WHEN I APPROACH A NEW <span class="NO-BREAK">IDE ENVIRONMENT:</span></p><ul>
-<li><strong class="BOLD">CODE COMPLETION AND ANALYSIS</strong>: GOOD IDES PROVIDE INTELLIGENT CODE COMPLETION, ERROR HIGHLIGHTING, AND FIXES, WHICH ARE INVALUABLE FOR <span class="NO-BREAK">EFFICIENT DEVELOPMENT</span></li>
-<li><strong class="BOLD">DEBUGGING TOOLS</strong>: UTILIZE DEBUGGING FEATURES PROVIDED BY THE IDE TO DIAGNOSE AND RESOLVE ISSUES IN <span class="NO-BREAK">YOUR CODE</span></li>
-<li><strong class="BOLD">VERSION CONTROL INTEGRATION</strong>: A GOOD IDE OFFERS SUPPORT FOR GIT, SIMPLIFYING CODE CHANGE TRACKING AND <span class="NO-BREAK">REPOSITORY MANAGEMENT</span></li>
-<li><strong class="BOLD">CUSTOMIZATION</strong>: CUSTOMIZE<a id="_IDINDEXMARKER014"></a> YOUR IDE BY ADJUSTING THEMES, KEY BINDING, AND SETTINGS TO MATCH YOUR WORKFLOW, MAKING YOUR DEVELOPMENT EXPERIENCE AS COMFORTABLE AND PRODUCTIVE <span class="NO-BREAK">AS POSSIBLE</span></li>
-</ul><h3>SETTING UP GIT AND GITHUB</h3><p>VERSION CONTROL IS AN ESSENTIAL ASPECT OF SOFTWARE DEVELOPMENT. GIT, COUPLED WITH GITHUB, FORMS A POWERFUL <a id="_IDINDEXMARKER015"></a>TOOLSET FOR TRACKING CHANGES, COLLABORATING, AND MAINTAINING THE HISTORY OF YOUR PROJECTS. YOU CAN DOWNLOAD THE GIT INSTALLER <a id="_IDINDEXMARKER016"></a>FROM THE OFFICIAL WEBSITE <a href="HTTP://GIT-SCM.COM">GIT-SCM.COM</a> AND <span class="NO-BREAK">INSTALL IT.</span></p><p>AFTER INSTALLATION, CONFIGURE GIT WITH YOUR USERNAME AND EMAIL USING THE FOLLOWING COMMANDS IN THE <span class="NO-BREAK">COMMAND LINE:</span></p><p>GITHUB IS THE PLATFORM CHOSEN TO STORE CODE EXAMPLES USED IN THE BOOK. SIGN UP FOR A GITHUB ACCOUNT AT <a href="HTTP://GITHUB.COM">GITHUB.COM</a> IF YOU DON’T ALREADY <span class="NO-BREAK">HAVE ONE.</span></p><h1 id="_IDPARADEST-27"><a id="_IDTEXTANCHOR026"></a>CREATING A NEW FASTAPI PROJECT</h1><p>SETTING UP A WELL-ORGANIZED<a id="_IDINDEXMARKER017"></a> PROJECT STRUCTURE IS CRUCIAL FOR MAINTAINING A CLEAN CODE BASE, ESPECIALLY AS YOUR APPLICATION GROWS AND EVOLVES. THIS RECIPE WILL GUIDE YOU ON HOW TO CREATE YOUR FIRST BASIC FASTAPI PROJECT. A STRUCTURED PROJECT SIMPLIFIES NAVIGATION, DEBUGGING, AND COLLABORATION. FOR FASTAPI, FOLLOWING BEST PRACTICES IN STRUCTURING CAN SIGNIFICANTLY ENHANCE SCALABILITY <span class="NO-BREAK">AND MAINTAINABILITY.</span></p><h2 id="_IDPARADEST-28"><a id="_IDTEXTANCHOR027"></a>GETTING READY</h2><p>ALL YOU NEED TO DO TO FOLLOW THE RECIPE IS MAKE SURE THAT YOU HAVE YOUR DEVELOPMENT ENVIRONMENT <span class="NO-BREAK">SET UP.</span></p><h2 id="_IDPARADEST-29"><a id="_IDTEXTANCHOR028"></a>HOW TO DO IT...</h2><p>WE BEGIN BY MAKING A PROJECT <a id="_IDINDEXMARKER018"></a>FOLDER NAMED <strong class="SOURCE-INLINE">FASTAPI_START</strong> THAT WE’LL USE AS THE ROOT <span class="NO-BREAK">PROJECT FOLDER.</span></p><ol>
-<li>FROM THE TERMINAL AT THE ROOT PROJECT FOLDER LEVEL, WE’LL SET UP OUR VIRTUAL ENVIRONMENT BY RUNNING THE <span class="NO-BREAK">FOLLOWING COMMAND:</span><pre class="source-code">
-<strong class="bold">$ python -m venv .venv</strong></pre><p class="LIST-INSET">THIS WILL CREATE A <strong class="SOURCE-INLINE">.VENV</strong> FOLDER THAT WILL CONTAIN ALL PACKAGES REQUIRED FOR THE PROJECT WITHIN OUR PROJECT'S <span class="NO-BREAK">ROOT FOLDER.</span></p></li> <li>NOW, YOU NEED TO ACTIVATE THE ENVIRONMENT. IF YOU ARE ON MAC OR LINUX, RUN THE <span class="NO-BREAK">FOLLOWING COMMAND:</span><pre class="source-code">
-<strong class="bold">$ source .venv/bin/activate</strong></pre><p class="LIST-INSET">FROM WINDOWS, RUN THE <span class="NO-BREAK">FOLLOWING COMMAND:</span></p><pre class="source-code"><strong class="bold">$ .venv\Scripts\activate</strong></pre><p class="LIST-INSET">WHEN THE ENVIRONMENT IS ACTIVE, YOU SHOULD SEE IN YOUR TERMINAL A PREFIX STRING SUCH AS <strong class="SOURCE-INLINE">(.VENV) $</strong>. ALTERNATIVELY, IF YOU CHECK THE LOCATION OF THE <strong class="SOURCE-INLINE">PYTHON</strong> BINARY COMMAND, IT SHOULD BE LOCATED WITHIN THE <strong class="SOURCE-INLINE">.VENV</strong> FOLDER. FROM NOW ON, EACH TIME YOU INSTALL A MODULE WITH <strong class="SOURCE-INLINE">PIP</strong>, IT WILL BE INSTALLED IN THE <strong class="SOURCE-INLINE">.VENV</strong> FOLDER, AND IT WILL BE ACTIVATED ONLY IF THE ENVIRONMENT <span class="NO-BREAK">IS ACTIVE.</span></p></li> <li>NOW, YOU CAN INSTALL THE <strong class="SOURCE-INLINE">FASTAPI</strong> PACKAGE WITH <strong class="SOURCE-INLINE">UVICORN</strong> IN YOUR ENVIRONMENT BY RUNNING THE <span class="NO-BREAK">FOLLOWING COMMAND:</span><pre class="source-code">
-<strong class="bold">$ pip install fastapi uvicorn</strong></pre><p class="LIST-INSET">ONCE FASTAPI IS INSTALLED IN YOUR ENVIRONMENT, OPEN YOUR PROJECT FOLDER WITH YOUR FAVORITE IDE AND CREATE A FILE <span class="NO-BREAK">CALLED </span><span class="NO-BREAK"><strong class="SOURCE-INLINE">MAIN.PY</strong></span><span class="NO-BREAK">.</span></p></li> <li>THIS FILE IS WHERE YOUR FASTAPI APPLICATION BEGINS. START BY WRITING THE IMPORT OF THE <strong class="SOURCE-INLINE">FASTAPI</strong> MODULE. THEN, CREATE AN INSTANCE OF THE <span class="NO-BREAK"><strong class="SOURCE-INLINE">FASTAPI</strong></span><span class="NO-BREAK"> CLASS:</span><pre class="source-code">
-from fastapi import FastAPI
-app = FastAPI()</pre><p class="LIST-INSET">THIS INSTANCE HOUSES THE CODE OF <span class="NO-BREAK">YOUR APPLICATION.</span></p></li> <li>NEXT, DEFINE YOUR FIRST ROUTE. ROUTES IN FASTAPI ARE LIKE SIGNPOSTS THAT DIRECT REQUESTS TO THE <a id="_IDINDEXMARKER019"></a>APPROPRIATE FUNCTION. START WITH A SIMPLE ROUTE THAT RETURNS A GREETING TO <span class="NO-BREAK">THE WORLD:</span><pre class="source-code">
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}</pre><p class="LIST-INSET">YOU’VE JUST CREATED THE CODE FOR YOUR FIRST <span class="NO-BREAK">FASTAPI APPLICATION.</span></p></li> </ol><p>IF YOU WANT TO TRACK THE PROJECT, YOU CAN SET UP GIT <span class="NO-BREAK">AS FOLLOWS:</span></p><ol>
-<li>IN YOUR PROJECT’S ROOT DIRECTORY, OPEN A TERMINAL OR COMMAND PROMPT AND RUN THE FOLLOWING <span class="NO-BREAK">COMMAND:</span><pre class="source-code">
-<strong class="bold">$ git init</strong></pre><p class="LIST-INSET">THIS SIMPLE COMMAND PREPARES YOUR PROJECT FOR VERSION CONTROL <span class="NO-BREAK">UNDER GIT.</span></p><p class="LIST-INSET">BEFORE COMMITTING, CREATE A <strong class="SOURCE-INLINE">.GITIGNORE</strong> FILE TO SPECIFY UNTRACKED FILES TO IGNORE (SUCH AS <strong class="SOURCE-INLINE">__PYCHACHE__</strong>, .<strong class="SOURCE-INLINE">VENV</strong>, OR IDE-SPECIFIC FOLDERS). YOU CAN ALSO HAVE A LOOK AT THE ONE ON THE GITHUB REPOSITORY OF THE PROJECT AT THE <span class="NO-BREAK">LINK: </span><a href="HTTPS://GITHUB.COM/PACKTPUBLISHING/FASTAPI-COOKBOOK/BLOB/MAIN/.GITIGNORE"><span class="NO-BREAK">HTTPS://GITHUB.COM/PACKTPUBLISHING/FASTAPI-COOKBOOK/BLOB/MAIN/.GITIGNORE</span></a><span class="NO-BREAK">.</span></p></li> <li>THEN, ADD YOUR FILES WITH THE <span class="NO-BREAK">FOLLOWING COMMAND:</span><pre class="source-code">
-<strong class="bold">$ git add</strong> .</pre></li> <li>THEN, COMMIT THEM USING THE <span class="NO-BREAK">FOLLOWING COMMAND:</span><pre class="source-code">
-<strong class="bold">$ git commit –m "Initial commit"</strong></pre></li> </ol><p>AND THAT'S IT. YOU ARE NOW TRACKING YOUR PROJECT <span class="NO-BREAK">WITH GIT.</span></p><h2 id="_IDPARADEST-30"><a id="_IDTEXTANCHOR029"></a>THERE’S MORE...</h2><p>A WELL-STRUCTURED PROJECT IS NOT JUST ABOUT NEATNESS; IT’S ABOUT CREATING A SUSTAINABLE AND SCALABLE ENVIRONMENT WHERE YOUR APPLICATION CAN GROW AND EVOLVE. IN FASTAPI, THIS MEANS ORGANIZING YOUR <a id="_IDINDEXMARKER020"></a>PROJECT IN A WAY THAT SEPARATES DIFFERENT ASPECTS OF YOUR APPLICATION LOGICALLY <span class="NO-BREAK">AND EFFICIENTLY.</span></p><p>THERE IS NO UNIQUE AND PERFECT STRUCTURE FOR A FASTAPI PROJECT; HOWEVER, A COMMON APPROACH IS TO DIVIDE YOUR PROJECT INTO SEVERAL <span class="NO-BREAK">KEY DIRECTORIES:</span></p><ul>
-<li><strong class="SOURCE-INLINE">/SRC</strong>: THIS IS WHERE YOUR PRIMARY APPLICATION CODE LIVES. INSIDE <strong class="SOURCE-INLINE">/SRC</strong>, YOU MIGHT HAVE SUBDIRECTORIES FOR DIFFERENT MODULES OF YOUR APPLICATION. FOR INSTANCE, YOU COULD HAVE A <strong class="SOURCE-INLINE">MODELS</strong> DIRECTORY FOR YOUR DATABASE MODELS, A <strong class="SOURCE-INLINE">ROUTES</strong> DIRECTORY FOR YOUR FASTAPI ROUTES, AND A <strong class="SOURCE-INLINE">SERVICES</strong> DIRECTORY FOR <span class="NO-BREAK">BUSINESS LOGIC.</span></li>
-<li><strong class="SOURCE-INLINE">/TESTS</strong>: KEEPING YOUR TESTS SEPARATE FROM YOUR APPLICATION CODE IS A GOOD PRACTICE. IT MAKES IT EASIER TO MANAGE THEM AND ENSURES THAT YOUR PRODUCTION BUILDS DON’T INCLUDE <span class="NO-BREAK">TEST CODE.</span></li>
-<li><strong class="SOURCE-INLINE">/DOCS</strong>: DOCUMENTATION IS CRUCIAL FOR ANY PROJECT. WHETHER IT’S API DOCUMENTATION, INSTALLATION GUIDES, OR USAGE INSTRUCTIONS, HAVING A DEDICATED DIRECTORY FOR DOCUMENTATION HELPS <span class="NO-BREAK">MAINTAIN CLARITY.</span></li>
-</ul><h2 id="_IDPARADEST-31"><a id="_IDTEXTANCHOR030"></a>SEE ALSO</h2><p>YOU CAN FIND DETAILED INFORMATION ON HOW TO MANAGE VIRTUAL ENVIRONMENTS WITH <strong class="SOURCE-INLINE">VENV</strong> AT THE <span class="NO-BREAK">FOLLOWING LINK:</span></p><ul>
-<li><em class="ITALIC">CREATION OF VIRTUAL </em><span class="NO-BREAK"><em class="ITALIC">ENVIRONMENTS</em></span><span class="NO-BREAK">: </span><a href="HTTPS://DOCS.PYTHON.ORG/3/LIBRARY/VENV.XHTML"><span class="NO-BREAK">HTTPS://DOCS.PYTHON.ORG/3/LIBRARY/VENV.XHTML</span></a></li>
-</ul><p>TO BRUSH UP YOUR KNOWLEDGE WITH GIT AND GET FAMILIAR WITH ADDING, STAGING AND COMMITING OPERATIONS, HAVE A LOOK AT THIS GUIDE: </p><ul>
-<li><em class="ITALIC">GIT SIMPLE </em><span class="NO-BREAK"><em class="ITALIC">GUIDE</em></span><span class="NO-BREAK">: </span><a href="HTTPS://ROGERDUDLER.GITHUB.IO/GIT-GUIDE/"><span class="NO-BREAK">HTTPS://ROGERDUDLER.GITHUB.IO/GIT-GUIDE/</span></a></li>
-</ul><h1 id="_idParaDest-32"><a id="_idTextAnchor031"></a>Understanding FastAPI basics</h1><p>As we embark on our journey <a id="_idIndexMarker021"></a>with FastAPI, it’s essential to build a solid foundation. FastAPI isn’t just another web framework; it’s a powerful tool designed to make your life as a developer easier, your applications faster, and your code more robust <span class="No-Break">and maintainable.</span></p><p>In this recipe, we’ll demystify the core concepts of FastAPI, delve into its unique features such as asynchronous programming, and guide you through creating and organizing your first endpoints. By the end of the recipe, you’ll have your first FastAPI server up and running – a milestone that marks the beginning of an exciting journey in modern <span class="No-Break">web development.</span></p><p>FastAPI is a modern, fast web framework for building API with Python based on standard Python <span class="No-Break">type hints.</span></p><p>Key features that define <a id="_idIndexMarker022"></a>FastAPI are <span class="No-Break">the following:</span></p><ul>
-<li><strong class="bold">Speed</strong>: It’s one of the fastest frameworks for building API in Python, thanks to its underlying Starlette framework for web parts and Pydantic for <span class="No-Break">data handling</span></li>
-<li><strong class="bold">Ease of use</strong>: FastAPI is designed to be easy to use, with intuitive coding that accelerates your <span class="No-Break">development time</span></li>
-<li><strong class="bold">Automatic documentation</strong>: With FastAPI, the API documentation is generated automatically, a feature that is both a time-saver and a boon <span class="No-Break">for developers</span></li>
-</ul><h2 id="_idParaDest-33"><a id="_idTextAnchor032"></a>How to do it…</h2><p>We will now explore how to use those features effectively with some <span class="No-Break">general guidance.</span></p><p>We will go through the <span class="No-Break">following steps:</span></p><ul>
-<li>Applying asynchronous programming to our existing endpoints to improve <span class="No-Break">time efficiency</span></li>
-<li>Exploring routers and endpoints to better organize large <span class="No-Break">code bases</span></li>
-<li>Running your first FastAPI server with a <span class="No-Break">basic configuration</span></li>
-<li>Exploring the <span class="No-Break">automatic documentation</span></li>
-</ul><h3>Applying asynchronous programming</h3><p>One of the most powerful features of FastAPI is its support for asynchronous programming. This allows your applications to handle more requests simultaneously, making them more<a id="_idIndexMarker023"></a> efficient. Asynchronous programming is a style of concurrent programming in which tasks are executed without blocking the execution of other tasks, improving the overall performance of your application. To integrate asynchronous programming smoothly, FastAPI leverages the <strong class="source-inline">async</strong>/<strong class="source-inline">await</strong> syntax (<a href="https://fastapi.tiangolo.com/async/">https://fastapi.tiangolo.com/async/</a>) and automatically integrates <span class="No-Break">asynchronous functions.</span></p><p>So, the <strong class="source-inline">read_root()</strong> function in <strong class="source-inline">main.py</strong> from the previous code snippet in the <em class="italic">Creating a new FastAPI project</em> recipe can be written <span class="No-Break">as follows:</span></p><p>In this case, the behavior of the code will be exactly the same <span class="No-Break">as before.</span></p><h3>Exploring routers and endpoints</h3><p>In FastAPI, organizing your code into routers and endpoints is a fundamental practice. This organization helps in making your code cleaner and <span class="No-Break">more modular.</span></p><h4>Endpoints</h4><p>ENDPOINTS ARE THE POINTS AT <a id="_IDINDEXMARKER024"></a>WHICH API INTERACTIONS HAPPEN. IN FASTAPI, AN ENDPOINT IS CREATED BY DECORATING A FUNCTION WITH AN HTTP METHOD, SUCH <span class="NO-BREAK">AS </span><span class="NO-BREAK"><strong class="SOURCE-INLINE">@APP.GET("/")</strong></span><span class="NO-BREAK">.</span></p><p>THIS SIGNIFIES A <strong class="SOURCE-INLINE">GET</strong> REQUEST TO THE ROOT OF <span class="NO-BREAK">YOUR APPLICATION.</span></p><p>CONSIDER THE FOLLOWING <span class="NO-BREAK">CODE SNIPPET:</span></p><p>IN THIS SNIPPET, WE <a id="_IDINDEXMARKER025"></a>DEFINE AN ENDPOINT FOR THE ROOT URL (<strong class="SOURCE-INLINE">"/"</strong>). WHEN A <strong class="SOURCE-INLINE">GET</strong> REQUEST IS MADE TO THIS URL, THE <strong class="SOURCE-INLINE">READ_ROOT</strong> FUNCTION IS INVOKED, RETURNING A <span class="NO-BREAK">JSON RESPONSE.</span></p><h4>ROUTERS</h4><p>WHEN WE NEED TO HANDLE <a id="_IDINDEXMARKER026"></a>MULTIPLE ENDPOINTS THAT ARE IN DIFFERENT FILES, WE CAN BENEFIT FROM USING ROUTERS. ROUTERS ASSIST US IN GROUPING OUR ENDPOINTS INTO DIFFERENT MODULES, WHICH MAKES OUR CODE BASE EASIER TO MAINTAIN AND UNDERSTAND. FOR EXAMPLE, WE COULD USE ONE ROUTER FOR OPERATIONS RELATED TO USERS AND ANOTHER FOR OPERATIONS RELATED <span class="NO-BREAK">TO PRODUCTS.</span></p><p>TO DEFINE A ROUTER, FIRST CREATE A NEW FILE IN THE <strong class="SOURCE-INLINE">FASTAPI_START</strong> FOLDER CALLED <strong class="SOURCE-INLINE">ROUTER_EXAMPLE.PY</strong>. THEN, CREATE THE ROUTER <span class="NO-BREAK">AS FOLLOWS:</span></p><p>YOU CAN NOW REUSE IT AND ATTACH THE ROUTER TO THE FASTAPI SERVER INSTANCE <span class="NO-BREAK">IN </span><span class="NO-BREAK"><strong class="SOURCE-INLINE">MAIN.PY</strong></span><span class="NO-BREAK">:</span></p><p>YOU NOW HAVE THE CODE TO <a id="_IDINDEXMARKER027"></a>RUN THE SERVER THAT INCLUDES THE ROUTER FOR THE <strong class="SOURCE-INLINE">GET /ITEMS</strong> ENDPOINT IMPORTER FROM <span class="NO-BREAK">ANOTHER MODULE.</span></p><h3>RUNNING YOUR FIRST FASTAPI SERVER</h3><p>TO RUN YOUR FASTAPI APPLICATION, YOU<a id="_IDINDEXMARKER028"></a> NEED TO POINT UVICORN TO YOUR APP INSTANCE. IF YOUR FILE IS NAMED <strong class="SOURCE-INLINE">MAIN.PY</strong> AND YOUR FASTAPI INSTANCE IS CALLED <strong class="SOURCE-INLINE">APP</strong>, YOU CAN START YOUR SERVER LIKE THIS AT THE <strong class="SOURCE-INLINE">FASTAPI_START</strong> <span class="NO-BREAK">FOLDER LEVEL:</span></p><p>THE <strong class="SOURCE-INLINE">--RELOAD</strong> FLAG MAKES THE SERVER RESTART AFTER CODE CHANGES, MAKING IT IDEAL <span class="NO-BREAK">FOR DEVELOPMENT.</span></p><p>ONCE THE SERVER IS RUNNING, YOU CAN ACCESS YOUR API AT <strong class="SOURCE-INLINE">HTTP://127.0.0.1:8000</strong>. IF YOU VISIT THIS URL IN YOUR BROWSER, YOU’LL SEE THE JSON RESPONSE FROM THE <strong class="SOURCE-INLINE">"/"</strong> ENDPOINT WE HAVE <span class="NO-BREAK">JUST CREATED.</span></p><h3>EXPLORING THE AUTOMATIC DOCUMENTATION</h3><p>ONE OF THE MOST EXCITING FEATURES OF FASTAPI IS ITS <a id="_IDINDEXMARKER029"></a>AUTOMATIC DOCUMENTATION. WHEN YOU RUN YOUR FASTAPI APPLICATION, TWO DOCUMENTATION INTERFACES ARE AUTOMATICALLY GENERATED: <strong class="BOLD">SWAGGER UI</strong> <span class="NO-BREAK">AND </span><span class="NO-BREAK"><strong class="BOLD">REDOC</strong></span><span class="NO-BREAK">.</span></p><p>YOU CAN ACCESS THESE AT <strong class="SOURCE-INLINE">HTTP://127.0.0.1:8000/DOCS</strong> FOR SWAGGER UI AND <strong class="SOURCE-INLINE">HTTP://127.0.0.1:8000/REDOC</strong> <span class="NO-BREAK">FOR REDOC.</span></p><p>THESE INTERFACES PROVIDE AN INTERACTIVE WAY TO EXPLORE YOUR API AND TEST <span class="NO-BREAK">ITS FUNCTIONALITY.</span></p><h2 id="_IDPARADEST-34"><a id="_IDTEXTANCHOR033"></a>SEE ALSO</h2><p>YOU CAN DISCOVER MORE ABOUT WHAT WE COVERED IN THE RECIPE AT THE <span class="NO-BREAK">FOLLOWING LINKS:</span></p><ul>
-<li><em class="italic">First </em><span class="No-Break"><em class="italic">Steps</em></span><span class="No-Break">: </span><a href="https://fastapi.tiangolo.com/tutorial/first-steps/"><span class="No-Break">https://fastapi.tiangolo.com/tutorial/first-steps/</span></a></li>
-<li><em class="italic">Docs </em><span class="No-Break"><em class="italic">URLs</em></span><span class="No-Break">: </span><a href="https://fastapi.tiangolo.com/tutorial/metadata/#docs-urls"><span class="No-Break">https://fastapi.tiangolo.com/tutorial/metadata/#docs-urls</span></a></li>
-<li><em class="italic">Concurrency and async / </em><span class="No-Break"><em class="italic">await</em></span><span class="No-Break">: </span><a href="https://fastapi.tiangolo.com/async/"><span class="No-Break">https://fastapi.tiangolo.com/async/</span></a></li>
-</ul><h1 id="_idParaDest-35"><a id="_idTextAnchor034"></a>Defining your first API endpoint</h1><p>Now that you have a fundamental grasp of FastAPI and your development environment is all set up, it’s time to take the <a id="_idIndexMarker030"></a>next thrilling step: creating your first <span class="No-Break">API endpoint.</span></p><p>This is where the real magic of FastAPI begins to shine. You’ll see how effortlessly you can build a functional API endpoint, ready to respond to <span class="No-Break">HTTP requests.</span></p><p>In this recipe, you will create a basic draft of a backend service for <span class="No-Break">a bookstore.</span></p><h2 id="_idParaDest-36"><a id="_idTextAnchor035"></a>Getting ready</h2><p>Make sure you know how to start a basic FastAPI project from the <em class="italic">Creating a new FastAPI </em><span class="No-Break"><em class="italic">project</em></span><span class="No-Break"> recipe.</span></p><h2 id="_idParaDest-37"><a id="_idTextAnchor036"></a>How to do it...</h2><p>In the realm of web API, the <strong class="source-inline">GET</strong> request is perhaps the most common. It’s used to retrieve data from the server. In FastAPI, handling a <strong class="source-inline">GET</strong> request is simple and intuitive. Let’s create a basic <span class="No-Break"><strong class="source-inline">GET</strong></span><span class="No-Break"> endpoint.</span></p><p>Imagine you’re building an API for a bookstore. Your first endpoint will provide information about a book when given its ID. Here’s how you <span class="No-Break">do it:</span></p><ol>
-<li>Create a new <strong class="source-inline">bookstore</strong> folder that will contain the code you are going <span class="No-Break">to write.</span></li>
-<li>Create in it a <strong class="source-inline">main.py</strong> file containing the <span class="No-Break">server instance:</span><pre class="source-code">
-from fastapi import FastAPI
-app = FastAPI()
-@app.get("/books/{book_id}")
-async def read_book(book_id: int):
-    return {
-        "book_id": book_id,
-        "title": "The Great Gatsby",
-        "author": "F. Scott Fitzgerald"
-    }</pre></li> </ol><p>In the preceding code snippet, the <strong class="source-inline">@app.get("/books/{book_id}")</strong> decorator tells FastAPI that this function will respond to <strong class="source-inline">GET</strong> requests at the <strong class="source-inline">/books/{book_id}</strong> path. <strong class="source-inline">{book_id}</strong> in the path is a path parameter, which you can use to pass values dynamically. FastAPI<a id="_idIndexMarker031"></a> automatically extracts the <strong class="source-inline">book_id</strong> parameter and passes it to <span class="No-Break">your function.</span></p><p class="callout-heading">Type hints and automatic data validation</p><p class="callout">Notice the use of type hints (<strong class="source-inline">book_id: int</strong>). FastAPI uses these hints to perform data validation. If a request is made with a non-integer <strong class="source-inline">book_id</strong> parameter, FastAPI automatically sends a helpful <span class="No-Break">error response.</span></p><h2 id="_idParaDest-38"><a id="_idTextAnchor037"></a>How it works…</h2><p>With your <strong class="source-inline">GET</strong> endpoint defined, run your FastAPI application using Uvicorn, just as you <span class="No-Break">did previously:</span></p><p>On the terminal, you can read the message logs describing that the server is running on <span class="No-Break">port </span><span class="No-Break"><strong class="source-inline">8000</strong></span><span class="No-Break">.</span></p><p>One of FastAPI’s most beloved features is its automatic generation of interactive API documentation using <a id="_idIndexMarker032"></a>Swagger UI. This tool allows you to test your API endpoints directly from your browser without writing any additional code, and you can directly check the presence of the newly created endpoint <span class="No-Break">in i<a id="_idTextAnchor038"></a>t.</span></p><h3>Using Swagger UI</h3><p>To test your new <strong class="source-inline">GET</strong> endpoint, navigate to <strong class="source-inline">http://127.0.0.1:8000/docs</strong> in your browser. This URL brings up the <a id="_idIndexMarker033"></a>Swagger UI documentation for your FastAPI application. Here, you’ll see your <strong class="source-inline">/books/{book_id}</strong> endpoint listed. Click <a id="_idIndexMarker034"></a>on it, and you’ll be able to execute a test request right from the interface. Try inputting a book ID and see the response your <span class="No-Break">API generates.</span></p><h3>Postman – a versatile alternative</h3><p>While Swagger UI is convenient <a id="_idIndexMarker035"></a>for quick tests, you might want to use a more robust tool such as Postman for more complex scenarios. Postman is an API client that lets you build, test, and document your<a id="_idIndexMarker036"></a> API <span class="No-Break">more extensively.</span></p><p>To use Postman, download and install it from Postman’s <span class="No-Break">website (</span><a href="https://www.postman.com/downloads/"><span class="No-Break">https://www.postman.com/downloads/</span></a><span class="No-Break">).</span></p><p>Once installed, create a new request. Set the method to <strong class="source-inline">GET</strong> and the request URL to your FastAPI endpoint, <strong class="source-inline">http://127.0.0.1:8000/books/1</strong>. Hit <strong class="bold">Send</strong>, and Postman will display the response from your <span class="No-Break">FastAPI server.</span></p><h1 id="_idParaDest-39"><a id="_idTextAnchor039"></a>Working with path and query parameters</h1><p>One of the most <a id="_idIndexMarker037"></a>crucial aspects of API development is handling parameters. Parameters<a id="_idIndexMarker038"></a> allow your API to accept input from users, making your endpoints dynamic <span class="No-Break">and responsive.</span></p><p>In this recipe, we will explore how to capture and handle path, query parameters, and test them efficiently, enhancing the flexibility and functionality of your <span class="No-Break">FastAPI applications.</span></p><h2 id="_idParaDest-40"><a id="_idTextAnchor040"></a>Getting ready</h2><p>To follow the recipe, make sure you know how to create a basic endpoint from the <span class="No-Break">previous recipe.</span></p><h2 id="_idParaDest-41"><a id="_idTextAnchor041"></a>How to do it…</h2><p>Path parameters are<a id="_idIndexMarker039"></a> parts of the URL that are expected to change. For instance, in an endpoint such as <strong class="source-inline">/books/{book_id}</strong>, <strong class="source-inline">book_id</strong> is a path parameter. FastAPI allows you to capture these parameters effortlessly and use them in <span class="No-Break">your function.</span></p><ol>
-<li>LET’S EXPAND OUR BOOKSTORE API WITH A NEW ENDPOINT THAT USES PATH PARAMETERS. THIS TIME, WE’LL CREATE<a id="_IDINDEXMARKER040"></a> A ROUTE TO GET INFORMATION ABOUT A <span class="NO-BREAK">SPECIFIC AUTHOR:</span><pre class="source-code">
-@app.get("/authors/{author_id}")
-async def read_author(author_id: int):
-    return {
-        "author_id": author_id,
-        "name": "Ernest Hemingway"
-    }</pre><p class="LIST-INSET">THE NAME WILL NOT CHANGE; HOWEVER, THE <strong class="SOURCE-INLINE">AUTHOR_ID</strong> VALUE WILL BE THE ONE PROVIDED BY THE <span class="NO-BREAK">QUERY REQUEST.</span></p><p class="LIST-INSET">QUERY PARAMETERS ARE USED TO REFINE OR CUSTOMIZE THE RESPONSE OF AN API ENDPOINT. THEY CAN BE INCLUDED IN THE URL AFTER A QUESTION MARK (<strong class="SOURCE-INLINE">?</strong>). FOR INSTANCE, <strong class="SOURCE-INLINE">/BOOKS?GENRE=FICTION&amp;YEAR=2010</strong> MIGHT RETURN ONLY BOOKS THAT FALL UNDER THE FICTION GENRE RELEASED <span class="NO-BREAK">IN 2010.</span></p></li> <li>LET’S ADD QUERY PARAMETERS TO OUR EXISTING ENDPOINT. SUPPOSE WE WANT TO ALLOW USERS TO FILTER BOOKS BY<a id="_IDINDEXMARKER041"></a> THEIR <span class="NO-BREAK">PUBLICATION YEAR:</span><pre class="source-code">
-@app.get("/books")
-async def read_books(year: int = None):
-    if year:
-        return {
-            "year": year,
-            "books": ["Book 1", "Book 2"]
-        }
-    return {"books": ["All Books"]}</pre></li> </ol><p>HERE, <strong class="SOURCE-INLINE">YEAR</strong> IS AN OPTIONAL<a id="_IDINDEXMARKER042"></a> QUERY PARAMETER. BY ASSIGNING <strong class="SOURCE-INLINE">NONE</strong> AS A DEFAULT VALUE, WE MAKE IT OPTIONAL. IF A YEAR IS SPECIFIED, THE ENDPOINT RETURNS BOOKS FROM THAT YEAR; OTHERWISE, IT RETURNS <span class="NO-BREAK">ALL BOOKS.</span></p><p class="CALLOUT-HEADING">EXERCISE</p><p class="CALLOUT">USING THE <strong class="SOURCE-INLINE">APIROUTER</strong> CLASS, REFACTOR EACH ENDPOINT IN A SEPARATE FILE AND ADD THE ROUTE TO THE <span class="NO-BREAK">FASTAPI SERVER.</span></p><h2 id="_IDPARADEST-42"><a id="_IDTEXTANCHOR042"></a>HOW IT WORKS…</h2><p>NOW, FROM THE COMMAND TERMINAL, SPIN UP THE SERVER WITH UVICORN BY RUNNING THE <span class="NO-BREAK">FOLLOWING COMMAND:</span></p><p>TESTING ENDPOINTS WITH PATH PARAMETERS CAN BE DONE USING SWAGGER UI OR POSTMAN, SIMILAR TO HOW WE TESTED OUR BASIC <span class="NO-BREAK"><strong class="SOURCE-INLINE">GET</strong></span><span class="NO-BREAK"> ENDPOINT.</span></p><p>IN SWAGGER UI, AT <strong class="SOURCE-INLINE">HTTP://LOCALHOST:8000/DOCS</strong>, NAVIGATE TO YOUR <strong class="SOURCE-INLINE">/AUTHORS/{AUTHOR_ID}</strong> ENDPOINT. YOU’LL NOTICE THAT IT PROMPTS YOU TO ENTER AN <strong class="SOURCE-INLINE">AUTHOR_ID</strong> VALUE BEFORE YOU CAN TRY IT OUT. ENTER A VALID INTEGER AND EXECUTE THE REQUEST. YOU SHOULD SEE A RESPONSE WITH THE <span class="NO-BREAK">AUTHOR’S INFORMATION.</span></p><p>THE <strong class="SOURCE-INLINE">GET /BOOKS</strong> ENDPOINT WILL NOW SHOW AN OPTIONAL FIELD FOR THE <strong class="SOURCE-INLINE">YEAR</strong> QUERY PARAMETER. YOU CAN TEST IT BY ENTERING DIFFERENT YEARS AND OBSERVING THE <span class="NO-BREAK">VARYING RESPONSES.</span></p><p>IF YOU USE POSTMAN INSTEAD, CREATE A NEW <strong class="SOURCE-INLINE">GET</strong> REQUEST WITH THE <strong class="SOURCE-INLINE">HTTP://127.0.0.1:8000/AUTHORS/1</strong> URL. SENDING THIS REQUEST SHOULD YIELD A <span class="NO-BREAK">SIMILAR RESPONSE.</span></p><p>IN POSTMAN, APPEND THE QUERY PARAMETER TO THE URL LIKE SO: <strong class="SOURCE-INLINE">HTTP://127.0.0.1:8000/BOOKS?YEAR=2021</strong>. SENDING<a id="_IDINDEXMARKER043"></a> THIS REQUEST SHOULD RETURN BOOKS PUBLISHED IN THE <span class="NO-BREAK">YEAR 2021.</span></p><h2 id="_IDPARADEST-43"><a id="_IDTEXTANCHOR043"></a>SEE ALSO</h2><p>YOU CAN FIND MORE <a id="_IDINDEXMARKER044"></a>ABOUT PATH AND QUERY PARAMETERS IN THE FASTAPI OFFICIAL DOCUMENTATION AT THE <span class="NO-BREAK">FOLLOWING LINKS:</span></p><ul>
-<li><em class="ITALIC">PATH </em><span class="NO-BREAK"><em class="ITALIC">PARAMETERS</em></span><span class="NO-BREAK">: </span><a href="HTTPS://FASTAPI.TIANGOLO.COM/TUTORIAL/PATH-PARAMS/"><span class="NO-BREAK">HTTPS://FASTAPI.TIANGOLO.COM/TUTORIAL/PATH-PARAMS/</span></a></li>
-<li><em class="ITALIC">QUERY </em><span class="NO-BREAK"><em class="ITALIC">PARAMETERS</em></span><span class="NO-BREAK">: </span><a href="HTTPS://FASTAPI.TIANGOLO.COM/TUTORIAL/QUERY-PARAMS/"><span class="NO-BREAK">HTTPS://FASTAPI.TIANGOLO.COM/TUTORIAL/QUERY-PARAMS/</span></a></li>
-</ul><h1 id="_IDPARADEST-44"><a id="_IDTEXTANCHOR044"></a>DEFINING AND USING REQUEST AND RESPONSE MODELS</h1><p>IN THE WORLD OF API DEVELOPMENT, DATA HANDLING IS A CRITICAL ASPECT THAT DETERMINES THE ROBUSTNESS AND RELIABILITY OF YOUR APPLICATION. FASTAPI SIMPLIFIES THIS PROCESS THROUGH ITS SEAMLESS INTEGRATION WITH <strong class="BOLD">PYDANTIC</strong>, A DATA <a id="_IDINDEXMARKER045"></a>VALIDATION AND SETTINGS MANAGEMENT LIBRARY USING PYTHON TYPE ANNOTATIONS. THE RECIPE WILL SHOW YOU HOW TO DEFINE AND USE REQUEST AND RESPONSE MODELS IN FASTAPI, ENSURING YOUR DATA IS WELL STRUCTURED, VALIDATED, AND <span class="NO-BREAK">CLEARLY DEFINED.</span></p><p>PYDANTIC MODELS ARE A<a id="_IDINDEXMARKER046"></a> POWERFUL FEATURE FOR DATA VALIDATION AND CONVERSION. THEY ALLOW YOU TO DEFINE THE STRUCTURE, TYPE, AND CONSTRAINTS OF THE DATA YOUR APPLICATION HANDLES, BOTH FOR INCOMING REQUESTS AND <span class="NO-BREAK">OUTGOING RESPONSES.</span></p><p>IN THIS RECIPE, WE WILL SEE HOW TO USE PYDANTIC TO ENSURE THAT YOUR DATA CONFORMS TO THE SPECIFIED SCHEMA, PROVIDING AN AUTOMATIC LAYER OF SAFETY <span class="NO-BREAK">AND CLARITY.</span></p><h2 id="_IDPARADEST-45"><a id="_IDTEXTANCHOR045"></a>GETTING READY</h2><p>THIS RECIPE REQUIRES YOU TO KNOW HOW TO SET UP A BASIC ENDPOINT <span class="NO-BREAK">IN FASTAPI.</span></p><h2 id="_IDPARADEST-46"><a id="_IDTEXTANCHOR046"></a>HOW TO DO IT...</h2><p>WE WILL BREAK THE <a id="_IDINDEXMARKER047"></a>PROCESS INTO THE <span class="NO-BREAK">FOLLOWING STEPS:</span></p><ol>
-<li>CREATING <span class="NO-BREAK">THE MODEL</span></li>
-<li>DEFINING THE <span class="NO-BREAK">REQUEST BODY</span></li>
-<li>VALIDATING <span class="NO-BREAK">REQUEST DATA</span></li>
-<li>MANAGING <span class="NO-BREAK">RESPONSE FORMATS</span></li>
-</ol><h3>CREATING THE MODEL</h3><p>LET’S CREATE A PYDANTIC<a id="_IDINDEXMARKER048"></a> <strong class="SOURCE-INLINE">BASEMODEL</strong> CLASS FOR OUR BOOKSTORE APPLICATION IN A NEW FILE <span class="NO-BREAK">CALLED </span><span class="NO-BREAK"><strong class="SOURCE-INLINE">MODELS.PY</strong></span><span class="NO-BREAK">.</span></p><p>SUPPOSE WE WANT TO HAVE A MODEL FOR A BOOK THAT INCLUDES THE TITLE, AUTHOR, AND <span class="NO-BREAK">PUBLICATION YEAR:</span></p><p>HERE, <strong class="SOURCE-INLINE">BOOK</strong> IS A PYDANTIC <strong class="SOURCE-INLINE">BASEMODEL</strong> CLASS WITH THREE FIELDS: <strong class="SOURCE-INLINE">TITLE</strong>, <strong class="SOURCE-INLINE">AUTHOR</strong>, AND <strong class="SOURCE-INLINE">YEAR</strong>. EACH FIELD IS TYPED, ENSURING THAT ANY DATA CONFORMING TO THIS MODEL WILL HAVE THESE ATTRIBUTES WITH THE SPECIFIED <span class="NO-BREAK">DATA TYPES.</span></p><h3>DEFINING THE REQUEST BODY</h3><p>IN FASTAPI, PYDANTIC MODELS ARE NOT JUST FOR VALIDATION. THEY ALSO SERVE AS THE REQUEST BODY. LET’S ADD AN<a id="_IDINDEXMARKER049"></a> ENDPOINT TO OUR APPLICATION WHERE USERS CAN ADD <span class="NO-BREAK">NEW BOOKS:</span></p><p>IN THIS ENDPOINT, WHEN A USER SENDS A <strong class="SOURCE-INLINE">POST</strong> REQUEST TO THE <strong class="SOURCE-INLINE">/BOOK</strong> ENDPOINT WITH JSON DATA, FASTAPI AUTOMATICALLY PARSES AND VALIDATES IT AGAINST THE <strong class="SOURCE-INLINE">BOOK</strong> MODEL. IF THE DATA IS INVALID, THE USER GETS AN AUTOMATIC <span class="NO-BREAK">ERROR RESPONSE.</span></p><h3>VALIDATING REQUEST DATA</h3><p>PYDANTIC OFFERS ADVANCED<a id="_IDINDEXMARKER050"></a> VALIDATION FEATURES. FOR INSTANCE, YOU CAN ADD REGEX VALIDATIONS, DEFAULT VALUES, <span class="NO-BREAK">AND MORE:</span></p><p>FOR AN EXHAUSTIVE LIST OF VALIDATION FEATURES, HAVE A LOOK AT PYDANTIC’S OFFICIAL DOCUMENTATION: <a href="HTTPS://DOCS.PYDANTIC.DEV/LATEST/CONCEPTS/FIELDS/"><span class="NO-BREAK">HTTPS://DOCS.PYDANTIC.DEV/LATEST/CONCEPTS/FIELDS/</span></a><span class="NO-BREAK">.</span></p><p>NEXT, YOU CAN PROCEED TO MANAGE THE <span class="NO-BREAK">RESPONSE FORMAT.</span></p><h3>MANAGING RESPONSE FORMATS</h3><p>FASTAPI ALLOWS YOU TO DEFINE RESPONSE MODELS EXPLICITLY, ENSURING THAT THE DATA RETURNED BY YOUR API MATCHES A SPECIFIC SCHEMA. THIS CAN BE PARTICULARLY USEFUL FOR FILTERING OUT SENSITIVE DATA OR RESTRUCTURING <span class="NO-BREAK">THE RESPONSE.</span></p><p>FOR EXAMPLE, LET’S SAY YOU WANT THE <strong class="SOURCE-INLINE">/ALLBOOKS</strong> <strong class="SOURCE-INLINE">GET</strong> ENDPOINT TO RETURN A LIST OF BOOKS, BUT ONLY WITH THEIR TITLES <a id="_IDINDEXMARKER051"></a>AND AUTHORS, OMITTING THE PUBLICATION YEAR. IN <strong class="SOURCE-INLINE">MAIN.PY</strong>, ADD THE <span class="NO-BREAK">FOLLOWING ACCORDINGLY:</span></p><p>HERE, THE <strong class="SOURCE-INLINE">-&gt; LIST[BOOKRESPONSE]</strong> FUNCTION TYPE HINT TELLS FASTAPI TO USE THE <strong class="SOURCE-INLINE">BOOKRESPONSE</strong> MODEL FOR RESPONSES, ENSURING THAT ONLY THE TITLE AND AUTHOR FIELDS ARE INCLUDED IN THE RESPONSE JSON. ALTERNATIVELY, YOU CAN SPECIFY THE RESPONSE TYPE IN THE ENDPOINT DECORATOR’S <a id="_IDINDEXMARKER052"></a>ARGUMENTS <span class="NO-BREAK">AS FOLLOWS:</span></p><p>THE <strong class="SOURCE-INLINE">RESPONSE_MODEL</strong> ARGUMENT TAKES PRIORITY AND CAN BE USED INSTEAD OF THE TYPE HINT TO RESOLVE TYPE CHECKER ISSUES THAT <span class="NO-BREAK">MAY OCCUR.</span></p><p>CHECK THE DOCUMENTATION AT <strong class="SOURCE-INLINE">HTTP://127.0.0.1:8000/DOCS</strong>. UNROLL THE <strong class="SOURCE-INLINE">/ALLBOOKS</strong> ENDPOINT DETAILS, AND YOU WILL NOTICE THE EXAMPLE VALUE RESPONSE BASED ON THE SCHEMA <span class="NO-BREAK">AS FOLLOWS:</span></p><p>BY MASTERING PYDANTIC MODELS IN FASTAPI, YOU ARE NOW CAPABLE OF HANDLING COMPLEX DATA STRUCTURES WITH EASE AND PRECISION. YOU’VE LEARNED TO DEFINE REQUEST BODIES AND MANAGE RESPONSE FORMATS, ENSURING DATA CONSISTENCY AND INTEGRITY THROUGHOUT <span class="NO-BREAK">YOUR APPLICATION.</span></p><h2 id="_IDPARADEST-47"><a id="_IDTEXTANCHOR047"></a>SEE ALSO</h2><p><strong class="BOLD">PYDANTIC</strong> IS A STANDALONE <a id="_IDINDEXMARKER053"></a>PROJECT LARGELY USED FOR DATA VALIDATION IN PYTHON WITH MANY MORE FEATURES THAN WHAT THE RECIPE HAS SHOWN. FEEL FREE TO HAVE A LOOK AT THE OFFICIAL DOCUMENTATION AT THE <span class="NO-BREAK">FOLLOWING LINK:</span></p><ul>
-<li><span class="NO-BREAK"><em class="ITALIC">PYDANTIC</em></span><span class="NO-BREAK">: </span><a href="HTTPS://DOCS.PYDANTIC.DEV/LATEST/"><span class="NO-BREAK">HTTPS://DOCS.PYDANTIC.DEV/LATEST/</span></a></li>
-</ul><p>YOU CAN SEE MORE ON RESPONSE MODEL USAGE AT THE FASTAPI OFFICIAL <span class="NO-BREAK">DOCUMENTATION LINK:</span></p><ul>
-<li><em class="ITALIC">RESPONSE MODEL - RETURN </em><span class="NO-BREAK"><em class="ITALIC">TYPE</em></span><span class="NO-BREAK">: </span><a href="HTTPS://FASTAPI.TIANGOLO.COM/TUTORIAL/RESPONSE-MODEL/"><span class="NO-BREAK">HTTPS://FASTAPI.TIANGOLO.COM/TUTORIAL/RESPONSE-MODEL/</span></a></li>
-</ul><h1 id="_IDPARADEST-48"><a id="_IDTEXTANCHOR048"></a>HANDLING ERRORS AND EXCEPTIONS</h1><p>ERROR HANDLING IS AN ESSENTIAL ASPECT OF DEVELOPING ROBUST AND RELIABLE WEB APPLICATIONS. IN FASTAPI, MANAGING ERRORS AND <a id="_IDINDEXMARKER054"></a>EXCEPTIONS IS NOT JUST ABOUT CATCHING UNEXPECTED ISSUES BUT ALSO ABOUT PROACTIVELY DESIGNING YOUR APPLICATION TO RESPOND TO VARIOUS ERROR <span class="NO-BREAK">SCENARIOS GRACEFULLY.</span></p><p>THIS RECIPE WILL GUIDE YOU THROUGH CUSTOM ERROR HANDLING, VALIDATING DATA AND HANDLING EXCEPTIONS, AND TESTING THESE SCENARIOS TO ENSURE YOUR FASTAPI APPLICATIONS ARE RESILIENT <span class="NO-BREAK">AND USER-FRIENDLY.</span></p><h2 id="_IDPARADEST-49"><a id="_IDTEXTANCHOR049"></a>HOW TO DO IT…</h2><p>FASTAPI PROVIDES BUILT-IN SUPPORT FOR HANDLING EXCEPTIONS <span class="NO-BREAK">AND ERRORS.</span></p><p>WHEN AN ERROR OCCURS, FASTAPI RETURNS A JSON RESPONSE CONTAINING DETAILS ABOUT THE ERROR, WHICH IS VERY USEFUL FOR DEBUGGING. HOWEVER, THERE ARE SITUATIONS WHERE YOU MIGHT WANT TO CUSTOMIZE THESE ERROR RESPONSES FOR BETTER USER EXPERIENCE <span class="NO-BREAK">OR SECURITY.</span></p><p>LET’S CREATE A CUSTOM ERROR HANDLER THAT CATCHES A SPECIFIC TYPE OF ERROR AND RETURNS A CUSTOM RESPONSE. FOR INSTANCE, IF A REQUESTED RESOURCE IS NOT FOUND, YOU MIGHT WANT TO RETURN A MORE FRIENDLY <span class="NO-BREAK">ERROR </span><span class="NO-BREAK">MESSAGE</span><span class="NO-BREAK">.</span></p><p>TO DO IT, IN THE <strong class="SOURCE-INLINE">MAIN.PY</strong> FILE, ADD THE FOLLOWING <span class="NO-BREAK">CODE ACCORDINGLY:</span></p><p>IN THIS EXAMPLE, THE <strong class="SOURCE-INLINE">HTTP_EXCEPTION_HANDLER</strong> FUNCTION WILL BE USED TO HANDLE <strong class="SOURCE-INLINE">HTTPEXCEPTION</strong> ERRORS. WHENEVER<a id="_IDINDEXMARKER055"></a> AN <strong class="SOURCE-INLINE">HTTPEXCEPTION</strong> ERROR IS RAISED ANYWHERE IN YOUR APPLICATION, FASTAPI WILL USE THIS HANDLER TO RETURN A <span class="NO-BREAK">CUSTOM RESPONSE.</span></p><p>YOU CAN TEST THE RESPONSE BY CREATING A NEW ENDPOINT THAT RAISES AN <span class="NO-BREAK">HTTP EXCEPTION:</span></p><p>THE ENDPOINT WILL EXPLICITLY THROW THE HTTP ERROR RESPONSE TO SHOWCASE THE CUSTOMIZED MESSAGE DEFINED IN THE <span class="NO-BREAK">PREVIOUS STEP.</span></p><p>NOW, SPIN THE SERVER FROM THE COMMAND LINE WITH THE <span class="NO-BREAK">FOLLOWING COMMAND:</span></p><p>OPEN THE BROWSER AT <strong class="SOURCE-INLINE">HTTP://LOCALHOST:8000/ERROR_ENDPOINT</strong>, AND YOU WILL HAVE A JSON RESPONSE <span class="NO-BREAK">LIKE THIS:</span></p><p>THE RESPONSE RETURNS THE DEFAULT MESSAGE WE DEFINED FOR ANY HTTP EXCEPTION RETURNED BY <span class="NO-BREAK">THE CODE.</span></p><h2 id="_IDPARADEST-50"><a id="_IDTEXTANCHOR050"></a>THERE’S MORE…</h2><p>AS DISCUSSED IN THE PREVIOUS RECIPE, <em class="ITALIC">DEFINING AND USING REQUEST AND RESPONSE MODELS</em>, FASTAPI USES PYDANTIC MODELS FOR DATA VALIDATION. WHEN A REQUEST IS MADE WITH DATA THAT DOES NOT CONFORM TO THE DEFINED MODEL, FASTAPI AUTOMATICALLY RAISES AN EXCEPTION AND RETURNS<a id="_IDINDEXMARKER056"></a> AN <span class="NO-BREAK">ERROR RESPONSE.</span></p><p>IN SOME CASES, YOU MIGHT WANT TO CUSTOMIZE THE RESPONSE FOR VALIDATION ERRORS. FASTAPI MAKES THIS <span class="NO-BREAK">QUITE STRAIGHTFORWARD:</span></p><p>THIS CUSTOM HANDLER WILL CATCH ANY <strong class="SOURCE-INLINE">REQUESTVALIDATIONERROR</strong> ERROR AND RETURN A PLAIN TEXT RESPONSE WITH THE DETAILS OF <span class="NO-BREAK">THE ERROR.</span></p><p>IF YOU TRY, FOR EXAMPLE, TO CALL THE <strong class="SOURCE-INLINE">POST /BOOK</strong> ENDPOINT WITH A NUMBER TYPE OF <strong class="SOURCE-INLINE">TITLE</strong> INSTEAD OF A <a id="_IDINDEXMARKER057"></a>STRING, YOU WILL GET A RESPONSE WITH A STATUS CODE OF <strong class="SOURCE-INLINE">400</strong> <span class="NO-BREAK">AND BODY:</span></p><p>YOU CAN ALSO, FOR EXAMPLE, MASK THE MESSAGE TO ADD A LAYER OF SECURITY TO PROTECT FROM UNWANTED USERS USING <span class="NO-BREAK">IT INCORRECTLY.</span></p><p>THIS IS ALL YOU NEED TO CUSTOMIZE RESPONSES WHEN A REQUEST VALIDATION <span class="NO-BREAK">ERROR OCCURS.</span></p><p>You will use this basic <a id="_idIndexMarker058"></a>knowledge as you move to the next chapter. <a href="B21025_02.xhtml#_idTextAnchor052"><span class="No-Break"><em class="italic">章节 2</em></span></a> will teach you more about data management in web applications, showing you how to set up and use SQL and NoSQL databases and stressing data security. This will not only improve your technical skills but also increase your awareness of creating scalable and reliable <span class="No-Break">FastAPI applications.</span></p><h2 id="_idParaDest-51"><a id="_idTextAnchor051"></a>See also</h2><p>You can find more information about customizing errors and exceptions using FastAPI in the <span class="No-Break">official documentation:</span></p><ul>
-<li><em class="italic">Handling </em><span class="No-Break"><em class="italic">Errors</em></span><span class="No-Break">: </span><a href="https://fastapi.tiangolo.com/tutorial/handling-errors/"><span class="No-Break">https://fastapi.tiangolo.com/tutorial/handling-errors/</span></a></li>
-</ul></div></div></body>
+
+<body>
+  <div id="book-content">
+    <div id="sbo-rt-content">
+      <section class="['pagenumrestart']" data-pdf-bookmark="Chapter 1. LLM Fundamentals with LangChain"
+        data-type="chapter" epub:type="chapter">
+        <div class="['chapter']" id="ch01_llm_fundamentals_with_langchain_1736545659776004">
+          <h1><span class="label">章节 1. </span>大语言模型 Fundamentals with LangChain</h1>
+          <p>The <a data-type="xref" href="preface01.html#pr01_preface_1736545679069216">前言</a> gave you
+            a taste of the power of 大语言模型 prompting, where we saw firsthand the impact that different
+            prompting techniques can have on what you get out of 大语言模型s, especially when judiciously combined.
+            The<a contenteditable="false" data-primary="大语言模型 applications"
+              data-secondary="challenge in building good applications" data-type="indexterm" id="id339"></a> challenge
+            in building good 大语言模型 applications is, in fact, in how to
+            effectively construct the prompt sent to the model and process the model’s prediction to return
+            an accurate output (see <a data-type="xref" href="#ch01_figure_1_1736545659763063">Figure 1-1</a>).</p>
+          <figure>
+            <div class="figure" id="ch01_figure_1_1736545659763063"><img height="105" src="assets/lelc_0101.png"
+                width="600" />
+              <h6><span class="label">Figure 1-1. </span>The challenge in making 大语言模型s a useful part of
+                your application</h6>
+            </div>
+          </figure>
+          <p>If you can solve this problem, you are well on your way to building 大语言模型 applications, simple and
+            complex alike. In this chapter, you’ll learn more about how LangChain’s building blocks map to
+            大语言模型 concepts and how, when combined effectively, they enable you to build 大语言模型 applications. But
+            first, the sidebar <a href="#ch01_why_langchain_1736545659776355">“Why LangChain?”</a> is a
+            brief primer on why we think it useful to use LangChain to build 大语言模型 applications.</p>
+          <aside data-type="sidebar" epub:type="sidebar">
+            <div class="['sidebar']" id="ch01_why_langchain_1736545659776355">
+              <h1>Why LangChain?</h1>
+              <p>You<a contenteditable="false" data-primary="LangChain" data-secondary="benefits of"
+                  data-type="indexterm" id="LCbene01"></a><a contenteditable="false" data-primary="大语言模型 applications"
+                  data-secondary="benefits of LangChain for building" data-type="indexterm" id="大语言模型bene01"></a> can of
+                course build 大语言模型 applications
+                without LangChain. The most obvious alternative is to use the software development kit
+                (SDK)—the package exposing the methods of their HTTP API as functions in the programming
+                language of your choice—of the 大语言模型 provider you tried first (for example, OpenAI). We
+                think learning LangChain will pay off in the short term and over the long run because of
+                the following factors:</p>
+              <dl>
+                <dt>Prebuilt common patterns</dt>
+                <dd>
+                  <p>LangChain comes with reference implementations of the most common 大语言模型 application
+                    patterns (we mentioned some of these in the <a data-type="xref"
+                      href="preface01.html#pr01_preface_1736545679069216">前言</a>:
+                    chain-of-thought, tool calling, and others). This is the quickest way to get
+                    started with 大语言模型s and might often be all you need. We’d suggest starting any new
+                    application from these and checking whether the results out of the box are good
+                    enough for your use case. If not, then see the next item for the other half of
+                    the LangChain libraries.</p>
+                </dd>
+                <dt>Interchangeable building blocks</dt>
+                <dd>
+                  <p>These are components that can be easily swapped out for alternatives. Every
+                    component (an 大语言模型, chat model, output parser, and so on—more on these shortly)
+                    follows a shared specification, which makes your application future-proof. As
+                    new capabilities are released by model providers and as your needs change, you
+                    can evolve your application without rewriting it each time.</p>
+                </dd>
+              </dl>
+              <p>Throughout this book we make use of the following major components in the code examples:
+              </p>
+              <ul>
+                <li>
+                  <p>大语言模型/chat model: OpenAI</p>
+                </li>
+                <li>
+                  <p>Embeddings: OpenAI</p>
+                </li>
+                <li>
+                  <p>Vector store: PGVector</p>
+                </li>
+              </ul>
+              <p>You can swap out each of these for any of the<a contenteditable="false"
+                  data-primary="large language models (大语言模型s)" data-secondary="alternative providers for"
+                  data-type="indexterm" id="id340"></a>
+                alternatives listed on the following pages:</p>
+              <dl>
+                <dt>Chat models</dt>
+                <dd>
+                  <p>See<a contenteditable="false" data-primary="chat models"
+                      data-secondary="alternative 大语言模型 providers for" data-type="indexterm" id="id341"></a> the <a
+                      href="https://oreil.ly/8Qlnb">LangChain
+                      documentation</a>. If you don’t want to use OpenAI (a commercial API) we
+                    suggest<a contenteditable="false" data-primary="Anthropic" data-type="indexterm" id="id342"></a> <a
+                      href="https://oreil.ly/XdGfD">Anthropic</a> as a
+                    commercial alternative<a contenteditable="false" data-primary="Ollama" data-type="indexterm"
+                      id="id343"></a> or <a href="https://oreil.ly/eKy6-">Ollama</a> as an open source one.</p>
+                </dd>
+                <dt>Embeddings</dt>
+                <dd>
+                  <p>See the<a contenteditable="false" data-primary="embedding models" data-type="indexterm"
+                      id="id344"></a><a contenteditable="false" data-primary="LangChain"
+                      data-secondary="documentation for" data-type="indexterm" id="id345"></a> <a
+                      href="https://oreil.ly/sKpfM">LangChain documentation</a>. If you don’t want
+                    to use OpenAI (a commercial API) we suggest<a contenteditable="false" data-primary="Cohere"
+                      data-type="indexterm" id="id346"></a> <a href="https://oreil.ly/o1D0C">Cohere</a> as a commercial
+                    alternative or <a href="https://oreil.ly/FarfL">Ollama</a> as an open source one.</p>
+                </dd>
+                <dt>Vector stores</dt>
+                <dd>
+                  <p>See<a contenteditable="false" data-primary="vector stores"
+                      data-secondary="alternative providers for" data-type="indexterm" id="id347"></a> the <a
+                      href="https://oreil.ly/q3RF1">LangChain
+                      documentation</a>. If you don’t want to use PGVector (an open source
+                    extension to the popular SQL database Postgres) we suggest using either<a contenteditable="false"
+                      data-primary="Weaviate" data-type="indexterm" id="id348"></a> <a
+                      href="https://oreil.ly/XqlYa">Weaviate</a> (a dedicated
+                    vector store) or<a contenteditable="false" data-primary="OpenSearch" data-type="indexterm"
+                      id="id349"></a> <a href="https://oreil.ly/1s357">OpenSearch</a> (vector search features that
+                    are part of a popular search database).</p>
+                </dd>
+              </dl>
+              <p>This effort goes beyond, for instance, all 大语言模型s having the same methods, with similar
+                arguments and return values. Let’s look at the example of chat models and two popular
+                大语言模型 providers, OpenAI and Anthropic. Both have a chat API which receives <em>chat
+                  messages</em> (loosely defined as objects with a type string and a content string)
+                and returns a new message generated by the model. But if you try to use both models in
+                the same conversation, you’ll immediately run into issues, as their chat message formats
+                are subtly incompatible. LangChain abstracts away these differences to enable building
+                applications that are truly independent of a particular provider. For instance, with
+                LangChain, a chatbot conversation where you use both OpenAI and Anthropic models works.
+              </p>
+              <p>Finally, as you build out your 大语言模型 applications with several of these components, we’ve
+                found it useful to have the<a contenteditable="false" data-primary="orchestration capabilities"
+                  data-type="indexterm" id="id350"></a>
+                <em>orchestration</em> capabilities of LangChain:
+              </p>
+              <ul>
+                <li>
+                  <p>All major components are instrumented by the callbacks system for observability
+                    (more on this in <a data-type="xref"
+                      href="ch08.html#ch08_patterns_to_make_the_most_of_llms_1736545674143600">章节 8</a>).
+                  </p>
+                </li>
+                <li>
+                  <p>All major components implement the same interface (more on this toward the end of
+                    this chapter).</p>
+                </li>
+                <li>
+                  <p>Long-running 大语言模型 applications can be interrupted, resumed, or retried (more on
+                    this in <a data-type="xref" href="ch06.html#ch06_agent_architecture_1736545671750341">章节 6</a>).<a
+                      contenteditable="false" data-primary="" data-startref="LCbene01" data-type="indexterm"
+                      id="id351"></a><a contenteditable="false" data-primary="" data-startref="大语言模型bene01"
+                      data-type="indexterm" id="id352"></a></p>
+                </li>
+              </ul>
+            </div>
+          </aside>
+          <section data-pdf-bookmark="Getting Set Up with LangChain" data-type="sect1">
+            <div class="['sect1']" id="ch01_getting_set_up_with_langchain_1736545659776600">
+              <h1>Getting Set Up with LangChain</h1>
+              <p>To<a contenteditable="false" data-primary="LangChain" data-secondary="setting up" data-type="indexterm"
+                  id="id353"></a> follow along with the rest of the chapter, and
+                the chapters to come, we recommend setting up LangChain on your computer first.</p>
+              <p>See the instructions in the <a data-type="xref"
+                  href="preface01.html#pr01_preface_1736545679069216">前言</a> regarding setting up
+                an<a contenteditable="false" data-primary="OpenAI API" data-secondary="account creation"
+                  data-type="indexterm" id="id354"></a> OpenAI account and complete these if you
+                haven’t yet. If you prefer using a different 大语言模型 provider, see <a data-type="xref"
+                  href="#ch01_why_langchain_1736545659776355">“Why LangChain?”</a> for alternatives.
+              </p>
+              <p>Then head over to the <a href="https://oreil.ly/BKrtV">API Keys page</a> on the OpenAI
+                website (after logging in to your OpenAI account), create an API key, and save it—you’ll
+                need it soon.</p>
+              <div data-type="note" epub:type="note">
+                <h6>Note</h6>
+                <p>In this book, we’ll show code examples in both Python and JavaScript (JS). LangChain
+                  offers the same functionality in both languages, so just pick the one you’re most
+                  comfortable with and follow the respective code snippets throughout the book (the
+                  code examples for each language are equivalent).</p>
+              </div>
+              <p>First, some setup instructions for readers using<a contenteditable="false" data-primary="Python"
+                  data-secondary="LangChain set up using" data-type="indexterm" id="id355"></a> Python:</p>
+              <ol>
+                <li>
+                  <p>Ensure that you have Python installed. See the <a href="https://oreil.ly/20K9l">instructions for
+                      your operating system</a>.
+                  </p>
+                </li>
+                <li>
+                  <p>Install Jupyter if you want to run the examples in a notebook environment. You
+                    can do this by running <code>pip install notebook</code> in your terminal.</p>
+                </li>
+                <li>
+                  <p class="pagebreak-before less_space">Install the LangChain library by running the
+                    following commands in your <span class="keep-together">terminal:</span></p>
+                  <pre data-type="programlisting">
+pip install langchain langchain-openai langchain-community 
+pip install langchain-text-splitters langchain-postgres</pre>
+                </li>
+                <li>
+                  <p>Take the OpenAI API key you generated at the beginning of this section and make
+                    it available in your terminal environment. You can do this by running the
+                    following:</p>
+                  <pre data-type="programlisting">
+export OPENAI_API_KEY=your-key</pre>
+                </li>
+                <li>
+                  <p>Don’t forget to replace <code>your-key</code> with the API key you generated
+                    previously.</p>
+                </li>
+                <li>
+                  <p>Open a Jupyter notebook by running this command:</p>
+                  <pre data-type="programlisting">
+jupyter notebook</pre>
+                </li>
+              </ol>
+              <p>You’re now ready to follow along with the Python code examples.</p>
+              <p>Here are the instructions for readers using<a contenteditable="false" data-primary="JavaScript"
+                  data-secondary="LangChain set up using" data-type="indexterm" id="id356"></a> JavaScript:</p>
+              <ol>
+                <li>
+                  <p>Take the OpenAI API key you generated at the beginning of this section and make
+                    it available in your terminal environment. You can do this by running the
+                    following:</p>
+                  <pre data-type="programlisting">
+export OPENAI_API_KEY=your-key</pre>
+                </li>
+                <li>
+                  <p>Don’t forget to replace <code>your-key</code> with the API key you generated
+                    previously.</p>
+                </li>
+                <li>
+                  <p>If you want to run the examples as Node.js scripts, install Node by following the
+                    <a href="https://oreil.ly/5gjiO">instructions</a>.
+                  </p>
+                </li>
+                <li>
+                  <p>Install the LangChain libraries by running the following commands in your
+                    terminal:</p>
+                  <pre data-type="programlisting">
+npm install langchain @langchain/openai @langchain/community
+npm install @langchain/core pg</pre>
+                </li>
+                <li>
+                  <p>Take each example, save it as a <em>.js</em> file and run it with
+                    <code>node ./file.js</code>.
+                  </p>
+                </li>
+              </ol>
+            </div>
+          </section>
+          <section data-pdf-bookmark="Using LLMs in LangChain" data-type="sect1">
+            <div class="['sect1']" id="ch01_using_llms_in_langchain_1736545659776671">
+              <h1>Using 大语言模型s in LangChain</h1>
+              <p>To<a contenteditable="false" data-primary="LangChain" data-secondary="using 大语言模型s in"
+                  data-type="indexterm" id="LCllms01"></a><a contenteditable="false"
+                  data-primary="large language models (大语言模型s)" data-secondary="using in LangChain"
+                  data-type="indexterm" id="大语言模型land01"></a> recap, 大语言模型s are the driving engine behind
+                most generative AI applications. LangChain provides two simple<a contenteditable="false"
+                  data-primary="LangChain" data-secondary="interfaces provided" data-type="indexterm" id="id357"></a>
+                interfaces to interact with any 大语言模型 API provider:</p>
+              <ul>
+                <li>
+                  <p>Chat models</p>
+                </li>
+                <li>
+                  <p>大语言模型s</p>
+                </li>
+              </ul>
+              <p>The 大语言模型 interface simply takes a string prompt as input, sends the input to the model
+                provider, and then returns the model prediction as output.</p>
+              <p>Let’s import LangChain’s OpenAI 大语言模型 wrapper to<a contenteditable="false" data-primary="invoke method"
+                  data-type="indexterm" id="id358"></a>
+                <code>invoke</code> a model prediction using a simple prompt:
+              </p>
+              <p><em>Python<a contenteditable="false" data-primary="Python" data-secondary="model predictions, invoking"
+                    data-type="indexterm" id="id359"></a></em></p>
+              <p><em>JavaScript<a contenteditable="false" data-primary="JavaScript"
+                    data-secondary="model predictions, invoking" data-type="indexterm" id="id360"></a></em></p>
+              <p><em>The output:</em></p>
+              <div data-type="tip">
+                <h6>Tip</h6>
+                <p class="fix_tracking">Notice the<a contenteditable="false" data-primary="model parameter"
+                    data-type="indexterm" id="id361"></a><a contenteditable="false" data-primary="parameters"
+                    data-secondary="model parameter" data-type="indexterm" id="id362"></a> parameter
+                  <code>model</code> passed to <code>OpenAI</code>. This is the most common parameter
+                  to configure when using an 大语言模型 or chat model, the underlying model to use, as most
+                  providers offer several models with different trade-offs in capability and cost
+                  (usually larger models are more capable, but also more expensive and slower). See<a
+                    contenteditable="false" data-primary="OpenAI API" data-secondary="overview of models offered"
+                    data-type="indexterm" id="id363"></a> <a href="https://oreil.ly/dM886">OpenAI’s overview</a> of the
+                  models they offer.
+                </p>
+                <p>Other useful parameters to configure include the following, offered by most<a contenteditable="false"
+                    data-primary="parameters" data-secondary="temperature" data-type="indexterm" id="id364"></a><a
+                    contenteditable="false" data-primary="temperature parameter" data-type="indexterm" id="id365"></a>
+                  providers.</p>
+                <dl>
+                  <dt>
+                    <code>temperature</code>
+                  </dt>
+                  <dd>
+                    <p>This controls the sampling algorithm used to generate output. Lower values
+                      produce more predictable outputs (for example, 0.1), while higher values
+                      generate more creative, or unexpected, results (such as 0.9). Different
+                      tasks will need different values for this parameter. For instance, producing
+                      structured output usually benefits from a lower temperature, whereas
+                      creative writing tasks do better with a<a contenteditable="false"
+                        data-primary="max_tokens parameter" data-type="indexterm" id="id366"></a><a
+                        contenteditable="false" data-primary="parameters" data-secondary="max_tokens"
+                        data-type="indexterm" id="id367"></a> higher
+                      value:</p>
+                  </dd>
+                  <dt><code>
+max_tokens</code></dt>
+                  <dd>
+                    <p>This limits the size (and cost) of the output. A lower value may cause the
+                      大语言模型 to stop generating the output before getting to a natural end, so it may
+                      appear to have been truncated.</p>
+                  </dd>
+                </dl>
+                <p>Beyond these, each provider exposes a different set of parameters. We recommend
+                  looking at the documentation for the one you choose. For an example, refer to <a
+                    href="https://oreil.ly/5O1RW">OpenAI’s platform</a>.</p>
+              </div>
+              <p class="fix_tracking">Alternatively, the chat model<a contenteditable="false" data-primary="chat models"
+                  data-secondary="roles in" data-type="indexterm" id="id368"></a> interface enables back and forth
+                conversations between the user and
+                model. The reason why it’s a separate interface is because popular 大语言模型 providers like
+                OpenAI differentiate messages sent to and from the model into <em>user</em>,
+                <em>assistant</em>, and <em>system</em> roles (here<a contenteditable="false" data-primary="roles"
+                  data-type="indexterm" id="id369"></a> <em>role</em> denotes the
+                type of content the message contains):
+              </p>
+              <dl>
+                <dt>System role</dt>
+                <dd>
+                  <p>Used<a contenteditable="false" data-primary="system role" data-type="indexterm" id="id370"></a> for
+                    instructions the model should use to answer a user
+                    question</p>
+                </dd>
+                <dt>User role</dt>
+                <dd>
+                  <p>Used<a contenteditable="false" data-primary="user role" data-type="indexterm" id="id371"></a> for
+                    the user’s query and any other content produced by the
+                    user</p>
+                </dd>
+                <dt>Assistant role</dt>
+                <dd>
+                  <p>Used<a contenteditable="false" data-primary="assistant role" data-type="indexterm" id="id372"></a>
+                    for content generated by the model</p>
+                </dd>
+              </dl>
+              <p class="fix_tracking">The chat model’s interface makes it easier to configure and manage
+                conversions in your AI chatbot application. Here’s an example utilizing LangChain’s
+                ChatOpenAI model:</p>
+              <p><em>Python<a contenteditable="false" data-primary="Python"
+                    data-secondary="chatbot conversation configuration" data-type="indexterm" id="id373"></a></em></p>
+              <p><em>JavaScript<a contenteditable="false" data-primary="JavaScript"
+                    data-secondary="chatbot conversation configuration" data-type="indexterm" id="id374"></a></em></p>
+              <p><em>The output:</em></p>
+              <p>Instead of a single prompt string, chat models make use of different types of<a contenteditable="false"
+                  data-primary="chat models" data-secondary="message interfaces in" data-type="indexterm"
+                  id="id375"></a> chat
+                message interfaces associated with each role mentioned previously. These include the
+                following:</p>
+              <dl>
+                <dt><code>HumanMessage</code></dt>
+                <dd>
+                  <p>A<a contenteditable="false" data-primary="HumanMessage interface" data-type="indexterm"
+                      id="id376"></a> message sent from the perspective of
+                    the human, with the user role</p>
+                </dd>
+                <dt><code>AIMessage</code></dt>
+                <dd>
+                  <p>A<a contenteditable="false" data-primary="AIMessage interface" data-type="indexterm"
+                      id="id377"></a> message sent from the perspective of
+                    the AI that the human is interacting with, with the assistant role</p>
+                </dd>
+                <dt><code>SystemMessage</code></dt>
+                <dd>
+                  <p>A<a contenteditable="false" data-primary="SystemMessage interface" data-type="indexterm"
+                      id="id378"></a> message setting the instructions the
+                    AI should follow, with the system role</p>
+                </dd>
+                <dt><code>ChatMessage</code></dt>
+                <dd>
+                  <p>A<a contenteditable="false" data-primary="ChatMessage interface" data-type="indexterm"
+                      id="id379"></a> message allowing for arbitrary setting
+                    of role</p>
+                </dd>
+              </dl>
+              <p>Let’s incorporate a <code>SystemMessage</code> instruction in our example:</p>
+              <p><em>Python<a contenteditable="false" data-primary="Python" data-secondary="SystemMessage instruction"
+                    data-type="indexterm" id="id380"></a></em></p>
+              <p><em>JavaScript<a contenteditable="false" data-primary="JavaScript"
+                    data-secondary="SystemMessage instruction" data-type="indexterm" id="id381"></a></em></p>
+              <p><em>The output:</em></p>
+              <p class="fix_tracking">As you can see, the model obeyed the instruction provided in the
+                <code>SystemMessage</code> even though it wasn’t present in the user’s question. This
+                enables you to preconfigure your AI application to respond in a relatively predictable
+                manner based on the user’s input.<a contenteditable="false" data-primary="" data-startref="LCllms01"
+                  data-type="indexterm" id="id382"></a><a contenteditable="false" data-primary=""
+                  data-startref="大语言模型land01" data-type="indexterm" id="id383"></a>
+              </p>
+            </div>
+          </section>
+          <section data-pdf-bookmark="Making LLM Prompts Reusable" data-type="sect1">
+            <div class="['sect1']" id="ch01_making_llm_prompts_reusable_1736545659776740">
+              <h1>Making 大语言模型 Prompts Reusable</h1>
+              <p>The<a contenteditable="false" data-primary="LangChain" data-secondary="making 大语言模型 prompts reusable"
+                  data-type="indexterm" id="LCreusable01"></a><a contenteditable="false" data-primary="prompts"
+                  data-secondary="reusing" data-type="indexterm" id="Preuse01"></a><a contenteditable="false"
+                  data-primary="prompts" data-secondary="purpose of" data-type="indexterm" id="id384"></a> previous
+                section showed how the
+                <code>prompt</code> instruction significantly influences the model’s output. Prompts
+                help the model understand context and generate relevant answers to queries.
+              </p>
+              <p>Here<a contenteditable="false" data-primary="prompts" data-secondary="example of detailed"
+                  data-type="indexterm" id="id385"></a> is an
+                example of a detailed prompt:</p>
+              <p>Although the prompt looks like a simple string, the challenge is figuring out what the
+                text should contain and how it should vary based on the user’s input. In this example,
+                the Context and Question values are hardcoded, but what if we wanted to pass these in
+                dynamically?</p>
+              <p>Fortunately, LangChain provides prompt template interfaces that make it easy to construct
+                prompts with<a contenteditable="false" data-primary="dynamic inputs" data-type="indexterm"
+                  id="id386"></a><a contenteditable="false" data-primary="input" data-secondary="dynamic inputs"
+                  data-type="indexterm" id="id387"></a> dynamic
+                inputs:</p>
+              <p><em>Python<a contenteditable="false" data-primary="Python" data-secondary="dynamic inputs"
+                    data-tertiary="constructing" data-type="indexterm" id="id388"></a></em></p>
+              <p class="pagebreak-before less_space"><em>JavaS</em><em>cript<a contenteditable="false"
+                    data-primary="JavaScript" data-secondary="dynamic inputs" data-tertiary="constructing"
+                    data-type="indexterm" id="id389"></a></em></p>
+              <p><em>The output:</em></p>
+              <p>This example takes the static prompt from the previous block and makes it dynamic. The
+                <code>template</code> contains the structure of the final prompt alongside the
+                definition of where the dynamic inputs will be inserted.
+              </p>
+              <p>As such, the template can be used as a recipe to build multiple static, specific prompts.
+                When you format the prompt with some specific values—in this case, <code>context</code>
+                and <code>question</code>—you get a static prompt ready to be passed in to an 大语言模型.</p>
+              <p>As you can see, the <code>question</code> argument is passed dynamically via the<a
+                  contenteditable="false" data-primary="invoke method" data-type="indexterm" id="id390"></a>
+                <code>invoke</code> function. By default, LangChain prompts follow
+                Python’s<a contenteditable="false" data-primary="Python" data-secondary="f-string syntax"
+                  data-type="indexterm" id="id391"></a>
+                <code>f-string</code> syntax for defining dynamic parameters—any word surrounded by<a
+                  contenteditable="false" data-primary="curly braces ({})" data-type="indexterm" id="id392"></a><a
+                  contenteditable="false" data-primary="{} (curly braces)" data-type="indexterm" id="id393"></a><a
+                  contenteditable="false" data-primary="braces, curly ({})" data-type="indexterm" id="id394"></a> curly
+                braces, such as <code>{question}</code>, are placeholders for values passed in at
+                runtime. In the previous example, <code>{question}</code> was replaced by
+                <code>“Which model providers offer LLMs?”</code>
+              </p>
+              <p class="pagebreak-before less_space">Let’s see how we’d feed this into an 大语言模型 OpenAI model
+                using LangChain:</p>
+              <p><em>Python<a contenteditable="false" data-primary="Python" data-secondary="dynamic inputs"
+                    data-tertiary="feeding into 大语言模型s" data-type="indexterm" id="id395"></a></em></p>
+              <p><em>JavaScript<a contenteditable="false" data-primary="JavaScript" data-secondary="dynamic inputs"
+                    data-tertiary="feeding into 大语言模型s" data-type="indexterm" id="id396"></a></em></p>
+              <p><em>The output:</em></p>
+              <p>If you’re looking to build an AI chat application, the<a contenteditable="false"
+                  data-primary="ChatPromptTemplate" data-type="indexterm" id="chatprompttemp01"></a>
+                <code>ChatPromptTemplate</code> can be used instead to provide dynamic inputs based on
+                the role of the chat message:
+              </p>
+              <p><em>Python<a contenteditable="false" data-primary="Python" data-secondary="ChatPromptTemplate"
+                    data-type="indexterm" id="Pchatprompt01"></a></em></p>
+              <p><em>JavaScript<a contenteditable="false" data-primary="JavaScript" data-secondary="ChatPromptTemplate"
+                    data-type="indexterm" id="JSchatprompt01"></a></em></p>
+              <p><em>The output:</em></p>
+              <p>Notice how the prompt contains instructions in a <code>SystemMessage</code> and two
+                instances of <code>HumanMessage</code> that contain dynamic <code>context</code> and
+                <code>question</code> variables. You can still format the template in the same way and
+                get back a static prompt that you can pass to a large language model for a prediction
+                output:
+              </p>
+              <p><em>Python</em></p>
+              <p><em>JavaScript</em></p>
+              <p><em>The output:</em></p>
+            </div>
+          </section>
+          <section data-pdf-bookmark="Getting Specific Formats out of LLMs" data-type="sect1">
+            <div class="['sect1']" id="ch01_getting_specific_formats_out_of_llms_1736545659776807">
+              <h1>Getting Specific Formats out of 大语言模型s</h1>
+              <p>Plain<a contenteditable="false" data-primary="" data-startref="Preuse01" data-type="indexterm"
+                  id="id397"></a><a contenteditable="false" data-primary="" data-startref="LCreusable01"
+                  data-type="indexterm" id="id398"></a><a contenteditable="false" data-primary=""
+                  data-startref="JSchatprompt01" data-type="indexterm" id="id399"></a><a contenteditable="false"
+                  data-primary="" data-startref="Pchatprompt01" data-type="indexterm" id="id400"></a><a
+                  contenteditable="false" data-primary="" data-startref="chatprompttemp01" data-type="indexterm"
+                  id="id401"></a> text outputs<a contenteditable="false" data-primary="LangChain"
+                  data-secondary="getting specific formats out of LLMs" data-type="indexterm" id="LCformat01"></a><a
+                  contenteditable="false" data-primary="large language models (大语言模型s)"
+                  data-secondary="getting specific formats out of LLMs" data-type="indexterm" id="大语言模型format01"></a><a
+                  contenteditable="false" data-primary="formats" data-secondary="specifying from 大语言模型s"
+                  data-type="indexterm" id="Fspecific01"></a>
+                are useful, but there may be use cases where you need the 大语言模型 to generate a
+                <em>structured</em> output—that is, output in a machine-readable format, such as JSON,
+                XML, CSV, or even in a programming language such as Python or JavaScript. This is very
+                useful when you intend to hand that output off to some other piece of code, making an
+                大语言模型 play a part in your larger application.
+              </p>
+              <section data-pdf-bookmark="JSON Output" data-type="sect2">
+                <div class="sect2" id="ch01_json_output_1736545659776868">
+                  <h2>JSON Output</h2>
+                  <p>The<a contenteditable="false" data-primary="JSON output" data-type="indexterm" id="id402"></a><a
+                      contenteditable="false" data-primary="output" data-secondary="JSON output" data-type="indexterm"
+                      id="id403"></a> most
+                    common format to generate with 大语言模型s is JSON. JSON outputs can (for example) be
+                    sent over the wire to your frontend code or be saved to a database.</p>
+                  <p>When generating JSON, the first task is to define the schema you want the 大语言模型 to
+                    respect when producing the output. Then, you should include that schema in the
+                    prompt, along with the text you want to use as the source. Let’s see an example:
+                  </p>
+                  <p><em>Python<a contenteditable="false" data-primary="Python" data-secondary="output"
+                        data-tertiary="JSON" data-type="indexterm" id="id404"></a></em></p>
+                  <pre data-code-language="python" data-type="programlisting">
+<code class="kn">from</code> <code class="nn">langchain_openai</code> <code class="kn">import</code> <code class="n">ChatOpenAI</code>
+<code class="kn">from</code> <code class="nn">langchain_core.pydantic_v1</code> <code class="kn">import</code> <code class="n">BaseModel</code>
+
+<code class="k">class</code> <code class="nc">AnswerWithJustification</code><code class="p">(</code><code class="n">BaseModel</code><code class="p">):</code>
+    <code class="sd">'''An answer to the user's question along with justification for the </code>
+<code class="sd">        answer.'''</code>
+    <code class="n">answer</code><code class="p">:</code> <code class="nb">str</code>
+    <code class="sd">'''The answer to the user's question'''</code>
+    <code class="n">justification</code><code class="p">:</code> <code class="nb">str</code>
+    <code class="sd">'''Justification for the answer'''</code>
+
+<code class="n">llm</code> <code class="o">=</code> <code class="n">ChatOpenAI</code><code class="p">(</code><code class="n">model</code><code class="o">=</code><code class="s2">"gpt-3.5-turbo"</code><code class="p">,</code> <code class="n">temperature</code><code class="o">=</code><code class="mi">0</code><code class="p">)</code>
+<code class="n">structured_llm</code> <code class="o">=</code> <code class="n">llm</code><code class="o">.</code><code class="n">with_structured_output</code><code class="p">(</code><code class="n">AnswerWithJustification</code><code class="p">)</code>
+
+<code class="n">structured_llm</code><code class="o">.</code><code class="n">invoke</code><code class="p">(</code><code class="s2">"""What weighs more, a pound of bricks or a pound </code>
+<code class="s2">    of feathers"""</code><code class="p">)</code></pre>
+                  <p><em>JavaScript</em></p>
+                  <pre data-code-language="javascript" data-type="programlisting">
+<code class="kr">import</code> <code class="p">{</code> <code class="nx">ChatOpenAI</code> <code class="p">}</code> <code class="nx">from</code> <code class="s1">'@langchain/openai'</code>
+<code class="kr">import</code> <code class="p">{</code> <code class="nx">z</code> <code class="p">}</code> <code class="nx">from</code> <code class="s2">"zod"</code><code class="p">;</code>
+
+<code class="kr">const</code> <code class="nx">answerSchema</code> <code class="o">=</code> <code class="nx">z</code>
+  <code class="p">.</code><code class="nx">object</code><code class="p">({</code>
+    <code class="nx">answer</code><code class="o">:</code> <code class="nx">z</code><code class="p">.</code><code class="nx">string</code><code class="p">().</code><code class="nx">describe</code><code class="p">(</code><code class="s2">"The answer to the user's question"</code><code class="p">),</code>
+    <code class="nx">justification</code><code class="o">:</code> <code class="nx">z</code><code class="p">.</code><code class="nx">string</code><code class="p">().</code><code class="nx">describe</code><code class="p">(</code><code class="sb">`Justification for the </code>
+<code class="sb">      answer`</code><code class="p">),</code>
+  <code class="p">})</code>
+  <code class="p">.</code><code class="nx">describe</code><code class="p">(</code><code class="sb">`An answer to the user's question along with justification for </code>
+<code class="sb">    the answer.`</code><code class="p">);</code>
+
+<code class="kr">const</code> <code class="nx">model</code> <code class="o">=</code> <code class="k">new</code> <code class="nx">ChatOpenAI</code><code class="p">({</code>
+  <code class="nx">model</code><code class="o">:</code> <code class="s2">"gpt-3.5-turbo"</code><code class="p">,</code>
+  <code class="nx">temperature</code><code class="o">:</code> <code class="mi">0</code><code class="p">,</code>
+<code class="p">}).</code><code class="nx">withStructuredOutput</code><code class="p">(</code><code class="nx">answerSchema</code><code class="p">)</code>
+<code class="nx">await</code> <code class="nx">model</code><code class="p">.</code><code class="nx">invoke</code><code class="p">(</code><code class="s2">"What weighs more, a pound of bricks or a pound of feathers"</code><code class="p">)</code></pre>
+                  <p class="pagebreak-before less_space"><em>The output:</em></p>
+                  <pre data-type="programlisting">
+{
+  answer: "They weigh the same",
+  justification: "Both a pound of bricks and a pound of feathers weigh one pound. 
+    The weight is the same, but the volu"... 42 more characters
+}</pre>
+                  <p>So, first define a schema. In Python, this is easiest to do with<a contenteditable="false"
+                      data-primary="Pydantic" data-type="indexterm" id="id405"></a> Pydantic (a library used for
+                    validating data against
+                    schemas). In JS, this is easiest to do with<a contenteditable="false" data-primary="Zod"
+                      data-type="indexterm" id="id406"></a> Zod (an equivalent
+                    library). The method <code>with_structured_output</code> will use that schema
+                    for two things:</p>
+                  <ul>
+                    <li>
+                      <p>The schema will be converted to a <code>JSONSchema</code> object (a JSON
+                        format used to describe the shape [types, names, descriptions] of JSON
+                        data), which will be sent to the 大语言模型. For each 大语言模型, LangChain picks the
+                        best method to do this, usually function calling or prompting.</p>
+                    </li>
+                    <li>
+                      <p>The schema will also be used to validate the output returned by the 大语言模型
+                        before returning it; this ensures the output produced respects the
+                        schema you passed in exactly.</p>
+                    </li>
+                  </ul>
+                </div>
+              </section>
+              <section data-pdf-bookmark="Other Machine-Readable Formats with Output Parsers" data-type="sect2">
+                <div class="sect2" id="ch01_other_machine_readable_formats_with_output_parsers_1736545659776930">
+                  <h2>Other Machine-Readable Formats with Output Parsers</h2>
+                  <p>You<a contenteditable="false" data-primary="CSV format" data-type="indexterm" id="id407"></a><a
+                      contenteditable="false" data-primary="formats" data-secondary="machine-readable"
+                      data-type="indexterm" id="id408"></a> can
+                    also use an 大语言模型 or chat model to produce output in other formats, such as<a
+                      contenteditable="false" data-primary="XML format" data-type="indexterm" id="id409"></a> CSV or
+                    XML. This is where<a contenteditable="false" data-primary="output parsers" data-type="indexterm"
+                      id="id410"></a> output
+                    parsers come in handy. <em>Output parsers</em> are classes that help you
+                    structure large language model responses. They serve two functions:</p>
+                  <dl>
+                    <dt>Providing format instructions</dt>
+                    <dd>
+                      <p>Output<a contenteditable="false" data-primary="formats"
+                          data-secondary="providing format instructions" data-type="indexterm" id="id411"></a> parsers
+                        can be used to inject some additional
+                        instructions in the prompt that will help guide the 大语言模型 to output text
+                        in the format it knows how to parse.</p>
+                    </dd>
+                    <dt>Validating and parsing output</dt>
+                    <dd>
+                      <p>The main function is to take the textual output of the 大语言模型 or chat model
+                        and render it to a more structured format, such as a list, XML, or other
+                        format. This can include removing extraneous information, correcting
+                        incomplete output, and validating the parsed values.</p>
+                    </dd>
+                  </dl>
+                  <p>Here’s an example of how an output parser works:</p>
+                  <p><em>Python<a contenteditable="false" data-primary="Python" data-secondary="output parsers in"
+                        data-type="indexterm" id="id412"></a></em></p>
+                  <pre data-code-language="python" data-type="programlisting">
+<code class="kn">from</code> <code class="nn">langchain_core.output_parsers</code> <code class="kn">import</code> <code class="n">CommaSeparatedListOutputParser</code>
+<code class="n">parser</code> <code class="o">=</code> <code class="n">CommaSeparatedListOutputParser</code><code class="p">()</code>
+<code class="n">items</code> <code class="o">=</code> <code class="n">parser</code><code class="o">.</code><code class="n">invoke</code><code class="p">(</code><code class="s2">"apple, banana, cherry"</code><code class="p">)</code></pre>
+                  <p class="pagebreak-before less_space"><em>JavaScript<a contenteditable="false"
+                        data-primary="JavaScript" data-secondary="output parsers in" data-type="indexterm"
+                        id="id413"></a></em></p>
+                  <pre data-code-language="javascript" data-type="programlisting">
+<code class="kr">import</code> <code class="p">{</code> <code class="nx">CommaSeparatedListOutputParser</code> <code class="p">}</code> <code class="nx">from</code> <code class="s1">'@langchain/core/output_parsers'</code>
+
+<code class="kr">const</code> <code class="nx">parser</code> <code class="o">=</code> <code class="k">new</code> <code class="nx">CommaSeparatedListOutputParser</code><code class="p">()</code>
+
+<code class="nx">await</code> <code class="nx">parser</code><code class="p">.</code><code class="nx">invoke</code><code class="p">(</code><code class="s2">"apple, banana, cherry"</code><code class="p">)</code></pre>
+                  <p><em>The output:</em></p>
+                  <pre data-type="programlisting">
+['apple', 'banana', 'cherry']</pre>
+                  <p>LangChain provides a variety of output parsers for various use cases, including
+                    CSV, XML, and more. We’ll see how to combine output parsers with models and
+                    prompts in the next section.<a contenteditable="false" data-primary="" data-startref="Fspecific01"
+                      data-type="indexterm" id="id414"></a><a contenteditable="false" data-primary=""
+                      data-startref="大语言模型format01" data-type="indexterm" id="id415"></a><a contenteditable="false"
+                      data-primary="" data-startref="LCformat01" data-type="indexterm" id="id416"></a></p>
+                </div>
+              </section>
+            </div>
+          </section>
+          <section data-pdf-bookmark="Assembling the Many Pieces of an LLM Application" data-type="sect1">
+            <div class="['sect1']" id="ch01_assembling_the_many_pieces_of_an_llm_application_1736545659777015">
+              <h1>Assembling the Many Pieces of an 大语言模型 Application</h1>
+              <p>The<a contenteditable="false" data-primary="大语言模型 applications" data-secondary="assembling"
+                  data-type="indexterm" id="大语言模型Aassem01"></a><a contenteditable="false" data-primary="LangChain"
+                  data-secondary="assembling 大语言模型 applications" data-type="indexterm" id="LCassemgling01"></a> key
+                components you’ve learned about
+                so far are essential building blocks of the LangChain framework. Which brings us to the
+                critical question: How do you combine them effectively to build your 大语言模型 application?
+              </p>
+              <section data-pdf-bookmark="Using the Runnable Interface" data-type="sect2">
+                <div class="['sect2']" id="ch01_using_the_runnable_interface_1736545659777090">
+                  <h2>USING THE RUNNABLE INTERFACE</h2>
+                  <p>AS<a contenteditable="FALSE" data-primary="RUNNABLE INTERFACE" data-type="INDEXTERM"
+                      id="ID417"></a> YOU MAY HAVE NOTICED, ALL THE CODE
+                    EXAMPLES USED SO FAR UTILIZE A SIMILAR INTERFACE AND THE<a contenteditable="FALSE"
+                      data-primary="INVOKE METHOD" data-type="INDEXTERM" id="ID418"></a> <code>invoke()</code> METHOD TO
+                    GENERATE OUTPUTS FROM THE
+                    MODEL (OR PROMPT TEMPLATE, OR OUTPUT PARSER). ALL COMPONENTS HAVE THE FOLLOWING:
+                  </p>
+                  <ul>
+                    <li>
+                      <p>THERE IS A COMMON INTERFACE WITH THESE<a contenteditable="FALSE" data-primary="BATCH METHOD"
+                          data-type="INDEXTERM" id="ID419"></a><a contenteditable="FALSE" data-primary="STREAM METHOD"
+                          data-type="INDEXTERM" id="ID420"></a> METHODS:</p>
+                      <ul>
+                        <li>
+                          <p><code>invoke</code>: TRANSFORMS A SINGLE INPUT INTO AN OUTPUT</p>
+                        </li>
+                        <li>
+                          <p><code>batch</code>: EFFICIENTLY TRANSFORMS MULTIPLE INPUTS INTO
+                            MULTIPLE OUTPUTS</p>
+                        </li>
+                        <li>
+                          <p><code>stream</code>: STREAMS OUTPUT FROM A SINGLE INPUT AS IT’S
+                            PRODUCED</p>
+                        </li>
+                      </ul>
+                    </li>
+                    <li>
+                      <p>THERE ARE BUILT-IN UTILITIES FOR RETRIES, FALLBACKS, SCHEMAS, AND RUNTIME
+                        <span class="KEEP-TOGETHER">CONFIGURABILITY.</span>
+                      </p>
+                    </li>
+                    <li>
+                      <p>IN PYTHON, EACH OF THE THREE METHODS HAVE <code>asyncio</code>
+                        EQUIVALENTS.</p>
+                    </li>
+                  </ul>
+                  <p>AS SUCH, ALL COMPONENTS BEHAVE THE SAME WAY, AND THE INTERFACE LEARNED FOR ONE OF
+                    THEM APPLIES TO ALL:</p>
+                  <p><em>PYTHON<a contenteditable="FALSE" data-primary="PYTHON" data-secondary="RUNNABLE INTERFACE"
+                        data-type="INDEXTERM" id="ID421"></a></em></p>
+                  <p><em>JAVASCRIPT<a contenteditable="FALSE" data-primary="JAVASCRIPT"
+                        data-secondary="RUNNABLE INTERFACE" data-type="INDEXTERM" id="ID422"></a></em></p>
+                  <p>IN THIS EXAMPLE, YOU SEE HOW THE THREE MAIN METHODS WORK:</p>
+                  <ul>
+                    <li>
+                      <p><code>invoke()</code> TAKES A SINGLE INPUT AND RETURNS A SINGLE OUTPUT.
+                      </p>
+                    </li>
+                    <li>
+                      <p><code>batch()</code> TAKES A LIST OF OUTPUTS AND RETURNS A LIST OF
+                        OUTPUTS.</p>
+                    </li>
+                    <li>
+                      <p><code>stream()</code> TAKES A SINGLE INPUT AND RETURNS AN ITERATOR OF
+                        PARTS OF THE OUTPUT AS THEY BECOME AVAILABLE.</p>
+                    </li>
+                  </ul>
+                  <p>IN SOME CASES, WHERE THE UNDERLYING COMPONENT DOESN’T SUPPORT ITERATIVE OUTPUT,
+                    THERE WILL BE A SINGLE PART CONTAINING ALL OUTPUT.</p>
+                  <p>YOU CAN COMBINE THESE COMPONENTS IN TWO WAYS:</p>
+                  <dl>
+                    <dt>IMPERATIVE</dt>
+                    <dd>
+                      <p>CALL<a contenteditable="FALSE" data-primary="IMPERATIVE COMPOSITION" data-type="INDEXTERM"
+                          id="IMPCOMP01"></a> YOUR COMPONENTS DIRECTLY,
+                        FOR EXAMPLE, WITH <code>model.invoke(...)</code></p>
+                    </dd>
+                    <dt>DECLARATIVE</dt>
+                    <dd>
+                      <p>USE<a contenteditable="FALSE" data-primary="DECLARATIVE COMPOSITION" data-type="INDEXTERM"
+                          id="ID423"></a> LANGCHAIN EXPRESSION LANGUAGE
+                        (LCEL), AS COVERED IN AN UPCOMING SECTION</p>
+                    </dd>
+                  </dl>
+                  <p><a data-type="XREF" href="#CH01_TABLE_1_1736545659767905">TABLE 1-1</a>
+                    SUMMARIZES THEIR DIFFERENCES, AND WE’LL SEE EACH IN ACTION<a contenteditable="FALSE"
+                      data-primary="PARALLEL EXECUTION" data-type="INDEXTERM" id="ID424"></a><a contenteditable="FALSE"
+                      data-primary="ASYNC EXECUTION" data-type="INDEXTERM" id="ID425"></a><a contenteditable="FALSE"
+                      data-primary="__ATTR_4559029312_29" data-secondary="__ATTR_4559029312_30" data-type="INDEXTERM"
+                      id="ID426"></a> NEXT.</p>
+                  <table id="CH01_TABLE_1_1736545659767905">
+                    <caption><span class="LABEL">TABLE 1-1. </span>THE MAIN DIFFERENCES BETWEEN
+                      IMPERATIVE AND DECLARATIVE COMPOSITION.</caption>
+                    <thead>
+                      <tr>
+                        <th> </th>
+                        <th>IMPERATIVE</th>
+                        <th>DECLARATIVE</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>SYNTAX</td>
+                        <td>ALL OF PYTHON OR JAVASCRIPT</td>
+                        <td>LCEL</td>
+                      </tr>
+                      <tr>
+                        <td>PARALLEL EXECUTION</td>
+                        <td>
+                          <p>PYTHON: WITH THREADS OR COROUTINES</p>
+                          <p>JAVASCRIPT: WITH <code>Promise.all</code></p>
+                        </td>
+                        <td>AUTOMATIC</td>
+                      </tr>
+                      <tr>
+                        <td>STREAMING</td>
+                        <td>WITH YIELD KEYWORD</td>
+                        <td>AUTOMATIC</td>
+                      </tr>
+                      <tr>
+                        <td>ASYNC EXECUTION</td>
+                        <td>WITH ASYNC FUNCTIONS</td>
+                        <td>AUTOMATIC</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+              <section data-pdf-bookmark="IMPERATIVE COMPOSITION" data-type="SECT2">
+                <div class="SECT2" id="__ATTR_4559029312_31">
+                  <h2>IMPERATIVE COMPOSITION</h2>
+                  <p><em>IMPERATIVE COMPOSITION</em> IS JUST A FANCY NAME FOR WRITING THE CODE YOU’RE
+                    USED TO WRITING, COMPOSING THESE COMPONENTS INTO FUNCTIONS AND CLASSES. HERE’S
+                    AN EXAMPLE COMBINING<a contenteditable="FALSE" data-primary="CHATBOTS"
+                      data-secondary="__ATTR_4559029312_32" data-type="INDEXTERM" id="ID427"></a> PROMPTS, MODELS, AND
+                    OUTPUT PARSERS:</p>
+                  <p><em>PYTHON<a contenteditable="FALSE" data-primary="PYTHON" data-secondary="COMPOSITION"
+                        data-tertiary="IMPERATIVE" data-type="INDEXTERM" id="ID428"></a></em></p>
+                  <pre data-code-language="python" data-type="programlisting">
+<code class="kn">from</code> <code class="nn">langchain_openai.chat_models</code> <code class="kn">import</code> <code class="n">ChatOpenAI</code>
+<code class="kn">from</code> <code class="nn">langchain_core.prompts</code> <code class="kn">import</code> <code class="n">ChatPromptTemplate</code>
+<code class="kn">from</code> <code class="nn">langchain_core.runnables</code> <code class="kn">import</code> <code class="n">chain</code>
+
+<code class="c1"># the building blocks</code>
+
+<code class="n">template</code> <code class="o">=</code> <code class="n">ChatPromptTemplate</code><code class="o">.</code><code class="n">from_messages</code><code class="p">([</code>
+    <code class="p">(</code><code class="s1">'system'</code><code class="p">,</code> <code class="s1">'You are a helpful assistant.'</code><code class="p">),</code>
+    <code class="p">(</code><code class="s1">'human'</code><code class="p">,</code> <code class="s1">'</code><code class="si">{question}</code><code class="s1">'</code><code class="p">),</code>
+<code class="p">])</code>
+
+<code class="n">model</code> <code class="o">=</code> <code class="n">ChatOpenAI</code><code class="p">()</code>
+
+<code class="c1"># combine them in a function</code>
+<code class="c1"># @chain decorator adds the same Runnable interface for any function you write</code>
+
+<code class="nd">@chain</code>
+<code class="k">def</code> <code class="nf">chatbot</code><code class="p">(</code><code class="n">values</code><code class="p">):</code>
+    <code class="n">prompt</code> <code class="o">=</code> <code class="n">template</code><code class="o">.</code><code class="n">invoke</code><code class="p">(</code><code class="n">values</code><code class="p">)</code>
+    <code class="k">return</code> <code class="n">model</code><code class="o">.</code><code class="n">invoke</code><code class="p">(</code><code class="n">prompt</code><code class="p">)</code>
+
+<code class="c1"># use it</code>
+
+<code class="n">chatbot</code><code class="o">.</code><code class="n">invoke</code><code class="p">({</code><code class="s2">"question"</code><code class="p">:</code> <code class="s2">"Which model providers offer LLMs?"</code><code class="p">})</code></pre>
+                  <p><em>JAVASCRIPT<a contenteditable="FALSE" data-primary="JAVASCRIPT" data-secondary="COMPOSITION"
+                        data-tertiary="IMPERATIVE" data-type="INDEXTERM" id="ID429"></a></em></p>
+                  <pre data-code-language="javascript" data-type="programlisting">
+<code class="kr">import</code> <code class="p">{</code><code class="nx">ChatOpenAI</code><code class="p">}</code> <code class="nx">from</code> <code class="s1">'@langchain/openai'</code>
+<code class="kr">import</code> <code class="p">{</code><code class="nx">ChatPromptTemplate</code><code class="p">}</code> <code class="nx">from</code> <code class="s1">'@langchain/core/prompts'</code>
+<code class="kr">import</code> <code class="p">{</code><code class="nx">RunnableLambda</code><code class="p">}</code> <code class="nx">from</code> <code class="s1">'@langchain/core/runnables'</code>
+
+<code class="c1">// the building blocks</code>
+
+<code class="kr">const</code> <code class="nx">template</code> <code class="o">=</code> <code class="nx">ChatPromptTemplate</code><code class="p">.</code><code class="nx">fromMessages</code><code class="p">([</code>
+  <code class="p">[</code><code class="s1">'system'</code><code class="p">,</code> <code class="s1">'You are a helpful assistant.'</code><code class="p">],</code>
+  <code class="p">[</code><code class="s1">'human'</code><code class="p">,</code> <code class="s1">'{question}'</code><code class="p">],</code>
+<code class="p">])</code>
+
+<code class="kr">const</code> <code class="nx">model</code> <code class="o">=</code> <code class="k">new</code> <code class="nx">ChatOpenAI</code><code class="p">()</code>
+
+<code class="c1">// combine them in a function</code>
+<code class="c1">// RunnableLambda adds the same Runnable interface for any function you write</code>
+
+<code class="kr">const</code> <code class="nx">chatbot</code> <code class="o">=</code> <code class="nx">RunnableLambda</code><code class="p">.</code><code class="nx">from</code><code class="p">(</code><code class="nx">async</code> <code class="nx">values</code> <code class="o">=&gt;</code> <code class="p">{</code>
+  <code class="kr">const</code> <code class="nx">prompt</code> <code class="o">=</code> <code class="nx">await</code> <code class="nx">template</code><code class="p">.</code><code class="nx">invoke</code><code class="p">(</code><code class="nx">values</code><code class="p">)</code>
+  <code class="k">return</code> <code class="nx">await</code> <code class="nx">model</code><code class="p">.</code><code class="nx">invoke</code><code class="p">(</code><code class="nx">prompt</code><code class="p">)</code>
+<code class="p">})</code>
+
+<code class="c1">// use it</code>
+
+<code class="nx">await</code> <code class="nx">chatbot</code><code class="p">.</code><code class="nx">invoke</code><code class="p">({</code>
+  <code class="s2">"question"</code><code class="o">:</code> <code class="s2">"Which model providers offer LLMs?"</code>
+<code class="p">})</code></pre>
+                  <p><em>THE OUTPUT:</em></p>
+                  <pre data-type="programlisting">
+AIMessage(content="Hugging Face's `transformers` library, OpenAI using the 
+    `openai` library, and Cohere using the `cohere` library offer LLMs.")</pre>
+                  <p>THE PRECEDING IS A COMPLETE EXAMPLE OF A CHATBOT, USING A PROMPT AND CHAT MODEL.
+                    AS YOU CAN SEE, IT USES FAMILIAR PYTHON SYNTAX AND SUPPORTS ANY CUSTOM LOGIC YOU
+                    MIGHT WANT TO ADD IN THAT FUNCTION.</p>
+                  <p>ON THE OTHER HAND, IF YOU WANT TO ENABLE STREAMING OR ASYNC SUPPORT, YOU’D HAVE
+                    TO MODIFY YOUR FUNCTION TO SUPPORT IT. FOR EXAMPLE, STREAMING SUPPORT CAN BE
+                    ADDED AS FOLLOWS:</p>
+                  <p><em>PYTHON<a contenteditable="FALSE" data-primary="PYTHON"
+                        data-secondary="CHATBOT STREAMING SUPPORT" data-type="INDEXTERM" id="ID430"></a><a
+                        contenteditable="FALSE" data-primary="CHATBOTS" data-secondary="__ATTR_4559029312_33"
+                        data-type="INDEXTERM" id="ID431"></a></em></p>
+                  <pre data-code-language="python" data-type="programlisting">
+<code class="nd">@chain</code>
+<code class="k">def</code> <code class="nf">chatbot</code><code class="p">(</code><code class="n">values</code><code class="p">):</code>
+    <code class="n">prompt</code> <code class="o">=</code> <code class="n">template</code><code class="o">.</code><code class="n">invoke</code><code class="p">(</code><code class="n">values</code><code class="p">)</code>
+    <code class="k">for</code> <code class="n">token</code> <code class="ow">in</code> <code class="n">model</code><code class="o">.</code><code class="n">stream</code><code class="p">(</code><code class="n">prompt</code><code class="p">):</code>
+        <code class="k">yield</code> <code class="n">token</code>
+
+<code class="k">for</code> <code class="n">part</code> <code class="ow">in</code> <code class="n">chatbot</code><code class="o">.</code><code class="n">stream</code><code class="p">({</code>
+    <code class="s2">"question"</code><code class="p">:</code> <code class="s2">"Which model providers offer LLMs?"</code>
+<code class="p">}):</code>
+    <code class="nb">print</code><code class="p">(</code><code class="n">part</code><code class="p">)</code></pre>
+                  <p><em>JAVASCRIPT<a contenteditable="FALSE" data-primary="JAVASCRIPT"
+                        data-secondary="CHATBOT STREAMING SUPPORT" data-type="INDEXTERM" id="ID432"></a></em></p>
+                  <pre data-code-language="javascript" data-type="programlisting">
+<code class="kr">const</code> <code class="nx">chatbot</code> <code class="o">=</code> <code class="nx">RunnableLambda</code><code class="p">.</code><code class="nx">from</code><code class="p">(</code><code class="nx">async</code> <code class="kd">function</code><code class="o">*</code> <code class="p">(</code><code class="nx">values</code><code class="p">)</code> <code class="p">{</code>
+  <code class="kr">const</code> <code class="nx">prompt</code> <code class="o">=</code> <code class="nx">await</code> <code class="nx">template</code><code class="p">.</code><code class="nx">invoke</code><code class="p">(</code><code class="nx">values</code><code class="p">)</code>
+  <code class="k">for</code> <code class="nx">await</code> <code class="p">(</code><code class="kr">const</code> <code class="nx">token</code> <code class="k">of</code> <code class="nx">await</code> <code class="nx">model</code><code class="p">.</code><code class="nx">stream</code><code class="p">(</code><code class="nx">prompt</code><code class="p">))</code> <code class="p">{</code>
+    <code class="k">yield</code> <code class="nx">token</code>
+  <code class="p">}</code>
+<code class="p">})</code>
+
+<code class="k">for</code> <code class="nx">await</code> <code class="p">(</code><code class="kr">const</code> <code class="nx">token</code> <code class="k">of</code> <code class="nx">await</code> <code class="nx">chatbot</code><code class="p">.</code><code class="nx">stream</code><code class="p">({</code>
+  <code class="s2">"question"</code><code class="o">:</code> <code class="s2">"Which model providers offer LLMs?"</code>
+<code class="p">}))</code> <code class="p">{</code>
+  <code class="nx">console</code><code class="p">.</code><code class="nx">log</code><code class="p">(</code><code class="nx">token</code><code class="p">)</code>
+<code class="p">}</code></pre>
+                  <p><em>THE OUTPUT:</em></p>
+                  <pre data-type="programlisting">
+AIMessageChunk(content="Hugging")
+AIMessageChunk(content=" Face's")
+AIMessageChunk(content=" `transformers`")
+...</pre>
+                  <p>SO, EITHER IN JS OR PYTHON, YOU CAN ENABLE STREAMING FOR YOUR CUSTOM FUNCTION BY
+                    YIELDING THE VALUES YOU WANT TO STREAM AND THEN CALLING IT WITH
+                    <code>stream</code>.
+                  </p>
+                  <p>FOR<a contenteditable="FALSE" data-primary="CHATBOTS" data-secondary="ASYNCHRONOUS EXECUTION OF"
+                      data-type="INDEXTERM" id="ID433"></a> ASYNCHRONOUS EXECUTION, YOU’D REWRITE YOUR FUNCTION LIKE
+                    THIS:</p>
+                  <p><em>PYTHON<a contenteditable="FALSE" data-primary="PYTHON"
+                        data-secondary="ASYNCHRONOUS EXECUTION WITH" data-type="INDEXTERM" id="ID434"></a></em></p>
+                  <pre data-code-language="python" data-type="programlisting">
+<code class="nd">@chain</code>
+<code class="k">async</code> <code class="k">def</code> <code class="nf">chatbot</code><code class="p">(</code><code class="n">values</code><code class="p">):</code>
+    <code class="n">prompt</code> <code class="o">=</code> <code class="k">await</code> <code class="n">template</code><code class="o">.</code><code class="n">ainvoke</code><code class="p">(</code><code class="n">values</code><code class="p">)</code>
+    <code class="k">return</code> <code class="k">await</code> <code class="n">model</code><code class="o">.</code><code class="n">ainvoke</code><code class="p">(</code><code class="n">prompt</code><code class="p">)</code>
+
+<code class="k">await</code> <code class="n">chatbot</code><code class="o">.</code><code class="n">ainvoke</code><code class="p">({</code><code class="s2">"question"</code><code class="p">:</code> <code class="s2">"Which model providers offer LLMs?"</code><code class="p">})</code>
+<code class="c1"># &gt; AIMessage(content="""Hugging Face's `transformers` library, OpenAI using</code>
+    <code class="n">the</code> <code class="err">`</code><code class="n">openai</code><code class="err">`</code> <code class="n">library</code><code class="p">,</code> <code class="ow">and</code> <code class="n">Cohere</code> <code class="n">using</code> <code class="n">the</code> <code class="err">`</code><code class="n">cohere</code><code class="err">`</code> <code class="n">library</code> <code class="n">offer</code> <code class="n">LLMs</code><code class="o">.</code><code class="s2">""")</code></pre>
+                  <p>THIS<a contenteditable="FALSE" data-primary="JAVASCRIPT"
+                      data-secondary="ASYNCHRONOUS EXECUTION WITH" data-type="INDEXTERM" id="ID435"></a> ONE APPLIES TO
+                    PYTHON ONLY, AS ASYNCHRONOUS EXECUTION IS THE
+                    ONLY OPTION IN JAVASCRIPT.<a contenteditable="FALSE" data-primary="" data-startref="IMPCOMP01"
+                      data-type="INDEXTERM" id="ID436"></a></p>
+                </div>
+              </section>
+              <section data-pdf-bookmark="DECLARATIVE COMPOSITION" data-type="SECT2">
+                <div class="SECT2" id="__ATTR_4559029312_34">
+                  <h2>DECLARATIVE COMPOSITION</h2>
+                  <p>LCEL<a contenteditable="FALSE" data-primary="DECLARATIVE COMPOSITION" data-type="INDEXTERM"
+                      id="DECCOMP01"></a><a contenteditable="FALSE" data-primary="__ATTR_4559029312_35"
+                      data-secondary="OPTIMIZED EXECUTION PLAN USING" data-type="INDEXTERM" id="ID437"></a> IS A
+                    <em>DECLARATIVE LANGUAGE</em> FOR COMPOSING LANGCHAIN
+                    COMPONENTS. LANGCHAIN COMPILES LCEL COMPOSITIONS TO AN<a contenteditable="FALSE"
+                      data-primary="OPTIMIZED EXECUTION PLAN" data-type="INDEXTERM" id="ID438"></a> <em>OPTIMIZED
+                      EXECUTION PLAN</em>, WITH AUTOMATIC
+                    PARALLELIZATION, STREAMING, TRACING, AND ASYNC SUPPORT.</p>
+                  <p>LET’S SEE THE SAME EXAMPLE USING LCEL:</p>
+                  <p><em>PYTHON<a contenteditable="FALSE" data-primary="PYTHON" data-secondary="COMPOSITION"
+                        data-tertiary="DECLARATIVE" data-type="INDEXTERM" id="ID439"></a></em></p>
+                  <pre data-code-language="python" data-type="programlisting">
+<code class="kn">from</code> <code class="nn">langchain_openai.chat_models</code> <code class="kn">import</code> <code class="n">ChatOpenAI</code>
+<code class="kn">from</code> <code class="nn">langchain_core.prompts</code> <code class="kn">import</code> <code class="n">ChatPromptTemplate</code>
+
+<code class="c1"># the building blocks</code>
+
+<code class="n">template</code> <code class="o">=</code> <code class="n">ChatPromptTemplate</code><code class="o">.</code><code class="n">from_messages</code><code class="p">([</code>
+    <code class="p">(</code><code class="s1">'system'</code><code class="p">,</code> <code class="s1">'You are a helpful assistant.'</code><code class="p">),</code>
+    <code class="p">(</code><code class="s1">'human'</code><code class="p">,</code> <code class="s1">'</code><code class="si">{question}</code><code class="s1">'</code><code class="p">),</code>
+<code class="p">])</code>
+
+<code class="n">model</code> <code class="o">=</code> <code class="n">ChatOpenAI</code><code class="p">()</code>
+
+<code class="c1"># combine them with the | operator</code>
+
+<code class="n">chatbot</code> <code class="o">=</code> <code class="n">template</code> <code class="o">|</code> <code class="n">model</code>
+
+<code class="c1"># use it</code>
+
+<code class="n">chatbot</code><code class="o">.</code><code class="n">invoke</code><code class="p">({</code><code class="s2">"question"</code><code class="p">:</code> <code class="s2">"Which model providers offer LLMs?"</code><code class="p">})</code></pre>
+                  <p><em>JAVASCRIPT<a contenteditable="FALSE" data-primary="JAVASCRIPT" data-secondary="COMPOSITION"
+                        data-tertiary="DECLARATIVE" data-type="INDEXTERM" id="ID440"></a></em></p>
+                  <pre data-code-language="javascript" data-type="programlisting">
+<code class="kr">import</code> <code class="p">{</code> <code class="nx">ChatOpenAI</code> <code class="p">}</code> <code class="nx">from</code> <code class="s1">'@langchain/openai'</code>
+<code class="kr">import</code> <code class="p">{</code> <code class="nx">ChatPromptTemplate</code> <code class="p">}</code> <code class="nx">from</code> <code class="s1">'@langchain/core/prompts'</code>
+<code class="kr">import</code> <code class="p">{</code> <code class="nx">RunnableLambda</code> <code class="p">}</code> <code class="nx">from</code> <code class="s1">'@langchain/core/runnables'</code>
+
+<code class="c1">// the building blocks</code>
+
+<code class="kr">const</code> <code class="nx">template</code> <code class="o">=</code> <code class="nx">ChatPromptTemplate</code><code class="p">.</code><code class="nx">fromMessages</code><code class="p">([</code>
+  <code class="p">[</code><code class="s1">'system'</code><code class="p">,</code> <code class="s1">'You are a helpful assistant.'</code><code class="p">],</code>
+  <code class="p">[</code><code class="s1">'human'</code><code class="p">,</code> <code class="s1">'{question}'</code><code class="p">],</code>
+<code class="p">])</code>
+
+<code class="kr">const</code> <code class="nx">model</code> <code class="o">=</code> <code class="k">new</code> <code class="nx">ChatOpenAI</code><code class="p">()</code>
+
+<code class="c1">// combine them in a function</code>
+
+<code class="kr">const</code> <code class="nx">chatbot</code> <code class="o">=</code> <code class="nx">template</code><code class="p">.</code><code class="nx">pipe</code><code class="p">(</code><code class="nx">model</code><code class="p">)</code>
+
+<code class="c1">// use it</code>
+
+<code class="nx">await</code> <code class="nx">chatbot</code><code class="p">.</code><code class="nx">invoke</code><code class="p">({</code>
+  <code class="s2">"question"</code><code class="o">:</code> <code class="s2">"Which model providers offer LLMs?"</code>
+<code class="p">})</code></pre>
+                  <p><em>THE OUTPUT:</em></p>
+                  <pre data-type="programlisting">
+AIMessage(content="Hugging Face's `transformers` library, OpenAI using the 
+    `openai` library, and Cohere using the `cohere` library offer LLMs.")</pre>
+                  <p>CRUCIALLY, THE LAST LINE IS THE SAME BETWEEN THE TWO EXAMPLES—THAT IS, YOU USE
+                    THE FUNCTION AND THE LCEL SEQUENCE IN THE SAME WAY, WITH
+                    <code>invoke/stream/batch</code>. AND IN THIS VERSION, YOU DON’T NEED TO DO
+                    ANYTHING ELSE TO USE STREAMING:
+                  </p>
+                  <p><em>PYTHON<a contenteditable="FALSE" data-primary="PYTHON"
+                        data-secondary="CHATBOT STREAMING SUPPORT" data-type="INDEXTERM" id="ID441"></a></em></p>
+                  <pre data-code-language="python" data-type="programlisting">
+<code class="n">chatbot</code> <code class="o">=</code> <code class="n">template</code> <code class="o">|</code> <code class="n">model</code>
+
+<code class="k">for</code> <code class="n">part</code> <code class="ow">in</code> <code class="n">chatbot</code><code class="o">.</code><code class="n">stream</code><code class="p">({</code>
+    <code class="s2">"question"</code><code class="p">:</code> <code class="s2">"Which model providers offer LLMs?"</code>
+<code class="p">}):</code>
+    <code class="nb">print</code><code class="p">(</code><code class="n">part</code><code class="p">)</code>
+    <code class="c1"># &gt; AIMessageChunk(content="Hugging")</code>
+    <code class="c1"># &gt; AIMessageChunk(content=" Face's")</code>
+    <code class="c1"># &gt; AIMessageChunk(content=" `transformers`")</code>
+    <code class="c1"># ...</code></pre>
+                  <p><em>JAVASCRIPT<a contenteditable="FALSE" data-primary="JAVASCRIPT"
+                        data-secondary="CHATBOT STREAMING SUPPORT" data-type="INDEXTERM" id="ID442"></a></em></p>
+                  <pre data-code-language="javascript" data-type="programlisting">
+<code class="kr">const</code> <code class="nx">chatbot</code> <code class="o">=</code> <code class="nx">template</code><code class="p">.</code><code class="nx">pipe</code><code class="p">(</code><code class="nx">model</code><code class="p">)</code>
+
+<code class="k">for</code> <code class="nx">await</code> <code class="p">(</code><code class="kr">const</code> <code class="nx">token</code> <code class="k">of</code> <code class="nx">await</code> <code class="nx">chatbot</code><code class="p">.</code><code class="nx">stream</code><code class="p">({</code>
+  <code class="s2">"question"</code><code class="o">:</code> <code class="s2">"Which model providers offer LLMs?"</code>
+<code class="p">}))</code> <code class="p">{</code>
+  <code class="nx">console</code><code class="p">.</code><code class="nx">log</code><code class="p">(</code><code class="nx">token</code><code class="p">)</code>
+<code class="p">}</code></pre>
+                  <p>AND, FOR PYTHON ONLY, IT’S THE SAME FOR USING ASYNCHRONOUS METHODS:</p>
+                  <p><em>PYTHON</em></p>
+                  <pre data-code-language="python" data-type="programlisting">
+<code class="n">chatbot</code> <code class="o">=</code> <code class="n">template</code> <code class="o">|</code> <code class="n">model</code>
+
+<code class="k">await</code> <code class="n">chatbot</code><code class="o">.</code><code class="n">ainvoke</code><code class="p">({</code>
+    <code class="s2">"question"</code><code class="p">:</code> <code class="s2">"Which model providers offer LLMs?"</code>
+<code class="p">})</code></pre>
+                </div>
+              </section>
+            </div>
+          </section>
+          <section data-pdf-bookmark="Summary" data-type="sect1">
+            <div class="sect1" id="ch01_summary_1736545659777270">
+              <h1>Summary</h1>
+              <p>In<a contenteditable="false" data-primary="" data-startref="大语言模型Aassem01" data-type="indexterm"
+                  id="id443"></a><a contenteditable="false" data-primary="" data-startref="deccomp01"
+                  data-type="indexterm" id="id444"></a><a contenteditable="false" data-primary=""
+                  data-startref="LCassemgling01" data-type="indexterm" id="id445"></a> this chapter, you’ve learned
+                about the
+                building blocks and key components necessary to build 大语言模型 applications using LangChain.
+                大语言模型 applications are essentially a chain consisting of the large language model to make
+                predictions, the prompt instruction(s) to guide the model toward a desired output, and
+                an optional output parser to transform the format of the model’s output.</p>
+              <p>All LangChain components share the same interface with<a contenteditable="false"
+                  data-primary="invoke method" data-type="indexterm" id="id446"></a><a contenteditable="false"
+                  data-primary="stream method" data-type="indexterm" id="id447"></a><a contenteditable="false"
+                  data-primary="batch method" data-type="indexterm" id="id448"></a> <code>invoke</code>,
+                <code>stream</code>, and
+                <code>batch</code> methods to handle various inputs and outputs. They can either be
+                combined and executed imperatively by calling them directly or declaratively using LCEL.
+              </p>
+              <p>The<a contenteditable="false" data-primary="imperative composition" data-type="indexterm"
+                  id="id449"></a> imperative approach is useful if you intend to write a lot of custom
+                logic, whereas the declarative approach is useful for simply assembling existing
+                components with limited customization.</p>
+              <p>In <a data-type="xref" href="ch02.html#ch02_rag_part_i_indexing_your_data_1736545662500927">章节 2</a>,
+                you’ll learn how to provide external data to your AI chatbot as <em>context</em> so that
+                you can build an 大语言模型 application that enables you to “chat” with your data.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+  </div>
+</body>
+
 </html>
