@@ -283,14 +283,13 @@ class TreeProcessor:
 
         if node.node_type == "leaf":
             print(f"\n节点类型: {node.node_type}")
-            print(f"原始内容: {node.content}")
             print(f"Token数量: {node.token_count}")
             translated = await self.translator.translate(
                 node.content, source_lang=self.source_lang, target_lang=self.target_lang
             )
             translated = self._clean_translation_result(translated)
             node.translated = translated
-            print(f"翻译内容: {node.translated}")
+            print(f"翻译内容: {node.translated[:200]}")
             print("-" * 50)
         else:
             for child in node.children:

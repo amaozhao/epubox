@@ -6,7 +6,7 @@ Handles the core EPUB processing functionality.
 import shutil
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 from bs4 import BeautifulSoup
 
