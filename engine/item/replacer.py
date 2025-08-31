@@ -56,8 +56,8 @@ class Replacer:
         # "audio",
         # "video",
         # "track",
-        # "source",
-        # "figure",
+        "source",
+        "figure",
         # 表单相关
         # "input",
         # "button",
