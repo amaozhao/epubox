@@ -25,7 +25,7 @@ def translate(
         resolve_path=True,
         help="待翻译的 EPUB 文件路径。",
     ),
-    limit: Optional[int] = typer.Option(1000, "--limit", "-l", help="每个分块的最大 token 数。"),
+    limit: Optional[int] = typer.Option(1200, "--limit", "-l", help="每个分块的最大 token 数。"),
     language: Optional[str] = typer.Option("Chinese", "--language", "-lg", help="目标翻译语言。"),
 ):
     """
@@ -41,7 +41,7 @@ def translate(
         # 实例化并运行 Orchestrator
         orchestrator = Orchestrator()
         asyncio.run(
-            orchestrator.translate_epub(str(epub_path), limit=limit or 1000, target_language=language or "Chinese")
+            orchestrator.translate_epub(str(epub_path), limit=limit or 1200, target_language=language or "Chinese")
         )
 
         # 翻译成功，打印完成信息

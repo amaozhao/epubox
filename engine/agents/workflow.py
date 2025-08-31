@@ -79,6 +79,7 @@ class TranslatorWorkflow(Workflow):
             logger.error(error_msg)
             return RunResponse(run_id=self.run_id, content=error_msg)
         translated = translation_response.content.translation
+        translated = translated.replace("您", "你")
         logger.info(f"Translated text received: '{translated[:70]}...'")
         # Validate placeholders
         if not self._validate(chunk.original, translated):
@@ -113,5 +114,6 @@ class TranslatorWorkflow(Workflow):
             chunk.status = TranslationStatus.COMPLETED
             chunk.translated = final_text
             logger.info("Successfully applied corrections.")
+        final_text = final_text.replace("您", "你")
 
         return RunResponse(run_id=self.run_id, content=final_text)
