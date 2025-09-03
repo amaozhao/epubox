@@ -72,7 +72,7 @@ def configure_logging() -> None:
                 # Process any exceptions and include traceback info
                 structlog.processors.format_exc_info,
                 # Convert log entry to JSON format
-                structlog.processors.JSONRenderer(),
+                structlog.processors.JSONRenderer(ensure_ascii=False),
             ],
             logger_factory=structlog.stdlib.LoggerFactory(),
             wrapper_class=structlog.stdlib.BoundLogger,
@@ -106,4 +106,5 @@ def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name)
 
 
+configure_logging()
 engine_logger = get_logger("engine")

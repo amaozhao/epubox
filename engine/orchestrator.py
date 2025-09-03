@@ -77,6 +77,7 @@ class Orchestrator:
 
                 workflow = TranslatorWorkflow()
                 await workflow.arun(chunk=chunk)
+                parser.save_json(book)
 
             # This call should be inside the loop as it restores content for each item.
             self.replacer.restore(item)

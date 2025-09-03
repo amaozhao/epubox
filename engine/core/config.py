@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_FORMAT: Literal["json", "console"] = "json"
-    LOG_FILE: Optional[Path] = None
+    LOG_FILE: Optional[Path] = Path("./logs/engine.log")
     JSON_LOGS: bool = True
 
     model_config = {
