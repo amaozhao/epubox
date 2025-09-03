@@ -86,7 +86,7 @@ class Parser:
                 file_path = os.path.join(root, file)
                 relative_path = os.path.relpath(file_path, self.output_dir)
 
-                if relative_path.lower().endswith((".xhtml", ".html", ".xml", ".ncx")):
+                if relative_path.lower().endswith((".xhtml", ".html", ".htm", ".xml", ".ncx")):
                     if relative_path.endswith("container.xml"):
                         continue
                     if "META-INF" in relative_path:
