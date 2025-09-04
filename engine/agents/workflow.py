@@ -77,7 +77,7 @@ class TranslatorWorkflow(Workflow):
         if not isinstance(translation_response.content, TranslationResponse):
             error_msg = "Translation step failed: The agent returned an unexpected response type."
             logger.error(error_msg)
-            return RunResponse(run_id=self.run_id, content=error_msg)
+            return RunResponse(content=error_msg, run_id=self.run_id)
         translated = translation_response.content.translation
         translated = translated.replace("您", "你")
         logger.info(f"Translated text received: '{translated[:70]}...'")
