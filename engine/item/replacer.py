@@ -5,7 +5,7 @@ from typing import Dict
 
 from bs4 import BeautifulSoup, Tag
 
-from engine.constant import PLACEHOLDER_PATTERN
+from engine.constant import ID_LENGTH, PLACEHOLDER_DELIMITER, PLACEHOLDER_PATTERN
 from engine.core.logger import engine_logger
 
 
@@ -18,9 +18,9 @@ class Placeholder:
 
     def generate(self):
         while True:
-            _placeholder = "".join(secrets.choice(self.characters) for _ in range(6))
+            _placeholder = "".join(secrets.choice(self.characters) for _ in range(ID_LENGTH))
             if _placeholder in self.generated:
-                _placeholder = "".join(secrets.choice(self.characters) for _ in range(6))
+                _placeholder = "".join(secrets.choice(self.characters) for _ in range(ID_LENGTH))
             break
         return _placeholder
 
@@ -29,7 +29,7 @@ class Placeholder:
             _placeholder = self.generate()
             if _placeholder not in self.generated:
                 self.generated.add(_placeholder)
-                holder = f"##{_placeholder}##"
+                holder = f"{PLACEHOLDER_DELIMITER}{_placeholder}{PLACEHOLDER_DELIMITER}"
                 self.placer_map[holder] = str(original)
                 return holder
 
