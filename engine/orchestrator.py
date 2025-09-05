@@ -1,5 +1,4 @@
 import os
-import re
 
 from tqdm import tqdm
 
@@ -39,12 +38,12 @@ class Orchestrator:
         if chunk.status == TranslationStatus.COMPLETED:
             return False
 
-        # 中文字符的 unicode 范围
-        chinese_pattern = re.compile(r"[\u4e00-\u9fff]")
+        # # 中文字符的 unicode 范围
+        # chinese_pattern = re.compile(r"[\u4e00-\u9fff]")
 
-        # 检查 translated 属性是否为非空字符串，并包含中文字符
-        if chunk.translated and isinstance(chunk.translated, str) and chinese_pattern.search(chunk.translated):
-            return False
+        # # 检查 translated 属性是否为非空字符串，并包含中文字符
+        # if chunk.translated and isinstance(chunk.translated, str) and chinese_pattern.search(chunk.translated):
+        #     return False
 
         return True
 

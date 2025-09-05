@@ -66,28 +66,35 @@ class TranslatorWorkflow(Workflow):
     async def arun(self, chunk: Chunk) -> RunResponse:
         """异步生成器入口点，处理分块内容并返回状态。"""
 
-        translator_input = {
-            "text_to_translate": chunk.original,
-            "untranslatable_placeholders": self._get_placeholders(chunk.original),
-        }
-        translation_response: RunResponse = await self.translator.arun(
-            json.dumps(translator_input, ensure_ascii=False, indent=2)
-        )
-        # Validate the response type to ensure the agent followed instructions.
-        if not isinstance(translation_response.content, TranslationResponse):
-            error_msg = "Translation step failed: The agent returned an unexpected response type."
-            logger.error(error_msg)
-            return RunResponse(content=error_msg, run_id=self.run_id)
-        translated = translation_response.content.translation
-        translated = translated.replace("您", "你")
-        logger.info(f"Translated text received: '{translated[:70]}...'")
-        # Validate placeholders
-        if not self._validate(chunk.original, translated):
-            error_msg = "Translation step failed: Placeholder mismatch detected."
+        if chunk.status == TranslationStatus.TRANSLATED:
+            translated = chunk.translated
+        else:
+            translator_input = {
+                "text_to_translate": chunk.original,
+                "untranslatable_placeholders": self._get_placeholders(chunk.original),
+            }
+            translation_response: RunResponse = await self.translator.arun(
+                json.dumps(translator_input, ensure_ascii=False, indent=2)
+            )
+            # Validate the response type to ensure the agent followed instructions.
+            if not isinstance(translation_response.content, TranslationResponse):
+                error_msg = "Translation step failed: The agent returned an unexpected response type."
+                logger.error(error_msg)
+                return RunResponse(content=error_msg, run_id=self.run_id)
+            translated = translation_response.content.translation
+            logger.info(f"Translated text received: '{translated[:70]}...'")
+            # Validate placeholders
+            if not self._validate(chunk.original, translated):
+                error_msg = "Translation step failed: Placeholder mismatch detected."
+                logger.error(error_msg)
+                return RunResponse(run_id=self.run_id, content=error_msg)
+            chunk.status = TranslationStatus.TRANSLATED
+            chunk.translated = translated
+
+        if translated is None:
+            error_msg = "Translation is None."
             logger.error(error_msg)
             return RunResponse(run_id=self.run_id, content=error_msg)
-        chunk.status = TranslationStatus.TRANSLATED
-        chunk.translated = translated
 
         # --- Step 2: Proofread the translated text ---
         proofer_input = {
@@ -111,9 +118,9 @@ class TranslatorWorkflow(Workflow):
         if corrections:
             for original, corrected in corrections.items():
                 final_text = final_text.replace(original, corrected)
-            chunk.status = TranslationStatus.COMPLETED
             chunk.translated = final_text
             logger.info("Successfully applied corrections.")
         final_text = final_text.replace("您", "你")
+        chunk.status = TranslationStatus.COMPLETED
 
         return RunResponse(run_id=self.run_id, content=final_text)
