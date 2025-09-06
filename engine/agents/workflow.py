@@ -8,6 +8,7 @@ from agno.workflow import RunResponse, Workflow
 from engine.constant import PLACEHOLDER_PATTERN
 from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
+from engine.services import GoogleTranslator
 
 from .proofer import ProofreadingResult, get_proofer
 from .translator import TranslationResponse, get_translator
@@ -25,6 +26,7 @@ class TranslatorWorkflow(Workflow):
 
     translator: Agent = get_translator()
     proofer: Agent = get_proofer()
+    google_translator = GoogleTranslator()
 
     def _get_placeholders(self, text: str) -> list[str]:
         """
@@ -87,6 +89,7 @@ class TranslatorWorkflow(Workflow):
             if not self._validate(chunk.original, translated):
                 error_msg = "Translation step failed: Placeholder mismatch detected."
                 logger.error(error_msg)
+                translated = await self.google_translator.translate(chunk.original)
                 return RunResponse(run_id=self.run_id, content=error_msg)
             chunk.status = TranslationStatus.TRANSLATED
             chunk.translated = translated

@@ -21,7 +21,7 @@ class GoogleTranslator:
         }
         self.client = httpx.AsyncClient()
 
-    async def translate(self, text):
+    async def translate(self, text: str) -> str:
         r = await self.client.post(self.api_url, headers=self.headers, data={"q": urllib.parse.quote(text)})
         if not r.is_success:
             return text

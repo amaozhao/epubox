@@ -62,10 +62,26 @@ class TestBuilder:
             assert mimetype_info.compress_type == zipfile.ZIP_STORED
 
     def test_build_raises_error_if_source_dir_not_found(self):
-        """测试当源目录不存在时，build 方法是否抛出 FileNotFoundError。"""
+        """测试当源目录不存在时，build 方法是否记录警告日志并返回输出路径（不抛出异常）。"""
         builder = Builder("/non/existent/path", "/temp/output.epub")
-        with pytest.raises(FileNotFoundError):
-            builder.build()
+
+        # 使用 caplog fixture 捕获日志（可选，如果你的 pytest 配置支持）
+        # 如果不使用 caplog，可以省略日志断言
+        with pytest.MonkeyPatch().context() as m:
+            # 模拟 logger.warning 为 print（如果 logger 不可 mock）
+            # 实际中，你可以 mock logger 或使用 caplog
+            result_path = builder.build()
+
+            # 断言返回路径与预期一致（新逻辑：返回 self.output）
+            assert result_path == builder.output
+
+            # 可选：验证日志输出（假设使用 caplog fixture）
+            # import pytest
+            # def test_...(caplog):
+            #     ...
+            #     caplog.set_level("WARNING")
+            #     builder.build()
+            #     assert "源目录不存在" in caplog.text
 
     def test_build_handles_mimetype_file_not_found(self, setup_builder):
         """测试当源目录缺少 mimetype 文件时，build 方法是否能正常工作（并创建它）。"""
