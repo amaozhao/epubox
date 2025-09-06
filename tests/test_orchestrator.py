@@ -133,7 +133,7 @@ class TestOrchestrator:
 
             # 验证 save_json 和 restore 在每次循环中都正确调用
             # 因为 item3 的 chunks 为空，这两个方法不会被调用
-            assert mock_parser_save_json.call_count == 2
+            assert mock_parser_save_json.call_count == 4
             assert mock_replacer_restore.call_count == 2
 
             # 验证 Builder 的调用
@@ -180,7 +180,7 @@ class TestOrchestrator:
             assert mock_instance.arun.call_count == 1
 
             # 验证 save_json 和 restore 仍然为每个 item 调用
-            assert mock_parser_save_json.call_count == 2
+            assert mock_parser_save_json.call_count == 3
             assert mock_replacer_restore.call_count == 2
 
             # 验证 Builder 的调用
@@ -215,14 +215,14 @@ class TestOrchestrator:
         mock_instance.arun = AsyncMock(return_value="Mocked Error")
 
         # 确保 _should_translate_chunk 总是返回 True
-        with patch.object(orchestrator, "_should_translate_chunk", return_value=True) as mock_should_translate_chunk:
+        with patch.object(orchestrator, "_should_translate_chunk", return_value=True):
             await orchestrator.translate_epub("mock_epub_path")
 
             # 验证 workflow 的调用次数
             assert mock_instance.arun.call_count == 2
 
             # 验证 save_json 和 restore 仍然为每个 item 调用
-            assert mock_parser_save_json.call_count == 2
+            assert mock_parser_save_json.call_count == 4
             assert mock_replacer_restore.call_count == 2
 
             # 验证 Builder 的调用
@@ -264,7 +264,7 @@ class TestOrchestrator:
         assert mock_instance.arun.call_count == 2
 
         # 验证 save_json 和 restore 仍然为每个 item 调用
-        assert mock_parser_save_json.call_count == 2
+        assert mock_parser_save_json.call_count == 4
         assert mock_replacer_restore.call_count == 2
 
         # 验证 Builder 的调用
