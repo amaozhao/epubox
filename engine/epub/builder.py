@@ -41,24 +41,24 @@ class Builder:
 
     def _modify_content_opf(self, content_opf_path: str) -> bool:
         """
-        修改 content.opf 文件，设置或更新 <dc:language> 或 <dc: language> 标签。
+        修改 .opf 文件，设置或更新 <dc:language> 或 <dc: language> 标签。
 
         Args:
-            content_opf_path: content.opf 文件的路径。
+            content_opf_path: .opf 文件的路径。
 
         Returns:
             bool: 修改是否成功。
         """
         if not os.path.exists(content_opf_path):
-            logger.warning(f"未找到 content.opf 文件：{content_opf_path}")
+            logger.warning(f"未找到 .opf 文件：{content_opf_path}")
             return False
 
-        # 读取 content.opf 文件内容
+        # 读取 .opf 文件内容
         try:
             with open(content_opf_path, "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception as e:
-            logger.warning(f"读取 content.opf 文件失败：{e}")
+            logger.warning(f"读取 .opf 文件失败：{content_opf_path}, 错误：{e}")
             return False
 
         # 设置语言：检查是否已存在 <dc:language> 或 <dc: language> 标签
@@ -72,24 +72,24 @@ class Builder:
                     metadata_end_pattern, f"  <dc:language>{self.language}</dc:language>\n</metadata>", content
                 )
             else:
-                logger.warning("content.opf 文件中未找到 </metadata> 标签，无法添加语言")
+                logger.warning(f".opf 文件中未找到 </metadata> 标签，无法添加语言：{content_opf_path}")
                 return False
 
-        # 写回修改后的 content.opf 文件
+        # 写回修改后的 .opf 文件
         try:
             with open(content_opf_path, "w", encoding="utf-8") as f:
                 f.write(content)
             return True
         except Exception as e:
-            logger.warning(f"写入 content.opf 文件失败：{e}")
+            logger.warning(f"写入 .opf 文件失败：{content_opf_path}, 错误：{e}")
             return False
 
     def _find_css_files(self, content_opf_path: str) -> list:
         """
-        从 content.opf 文件中查找所有 CSS 文件的路径。
+        从 .opf 文件中查找所有 CSS 文件的路径。
 
         Args:
-            content_opf_path: content.opf 文件的路径。
+            content_opf_path: .opf 文件的路径。
 
         Returns:
             包含 CSS 文件绝对路径的列表。
@@ -107,9 +107,9 @@ class Builder:
                 if os.path.exists(css_path):
                     css_files.append(css_path)
             if not css_files:
-                logger.warning("未找到任何 CSS 文件，请确保 content.opf 中声明了 CSS 文件")
+                logger.warning(f"未找到任何 CSS 文件，请确保 .opf 文件中声明了 CSS 文件：{content_opf_path}")
         except Exception as e:
-            logger.warning(f"读取 content.opf 文件以查找 CSS 文件失败：{e}")
+            logger.warning(f"读取 .opf 文件以查找 CSS 文件失败：{content_opf_path}, 错误：{e}")
         return css_files
 
     def _modify_css_file(self, css_path: str) -> bool:
@@ -177,17 +177,20 @@ class Builder:
             logger.warning(f"源目录不存在：{self.dir}")
             return self.output
 
-        # 查找 content.opf 文件
+        # 查找扩展名为 .opf 的文件
         content_opf_path = None
         for root, _, files in os.walk(self.dir):
-            if "content.opf" in files:
-                content_opf_path = os.path.join(root, "content.opf")
-                break
+            for file in files:
+                if file.lower().endswith(".opf"):
+                    content_opf_path = os.path.join(root, file)
+                    break  # 只处理第一个找到的 .opf 文件
+            if content_opf_path:
+                break  # 如果找到，退出外层循环
 
         if not content_opf_path:
-            logger.warning("未找到 content.opf 文件，跳过语言和字体设置")
+            logger.warning("未找到任何 .opf 文件，跳过语言和字体设置")
         else:
-            # 修改 content.opf 文件以设置语言
+            # 修改 .opf 文件以设置语言
             self._modify_content_opf(content_opf_path)
 
             # 查找并修改所有 CSS 文件
