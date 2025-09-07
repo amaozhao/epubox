@@ -67,7 +67,7 @@ class TestBuilder:
 
         # 使用 caplog fixture 捕获日志（可选，如果你的 pytest 配置支持）
         # 如果不使用 caplog，可以省略日志断言
-        with pytest.MonkeyPatch().context() as m:
+        with pytest.MonkeyPatch().context():
             # 模拟 logger.warning 为 print（如果 logger 不可 mock）
             # 实际中，你可以 mock logger 或使用 caplog
             result_path = builder.build()

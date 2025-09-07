@@ -89,7 +89,7 @@ class TranslatorWorkflow(Workflow):
             if not self._validate(chunk.original, translated):
                 error_msg = "Translation step failed: Placeholder mismatch detected."
                 logger.error(error_msg)
-                translated = await self.google_translator.translate(chunk.original)
+                # translated = await self.google_translator.translate(chunk.original)
                 return RunResponse(run_id=self.run_id, content=error_msg)
             chunk.status = TranslationStatus.TRANSLATED
             chunk.translated = translated
