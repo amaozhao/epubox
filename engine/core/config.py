@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     KIMI_API_KEY: str = "your-api-key-here"
     KIMI_MODEL: str = "kimi-latest"
 
+    # GLM引擎配置
+    GLM_BASE_URL: str = "https://open.bigmodel.cn/api/paas/v4/"
+    GLM_API_KEY: str = "your-api-key-here"
+    GLM_MODEL: str = "glm-4.5-air"
+
     # Gemini 引擎配置
     GEMINI_API_KEY: str = "your-api-key-here"
     GEMINI_MODEL: str = "gemini-2.5-flash"
