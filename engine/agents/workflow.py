@@ -121,9 +121,10 @@ class TranslatorWorkflow(Workflow):
         if corrections:
             for original, corrected in corrections.items():
                 final_text = final_text.replace(original, corrected)
+                final_text = final_text.replace("您", "你")
             chunk.translated = final_text
             logger.info("Successfully applied corrections.")
-        final_text = final_text.replace("您", "你")
+
         chunk.status = TranslationStatus.COMPLETED
 
         return RunResponse(run_id=self.run_id, content=final_text)
