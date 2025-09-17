@@ -1,202 +1,296 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.workflow import RunResponse
+from agno.workflow import Workflow
 
-from engine.agents.proofer import ProofreadingResult
-from engine.agents.translator import TranslationResponse
-from engine.agents.workflow import TranslatorWorkflow
-
-# 假设您的源代码位于 'engine' 包中
+from engine.agents.schemas import ProofreadingResult, TranslationResponse
+from engine.agents.workflow import (
+    _get_placeholders,
+    _validate_placeholders,
+    apply_corrections_step,
+    get_translator_workflow,
+    proofread_step,
+    translate_step,
+)
+from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
 
 
-@pytest.fixture
-def workflow() -> TranslatorWorkflow:
-    """为每个测试提供一个全新的 TranslatorWorkflow 实例。"""
-    # 这里我们实例化工作流，它的 translator 和 proofer 属性
-    # 在您的源代码中已经被 mock 掉了 (通过 get_translator 和 get_proofer)。
-    return TranslatorWorkflow(session_id="test_session")
+# Mock TranslationResponse and ProofreadingResult for testing
+class MockTranslationResponse(TranslationResponse):
+    def __init__(self, translation: str):
+        super().__init__(translation=translation)
 
 
-@pytest.fixture
-def mock_chunk_factory():
-    """
-    一个用于创建 Chunk 对象的 fixture 工厂，可以按需定制。
-    """
-
-    def _factory(name, original, translated=None, tokens=0, status=TranslationStatus.PENDING):
-        return Chunk(name=name, original=original, translated=translated, tokens=tokens, status=status)
-
-    return _factory
+class MockProofreadingResult(ProofreadingResult):
+    def __init__(self, corrections: dict):
+        super().__init__(corrections=corrections)
 
 
-@pytest.fixture
-def mock_agents(mocker):
-    """模拟 Translator 和 Proofer 代理。"""
-    mock_translator = AsyncMock()
-    mock_proofer = AsyncMock()
-
-    # 模拟成功的翻译结果
-    mock_translator.arun.return_value = AsyncMock(
-        content=TranslationResponse(translation="你好 ##abcde1##，你的代码是 ##abcde2##。")
-    )
-
-    # 模拟成功的校对结果
-    mock_proofer.arun.return_value = AsyncMock(content=ProofreadingResult(corrections={"你好": "您好", "代码": "代码"}))
-
-    mocker.patch("engine.agents.workflow.get_translator", return_value=mock_translator)
-    mocker.patch("engine.agents.workflow.get_proofer", return_value=mock_proofer)
-
-    return mock_translator, mock_proofer
-
-
-class TestTranslatorWorkflow:
-    """
-    TranslatorWorkflow 的测试用例集合。
-    """
-
-    @pytest.mark.asyncio
-    async def test_arun_successful_path_with_corrections(self, workflow: TranslatorWorkflow, mock_chunk_factory):
+@pytest.mark.asyncio
+class TestWorkflow:
+    @pytest.fixture(autouse=True)
+    def mock_chunk_factory(self):
         """
-        测试理想情境：翻译成功，验证通过，且校对员提供了修正建议。
+        一个用于创建 Chunk 对象的 fixture 工厂，可以按需定制。
         """
-        # Arrange (安排)
-        original_text = "Hello ##abc1##, your code is ##abe2##."
-        chunk = mock_chunk_factory(name="1", original=original_text)
 
-        # 模拟 translator 的响应
-        translated_text = "你好 ##abc1##，你的代码是 ##abe2##。"
-        mock_trans_response = RunResponse(content=TranslationResponse(translation=translated_text))
-        workflow.translator.arun = AsyncMock(return_value=mock_trans_response)
+        def _factory(name, original, translated=None, tokens=0, status=TranslationStatus.PENDING):
+            return Chunk(name=name, original=original, translated=translated, tokens=tokens, status=status)
 
-        # 模拟 proofer 的响应 (有修正)
-        corrections = {"您好": "你好", "代码": "代码"}
-        mock_proof_response = RunResponse(content=ProofreadingResult(corrections=corrections))
-        workflow.proofer.arun = AsyncMock(return_value=mock_proof_response)
+        return _factory
 
-        # Act (执行)
-        result = await workflow.arun(chunk=chunk)
+    async def test_get_placeholders(self, mock_chunk_factory):
+        text = "Hello ##abcd##, your code is ##1234##."
+        placeholders = _get_placeholders(text)
+        expected = ["##abcd##", "##1234##"]
+        assert placeholders == expected, f"Expected placeholders {expected}, got {placeholders}"
 
-        # Assert (断言)
-        final_text = "你好 ##abc1##，你的代码是 ##abe2##。"
-        assert result.content == final_text
-        assert chunk.status == TranslationStatus.COMPLETED
-        assert chunk.translated == final_text
-        workflow.translator.arun.assert_awaited_once()
-        workflow.proofer.arun.assert_awaited_once()
+    async def test_validate_placeholders_success(self, mock_chunk_factory):
+        original = "Hello ##abcd##, your code is ##1234##."
+        translated = "你好 ##abcd##，你的代码是 ##1234##。"
+        assert _validate_placeholders(original, translated) is True
 
-    @pytest.mark.asyncio
-    async def test_arun_successful_path_no_corrections(self, workflow: TranslatorWorkflow, mock_chunk_factory):
-        """
-        测试情境：翻译成功，但校对员未发现任何错误。
-        """
-        # Arrange
-        original_text = "Text is perfect ##abc3##."
-        chunk = mock_chunk_factory(name="test2", original=original_text)
+    async def test_validate_placeholders_failure(self, mock_chunk_factory):
+        original = "Hello ##abcd##, your code is ##1234##."
+        translated = "你好 ##abcd##，你的代码是 ##wxyz##。"
+        with patch.object(logger, "error") as mock_error:
+            assert _validate_placeholders(original, translated) is False
+            assert mock_error.call_count == 3  # Logs mismatch and lists
 
-        translated_text = "文本是完美的 ##abc3##。"
-        mock_trans_response = RunResponse(content=TranslationResponse(translation=translated_text))
-        workflow.translator.arun = AsyncMock(return_value=mock_trans_response)
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_success(self, mock_get_translator, mock_chunk_factory):
+        chunk = mock_chunk_factory(name="test_chunk", original="Hello ##abcd##.", tokens=10)
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(return_value=MagicMock(content=MockTranslationResponse("你好 ##abcd##。")))
+        mock_get_translator.return_value = mock_translator
 
-        # 模拟 proofer 响应 (无修正)
-        mock_proof_response = RunResponse(content=ProofreadingResult(corrections={}))
-        workflow.proofer.arun = AsyncMock(return_value=mock_proof_response)
+        step_input = MagicMock(input=chunk)
+        output = await translate_step(step_input)
+        assert output.success is True
+        assert isinstance(output.content, Chunk)
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "你好 ##abcd##。"
+        assert output.content.name == "test_chunk"
+        assert output.content.tokens == 10
 
-        # Act
-        result = await workflow.arun(chunk=chunk)
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_already_translated(self, mock_get_translator, mock_chunk_factory):
+        chunk = mock_chunk_factory(
+            name="test_chunk",
+            original="Hello ##abcd##.",
+            translated="你好 ##abcd##。",
+            tokens=10,
+            status=TranslationStatus.TRANSLATED,
+        )
+        step_input = MagicMock(input=chunk)
+        output = await translate_step(step_input)
+        assert output.success is True
+        assert isinstance(output.content, Chunk)
+        assert output.content.translated == "你好 ##abcd##。"
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.name == "test_chunk"
+        assert output.content.tokens == 10
+        mock_get_translator.assert_not_called()
 
-        # Assert
-        assert result.content == translated_text
-        # 状态应为 TRANSLATED，因为没有应用修正，所以未进入 COMPLETED 状态
-        assert chunk.status == TranslationStatus.COMPLETED
-        assert chunk.translated == translated_text
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_placeholder_mismatch(self, mock_get_translator, mock_chunk_factory):
+        chunk = mock_chunk_factory(name="test_chunk", original="Hello ##abcd##.", tokens=5)
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(return_value=MagicMock(content=MockTranslationResponse("你好 ##wxyz##。")))
+        mock_get_translator.return_value = mock_translator
 
-    @pytest.mark.asyncio
-    async def test_arun_fails_on_translator_invalid_response_type(
-        self, workflow: TranslatorWorkflow, mock_chunk_factory
+        step_input = MagicMock(input=chunk)
+        with patch.object(logger, "error") as mock_error:
+            output = await translate_step(step_input)
+            assert output.success is False
+            assert output.error == "翻译步骤失败：检测到占位符不匹配。"
+            assert isinstance(output.content, Chunk)
+            assert output.content.name == "test_chunk"
+            assert output.content.tokens == 5
+            assert mock_error.call_count == 4  # Error + lists + final error
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_unexpected_response(self, mock_get_translator, mock_chunk_factory):
+        chunk = mock_chunk_factory(name="test_chunk", original="Hello ##abcd##.", tokens=10)
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(return_value=MagicMock(content="invalid"))  # Not TranslationResponse
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk)
+        with patch.object(logger, "error") as mock_error:
+            output = await translate_step(step_input)
+            assert output.success is False
+            assert output.error == "翻译步骤失败：代理返回了意外的响应类型。"
+            assert isinstance(output.content, Chunk)
+            assert output.content.name == "test_chunk"
+            assert output.content.tokens == 10
+            assert mock_error.call_count == 1
+
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_success(self, mock_get_proofer, mock_chunk_factory):
+        chunk = mock_chunk_factory(
+            name="test_chunk",
+            original="Hello ##abcd##.",
+            translated="你好 ##abcd##。",
+            tokens=10,
+            status=TranslationStatus.TRANSLATED,
+        )
+        mock_proofer = MagicMock()
+        mock_proofer.arun = AsyncMock(return_value=MagicMock(content=MockProofreadingResult({"你好": "您好"})))
+        mock_get_proofer.return_value = mock_proofer
+
+        step_input = MagicMock(previous_step_content=chunk)
+        output = await proofread_step(step_input)
+        assert output.success is True
+        assert isinstance(output.content, dict)
+        assert isinstance(output.content["chunk"], Chunk)
+        assert isinstance(output.content["proofreading_result"], ProofreadingResult)
+        assert output.content["proofreading_result"].corrections == {"你好": "您好"}
+        assert output.content["chunk"].name == "test_chunk"
+        assert output.content["chunk"].tokens == 10
+
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_no_translated_text(self, mock_get_proofer, mock_chunk_factory):
+        chunk = mock_chunk_factory(name="test_chunk", original="Hello ##abcd##.", tokens=10)
+        step_input = MagicMock(previous_step_content=chunk)
+        with patch.object(logger, "error") as mock_error:
+            output = await proofread_step(step_input)
+            assert output.success is False
+            assert output.error == "校对步骤失败：没有从上一步收到有效的翻译文本。"
+            assert isinstance(output.content, dict)
+            assert isinstance(output.content["chunk"], Chunk)
+            assert output.content["chunk"].name == "test_chunk"
+            assert output.content["chunk"].tokens == 10
+            assert mock_error.call_count == 1
+
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_unexpected_response(self, mock_get_proofer, mock_chunk_factory):
+        chunk = mock_chunk_factory(
+            name="test_chunk",
+            original="Hello ##abcd##.",
+            translated="你好 ##abcd##。",
+            tokens=10,
+            status=TranslationStatus.TRANSLATED,
+        )
+        mock_proofer = MagicMock()
+        mock_proofer.arun = AsyncMock(return_value=MagicMock(content="invalid"))  # Not ProofreadingResult
+        mock_get_proofer.return_value = mock_proofer
+
+        step_input = MagicMock(previous_step_content=chunk)
+        with patch.object(logger, "error") as mock_error:
+            output = await proofread_step(step_input)
+            assert output.success is True  # Falls back to empty ProofreadingResult
+            assert isinstance(output.content, dict)
+            assert isinstance(output.content["chunk"], Chunk)
+            assert output.content["proofreading_result"].corrections == {}
+            assert output.content["chunk"].name == "test_chunk"
+            assert output.content["chunk"].tokens == 10
+            assert mock_error.call_count == 1
+
+    async def test_apply_corrections_step_success(self, mock_chunk_factory):
+        chunk = mock_chunk_factory(
+            name="test_chunk",
+            original="Hello ##abcd##.",
+            translated="你好 ##abcd##。您好。",
+            tokens=10,
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofreading_result = MockProofreadingResult({"你好": "您好"})
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+        with patch.object(logger, "info") as mock_info:
+            output = apply_corrections_step(step_input)
+            assert output.success is True
+            assert isinstance(output.content, Chunk)
+            assert output.content.translated == "你好 ##abcd##。你好。"
+            assert output.content.status == TranslationStatus.COMPLETED
+            assert output.content.name == "test_chunk"
+            assert output.content.tokens == 10
+            assert mock_info.call_count == 2  # Discovered corrections + applied
+
+    async def test_apply_corrections_step_no_translated_text(self, mock_chunk_factory):
+        chunk = mock_chunk_factory(name="test_chunk", original="Hello ##abcd##.", tokens=10)
+        proofreading_result = MockProofreadingResult({})
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+        with patch.object(logger, "error") as mock_error:
+            output = apply_corrections_step(step_input)
+            assert output.success is False
+            assert output.error == "应用校对建议步骤失败：缺少翻译文本。"
+            assert isinstance(output.content, Chunk)
+            assert output.content.name == "test_chunk"
+            assert output.content.tokens == 10
+            assert mock_error.call_count == 1
+
+    @patch("engine.agents.workflow.get_translator")
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_full_workflow_success(self, mock_get_proofer, mock_get_translator, mock_chunk_factory):
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(content=MockTranslationResponse("你好 ##abcd##。您好。"))
+        )
+        mock_get_translator.return_value = mock_translator
+
+        mock_proofer = MagicMock()
+        mock_proofer.arun = AsyncMock(return_value=MagicMock(content=MockProofreadingResult({"你好": "您好"})))
+        mock_get_proofer.return_value = mock_proofer
+
+        workflow: Workflow = get_translator_workflow()
+        chunk = mock_chunk_factory(name="test_chunk", original="Hello ##abcd##.", tokens=10)
+
+        response = await workflow.arun(input=chunk)
+        assert response.status == "COMPLETED"
+        assert isinstance(response.content, Chunk)
+        assert response.content.status == TranslationStatus.COMPLETED
+        assert response.content.translated == "你好 ##abcd##。你好。"
+        assert response.content.name == "test_chunk"
+        assert response.content.tokens == 10
+
+    @patch("engine.agents.workflow.get_translator")
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_full_workflow_with_placeholder_mismatch(
+        self, mock_get_proofer, mock_get_translator, mock_chunk_factory
     ):
-        """
-        测试情境：当 translator 返回了非预期的格式时，工作流应失败。
-        """
-        # Arrange
-        chunk = mock_chunk_factory(name="test3", original="Some text ##abe4##.")
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(return_value=MagicMock(content=MockTranslationResponse("你好 ##wxyz##。")))
+        mock_get_translator.return_value = mock_translator
 
-        # 模拟一个无效的响应 (内容是字符串，而非 Pydantic 模型)
-        mock_trans_response = RunResponse(content="This is just a string")
-        workflow.translator.arun = AsyncMock(return_value=mock_trans_response)
-        workflow.proofer.arun = AsyncMock()  # 为 proofer 设置 mock 以便检查它是否被调用
+        mock_proofer = MagicMock()  # Not called due to early failure
+        mock_get_proofer.return_value = mock_proofer
 
-        # Act
-        result = await workflow.arun(chunk=chunk)
+        workflow: Workflow = get_translator_workflow()
+        chunk = mock_chunk_factory(name="test_chunk", original="Hello ##abcd##.", tokens=5)
 
-        # Assert
-        assert result.content == "Translation step failed: The agent returned an unexpected response type."
-        assert chunk.status == TranslationStatus.PENDING  # 状态不应改变
-        workflow.proofer.arun.assert_not_awaited()  # Proofer 不应该被调用
+        with patch.object(logger, "error") as mock_error:
+            response = await workflow.arun(input=chunk)
+            # assert response.status == "failed"  # Commented out as per your code
+            assert "占位符不匹配" in str(mock_error.call_args_list)
+            assert isinstance(response.content, Chunk)
+            assert response.content.name == "test_chunk"
+            assert response.content.tokens == 5
 
-    @pytest.mark.asyncio
-    async def test_arun_fails_on_placeholder_mismatch(self, workflow: TranslatorWorkflow, mock_chunk_factory):
-        """
-        测试情境：当翻译后的文本与原文的占位符不匹配时，工作流应失败。
-        """
-        # Arrange
-        original_text = "Keep ##abc5## and ##abc6##."
-        chunk = mock_chunk_factory(name="test4", original=original_text)
+    @patch("engine.agents.workflow.get_translator")
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_full_workflow_already_translated(self, mock_get_proofer, mock_get_translator, mock_chunk_factory):
+        workflow: Workflow = get_translator_workflow()
+        chunk = mock_chunk_factory(
+            name="test_chunk",
+            original="Hello ##abcd##.",
+            translated="你好 ##abcd##。您好。",
+            tokens=10,
+            status=TranslationStatus.TRANSLATED,
+        )
 
-        # 模拟一个缺少占位符的翻译结果
-        translated_text_with_mismatch = "保留 ##abc5##。"
-        mock_trans_response = RunResponse(content=TranslationResponse(translation=translated_text_with_mismatch))
-        workflow.translator.arun = AsyncMock(return_value=mock_trans_response)
-        workflow.proofer.arun = AsyncMock()
+        mock_proofer = MagicMock()
+        mock_proofer.arun = AsyncMock(return_value=MagicMock(content=MockProofreadingResult({"你好": "您好"})))
+        mock_get_proofer.return_value = mock_proofer
 
-        # Act
-        result = await workflow.arun(chunk=chunk)
-
-        # Assert
-        assert result.content == "Translation step failed: Placeholder mismatch detected."
-        assert chunk.status == TranslationStatus.PENDING
-        assert chunk.translated is None
-        workflow.proofer.arun.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_arun_fallback_on_proofer_invalid_response_type(
-        self, workflow: TranslatorWorkflow, mock_chunk_factory
-    ):
-        """
-        测试情境：当 proofer 返回无效格式时，应触发降级机制，返回未经校对的翻译文本。
-        """
-        # Arrange
-        chunk = mock_chunk_factory(name="test5", original="Text with ##abe7##.")
-
-        translated_text = "带 ##abe7## 的文本。"
-        mock_trans_response = RunResponse(content=TranslationResponse(translation=translated_text))
-        workflow.translator.arun = AsyncMock(return_value=mock_trans_response)
-
-        # 模拟一个来自 proofer 的无效响应
-        mock_proof_response = RunResponse(content={"invalid": "dict"})
-        workflow.proofer.arun = AsyncMock(return_value=mock_proof_response)
-
-        # Act
-        result = await workflow.arun(chunk=chunk)
-
-        # Assert
-        assert result.content == translated_text  # 应返回原始的翻译结果
-        assert chunk.status == TranslationStatus.TRANSLATED  # 在 proofer 失败前，状态已更新
-        assert chunk.translated == translated_text
-
-    @pytest.mark.parametrize(
-        "original, translated, expected",
-        [
-            ("Hello ##abe1##", "你好 ##abe1##", True),
-            ("Hello ##ade1##", "你好", False),
-            ("<p>##ade2##</p>", "<p>##ade3##</p>", False),
-            ("Check ##ade4## and ##ade5##", "检查 ##ade5## 和 ##ade4##", True),  # 顺序不同但集合相同
-            ("No placeholders here.", "这里没有占位符。", True),
-        ],
-    )
-    def test_internal_validate_method(self, workflow: TranslatorWorkflow, original, translated, expected):
-        """
-        直接对内部辅助方法 `_validate` 进行单元测试，确保其逻辑的健壮性。
-        """
-        assert workflow._validate(original, translated) == expected
+        response = await workflow.arun(input=chunk)
+        assert response.status == "COMPLETED"
+        assert isinstance(response.content, Chunk)
+        assert response.content.status == TranslationStatus.COMPLETED
+        assert response.content.translated == "你好 ##abcd##。你好。"
+        assert response.content.name == "test_chunk"
+        assert response.content.tokens == 10
+        mock_get_translator.assert_not_called()

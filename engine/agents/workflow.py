@@ -1,131 +1,145 @@
 import json
 import re
-from textwrap import dedent
 
-from agno.agent import Agent
-from agno.workflow import RunResponse, Workflow
+from agno.workflow import Step, StepInput, StepOutput, Workflow
 
 from engine.constant import PLACEHOLDER_PATTERN
 from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
-from engine.services import GoogleTranslator
 
-from .proofer import ProofreadingResult, get_proofer
-from .translator import TranslationResponse, get_translator
+from .proofer import get_proofer
+from .schemas import ProofreadingResult, TranslationResponse
+from .translator import get_translator
 
 
-class TranslatorWorkflow(Workflow):
+def _get_placeholders(text: str) -> list[str]:
     """
-    一个使用 AI 代理处理翻译的工作流。
+    从文本中提取所有占位符。
     """
+    return re.findall(PLACEHOLDER_PATTERN, text)
 
-    description: str = dedent("""\
-    An intelligent translation workflow that produces high-quality,
-    proofread Chinese text from an English source.
-    It carefully preserves placeholders and XML tags as required.""")
 
-    translator: Agent = get_translator()
-    proofer: Agent = get_proofer()
-    google_translator = GoogleTranslator()
+def _validate_placeholders(original: str, translated: str) -> bool:
+    """
+    验证翻译结果中的占位符是否与原始内容完全一致。
+    """
+    original_placeholders = _get_placeholders(original)
+    translated_placeholders = _get_placeholders(translated)
 
-    def _get_placeholders(self, text: str) -> list[str]:
-        """
-        从文本中提取所有占位符。
+    if set(original_placeholders) != set(translated_placeholders):
+        logger.error("占位符内容不匹配！")
+        logger.error(f"原始占位符列表: {original_placeholders}")
+        logger.error(f"翻译占位符列表: {translated_placeholders}")
+        return False
+    return True
 
-        Args:
-            text: 输入文本。
 
-        Returns:
-            包含所有占位符的列表。
-        """
-        return re.findall(PLACEHOLDER_PATTERN, text)
+# Step 1: Translate
+async def translate_step(step_input: StepInput) -> StepOutput:
+    chunk: Chunk = step_input.input  # type: ignore
+    if chunk.status == TranslationStatus.TRANSLATED and chunk.translated:
+        # 如果已经翻译过，直接将 chunk 传递给下一步
+        return StepOutput(content=chunk)
 
-    def _validate(self, original: str, translated: str) -> bool:
-        """
-        验证翻译结果中的占位符是否与原始内容完全一致。
+    translator = get_translator()
+    translator_input = {
+        "text_to_translate": chunk.original,
+        "untranslatable_placeholders": _get_placeholders(chunk.original),
+    }
+    response = await translator.arun(json.dumps(translator_input, ensure_ascii=False, indent=2))
 
-        Args:
-            original: 原始文本。
-            translated: 翻译后的文本。
+    if not isinstance(response.content, TranslationResponse):
+        error_msg = "翻译步骤失败：代理返回了意外的响应类型。"
+        logger.error(error_msg)
+        # 失败时也返回原始 chunk，但可以考虑设置一个错误状态
+        return StepOutput(content=chunk, success=False, error=error_msg)
 
-        Returns:
-            如果占位符数量和内容完全一致，返回 True，否则返回 False。
-        """
-        # 提取所有占位符
-        original_placeholders = self._get_placeholders(original)
-        translated_placeholders = self._get_placeholders(translated)
+    translated = response.content.translation
+    logger.info(f"接收到翻译文本: '{translated[:70]}...'")
 
-        # 检查内容是否完全一致 (使用 set 比较唯一值，但其实应该检查顺序和重复，如果需要)
-        if set(original_placeholders) != set(translated_placeholders):
-            logger.error("占位符内容不匹配！")
-            logger.error(f"原始占位符列表: {original_placeholders}")
-            logger.error(f"翻译占位符列表: {translated_placeholders}")
-            return False
+    if not _validate_placeholders(chunk.original, translated):
+        error_msg = "翻译步骤失败：检测到占位符不匹配。"
+        logger.error(error_msg)
+        return StepOutput(content=chunk, success=False, error=error_msg)
 
-        # 可选: 如果需要检查顺序/重复次数，用列表比较: if original_placeholders != translated_placeholders
-        return True
+    chunk.status = TranslationStatus.TRANSLATED
+    chunk.translated = translated
+    return StepOutput(content=chunk)
 
-    async def arun(self, chunk: Chunk) -> RunResponse:
-        """异步生成器入口点，处理分块内容并返回状态。"""
 
-        if chunk.status == TranslationStatus.TRANSLATED:
-            translated = chunk.translated
-        else:
-            translator_input = {
-                "text_to_translate": chunk.original,
-                "untranslatable_placeholders": self._get_placeholders(chunk.original),
-            }
-            translation_response: RunResponse = await self.translator.arun(
-                json.dumps(translator_input, ensure_ascii=False, indent=2)
-            )
-            # Validate the response type to ensure the agent followed instructions.
-            if not isinstance(translation_response.content, TranslationResponse):
-                error_msg = "Translation step failed: The agent returned an unexpected response type."
-                logger.error(error_msg)
-                return RunResponse(content=error_msg, run_id=self.run_id)
-            translated = translation_response.content.translation
-            logger.info(f"Translated text received: '{translated[:70]}...'")
-            # Validate placeholders
-            if not self._validate(chunk.original, translated):
-                error_msg = "Translation step failed: Placeholder mismatch detected."
-                logger.error(error_msg)
-                # translated = await self.google_translator.translate(chunk.original)
-                return RunResponse(run_id=self.run_id, content=error_msg)
-            chunk.status = TranslationStatus.TRANSLATED
-            chunk.translated = translated
+# Step 2: Proofread
+async def proofread_step(step_input: StepInput) -> StepOutput:
+    chunk: Chunk = step_input.previous_step_content  # type: ignore
+    translated_text = chunk.translated
 
-        if translated is None:
-            error_msg = "Translation is None."
-            logger.error(error_msg)
-            return RunResponse(run_id=self.run_id, content=error_msg)
+    if not translated_text or not isinstance(translated_text, str):
+        error_msg = "校对步骤失败：没有从上一步收到有效的翻译文本。"
+        logger.error(error_msg)
+        # 将 chunk 和一个空的校对结果传递下去
+        return StepOutput(
+            content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})},
+            success=False,
+            error=error_msg,
+        )
 
-        # --- Step 2: Proofread the translated text ---
-        proofer_input = {
-            "text_to_proofread": translated,
-            "untranslatable_placeholders": self._get_placeholders(translated),
-        }
-        proofer_response: RunResponse = await self.proofer.arun(json.dumps(proofer_input, ensure_ascii=False, indent=2))
+    proofer = get_proofer()
+    proofer_input = {
+        "text_to_proofread": translated_text,
+        "untranslatable_placeholders": _get_placeholders(translated_text),
+    }
+    response = await proofer.arun(json.dumps(proofer_input, ensure_ascii=False, indent=2))
 
-        # Validate the proofreader's response.
-        if not isinstance(proofer_response.content, ProofreadingResult):
-            error_msg = "Proofreading step failed: The agent returned an unexpected response type."
-            logger.error(error_msg)
-            # As a fallback, we return the un-proofread translation.
-            return RunResponse(run_id=self.run_id, content=translated)
+    proofreading_result: ProofreadingResult
+    if not isinstance(response.content, ProofreadingResult):
+        error_msg = "校对步骤失败：代理返回了意外的响应类型。"
+        logger.error(error_msg)
+        # 作为回退，我们使用一个空的 ProofreadingResult 对象。
+        proofreading_result = ProofreadingResult(corrections={})
+    else:
+        proofreading_result = response.content
 
-        corrections = proofer_response.content.corrections
-        logger.info(f"Proofreader found {len(corrections)} potential corrections.")
+    return StepOutput(content={"chunk": chunk, "proofreading_result": proofreading_result})
 
-        # --- Step 3: Apply corrections and return the final result ---
-        final_text = translated
-        if corrections:
-            for original, corrected in corrections.items():
-                final_text = final_text.replace(original, corrected)
-            chunk.translated = final_text
-            logger.info("Successfully applied corrections.")
 
-        if chunk.translated:
-            chunk.translated = chunk.translated.replace("您", "你")
-        chunk.status = TranslationStatus.COMPLETED
+# Step 3: Apply Corrections
+def apply_corrections_step(step_input: StepInput) -> StepOutput:
+    step_data: dict = step_input.previous_step_content  # type: ignore
+    chunk: Chunk = step_data["chunk"]
+    proofreading_result: ProofreadingResult = step_data["proofreading_result"]
+    translated_text = chunk.translated
 
-        return RunResponse(run_id=self.run_id, content=final_text)
+    if not translated_text or not isinstance(translated_text, str):
+        error_msg = "应用校对建议步骤失败：缺少翻译文本。"
+        logger.error(error_msg)
+        return StepOutput(content=chunk, success=False, error=error_msg)
+
+    corrections = proofreading_result.corrections
+    logger.info(f"校对器发现 {len(corrections)} 个潜在的校对建议。")
+
+    final_text = translated_text
+    if corrections:
+        for original, corrected in corrections.items():
+            final_text = final_text.replace(original, corrected)
+        logger.info("成功应用校对建议。")
+
+    final_text = final_text.replace("您", "你")
+
+    chunk.translated = final_text
+    chunk.status = TranslationStatus.COMPLETED
+
+    return StepOutput(content=chunk)
+
+
+def get_translator_workflow() -> Workflow:
+    """
+    构建并返回翻译工作流。
+    """
+    return Workflow(
+        name="TranslatorWorkflow",
+        description="一个智能翻译工作流，可从英文源文本生成高质量、经过校对的中文文本。它会根据要求仔细保留占位符和 XML 标签。",
+        steps=[
+            Step(name="translate", executor=translate_step),
+            Step(name="proofread", executor=proofread_step),
+            Step(name="apply_corrections", executor=apply_corrections_step),
+        ],
+    )

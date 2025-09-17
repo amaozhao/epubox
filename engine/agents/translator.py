@@ -1,17 +1,7 @@
 from agno.agent import Agent
-from pydantic import BaseModel, Field
 
 from .models import model
-
-
-class TranslationResponse(BaseModel):
-    """
-    Defines the expected output structure for the translator agent.
-    It ensures the agent returns only the translated string.
-    """
-
-    translation: str = Field(..., description="The translated Chinese text.")
-
+from .schemas import TranslationResponse
 
 description = (
     "You are a professional translator. Your task is to translate English text into natural, fluent, simplified Chinese."
@@ -35,7 +25,7 @@ def get_translator():
         markdown=False,
         description=description,
         instructions=instructions,
-        response_model=TranslationResponse,
+        output_schema=TranslationResponse,
         use_json_mode=True,
         # reasoning=False,
         # debug_mode=True,

@@ -1,21 +1,7 @@
 from agno.agent import Agent
-from pydantic import BaseModel, Field
 
 from .models import model
-
-
-class ProofreadingResult(BaseModel):
-    """
-    Defines the expected output for the proofer agent.
-    It ensures the agent returns a dictionary of corrections, fulfilling requirement.
-    """
-
-    corrections: dict[str, str] = Field(
-        ...,
-        description="A dictionary mapping original phrases to their corrected versions. "
-        "This will be empty if no corrections are needed.",
-    )
-
+from .schemas import ProofreadingResult
 
 description = (
     "You are an expert Chinese proofreader. Your job is to review a Chinese translation for correctness, grammar, and style."
@@ -40,7 +26,7 @@ def get_proofer():
         # markdown=False,
         description=description,
         instructions=instructions,
-        response_model=ProofreadingResult,
+        output_schema=ProofreadingResult,
         use_json_mode=True,
         # reasoning=False,
         # debug_mode=True,
