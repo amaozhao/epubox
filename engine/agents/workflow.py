@@ -122,7 +122,7 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
             final_text = final_text.replace(original, corrected)
         logger.info("成功应用校对建议。")
 
-    final_text = final_text.replace("您", "你")
+    final_text = final_text.replace("您", "你").replace("。。", "。")
 
     chunk.translated = final_text
     chunk.status = TranslationStatus.COMPLETED
