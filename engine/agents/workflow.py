@@ -1,7 +1,8 @@
 import json
 import re
+from typing import List
 
-from agno.workflow import Step, StepInput, StepOutput, Workflow
+from agno.workflow import Loop, Step, StepInput, StepOutput, Workflow
 
 from engine.constant import PLACEHOLDER_PATTERN
 from engine.core.logger import engine_logger as logger
@@ -67,12 +68,22 @@ async def translate_step(step_input: StepInput) -> StepOutput:
     return StepOutput(content=chunk)
 
 
+def check_step(outputs: List[StepOutput]) -> bool:
+    if not outputs:
+        return False
+
+    output = outputs[-1]
+    if output.success:
+        return True
+    return False
+
+
 # Step 2: Proofread
 async def proofread_step(step_input: StepInput) -> StepOutput:
     chunk: Chunk = step_input.previous_step_content  # type: ignore
-    translated_text = chunk.translated
+    translated = getattr(chunk, "translated")
 
-    if not translated_text or not isinstance(translated_text, str):
+    if not translated or not isinstance(translated, str):
         error_msg = "校对步骤失败：没有从上一步收到有效的翻译文本。"
         logger.error(error_msg)
         # 将 chunk 和一个空的校对结果传递下去
@@ -83,10 +94,7 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
         )
 
     proofer = get_proofer()
-    proofer_input = {
-        "text_to_proofread": translated_text,
-        "untranslatable_placeholders": _get_placeholders(translated_text),
-    }
+    proofer_input = {"text_to_proofread": translated, "untranslatable_placeholders": _get_placeholders(translated)}
     response = await proofer.arun(json.dumps(proofer_input, ensure_ascii=False, indent=2))
 
     proofreading_result: ProofreadingResult
@@ -139,8 +147,18 @@ def get_translator_workflow() -> Workflow:
         name="TranslatorWorkflow",
         description="一个智能翻译工作流，可从英文源文本生成高质量、经过校对的中文文本。它会根据要求仔细保留占位符和 XML 标签。",
         steps=[
-            Step(name="translate", executor=translate_step),
-            Step(name="proofread", executor=proofread_step),
+            Loop(
+                name="Translate Loop",
+                steps=[Step(name="translate", executor=translate_step)],
+                end_condition=check_step,
+                max_iterations=3,
+            ),
+            Loop(
+                name="Proofread Loop",
+                steps=[Step(name="proofread", executor=proofread_step)],
+                end_condition=check_step,
+                max_iterations=3,
+            ),
             Step(name="apply_corrections", executor=apply_corrections_step),
         ],
     )
