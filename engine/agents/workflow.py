@@ -1,6 +1,6 @@
 import json
 import re
-from typing import List
+from typing import Dict, List
 
 from agno.workflow import Loop, Step, StepInput, StepOutput, Workflow
 
@@ -35,6 +35,29 @@ def _validate_placeholders(original: str, translated: str) -> bool:
     return True
 
 
+def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]:
+    """
+    从文本中过滤出出现在术语表中的术语。
+
+    Args:
+        text: 要检查的文本
+        glossary: 术语表字典
+
+    Returns:
+        出现在文本中的术语字典
+    """
+    found_terms = {}
+    # 按术语长度降序排序，确保较长的术语先被匹配
+    sorted_terms = sorted(glossary.keys(), key=len, reverse=True)
+
+    for term in sorted_terms:
+        if term.lower() in text.lower():
+            found_terms[term] = glossary[term]
+
+    logger.info(f"在文本中发现 {len(found_terms)} 个术语表中的术语")
+    return found_terms
+
+
 # Step 1: Translate
 async def translate_step(step_input: StepInput) -> StepOutput:
     chunk: Chunk = step_input.input  # type: ignore
@@ -42,10 +65,12 @@ async def translate_step(step_input: StepInput) -> StepOutput:
         # 如果已经翻译过，直接将 chunk 传递给下一步
         return StepOutput(content=chunk)
 
+    glossaries = step_input.additional_data["glossary"]
     translator = get_translator()
     translator_input = {
         "text_to_translate": chunk.original,
         "untranslatable_placeholders": _get_placeholders(chunk.original),
+        "glossaries": filter_glossary_terms(chunk.original, glossaries),
     }
     response = await translator.arun(json.dumps(translator_input, ensure_ascii=False, indent=2))
 

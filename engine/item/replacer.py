@@ -109,6 +109,6 @@ class Replacer:
         remaining_placeholders = re.findall(PLACEHOLDER_PATTERN, content)
         if remaining_placeholders:
             engine_logger.warning(
-                "还有未还原的占位符", count=len(remaining_placeholders), examples=remaining_placeholders[:5]
+                f"还有未还原的占位符: {len(remaining_placeholders)} 个, 示例: {remaining_placeholders[:5]}"
             )
         return content

@@ -6,6 +6,7 @@ from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
 from engine.epub import Builder, Parser, Replacer
 from engine.schemas import Chunk, TranslationStatus
+from engine.services.glossary import GlossaryLoader
 
 
 class Orchestrator:
@@ -52,6 +53,8 @@ class Orchestrator:
         # 解析 EPUB 文件
         parser = Parser(limit=limit, path=epub_path)
         book = parser.parse()
+        loader = GlossaryLoader()
+        glossary = loader.load(epub_path)
 
         # 使用 tqdm 显示外部循环进度（按文件）
         for item in tqdm(book.items, desc="翻译 EPUB", unit="文件"):
@@ -69,7 +72,7 @@ class Orchestrator:
                 max_attempts = 3
                 for attempt in range(max_attempts):
                     try:
-                        response = await workflow.arun(input=chunk)
+                        response = await workflow.arun(input=chunk, additional_data={"glossary": glossary})
                         if response.status == "COMPLETED":
                             # 确保 response.content 是 Chunk 类型
                             if not isinstance(response.content, Chunk):

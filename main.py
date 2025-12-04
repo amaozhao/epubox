@@ -8,6 +8,7 @@ from rich.console import Console
 
 from engine.core.logger import engine_logger as logger
 from engine.orchestrator import Orchestrator
+from engine.services.glossary import GlossaryExtractor
 
 # 初始化 Typer 应用和 Rich 控制台
 app = typer.Typer()
@@ -55,6 +56,36 @@ def translate(
         console.print("-" * 50)
         console.print("[bold red]翻译失败！[/bold red] 详情请查看日志。")
         typer.Exit(1)
+
+
+@app.command("generate-glossary", help="为指定的 EPUB 文件生成【多词术语】的 JSON 文件。")
+def generate_glossary(
+    epub_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="要提取术语的 EPUB 文件路径。",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="输出术语表文件的路径（可选，会自动生成）。",
+    ),
+):
+    """为指定的 EPUB 文件生成【多词术语】的 JSON 文件。"""
+    console.print("-" * 50)
+    if output_path:
+        console.print(f"[bold]指定输出路径:[bold] {output_path}")
+
+    extractor = GlossaryExtractor()
+    extractor.run(
+        epub_path=str(epub_path),
+        output_path=output_path,
+    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "epubox"
+version = "0.1.0"
+description = ""
+authors = []
+dependencies = [
+    "agno",
+    "aiosqlite",
+    "beautifulsoup4",
+    "ebooklib",
+    "fastapi",
+    "google-genai",
+    "httpx",
+    "mistralai",
+    "nltk",
+    "openai",
+    "pandas",
+    "pydantic",
+    "pydantic-settings",
+    "pytest",
+    "pytest-asyncio",
+    "scikit-learn",
+    "tenacity",
+    "tiktoken",
+    "tqdm",
+    "typer",
+]
+
+[tool.ruff]
+line-length = 119
+target-version = "py312"
+
+[tool.ruff.format]
+# 可选格式化相关配置（ruff formatter 从 0.4+ 开始支持）
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+docstring-code-line-length = 100
+
+[tool.pytest]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff.lint]
+extend-safe-fixes = ["E", "F401"]
