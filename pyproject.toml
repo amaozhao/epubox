@@ -18,7 +18,6 @@ dependencies = [
     "mistralai",
     "nltk",
     "openai",
-    "pandas",
     "pydantic",
     "pydantic-settings",
     "pytest",

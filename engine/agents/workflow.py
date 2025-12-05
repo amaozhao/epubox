@@ -1,5 +1,6 @@
 import json
 import re
+from collections import Counter
 from typing import Dict, List
 
 from agno.workflow import Loop, Step, StepInput, StepOutput, Workflow
@@ -20,19 +21,92 @@ def _get_placeholders(text: str) -> list[str]:
     return re.findall(PLACEHOLDER_PATTERN, text)
 
 
-def _validate_placeholders(original: str, translated: str) -> bool:
+def _validate_and_fix_placeholders(original: str, translated: str) -> tuple[bool, str]:
     """
-    验证翻译结果中的占位符是否与原始内容完全一致。
+    验证占位符并自动修正大小写和顺序问题。
+
+    新策略：
+    1. 统计每个占位符在原始文本中的出现次数（大小写敏感）
+    2. 检查翻译文本中占位符的数量和类型是否匹配
+    3. 逐个替换翻译文本中的占位符为原始大小写格式
+    4. 返回验证结果和修正后的文本
+
+    这样即使顺序错乱，也能正确修正每个占位符。
     """
     original_placeholders = _get_placeholders(original)
     translated_placeholders = _get_placeholders(translated)
 
-    if set(original_placeholders) != set(translated_placeholders):
-        logger.error("占位符内容不匹配！")
-        logger.error(f"原始占位符列表: {original_placeholders}")
-        logger.error(f"翻译占位符列表: {translated_placeholders}")
-        return False
-    return True
+    # 1. 检查数量是否匹配
+    if len(original_placeholders) != len(translated_placeholders):
+        logger.error("占位符数量不匹配！")
+        logger.error(f"原始文本占位符数量: {len(original_placeholders)}")
+        logger.error(f"翻译文本占位符数量: {len(translated_placeholders)}")
+        return False, translated
+
+    # 2. 统计原始文本中每个占位符的出现次数（大小写敏感）
+    original_lower_counts = Counter(ph.lower() for ph in original_placeholders)
+    translated_lower_counts = Counter(ph.lower() for ph in translated_placeholders)
+
+    if original_lower_counts != translated_lower_counts:
+        logger.error("占位符类型和数量不匹配！")
+        logger.error(f"原始占位符统计: {dict(original_lower_counts)}")
+        logger.error(f"翻译占位符统计: {dict(translated_lower_counts)}")
+        return False, translated
+
+    # 4. 创建大小写映射：lower -> correct_case
+    # 对于重复的占位符，我们需要确保使用正确的原始格式
+    lower_to_correct = {}
+    used_placeholders = set()
+
+    for orig_ph in original_placeholders:
+        lower_ph = orig_ph.lower()
+        if lower_ph not in lower_to_correct:
+            lower_to_correct[lower_ph] = orig_ph
+        # 如果有多个相同字符但不同大小写的占位符，我们记录所有变体
+        elif orig_ph not in used_placeholders:
+            # 这里简化处理：使用第一次遇到的格式
+            # 在实际应用中，可能需要更复杂的逻辑来匹配重复占位符
+            pass
+        used_placeholders.add(orig_ph)
+
+    # 5. 修正翻译文本中的占位符
+    corrected_text = translated
+    corrections_made = []
+
+    # 按照翻译文本中的顺序，逐个替换为正确的格式
+    for trans_ph in set(translated_placeholders):  # 使用set去重
+        trans_lower = trans_ph.lower()
+        if trans_lower in lower_to_correct:
+            correct_ph = lower_to_correct[trans_lower]
+            if trans_ph != correct_ph:
+                # 替换所有实例
+                corrected_text = corrected_text.replace(trans_ph, correct_ph)
+                corrections_made.append(f"'{trans_ph}' -> '{correct_ph}'")
+
+    if corrections_made:
+        logger.info(f"修正了占位符格式: {corrections_made}")
+
+    # 6. 最终验证：确保修正后的占位符与原始完全匹配
+    final_placeholders = _get_placeholders(corrected_text)
+
+    # 排序后比较，因为我们只关心集合是否相同，不关心顺序
+    if sorted(final_placeholders) != sorted(original_placeholders):
+        logger.error("占位符修正后仍然不匹配！")
+        logger.error(f"期望: {sorted(original_placeholders)}")
+        logger.error(f"实际: {sorted(final_placeholders)}")
+        return False, translated
+
+    logger.info("占位符验证和修正成功")
+    return True, corrected_text
+
+
+# 保留向后兼容的验证函数
+def _validate_placeholders(original: str, translated: str) -> bool:
+    """
+    向后兼容的验证函数。
+    """
+    is_valid, _ = _validate_and_fix_placeholders(original, translated)
+    return is_valid
 
 
 def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]:
@@ -83,13 +157,16 @@ async def translate_step(step_input: StepInput) -> StepOutput:
     translated = response.content.translation
     logger.info(f"接收到翻译文本: '{translated[:70]}...'")
 
-    if not _validate_placeholders(chunk.original, translated):
+    # 使用新的验证和修正函数
+    is_valid, corrected_translation = _validate_and_fix_placeholders(chunk.original, translated)
+    if not is_valid:
         error_msg = "翻译步骤失败：检测到占位符不匹配。"
         logger.error(error_msg)
         return StepOutput(content=chunk, success=False, error=error_msg)
 
+    # 使用修正后的翻译文本
     chunk.status = TranslationStatus.TRANSLATED
-    chunk.translated = translated
+    chunk.translated = corrected_translation
     return StepOutput(content=chunk)
 
 
