@@ -1,8 +1,6 @@
 import re
 from typing import List
-
 import tiktoken
-
 from engine.schemas import Chunk
 
 
@@ -22,7 +20,8 @@ class Chunker:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
         self.limit = limit
-        self.tag_pattern = re.compile(r"</(?!b|i|em|a|strong|span|small|big)[^>]+>")
+        # This regex matches only true HTML closing tags like </a>, </div>, etc.
+        self.tag_pattern = re.compile(r"</([a-zA-Z][a-zA-Z0-9]*)\s*?>")
 
     def get_token_count(self, content: str) -> int:
         if not content:
@@ -30,15 +29,6 @@ class Chunker:
         return len(self.tokenizer.encode(content))
 
     def chunk(self, html: str) -> List[Chunk]:
-        """
-        Splits the provided HTML string into Chunk objects.
-
-        Args:
-            html: The input HTML content as a string.
-
-        Returns:
-            A list of Chunk objects.
-        """
         if not isinstance(html, str):
             raise ValueError("html content must be a string")
 
@@ -62,32 +52,37 @@ class Chunker:
                 else:
                     high = mid - 1
 
-            # high is now the max l where tokens <= limit
             token_limit_char_end = pos + high
 
-            # Find the last closing tag end within pos to token_limit_char_end
+            # Step 1: Find the last valid tag end within pos to token_limit_char_end
             last_valid_tag_end = pos
             for m in self.tag_pattern.finditer(html, pos=pos):
-                tag_end = m.end()
+                tag_end = m.end()  # end() gives the position after the closing tag (e.g. "</a>" ends at `tag_end`)
                 if tag_end <= token_limit_char_end:
-                    last_valid_tag_end = tag_end
+                    last_valid_tag_end = tag_end  # Update the last valid tag end position
                 else:
                     break
 
+            # Step 2: Ensure split_at is strictly at the last valid tag end
             split_at = last_valid_tag_end if last_valid_tag_end > pos else token_limit_char_end
 
-            # Prevent infinite loop by forcing progress if needed
+            # Step 3: Prevent infinite loop by forcing progress if needed
             if split_at == pos and pos < n:
                 split_at = pos + 1
 
+            # Step 4: Create the chunk if content is valid
             chunk_content = html[pos:split_at]
             if chunk_content.strip():
                 chunk_name = str(cid)
                 chunk = Chunk(
-                    name=chunk_name, original=chunk_content, translated=None, tokens=self.get_token_count(chunk_content)
+                    name=chunk_name,
+                    original=chunk_content,
+                    translated=None,
+                    tokens=self.get_token_count(chunk_content),
                 )
                 chunks.append(chunk)
 
+            # Move position forward to the next chunk
             pos = split_at
 
         return chunks
