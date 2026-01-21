@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = "your-api-key-here"
     GEMINI_MODEL: str = "gemini-2.5-flash"
 
+    # OpenRouter 引擎配置
+    OPENROUTER_API_KEY: str = "your-openrouter-api-key-here"
+    OPENROUTER_MODEL: str = "deepseek/deepseek-r1-0528:free"
+
+    # Nvidia配置
+    NVIDIA_API_KEY: str = "your-api-key-here"
+    NVIDIA_MODEL: str = "nvidia-3"
+
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_FORMAT: Literal["json", "console"] = "json"

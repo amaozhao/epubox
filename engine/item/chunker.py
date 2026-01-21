@@ -13,11 +13,8 @@ class Chunker:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
         self.limit = limit
-        # 这些标签之后是理想的拆分点
         self.allowed_split_tags = {"p", "li", "ul", "div", "header", "section", "figure", "body", "html", "head", "br"}
-        # 匹配任何 HTML 标签（开始或结束），用于兜底
         self.any_tag_pattern = re.compile(r"<[^>]+>")
-        # 专门匹配允许的结束标签
         self.closing_tag_pattern = re.compile(r"</([a-zA-Z][a-zA-Z0-9]*)\s*>")
 
     def get_token_count(self, content: str) -> int:

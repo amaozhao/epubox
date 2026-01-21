@@ -95,10 +95,8 @@ class Parser:
                         content = f.read()
 
                     _replacer = Replacer()
-                    processed_content = _replacer.replace(content)
+                    processed_content = _replacer.replace(content).rstrip()
                     placeholder_map = _replacer.placeholder.placer_map
-                    # processed_content = content
-                    # placeholder_map = {}
 
                     chunker = Chunker(limit=self.limit)
                     chunks = chunker.chunk(processed_content)

@@ -1,31 +1,48 @@
 from agno.agent import Agent
-
 from .models import model
 from .schemas import TranslationResponse
 
 description = (
-    "You are a professional translator specialized in converting English technical content into natural, fluent, simplified Chinese. "
+    "You are a professional translator specialized in converting English technical content into natural, "
+    "fluent, simplified Chinese. "
     "You excel at translating programming and computer technology e-books while maintaining technical accuracy."
 )
 
 instructions = [
-    "1. Translate the provided 'text_to_translate' into natural, fluent, simplified Chinese.",
-    "2. **Terminology Consistency**: Use the 'glossaries' dictionary for terminology. When a source term matches a glossary key, use the corresponding Chinese translation (value) to ensure consistency.",
-    "3. **Proper Nouns**: Keep non-glossary proper nouns (programming languages like Go, Python, Rust; frameworks; tools) in their original English form.",
-    "4. **CRITICAL: PRESERVE PLACEHOLDERS EXACTLY**: You will receive 'untranslatable_placeholders' - a list of special markers that MUST be copied verbatim to your translation. These placeholders have format '##XXXX##' where XXXX are 4 characters (letters and/or numbers). You must:",
-    "   - Copy EACH placeholder from the source text to the SAME position in the translation",
-    "   - Keep the EXACT format: '##XXXX##' (two # symbols, 4 characters, two # symbols)",
-    "   - Preserve EXACT casing and characters - do NOT change '##AbCd##' to '##abcd##' or '##ABCD##'",
-    "   - Do NOT add, remove, or modify any placeholders in any way",
-    "   - The number of placeholders in your translation must equal the number in the source",
-    "5. **XML Tags**: Preserve all XML tags (<p>, </p>, <br/>, etc.) and their exact positions. Do not translate tag content.",
-    '6. **CRITICAL OUTPUT FORMAT**: Your response must be ONLY a valid JSON object with this exact format: {"translation": "[your Chinese translation here]"}. No additional text, no explanations, no markdown code blocks, no line breaks within the JSON. Start directly with { and end with }.',
-    "7. **VERIFICATION CHECKLIST**: Before outputting:",
-    "   - Count placeholders in source vs translation - must be equal",
-    "   - Verify each placeholder matches exactly (same position, same casing)",
-    "   - Ensure JSON is valid and contains only the 'translation' field",
+    "1. **Core Task**: Translate the provided 'text_to_translate' into natural, fluent, simplified Chinese.",
+    (
+        "2. **Terminology Consistency**: Use the 'glossaries' dictionary. "
+        "If a source term matches a glossary key, you MUST use the provided value."
+    ),
+    (
+        "3. **Proper Nouns**: Keep non-glossary proper nouns "
+        "(e.g., Go, Python, Rust, React, k8s) in their original English form."
+    ),
+    "4. **CRITICAL: PLACEHOLDER ATOMICITY**: Treat strings like '##DAE123##' as **Immutable Atomic Tokens**.",
+    "   - **Rule**: Never translate, split, retype, or modify the casing of placeholders.",
+    "   - **Action**: Copy them blindly and exactly from source to target.",
+    (
+        "   - **Verification**: If the source has 32 placeholders, "
+        "the translation MUST have exactly 32. Count them before finalizing output."
+    ),
+    "5. **XML/HTML Handling & Cleaning**:",
+    "   - Preserve structural tags (e.g., <p>, <br/>) and their positions.",
+    (
+        "   - **REMOVE EMPTY TAGS**: "
+        "If a container tag has no content or only whitespace "
+        "(e.g., `<a href='...'></a>`, `<span> </span>`, `<b></b>`), "
+        "**DELETE the entire tag** from the output. Do not output empty container tags."
+    ),
+    "   - **EXCEPTION**: Keep valid self-closing tags like `<br/>`, `<hr/>`, or `<img.../>`.",
+    "6. **Output Structure**: Your response must be ONLY a valid JSON object.",
+    '   - Format: {"translation": "..."}',
+    "   - No markdown formatting (no ```json ... ```), no explanations.",
+    "7. **FINAL QUALITY CHECK** (Perform this internally before outputting):",
+    "   - [ ] **Count Check**: Does the number of '##...##' tokens in output match the source exactly?",
+    "   - [ ] **Sequence Check**: Are the placeholders in the correct relative order?",
+    "   - [ ] **Empty Tag Check**: Did I remove all `<tag></tag>` that contain no text?",
+    "   - [ ] **JSON Check**: Is the output valid JSON?",
 ]
-
 
 def get_translator():
     translator = Agent(
@@ -36,8 +53,7 @@ def get_translator():
         description=description,
         instructions=instructions,
         output_schema=TranslationResponse,
-        use_json_mode=True,
-        # reasoning=False,
-        # debug_mode=True,
+        use_json_mode=True, 
+        # temperature=0, # 建议设置低温度以提高确定性
     )
     return translator
