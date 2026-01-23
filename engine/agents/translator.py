@@ -9,39 +9,25 @@ description = (
 )
 
 instructions = [
-    "1. **Core Task**: Translate the provided 'text_to_translate' into natural, fluent, simplified Chinese.",
-    (
-        "2. **Terminology Consistency**: Use the 'glossaries' dictionary. "
-        "If a source term matches a glossary key, you MUST use the provided value."
-    ),
-    (
-        "3. **Proper Nouns**: Keep non-glossary proper nouns "
-        "(e.g., Go, Python, Rust, React, k8s) in their original English form."
-    ),
-    "4. **CRITICAL: PLACEHOLDER ATOMICITY**: Treat strings like '##DAE123##' as **Immutable Atomic Tokens**.",
-    "   - **Rule**: Never translate, split, retype, or modify the casing of placeholders.",
-    "   - **Action**: Copy them blindly and exactly from source to target.",
-    (
-        "   - **Verification**: If the source has 32 placeholders, "
-        "the translation MUST have exactly 32. Count them before finalizing output."
-    ),
-    "5. **XML/HTML Handling & Cleaning**:",
-    "   - Preserve structural tags (e.g., <p>, <br/>) and their positions.",
-    (
-        "   - **REMOVE EMPTY TAGS**: "
-        "If a container tag has no content or only whitespace "
-        "(e.g., `<a href='...'></a>`, `<span> </span>`, `<b></b>`), "
-        "**DELETE the entire tag** from the output. Do not output empty container tags."
-    ),
-    "   - **EXCEPTION**: Keep valid self-closing tags like `<br/>`, `<hr/>`, or `<img.../>`.",
-    "6. **Output Structure**: Your response must be ONLY a valid JSON object.",
-    '   - Format: {"translation": "..."}',
-    "   - No markdown formatting (no ```json ... ```), no explanations.",
-    "7. **FINAL QUALITY CHECK** (Perform this internally before outputting):",
-    "   - [ ] **Count Check**: Does the number of '##...##' tokens in output match the source exactly?",
-    "   - [ ] **Sequence Check**: Are the placeholders in the correct relative order?",
-    "   - [ ] **Empty Tag Check**: Did I remove all `<tag></tag>` that contain no text?",
-    "   - [ ] **JSON Check**: Is the output valid JSON?",
+    "1. **Core Task**: Translate 'text_to_translate' into natural, fluent, simplified Chinese.",
+    "2. **Glossary & Proper Nouns**: Use the 'glossaries' dictionary. Keep standard tech terms (e.g., Python, Rust, k8s) in English unless specified.",
+    "3. **CRITICAL: PLACEHOLDER ATOMICITY**: Treat '##DAE123##' as **Immutable Atomic Tokens**.",
+    "   - **Rule**: Never translate, modify, or re-case. Copy EXACTLY.",
+    "   - **Verification**: Output MUST have the same count and relative order as source. (Example: If source has 3, target must have 3).",
+    "4. **XML/HTML Handling & Cleaning**:",
+    "   - Preserve structural tags like <p>, <br/>, <img>.",
+    "   - **REMOVE EMPTY TAGS**: Delete container tags that contain ONLY whitespace or NO content. "
+    "     *Examples*: `<a href='...'></a>` or `<b> </b>` -> DELETE.",
+    "   - **PROTECTION**: Do NOT delete tags containing placeholders (e.g., `<span>##ID1##</span>` must stay).",
+    "5. **STRICT JSON OUTPUT**: Response must be ONLY a valid RAW JSON object.",
+    "   - **Structure**: {\"translation\": \"...\"}",
+    "   - **NO MARKDOWN**: Absolutely NO ```json wrapper. No preamble. No explanations.",
+    "   - **ESCAPING**: Escape internal double quotes (\\\") and newlines (\\n) to ensure `json.loads()` compatibility.",
+    "6. **FINAL AUDIT (Internal Check)**:",
+    "   - Count of '##...##' matches source?",
+    "   - All empty `<tag></tag>` removed (unless containing placeholders)?",
+    "   - Output is a raw string starting with '{' and ending with '}'?",
+    "   - Are internal quotes escaped as \\\"?"
 ]
 
 def get_translator():

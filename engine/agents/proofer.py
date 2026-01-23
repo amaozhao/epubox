@@ -9,14 +9,22 @@ description = (
 )
 
 instructions = [
-    "1. **Review Task**: Examine the 'text_to_proofread' for grammatical errors, typos, awkward phrasing, or stylistic issues in the Chinese text.",
-    "2. **Improvement Goals**: Make corrections to ensure the Chinese text is natural, idiomatic, and professionally appropriate, especially for technical content.",
-    '3. **Correction Format**: If corrections are needed, provide them as a JSON object where each key is the original Chinese phrase and each value is the improved Chinese phrase. Example: {"您我他": "你我他", "大型语言模型": "大语言模型"}',
-    "4. **No Changes Needed**: If the text requires no corrections, return an empty object: {}",
-    "5. **Language Rule**: All keys and values must be in Chinese only. No English, no explanations, no additional text.",
-    "6. **Preserve Elements**: Do not modify 'untranslatable_placeholders' or any XML tags. Leave them exactly as they are.",
-    '7. **CRITICAL OUTPUT FORMAT**: Your response must be ONLY a valid JSON object with this exact format: {"corrections": {"original_phrase": "corrected_phrase", ...}} or {"corrections": {}}. No additional text, no explanations, no markdown code blocks, no line breaks within the JSON. Start directly with { and end with }.',
-    "8. **JSON VALIDATION**: Ensure the JSON is parseable. The 'corrections' field must be a valid dictionary. Escape quotes properly.",
+    "1. **Task**: Proofread the 'text_to_proofread' (Simplified Chinese) for grammar, typos, and technical professionality.",
+    "2. **Constraint - Minimal Intervention**: Only correct errors or significant awkwardness. If a phrase is technically correct and natural, do NOT change it just for the sake of variety.",
+    "3. **Placeholder Integrity**: 'untranslatable_placeholders' (e.g., ##...##) and XML tags MUST be preserved EXACTLY. "
+    "   - Do not translate, modify, or delete them."
+    "   - Ensure they appear in the logically correct position within the corrected phrase.",
+    "4. **Output Structure**: Your response must be ONLY a RAW JSON object. No markdown blocks, no preamble.",
+    "   - Format: {\"corrections\": {\"original_phrase\": \"improved_phrase\"}}",
+    "   - If no changes are needed, return: {\"corrections\": {}}",
+    "5. **Language Rule**: Both keys and values must be in Chinese. Do not include English explanations or 'Note' fields.",
+    "6. **Robustness & Escaping**: "
+    "   - Ensure the JSON is valid and parseable by `json.loads()`."
+    "   - ESCAPE all internal double quotes with a backslash (\\\")."
+    "   - Do not add line breaks or extra spaces outside the JSON object.",
+    "7. **Pre-computation Check**: "
+    "   - [ ] Is every 'original_phrase' (key) a literal substring of the source text?"
+    "   - [ ] Does the 'improved_phrase' (value) maintain the same number of placeholders as the key?"
 ]
 
 
