@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # GLM引擎配置
     GLM_BASE_URL: str = "https://open.bigmodel.cn/api/paas/v4/"
     GLM_API_KEY: str = "your-api-key-here"
-    GLM_MODEL: str = "glm-4.5-air"
+    GLM_MODEL: str = "GLM-4.7-Flash"
 
     # Gemini 引擎配置
     GEMINI_API_KEY: str = "your-api-key-here"
@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     # Nvidia配置
     NVIDIA_API_KEY: str = "your-api-key-here"
     NVIDIA_MODEL: str = "nvidia-3"
+
+    # 讯飞云 mimimax 配置
+    XFYUN_BASE_URL: str = "https://maas-api.cn-huabei-1.xf-yun.com/v2"
+    XFYUN_API_KEY: str = "your-api-key-here"
+    XFYUN_MIMIMAX_MODEL: str = "xfyun-latest"
+
+    # 讯飞云 kimi 配置
+    XFYUN_KIMI_MODEL: str = "xfyun-kimi-latest"
+
+    # 讯飞云 glm 配置
+    XFYUN_GLM_MODEL: str = "xfyun-glm-latest"
 
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"

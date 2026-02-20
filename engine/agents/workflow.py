@@ -1,5 +1,6 @@
 import json
 import re
+import asyncio
 from collections import Counter
 from typing import Dict, List
 
@@ -167,6 +168,7 @@ async def translate_step(step_input: StepInput) -> StepOutput:
     # 使用修正后的翻译文本
     chunk.status = TranslationStatus.TRANSLATED
     chunk.translated = corrected_translation
+    # await asyncio.sleep(1)  # 确保异步上下文切换
     return StepOutput(content=chunk)
 
 
@@ -208,6 +210,7 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
     else:
         proofreading_result = response.content
 
+    # await asyncio.sleep(1)  # 确保异步上下文切换
     return StepOutput(content={"chunk": chunk, "proofreading_result": proofreading_result})
 
 
