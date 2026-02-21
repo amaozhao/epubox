@@ -239,7 +239,7 @@ class TestWorkflow:
         workflow: Workflow = get_translator_workflow()
         chunk = mock_chunk_factory(name="test_chunk", original="Hello ##abcd##.", tokens=10)
 
-        response = await workflow.arun(input=chunk)
+        response = await workflow.arun(input=chunk, additional_data={"glossary": {}})
         assert response.status == "COMPLETED"
         assert isinstance(response.content, Chunk)
         assert response.content.status == TranslationStatus.COMPLETED
@@ -263,7 +263,7 @@ class TestWorkflow:
         chunk = mock_chunk_factory(name="test_chunk", original="Hello ##abcd##.", tokens=5)
 
         with patch.object(logger, "error") as mock_error:
-            response = await workflow.arun(input=chunk)
+            response = await workflow.arun(input=chunk, additional_data={"glossary": {}})
             # assert response.status == "failed"  # Commented out as per your code
             assert "占位符不匹配" in str(mock_error.call_args_list)
             assert isinstance(response.content, Chunk)

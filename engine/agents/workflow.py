@@ -133,11 +133,25 @@ def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]
     return found_terms
 
 
+def _has_translatable_content(text: str) -> bool:
+    """检查是否有可翻译的实际文本内容（排除纯 HTML 标签）"""
+    # 移除所有 HTML 标签后检查是否还有内容
+    text_without_tags = re.sub(r'<[^>]+>', '', text)
+    return bool(text_without_tags.strip())
+
+
 # Step 1: Translate
 async def translate_step(step_input: StepInput) -> StepOutput:
     chunk: Chunk = step_input.input  # type: ignore
     if chunk.status == TranslationStatus.TRANSLATED and chunk.translated:
         # 如果已经翻译过，直接将 chunk 传递给下一步
+        return StepOutput(content=chunk)
+
+    # 检查是否有可翻译内容，没有则直接返回原文
+    if not _has_translatable_content(chunk.original):
+        logger.info(f"Chunk '{chunk.name}' 无可翻译内容，直接返回原文")
+        chunk.translated = chunk.original
+        chunk.status = TranslationStatus.TRANSLATED
         return StepOutput(content=chunk)
 
     glossaries = step_input.additional_data["glossary"]
@@ -156,6 +170,8 @@ async def translate_step(step_input: StepInput) -> StepOutput:
         return StepOutput(content=chunk, success=False, error=error_msg)
 
     translated = response.content.translation
+    # 处理 agent 偶尔返回的 \\n -> 真正换行符
+    translated = translated.replace('\\n', '\n')
     logger.info(f"接收到翻译文本: '{translated[:70]}...'")
 
     # 使用新的验证和修正函数
