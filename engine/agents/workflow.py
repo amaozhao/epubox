@@ -1,18 +1,33 @@
 import json
 import re
-import asyncio
 from collections import Counter
 from typing import Dict, List
 
+from agno.run import RunStatus
 from agno.workflow import Loop, Step, StepInput, StepOutput, Workflow
 
 from engine.constant import PLACEHOLDER_PATTERN
 from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
 
+from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
 from .translator import get_translator
+
+# 需要内容安全审核 fallback 的错误码
+CONTENT_SAFETY_ERROR_CODES = {10014, 500, 400}
+CONTENT_SAFETY_KEYWORDS = ["相关法律法规", "不予显示", "安全审核", "content policy", "safety policy"]
+
+
+def is_content_safety_error(error_msg: str = "", status_code: int | None = None) -> bool:
+    """判断是否是内容安全审核错误"""
+    if status_code in CONTENT_SAFETY_ERROR_CODES:
+        return True
+    for keyword in CONTENT_SAFETY_KEYWORDS:
+        if keyword in error_msg:
+            return True
+    return False
 
 
 def _get_placeholders(text: str) -> list[str]:
@@ -136,7 +151,7 @@ def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]
 def _has_translatable_content(text: str) -> bool:
     """检查是否有可翻译的实际文本内容（排除纯 HTML 标签）"""
     # 移除所有 HTML 标签后检查是否还有内容
-    text_without_tags = re.sub(r'<[^>]+>', '', text)
+    text_without_tags = re.sub(r"<[^>]+>", "", text)
     return bool(text_without_tags.strip())
 
 
@@ -154,14 +169,24 @@ async def translate_step(step_input: StepInput) -> StepOutput:
         chunk.status = TranslationStatus.TRANSLATED
         return StepOutput(content=chunk)
 
-    glossaries = step_input.additional_data["glossary"]
-    translator = get_translator()
+    glossaries = step_input.additional_data.get("glossary", {}) if step_input.additional_data else {}
     translator_input = {
         "text_to_translate": chunk.original,
         "untranslatable_placeholders": _get_placeholders(chunk.original),
         "glossaries": filter_glossary_terms(chunk.original, glossaries),
     }
-    response = await translator.arun(json.dumps(translator_input, ensure_ascii=False, indent=2))
+
+    # 先用主模型尝试
+    translator = get_translator()
+    response = await translator.arun(json.dumps(translator_input, ensure_ascii=False, indent=2))  # type: ignore
+
+    # 检查是否是错误状态，如果是则使用备用模型重试一次
+    if response.status == RunStatus.error:
+        error_content = str(response.content) if response.content else ""
+        if is_content_safety_error(error_content):
+            logger.warning(f"主模型翻译失败（内容安全审核）：{error_content[:100]}，尝试使用备用模型重试...")
+            translator = get_translator(fallback_model)
+            response = await translator.arun(json.dumps(translator_input, ensure_ascii=False, indent=2))  # type: ignore
 
     if not isinstance(response.content, TranslationResponse):
         error_msg = "翻译步骤失败：代理返回了意外的响应类型。"
@@ -171,7 +196,7 @@ async def translate_step(step_input: StepInput) -> StepOutput:
 
     translated = response.content.translation
     # 处理 agent 偶尔返回的 \\n -> 真正换行符
-    translated = translated.replace('\\n', '\n')
+    translated = translated.replace("\\n", "\n")
     logger.info(f"接收到翻译文本: '{translated[:70]}...'")
 
     # 使用新的验证和修正函数
@@ -213,18 +238,55 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
             error=error_msg,
         )
 
-    proofer = get_proofer()
     proofer_input = {"text_to_proofread": translated, "untranslatable_placeholders": _get_placeholders(translated)}
-    response = await proofer.arun(json.dumps(proofer_input, ensure_ascii=False, indent=2))
 
-    proofreading_result: ProofreadingResult
-    if not isinstance(response.content, ProofreadingResult):
-        error_msg = "校对步骤失败：代理返回了意外的响应类型。"
+    # 重试逻辑
+    max_attempts = 3
+    proofreading_result = None
+    used_fallback = False
+
+    for attempt in range(max_attempts):
+        # 根据是否使用过 fallback 决定使用哪个模型
+        proofer = get_proofer(fallback_model) if used_fallback else get_proofer()
+
+        try:
+            response = await proofer.arun(json.dumps(proofer_input, ensure_ascii=False, indent=2))  # type: ignore
+
+            if isinstance(response.content, ProofreadingResult):
+                proofreading_result = response.content
+                break
+
+            # 检查是否是错误状态
+            if response.status == RunStatus.error:
+                error_content = str(response.content) if response.content else ""
+                if not used_fallback and is_content_safety_error(error_content):
+                    logger.warning(f"主模型校对失败（内容安全审核）：{error_content[:100]}，尝试使用备用模型重试...")
+                    used_fallback = True
+                    continue
+
+            logger.warning(f"校对步骤失败：代理返回了意外的响应类型 (attempt {attempt + 1}/{max_attempts})")
+        except Exception as e:
+            error_str = str(e)
+            # 检查是否是内容安全审核错误
+            if not used_fallback and is_content_safety_error(error_str):
+                logger.warning("主模型校对异常（内容安全审核），尝试使用备用模型重试...")
+                used_fallback = True
+                continue
+            logger.error(f"校对步骤异常 (attempt {attempt + 1}/{max_attempts}): {error_str}")
+
+        # 如果不是最后一次尝试，记录并继续重试
+        if attempt < max_attempts - 1:
+            logger.info("将在下次尝试中重试校对步骤...")
+
+    # 如果所有尝试都失败，使用空结果并标记失败
+    if proofreading_result is None:
+        error_msg = f"校对步骤失败：经过 {max_attempts} 次尝试后仍未成功。"
         logger.error(error_msg)
-        # 作为回退，我们使用一个空的 ProofreadingResult 对象。
-        proofreading_result = ProofreadingResult(corrections={})
-    else:
-        proofreading_result = response.content
+        return StepOutput(
+            content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})},
+            success=False,
+            error=error_msg,
+        )
 
     # await asyncio.sleep(1)  # 确保异步上下文切换
     return StepOutput(content={"chunk": chunk, "proofreading_result": proofreading_result})

@@ -1,5 +1,7 @@
 from agno.agent import Agent
-from .models import model
+from agno.models.base import Model
+
+from .models import model as default_model
 from .schemas import TranslationResponse
 
 description = (
@@ -20,26 +22,27 @@ instructions = [
     "     *Examples*: `<a href='...'></a>` or `<b> </b>` -> DELETE.",
     "   - **PROTECTION**: Do NOT delete tags containing placeholders (e.g., `<span>##ID1##</span>` must stay).",
     "5. **STRICT JSON OUTPUT**: Response must be ONLY a valid RAW JSON object.",
-    "   - **Structure**: {\"translation\": \"...\"}",
+    '   - **Structure**: {"translation": "..."}',
     "   - **NO MARKDOWN**: Absolutely NO ```json wrapper. No preamble. No explanations.",
-    "   - **ESCAPING**: Escape internal double quotes (\\\") and newlines (\\n) to ensure `json.loads()` compatibility.",
+    '   - **ESCAPING**: Escape internal double quotes (\\") and newlines (\\n) to ensure `json.loads()` compatibility.',
     "6. **FINAL AUDIT (Internal Check)**:",
     "   - Count of '##...##' matches source?",
     "   - All empty `<tag></tag>` removed (unless containing placeholders)?",
     "   - Output is a raw string starting with '{' and ending with '}'?",
-    "   - Are internal quotes escaped as \\\"?"
+    '   - Are internal quotes escaped as \\"?',
 ]
 
-def get_translator():
+
+def get_translator(model: Model | None = None):
     translator = Agent(
         name="Translator",
         role="翻译专家",
-        model=model,
+        model=model or default_model,
         markdown=False,
         description=description,
         instructions=instructions,
         output_schema=TranslationResponse,
-        use_json_mode=True, 
+        use_json_mode=True,
         # temperature=0, # 建议设置低温度以提高确定性
     )
     return translator

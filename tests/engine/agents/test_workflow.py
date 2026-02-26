@@ -178,14 +178,16 @@ class TestWorkflow:
         mock_get_proofer.return_value = mock_proofer
 
         step_input = MagicMock(previous_step_content=chunk)
-        with patch.object(logger, "error") as mock_error:
+        with patch.object(logger, "error") as mock_error, patch.object(logger, "warning") as mock_warning:
             output = await proofread_step(step_input)
-            assert output.success is True  # Falls back to empty ProofreadingResult
+            assert output.success is False  # Retry logic now marks failure
             assert isinstance(output.content, dict)
             assert isinstance(output.content["chunk"], Chunk)
             assert output.content["proofreading_result"].corrections == {}
             assert output.content["chunk"].name == "test_chunk"
             assert output.content["chunk"].tokens == 10
+            # Retry 3 times, each with warning about unexpected response type
+            assert mock_warning.call_count == 3
             assert mock_error.call_count == 1
 
     async def test_apply_corrections_step_success(self, mock_chunk_factory):

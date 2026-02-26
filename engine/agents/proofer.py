@@ -1,6 +1,7 @@
 from agno.agent import Agent
+from agno.models.base import Model
 
-from .models import model
+from .models import model as default_model
 from .schemas import ProofreadingResult
 
 description = (
@@ -15,24 +16,24 @@ instructions = [
     "   - Do not translate, modify, or delete them."
     "   - Ensure they appear in the logically correct position within the corrected phrase.",
     "4. **Output Structure**: Your response must be ONLY a RAW JSON object. No markdown blocks, no preamble.",
-    "   - Format: {\"corrections\": {\"original_phrase\": \"improved_phrase\"}}",
-    "   - If no changes are needed, return: {\"corrections\": {}}",
+    '   - Format: {"corrections": {"original_phrase": "improved_phrase"}}',
+    '   - If no changes are needed, return: {"corrections": {}}',
     "5. **Language Rule**: Both keys and values must be in Chinese. Do not include English explanations or 'Note' fields.",
     "6. **Robustness & Escaping**: "
     "   - Ensure the JSON is valid and parseable by `json.loads()`."
-    "   - ESCAPE all internal double quotes with a backslash (\\\")."
+    '   - ESCAPE all internal double quotes with a backslash (\\").'
     "   - Do not add line breaks or extra spaces outside the JSON object.",
     "7. **Pre-computation Check**: "
     "   - [ ] Is every 'original_phrase' (key) a literal substring of the source text?"
-    "   - [ ] Does the 'improved_phrase' (value) maintain the same number of placeholders as the key?"
+    "   - [ ] Does the 'improved_phrase' (value) maintain the same number of placeholders as the key?",
 ]
 
 
-def get_proofer():
+def get_proofer(model: Model | None = None):
     Proofer = Agent(
         name="Proofer",
         role="错词检查专家",
-        model=model,
+        model=model or default_model,
         markdown=False,
         description=description,
         instructions=instructions,
