@@ -13,18 +13,31 @@ class Chunker:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
         self.limit = limit
+        # 常规内容允许拆分的标签
         self.allowed_split_tags = {"p", "li", "ul", "div", "header", "section", "figure", "body", "html", "head", "br"}
+        # EPUB 导航相关标签 - 禁止拆分，这些标签必须保持完整
+        self.nav_tags = {"navPoint", "navLabel", "content", "navMap", "pageList", "pageTarget", "spine", "itemref"}
         self.any_tag_pattern = re.compile(r"<[^>]+>")
         self.closing_tag_pattern = re.compile(r"</([a-zA-Z][a-zA-Z0-9]*)\s*>")
 
     def get_token_count(self, content: str) -> int:
         return len(self.tokenizer.encode(content)) if content else 0
 
-    def chunk(self, html: str) -> List[Chunk]:
+    def chunk(self, html: str, is_nav_file: bool = False) -> List[Chunk]:
+        """
+        将 HTML 内容拆分成多个块。
+
+        Args:
+            html: HTML 内容
+            is_nav_file: 是否是 EPUB 导航文件（toc.ncx, nav.xhtml等）
+        """
         chunks = []
         pos = 0
         n = len(html)
         cid = 0
+
+        # 导航文件也使用统一的限制，保持结构完整性
+        effective_limit = self.limit
 
         while pos < n:
             cid += 1
@@ -33,7 +46,7 @@ class Chunker:
             token_limit_char_end = pos
             while low <= high:
                 mid = (low + high) // 2
-                if self.get_token_count(html[pos : pos + mid]) <= self.limit:
+                if self.get_token_count(html[pos : pos + mid]) <= effective_limit:
                     token_limit_char_end = pos + mid
                     low = mid + 1
                 else:
@@ -45,6 +58,9 @@ class Chunker:
             # 尝试寻找允许的结束标签 (如 </p>, </div>)
             for m in self.closing_tag_pattern.finditer(html, pos, token_limit_char_end):
                 tag_name = m.group(1).lower()
+                # 跳过导航标签作为拆分点，保护 EPUB 目录结构
+                if is_nav_file and hasattr(self, 'nav_tags') and tag_name in self.nav_tags:
+                    continue
                 if tag_name in self.allowed_split_tags:
                     split_at = m.end()
 

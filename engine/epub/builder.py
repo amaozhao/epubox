@@ -41,7 +41,8 @@ class Builder:
 
     def _modify_content_opf(self, content_opf_path: str) -> bool:
         """
-        修改 .opf 文件，设置或更新 <dc:language> 或 <dc: language> 标签。
+        修改 .opf 文件，设置或更新语言标签。
+        会修改 <dc:language> 和 <meta property="dcterms:language"> 两个标签。
 
         Args:
             content_opf_path: .opf 文件的路径。
@@ -61,19 +62,30 @@ class Builder:
             logger.warning(f"读取 .opf 文件失败：{content_opf_path}, 错误：{e}")
             return False
 
-        # 设置语言：检查是否已存在 <dc:language> 或 <dc: language> 标签
-        language_pattern = r"<dc:\s*language>[^<]*</dc:\s*language>"
-        if re.search(language_pattern, content):
-            content = re.sub(language_pattern, f"<dc:language>{self.language}</dc:language>", content)
-        else:
-            metadata_end_pattern = r"</metadata>"
-            if re.search(metadata_end_pattern, content):
-                content = re.sub(
-                    metadata_end_pattern, f"  <dc:language>{self.language}</dc:language>\n</metadata>", content
-                )
-            else:
-                logger.warning(f".opf 文件中未找到 </metadata> 标签，无法添加语言：{content_opf_path}")
-                return False
+        modified = False
+
+        # 1. 修改 <dc:language id="pub-language">xxx</dc:language> 标签（如果有 id）
+        dc_lang_pattern = r'<dc:language\s+id="pub-language"[^>]*>[^<]*</dc:language>'
+        if re.search(dc_lang_pattern, content):
+            content = re.sub(
+                dc_lang_pattern,
+                f'<dc:language id="pub-language">{self.language}</dc:language>',
+                content
+            )
+            modified = True
+
+        # 2. 修改 <meta id="meta-language" property="dcterms:language">xxx</meta> 标签
+        meta_lang_pattern = r'<meta\s+id="meta-language"\s+property="dcterms:language"[^>]*>[^<]*</meta>'
+        if re.search(meta_lang_pattern, content):
+            content = re.sub(
+                meta_lang_pattern,
+                f'<meta id="meta-language" property="dcterms:language">{self.language}</meta>',
+                content
+            )
+            modified = True
+
+        if not modified:
+            logger.warning(f"未找到需要修改的语言标签，跳过语言设置：{content_opf_path}")
 
         # 写回修改后的 .opf 文件
         try:

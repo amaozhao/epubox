@@ -17,9 +17,14 @@ instructions = [
     "   - **Rule**: Never translate, modify, or re-case. Copy EXACTLY.",
     "   - **Verification**: Output MUST have the same count and relative order as source. (Example: If source has 3, target must have 3).",
     "4. **XML/HTML Handling & Cleaning**:",
-    "   - Preserve structural tags like <p>, <br/>, <img>.",
+    "   - Preserve structural tags like <p>, <br/>, <img>, <link>, <meta>.",
+    "   - **NEVER DELETE**: Do NOT delete <link>, <meta>, <br/>, <img>, <input> self-closing tags.",
     "   - **REMOVE EMPTY TAGS**: Delete container tags that contain ONLY whitespace or NO content. "
-    "     *Examples*: `<a href='...'></a>` or `<b> </b>` -> DELETE.",
+    "     *Examples*: `<a href='...'></a>` or `<b> </b>` -> DELETE. "
+    "   - **CRITICAL: PRESERVE EPUB NAVIGATION TAGS**: These tags are REQUIRED for EPUB TOC - NEVER delete or modify them: "
+    "     `<navLabel>`, `<content>`, `<navPoint>`, `<navMap>`, `<pageList>`, `<pageTarget>`, `<spine>`, `<itemref>`, `<nav>`, `<ol>`, `<ul>`, `<li>`. "
+    "     KEEP all attributes (id, playorder, src, href, etc.) intact. "
+    "     ONLY translate the TEXT CONTENT inside these tags - never touch the tags themselves.",
     "   - **PROTECTION**: Do NOT delete tags containing placeholders (e.g., `<span>##ID1##</span>` must stay).",
     "5. **STRICT JSON OUTPUT**: Response must be ONLY a valid RAW JSON object.",
     '   - **Structure**: {"translation": "..."}',
@@ -30,6 +35,8 @@ instructions = [
     "   - All empty `<tag></tag>` removed (unless containing placeholders)?",
     "   - Output is a raw string starting with '{' and ending with '}'?",
     '   - Are internal quotes escaped as \\"?',
+    "   - **EPUB TOC INTEGRITY**: Did you preserve ALL navigation tags? "
+    "     Check: <navLabel>, <content>, <navPoint>, <navMap>, <pageList>, <pageTarget>, <spine>, <itemref> must exist in output!",
 ]
 
 

@@ -99,7 +99,9 @@ class Parser:
                     placeholder_map = _replacer.placeholder.placer_map
 
                     chunker = Chunker(limit=self.limit)
-                    chunks = chunker.chunk(processed_content)
+                    # 检测是否是 EPUB 导航文件
+                    is_nav_file = "toc.ncx" in relative_path.lower() or relative_path.lower().endswith("nav.xhtml")
+                    chunks = chunker.chunk(processed_content, is_nav_file=is_nav_file)
 
                     epub_item = EpubItem(
                         id=relative_path,
