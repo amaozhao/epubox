@@ -37,7 +37,8 @@ class Settings(BaseSettings):
     KIMI_MODEL: str = "kimi-latest"
 
     # GLM引擎配置
-    GLM_BASE_URL: str = "https://open.bigmodel.cn/api/paas/v4/"
+    # GLM_BASE_URL: str = "https://open.bigmodel.cn/api/paas/v4/"
+    GLM_BASE_URL: str = "https://api-ai.gitcode.com/v1"
     GLM_API_KEY: str = "your-api-key-here"
     GLM_MODEL: str = "GLM-4.7-Flash"
 
@@ -63,6 +64,21 @@ class Settings(BaseSettings):
 
     # 讯飞云 glm 配置
     XFYUN_GLM_MODEL: str = "xfyun-glm-latest"
+
+    # AIHubMix 配置
+    AIHUBMIX_API_KEY: str = "sk-"
+    AIHUBMIX_MODEL: str = "gemini-3-flash-preview-free"
+    AIHUBMIX_BASE_URL: str = "https://aihubmix.com/v1"
+
+    # BAISHAN 配置
+    BAISHAN_API_KEY: str = "sk-"
+    BAISHAN_MODEL: str = "DeepSeek-R1-0528-Qwen3-8B"
+    BAISHAN_BASE_URL: str = "https://api.edgefn.net/v1"
+
+    # iFlow 配置
+    IFLOW_API_KEY: str = "sk-"
+    IFLOW_MODEL: str = "kimi-k2"
+    IFLOW_BASE_URL: str = "https://apis.iflow.cn/v1"
 
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"

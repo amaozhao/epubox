@@ -1,10 +1,11 @@
 # from agno.models.deepseek import DeepSeek
 
-from agno.models.google import Gemini
+# from agno.models.google import Gemini
 from agno.models.mistral import MistralChat
 
 # from agno.models.openrouter import OpenRouter
-# from agno.models.openai.like import OpenAILike
+from agno.models.openai.like import OpenAILike
+
 # from agno.models.nvidia import Nvidia
 from ..core.config import settings
 
@@ -14,7 +15,10 @@ from ..core.config import settings
 # model = OpenAILike(id=settings.XFYUN_MIMIMAX_MODEL, api_key=settings.XFYUN_API_KEY, base_url=settings.XFYUN_BASE_URL)
 # model = OpenAILike(id=settings.XFYUN_GLM_MODEL, api_key=settings.XFYUN_API_KEY, base_url=settings.XFYUN_BASE_URL)
 # model = OpenAILike(id=settings.XFYUN_KIMI_MODEL, api_key=settings.XFYUN_API_KEY, base_url=settings.XFYUN_BASE_URL)
-model = Gemini(id=settings.GEMINI_MODEL, api_key=settings.GEMINI_API_KEY)
+# model = OpenAILike(id=settings.AIHUBMIX_MODEL, api_key=settings.AIHUBMIX_API_KEY, base_url=settings.AIHUBMIX_BASE_URL)
+model = OpenAILike(id=settings.BAISHAN_MODEL, api_key=settings.BAISHAN_API_KEY, base_url=settings.BAISHAN_BASE_URL)
+# model = OpenAILike(id=settings.IFLOW_MODEL, api_key=settings.IFLOW_API_KEY, base_url=settings.IFLOW_BASE_URL)
+# model = Gemini(id=settings.GEMINI_MODEL, api_key=settings.GEMINI_API_KEY)
 
 # 直接使用 Mistral 模型
 # model = MistralChat(id=settings.MISTRAL_MODEL, api_key=settings.MISTRAL_API_KEY)

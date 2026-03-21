@@ -195,7 +195,7 @@ async def translate_step(step_input: StepInput) -> StepOutput:
         return StepOutput(content=chunk, success=False, error=error_msg)
 
     translated = response.content.translation
-    # 处理 agent 偶尔返回的 \\n -> 真正换行符
+    # 处理 agent 偶尔返回的 \n -> 真正换行符
     translated = translated.replace("\\n", "\n")
     logger.info(f"接收到翻译文本: '{translated[:70]}...'")
 
