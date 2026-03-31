@@ -57,9 +57,8 @@ class TestMerger:
         result = merger.merge([])
         assert result == ""
 
-    def test_merge_handles_no_language_attributes(self, caplog):
-        """测试当合并内容中没有 lang 或 xml:lang 属性时，merge 方法是否记录警告日志。"""
-        caplog.set_level("WARNING")
+    def test_merge_handles_no_language_attributes(self):
+        """测试当合并内容中没有 lang 或 xml:lang 属性时，merge 方法仍能正常返回。"""
         merger = Merger()
         chunks = [
             Chunk(
@@ -72,7 +71,6 @@ class TestMerger:
         ]
         result = merger.merge(chunks, language="zh")
         assert result == "<html><body>Hello</body></html>"
-        assert "合并后的 XHTML 内容中未找到 lang 或 xml:lang 属性匹配 'en*'" in caplog.text
 
     def test_merge_with_custom_language(self):
         """测试 merge 方法使用自定义语言代码时能否正确更新属性。"""

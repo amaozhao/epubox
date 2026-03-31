@@ -186,6 +186,16 @@ class GlossaryExtractor:
         except IOError as e:
             logging.error(f"❌ 无法写入文件 '{output_path}': {e}")
 
+    def extract_from_epub(self, epub_path: str) -> Dict[str, str]:
+        """从EPUB提取术语并返回字典（不保存文件）"""
+        documents = self._extract_text_from_epub(epub_path)
+        if not documents:
+            return {}
+        all_terms = self._get_all_unique_terms(documents)
+        if not all_terms:
+            return {}
+        return {term: "" for term in all_terms}
+
 
 class GlossaryLoader:
     def __init__(self, glossary_dir: str = "glossary"):

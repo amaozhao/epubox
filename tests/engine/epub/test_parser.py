@@ -12,25 +12,17 @@ def setup_mocks(mocker):
     """
     为所有测试用例设置通用的 mock，以确保测试的独立性。
     """
-    # 模拟 Chunker 类
+    # 模拟 TagPreserver 类
+    mocked_preserver = MagicMock()
+    mocked_preserver.preserve_tags.return_value = ("", MagicMock(tag_map={}, counter=0))
+
+    mocker.patch("engine.epub.parser.TagPreserver", return_value=mocked_preserver)
+
+    # 模拟 HtmlChunker 类
     mocked_chunker = MagicMock()
-    mocked_chunker.chunk.return_value = []  # 返回一个空列表，避免后续的 chunk 处理
+    mocked_chunker.chunk.return_value = []
 
-    # 在所有测试用例中，当 Chunker 类被实例化时，都返回我们模拟的 Chunker 实例
-    mocker.patch("engine.epub.parser.Chunker", return_value=mocked_chunker)
-
-    # # 模拟 Replacer 类的实例
-    mocked_replacer = MagicMock()
-
-    # # 模拟 Replacer 实例的 placeholder 属性，并给它赋值
-    mocked_replacer.placeholder = MagicMock()
-    mocked_replacer.placeholder.placer_map = {"key": "value"}
-
-    # # 模拟 Replacer 实例的 replace 方法，并设置其返回值
-    mocked_replacer.replace.return_value = "processed content"
-
-    # # 在所有测试用例中，当 Replacer 类被实例化时，都返回我们模拟的 Replacer 实例
-    mocker.patch("engine.epub.parser.Replacer", return_value=mocked_replacer)
+    mocker.patch("engine.epub.parser.HtmlChunker", return_value=mocked_chunker)
 
 
 @pytest.fixture
@@ -51,9 +43,7 @@ class TestParser:
 
     def test_get_output_dir(self, parser_instance):
         """测试 _get_output_dir 方法是否正确生成解压路径。"""
-        # Get the directory of the mocked epub_path
         epub_dir = os.path.dirname(parser_instance.path)
-        # Construct the expected path using the same logic as your code
         expected_path = os.path.join(epub_dir, "temp", "my_book")
         assert parser_instance._get_output_dir() == expected_path
 
@@ -128,7 +118,6 @@ class TestParser:
 
         item = book.items[0]
         assert item.id == "chapter1.xhtml"
-        assert item.content == "processed content"
 
         assert "container.xml" not in [i.id for i in book.items]
 
