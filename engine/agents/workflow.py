@@ -298,7 +298,7 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
             if isinstance(response.content, ProofreadingResult):
                 proofreading_result = response.content
                 break
-            if not response.success:
+            if response.status == RunStatus.error:
                 error_content = str(response.content) if response.content else ""
                 if not used_fallback and is_content_safety_error(error_content):
                     logger.warning(f"主模型校对失败（内容安全审核），尝试使用备用模型...")
