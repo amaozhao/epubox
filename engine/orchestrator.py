@@ -1,4 +1,5 @@
 import os
+import re
 
 from agno.run import RunStatus
 from tqdm import tqdm
@@ -109,7 +110,13 @@ class Orchestrator:
             placeholder_mgr = PlaceholderManager()
             if item.placeholder:
                 placeholder_mgr.tag_map = item.placeholder
-                placeholder_mgr.counter = len(item.placeholder)
+                # counter 必须是最大索引+1，避免新占位符与已有高索引冲突
+                indices = []
+                for key in item.placeholder:
+                    m = re.search(r'\[id(\d+)\]', key)
+                    if m:
+                        indices.append(int(m.group(1)))
+                placeholder_mgr.counter = (max(indices) + 1) if indices else 0
 
             for _, chunk in enumerate(item.chunks):
                 # 在开始工作流前，判断该分块是否需要翻译

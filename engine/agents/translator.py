@@ -22,6 +22,7 @@ instructions = [
     "   - **ABSOLUTELY FORBIDDEN**: Skipping, reordering, duplicating, or inventing placeholder indices.",
     "   - **COUNT CHECK**: Before returning, count [idN] in your output — it MUST equal 'placeholder_count'.",
     "   - If 'validation_error' reports missing placeholders, add them back at their correct positions.",
+    "   - **PRE/CODE PLACEHOLDERS**: `[PRE:n]` and `[CODE:n]` are code block placeholders. Do NOT translate, modify, or delete them. Copy VERBATIM.",
     "4. **XML/HTML**: Preserve structural tags. Do NOT delete <link>, <meta>, <br/>, <img>. Remove empty container tags like <a href='...'></a>.",
     "   - **EPUB NAVIGATION TAGS** (MUST preserve): <navLabel>, <content>, <navPoint>, <navMap>, <pageList>, <pageTarget>, <spine>, <itemref>, <nav>, <ol>, <ul>, <li>. Keep all attributes. Translate only text content inside.",
     "5. **FINAL CHECK**: Verify the count of [idN] in your output equals 'placeholder_count'.",
