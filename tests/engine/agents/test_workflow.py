@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import json
 import pytest
 from agno.workflow import Workflow
 
@@ -151,7 +152,6 @@ class TestWorkflow:
         )
         output = await translate_step(step_input)
         assert output.content.status == TranslationStatus.TRANSLATED
-        import json
         parsed = json.loads(captured_input["json_str"])
         assert "placeholder_count" in parsed
         assert parsed["placeholder_count"] == 3
@@ -263,7 +263,6 @@ class TestWorkflow:
         captured_inputs = []
 
         async def capture_and_fail(json_input):
-            import json
             parsed = json.loads(json_input)
             captured_inputs.append(parsed)
             # 前两次返回无占位符的翻译
