@@ -110,7 +110,7 @@ class Parser:
                     is_nav_file = "toc.ncx" in relative_path.lower() or relative_path.lower().endswith("nav.xhtml")
 
                     # 使用 HtmlChunker 分块
-                    chunker = HtmlChunker(token_limit=self.limit, max_placeholders_per_chunk=25)
+                    chunker = HtmlChunker(token_limit=self.limit, max_placeholders_per_chunk=10)
                     # 全局索引范围：0 到 placeholder_mgr.counter - 1
                     global_indices = list(range(placeholder_mgr.counter))
                     chunks = chunker.chunk(
