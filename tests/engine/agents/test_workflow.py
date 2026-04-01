@@ -161,41 +161,6 @@ class TestWorkflow:
         assert "[id2]" in parsed["untranslatable_placeholders"]
 
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_phase2_triggered(self, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):
-        """验证 Phase 1 三次重试都失败后，Phase 2 被触发并成功"""
-        chunk = mock_chunk_factory(
-            name="test_chunk",
-            original="[id0]Hello[id1]World[id2]",
-            tokens=10,
-            global_indices=[0, 1, 2],
-            local_tag_map={"[id0]": "<p>", "[id1]": "</p>", "[id2]": "<p>"}
-        )
-        call_count = [0]
-
-        async def all_fail_response(json_input):
-            call_count[0] += 1
-            # Phase 1: 全部失败（缺少占位符）
-            if call_count[0] <= 3:
-                return MagicMock(content=MockTranslationResponse("你好世界"))
-            # Phase 2: 翻译纯净文本成功
-            return MagicMock(content=MockTranslationResponse("你好世界"))
-
-        mock_translator = MagicMock()
-        mock_translator.arun = all_fail_response
-        mock_get_translator.return_value = mock_translator
-
-        step_input = MagicMock(
-            input=chunk,
-            additional_data={"placeholder_mgr": mock_placeholder_mgr}
-        )
-        output = await translate_step(step_input)
-        assert output.content.status == TranslationStatus.TRANSLATED
-        assert call_count[0] == 4
-        assert "[id0]" in output.content.translated
-        assert "[id1]" in output.content.translated
-        assert "[id2]" in output.content.translated
-
-    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_content_safety_fallback(self, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):
         """验证翻译遇到内容安全错误时自动切换到备用模型"""
         chunk = mock_chunk_factory(
@@ -255,8 +220,8 @@ class TestWorkflow:
         assert call_count[0] == 2
 
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_phase2_triggered(self, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):
-        """验证 Phase 1 三次重试都失败后，Phase 2 被触发并成功"""
+    async def test_translate_step_all_retries_fail(self, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):
+        """验证所有重试都失败后，chunk.translated 为空，状态为 UNTRANSLATED"""
         chunk = mock_chunk_factory(
             name="test_chunk",
             original="[id0]Hello[id1]World[id2]",
@@ -267,13 +232,8 @@ class TestWorkflow:
         call_count = [0]
 
         async def all_fail_response(json_input):
-            import json
-            parsed = json.loads(json_input)
             call_count[0] += 1
-            # Phase 1: 全部失败（缺少占位符）
-            if call_count[0] <= 3:
-                return MagicMock(content=MockTranslationResponse("你好世界"))  # 无占位符
-            # Phase 2: 翻译纯净文本成功
+            # 始终返回无占位符的翻译
             return MagicMock(content=MockTranslationResponse("你好世界"))
 
         mock_translator = MagicMock()
@@ -285,14 +245,10 @@ class TestWorkflow:
             additional_data={"placeholder_mgr": mock_placeholder_mgr}
         )
         output = await translate_step(step_input)
-        # Phase 2 成功，状态应为 TRANSLATED
-        assert output.content.status == TranslationStatus.TRANSLATED
-        # Phase 1 三次 + Phase 2 一次 = 4 次调用
-        assert call_count[0] == 4
-        # Phase 2 的对齐结果应包含所有占位符
-        assert "[id0]" in output.content.translated
-        assert "[id1]" in output.content.translated
-        assert "[id2]" in output.content.translated
+        # 所有重试失败，translated 为空，状态为 UNTRANSLATED
+        assert output.content.status == TranslationStatus.UNTRANSLATED
+        assert output.content.translated == ""
+        assert call_count[0] == 3
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_error_msg_passed(self, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):

@@ -3,12 +3,11 @@ import re
 from typing import Dict, List
 
 from agno.run import RunStatus
-from agno.workflow import Loop, Step, StepInput, StepOutput, Workflow
+from agno.workflow import Step, StepInput, StepOutput, Workflow
 
 from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
 
-from .aligner import _align, _remove_placeholders
 from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
@@ -115,36 +114,27 @@ async def _call_translator(
 
 
 async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict[str, str] = None) -> Chunk:
-    """三层防御翻译"""
+    """Phase 1 翻译：直接翻译 + 占位符验证，失败则标记待手动处理"""
     original = chunk.original
-    last_translated = None  # 保存上一次翻译失败的结果用于重试
-    last_error_msg = None  # 保存错误信息供模型参考
-    used_fallback = False  # 是否已使用备用模型
-    # 聚合所有缺失的占位符 ID
+    last_error_msg = None
+    used_fallback = False
     all_missing_ids: set[int] = set()
 
-    # Phase 1: 正常翻译（最多重试max_retries次）
     for attempt in range(MAX_TRANSLATION_RETRIES):
         try:
-            translated = await _call_translator(original, placeholder_mgr, glossary, last_translated, last_error_msg, use_fallback=used_fallback)
+            translated = await _call_translator(original, placeholder_mgr, glossary, None, last_error_msg, use_fallback=used_fallback)
             translated = translated.replace("\\n", "\n")
         except Exception as e:
             error_str = str(e)
-            # 内容安全审核错误：切换到备用模型重试
             if not used_fallback and is_content_safety_error(error_str):
                 logger.warning(f"主模型翻译失败（内容安全审核），尝试使用备用模型...")
                 used_fallback = True
-                last_translated = None
                 last_error_msg = None
                 continue
-            logger.warning(f"Phase 1 重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 异常: {e}")
-            last_translated = None
+            logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 异常: {e}")
             last_error_msg = None
             continue
 
-        # 验证占位符 - 使用 chunk.global_indices 构建验证用的 tag_map
-        # 注意：chunk.original 中的占位符是全局索引（如 [id23]），而非局部索引
-        # 因此需要用全局索引来验证
         if hasattr(chunk, 'global_indices') and chunk.global_indices:
             validation_tag_map = {f"[id{i}]": placeholder_mgr.tag_map.get(f"[id{i}]", "") for i in chunk.global_indices}
         else:
@@ -154,66 +144,38 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
             chunk.translated = translated
             chunk.status = TranslationStatus.TRANSLATED
             return chunk
+
+        logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 失败: {error_msg}")
+        # 分离"缺少"和"多余"，避免把多余占位符误认为缺失
+        missing_ids: set[int] = set()
+        extra_ids: set[int] = set()
+        for m in re.findall(r'缺少:\[([^\]]+)\]', error_msg):
+            for item in m.replace('[id', '').replace(']', '').split(','):
+                item = item.strip()
+                if item.startswith('id'):
+                    missing_ids.add(int(item[2:]))
+        for m in re.findall(r'多余:\[([^\]]+)\]', error_msg):
+            for item in m.replace('[id', '').replace(']', '').split(','):
+                item = item.strip()
+                if item.startswith('id'):
+                    extra_ids.add(int(item[2:]))
+        all_missing_ids.update(missing_ids)
+
+        hint_parts = []
+        if missing_ids:
+            missing_str = ", ".join(sorted([f"[id{i}]" for i in sorted(missing_ids)]))
+            hint_parts.append(f"请保留以下占位符: {missing_str}")
+        if extra_ids:
+            extra_str = ", ".join(sorted([f"[id{i}]" for i in sorted(extra_ids)]))
+            hint_parts.append(f"请删除以下占位符，不要出现在输出中: {extra_str}")
+        if hint_parts:
+            last_error_msg = f"{error_msg} （{'；'.join(hint_parts)}）"
         else:
-            logger.warning(f"Phase 1 重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 失败: {error_msg}")
-            # 聚合缺失的占位符 ID
-            for m in re.findall(r'\[id(\d+)\]', error_msg):
-                all_missing_ids.add(int(m))
-            # 构建聚合错误消息
-            if all_missing_ids:
-                missing_str = ", ".join(sorted([f"[id{i}]" for i in sorted(all_missing_ids)]))
-                retry_hint = f"（已缺失 {len(all_missing_ids)} 个占位符，请全部保留在输出中）"
-                last_error_msg = f"{error_msg} {retry_hint}"
-            else:
-                last_error_msg = error_msg
-            # 不要把包含错误占位符的翻译结果传给下一次重试，否则模型会"强化"错误
-            last_translated = None
+            last_error_msg = error_msg
 
-    # Phase 1 所有重试都失败 → 尝试 Phase 2: Token Alignment
-    logger.warning("Phase 1 所有重试失败，尝试 Phase 2...")
-    try:
-        # Phase 2: 直接翻译纯净文本（不带占位符），然后重新插入占位符
-        # 使用 chunk 自己的局部占位符，而不是全文档的占位符
-        placeholders = [f"[id{i}]" for i in chunk.global_indices]
-        clean_original = _remove_placeholders(original, placeholders)
-
-        # 确保我们真的移除了占位符
-        if re.search(r'\[id\d+\]', clean_original):
-            logger.error("Phase 2: clean_original 仍然包含占位符！")
-            raise ValueError("占位符移除失败")
-
-        # 翻译纯净文本（不带占位符）
-        # Phase 2: 需要告诉模型原文有哪些占位符，在翻译后要加回去
-        clean_translated = await _call_translator(clean_original, placeholder_mgr, glossary, None, f"注意：原文有以下占位符必须保留在输出的对应位置：{placeholders}。翻译时将这些占位符视为不可见的标记，在翻译后的文本中保持它们的位置不变。")
-        clean_translated = clean_translated.replace("\\n", "\n")
-
-        # 如果翻译结果仍然包含占位符，说明模型没有正确处理
-        if re.search(r'\[id\d+\]', clean_translated):
-            logger.warning("Phase 2: 翻译结果仍然包含占位符，将清除后重新对齐")
-            # 强制清除翻译结果中的所有占位符（不仅是 global 的）
-            # 使用正则移除所有 [idN] 格式的占位符
-            clean_translated = re.sub(r'\[id\d+\]', '', clean_translated)
-
-        # 将占位符从原文对齐到译文（基于相对位置）
-        aligned = _align(original, clean_translated, placeholders)
-        # Phase 2 也使用 global_indices 构建验证 tag_map
-        if hasattr(chunk, 'global_indices') and chunk.global_indices:
-            validation_tag_map = {f"[id{i}]": placeholder_mgr.tag_map.get(f"[id{i}]", "") for i in chunk.global_indices}
-        else:
-            validation_tag_map = placeholder_mgr.tag_map
-        is_valid, _ = validate_placeholders(aligned, validation_tag_map)
-        if is_valid:
-            chunk.translated = aligned
-            chunk.status = TranslationStatus.TRANSLATED
-            return chunk
-    except Exception as e:
-        logger.warning(f"Phase 2 异常: {e}")
-        import traceback
-        logger.warning(f"Phase 2 堆栈: {traceback.format_exc()}")
-
-    # Phase 2 也失败 → 进入 Phase 3: 翻译失败，标记为失败状态等待手动处理
-    # 注意：不使用原文覆盖 translated 字段，保留原文让后续可手动翻译
-    logger.error(f"Chunk '{chunk.name}': Phase 1 和 Phase 2 都失败，标记为待手动翻译")
+    # 所有重试都失败 → 标记为 UNTRANSLATED，保留原文保结构
+    logger.warning(f"Chunk '{chunk.name}': 翻译重试全部失败，标记为 UNTRANSLATED")
+    chunk.translated = ""
     chunk.status = TranslationStatus.UNTRANSLATED
     return chunk
 
@@ -247,34 +209,15 @@ async def translate_step(step_input: StepInput) -> StepOutput:
         logger.error(error_msg)
         return StepOutput(content=chunk, success=False, error=error_msg)
 
-
-def translate_check_step(outputs: List[StepOutput]) -> bool:
-    """检查翻译步骤是否成功"""
-    if not outputs:
-        return False
-    last_output = outputs[-1]
-    chunk = last_output.content
-    if isinstance(chunk, Chunk):
-        if chunk.status == TranslationStatus.UNTRANSLATED:
-            return True
-        if chunk.status == TranslationStatus.TRANSLATED:
-            return True
-    return False
-
-
-def check_step(outputs: List[StepOutput]) -> bool:
-    if not outputs:
-        return False
-    output = outputs[-1]
-    if output.success:
-        return True
-    return False
-
-
 # Step 2: Proofread
 async def proofread_step(step_input: StepInput) -> StepOutput:
     chunk: Chunk = step_input.previous_step_content  # type: ignore
     translated = getattr(chunk, "translated")
+
+    # 翻译失败，跳过校对
+    if chunk.status == TranslationStatus.UNTRANSLATED:
+        logger.info(f"Chunk '{chunk.name}' 翻译失败，跳过校对步骤")
+        return StepOutput(content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})})
 
     if not translated or not isinstance(translated, str):
         error_msg = "校对步骤失败：没有从上一步收到有效的翻译文本。"
@@ -285,7 +228,7 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
             error=error_msg,
         )
 
-    proofer_input = {"text_to_proofread": translated, "untranslatable_placeholders": _get_placeholders_from_indices(_get_placeholder_indices(translated))}
+    proofer_input = {"text_to_proofread": translated, "untranslatable_placeholders": _get_placeholders_from_indices(_get_placeholder_indices(chunk.original))}
 
     max_attempts = 3
     proofreading_result = None
@@ -334,6 +277,11 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
     proofreading_result: ProofreadingResult = step_data["proofreading_result"]
     translated_text = chunk.translated
 
+    # 翻译失败，跳过应用校对建议
+    if chunk.status == TranslationStatus.UNTRANSLATED:
+        logger.info(f"Chunk '{chunk.name}' 翻译失败，跳过应用校对建议步骤")
+        return StepOutput(content=chunk)
+
     if not translated_text or not isinstance(translated_text, str):
         error_msg = "应用校对建议步骤失败：缺少翻译文本。"
         logger.error(error_msg)
@@ -358,17 +306,12 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
 
 
 def get_translator_workflow() -> Workflow:
-    """构建并返回翻译工作流（三层防御机制）"""
+    """构建并返回翻译工作流（翻译→校对→修正）"""
     return Workflow(
         name="TranslatorWorkflow",
-        description="一个智能翻译工作流，带三层防御机制保护EPUB结构完整性",
+        description="智能翻译工作流：直接翻译+占位符保护，校对提升质量",
         steps=[
-            Loop(
-                name="Translate Loop",
-                steps=[Step(name="translate", executor=translate_step)],
-                end_condition=translate_check_step,
-                max_iterations=3,
-            ),
+            Step(name="translate", executor=translate_step),
             Step(name="proofread", executor=proofread_step),
             Step(name="apply_corrections", executor=apply_corrections_step),
         ],
