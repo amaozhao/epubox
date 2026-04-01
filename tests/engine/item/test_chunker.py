@@ -202,6 +202,23 @@ class TestHtmlChunkerHelperMethods:
         assert len(chunks) >= 1
         assert all(hasattr(c, 'name') for c in chunks)
 
+    def test_merge_into_chunks_respects_max_placeholders(self):
+        """验证单个segment超限时按max_placeholders_per_chunk强制分割"""
+        chunker = HtmlChunker(token_limit=10000, max_placeholders_per_chunk=5)
+        # 创建一个包含10个占位符的单个segment
+        segment = "[id0][id1][id2][id3][id4][id5][id6][id7][id8][id9]Hello World"
+        global_indices = list(range(10))
+        mgr = PlaceholderManager()
+        for i in range(10):
+            mgr.tag_map[f"[id{i}]"] = f"<tag{i}>"
+        mgr.counter = 10
+
+        chunks = chunker._merge_into_chunks([segment], global_indices, mgr)
+        # 应该被分割成2个chunk（10个占位符 / 5限制 = 2 chunks）
+        assert len(chunks) == 2
+        for chunk in chunks:
+            assert len(chunk.global_indices) <= 5
+
     def test_create_chunk(self):
         """测试创建chunk"""
         chunker = HtmlChunker(token_limit=100)

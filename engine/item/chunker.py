@@ -229,17 +229,32 @@ class HtmlChunker:
             test_text = ''.join(test_parts)
             test_tokens = count_tokens(test_text)
 
-            # 检查两个条件：token限制 AND 占位符数量限制
-            # 或者当前chunk为空（强制接受第一个segment）
-            if (test_tokens <= self.token_limit and
-                len(current_indices) + len(new_indices) <= self.max_placeholders_per_chunk) or not current_chunk_parts:
-                # 可以加入
+            can_append = (
+                test_tokens <= self.token_limit and
+                len(current_indices) + len(new_indices) <= self.max_placeholders_per_chunk
+            )
+
+            if can_append:
+                # 可以加入当前chunk
                 current_chunk_parts.append(segment)
-                # 收集这个segment中的占位符索引
                 for ph in self.placeholder_pattern.findall(segment):
                     idx = int(ph[3:-1])
                     if idx not in current_indices:
                         current_indices.append(idx)
+            elif not current_chunk_parts and segment_placeholder_count > self.max_placeholders_per_chunk:
+                # 第一个segment本身就超限，需要强制按占位符数量分割
+                ph_positions = [(m.start(), m.end(), m.group()) for m in self.placeholder_pattern.finditer(segment)]
+                for i in range(0, len(ph_positions), self.max_placeholders_per_chunk):
+                    sub_positions = ph_positions[i:i + self.max_placeholders_per_chunk]
+                    if not sub_positions:
+                        continue
+                    start, end = sub_positions[0][0], sub_positions[-1][1]
+                    sub_segment = segment[start:end]
+                    chunks.append(self._create_chunk(
+                        [sub_segment],
+                        [int(p[2][3:-1]) for p in sub_positions],
+                        placeholder_mgr
+                    ))
             else:
                 # 保存当前chunk，开始新的
                 if current_chunk_parts:
@@ -250,7 +265,6 @@ class HtmlChunker:
                     ))
                 current_chunk_parts = [segment]
                 current_indices = []
-                # 收集这个segment中的占位符索引
                 for ph in self.placeholder_pattern.findall(segment):
                     idx = int(ph[3:-1])
                     if idx not in current_indices:
