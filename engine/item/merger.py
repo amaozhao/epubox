@@ -2,7 +2,7 @@ import re
 from typing import List
 
 from engine.core.logger import engine_logger as logger
-from engine.schemas import Chunk
+from engine.schemas import Chunk, TranslationStatus
 
 
 class Merger:
@@ -24,9 +24,15 @@ class Merger:
         if not chunks:
             return ""
 
-        # Merge translated parts
-        translated_parts = [chunk.translated for chunk in chunks if chunk.translated is not None]
-        translated = "".join(translated_parts)
+        # Merge parts based on translation status
+        parts = []
+        for chunk in chunks:
+            if chunk.status == TranslationStatus.UNTRANSLATED or not chunk.translated:
+                # 失败或翻译为空 → 使用原文保结构
+                parts.append(chunk.original)
+            else:
+                parts.append(chunk.translated)
+        translated = "".join(parts)
 
         # Replace lang and xml:lang attributes
         lang_pattern = r'lang="en[^"]*"|xml:lang="en[^"]*"'
