@@ -1,5 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import json
+import os
 import pytest
 from agno.run import RunStatus
 from agno.run.workflow import WorkflowRunOutput
@@ -311,3 +313,53 @@ class TestOrchestrator:
         # 使用真实的 _should_translate_chunk
         await orchestrator.translate_epub("mock_epub_path")
         # mock_workflow.arun.assert_called_once_with(input=mock_book.items[0].chunks[0])
+
+
+class TestManualTranslationReport:
+    """测试手动翻译报告功能"""
+
+    def test_save_manual_translation_report(self, tmp_path):
+        """测试保存手动翻译报告"""
+        orchestrator = Orchestrator()
+        manual_chunks = [
+            {
+                "file": "toc.ncx",
+                "chunk_name": "abc123",
+                "original": "<navPoint><text>Chapter 1</text></navPoint>",
+                "path": "/tmp/toc.ncx",
+                "placeholder": {"[id0]": "<navPoint>"},
+                "status": "untranslated"
+            }
+        ]
+        output_path = str(tmp_path / "test.epub")
+        report_path = orchestrator._save_manual_translation_report(manual_chunks, output_path)
+
+        assert os.path.exists(report_path)
+        with open(report_path, 'r', encoding='utf-8') as f:
+            report = json.load(f)
+        assert report["total"] == 1
+        assert report["chunks"][0]["chunk_name"] == "abc123"
+
+    def test_load_manual_translations(self, tmp_path):
+        """测试加载手动翻译报告"""
+        orchestrator = Orchestrator()
+
+        report_file = tmp_path / "manual_report.json"
+        report_data = {
+            "chunks": [
+                {"chunk_name": "c1", "translated": "<p>你好</p>"},
+                {"chunk_name": "c2", "translated": ""},  # 空翻译不加载
+                {"chunk_name": "c3"},  # 无 translated 字段不加载
+            ]
+        }
+        report_file.write_text(json.dumps(report_data, ensure_ascii=False), encoding='utf-8')
+
+        result = orchestrator._load_manual_translations(str(report_file))
+        assert result == {"c1": "<p>你好</p>"}
+        assert len(result) == 1
+
+    def test_load_manual_translations_file_not_exists(self):
+        """测试加载不存在的报告文件返回空字典"""
+        orchestrator = Orchestrator()
+        result = orchestrator._load_manual_translations("/nonexistent/path/report.json")
+        assert result == {}

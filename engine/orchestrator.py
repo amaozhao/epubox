@@ -1,7 +1,8 @@
+import json
 import os
 import re
+from datetime import datetime
 
-from agno.run import RunStatus
 from tqdm import tqdm
 
 from engine.agents.workflow import get_translator_workflow
@@ -54,6 +55,44 @@ class Orchestrator:
         super().__init__(*args, **kwargs)
         self.replacer = Replacer()
 
+    def _save_manual_translation_report(self, manual_chunks: list, output_path: str):
+        """保存手动翻译报告到 JSON 文件"""
+        report = {
+            "generated_at": datetime.now().isoformat(),
+            "total": len(manual_chunks),
+            "chunks": [
+                {
+                    "file": chunk["file"],
+                    "chunk_name": chunk["chunk_name"],
+                    "original": chunk["original"],
+                    "path": chunk["path"],
+                    "placeholder": chunk.get("placeholder", {}),
+                    "status": chunk["status"]
+                }
+                for chunk in manual_chunks
+            ]
+        }
+
+        report_path = os.path.join(os.path.dirname(output_path), "manual_translation_report.json")
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        logger.info(f"手动翻译报告已保存: {report_path}")
+        return report_path
+
+    def _load_manual_translations(self, report_path: str) -> dict:
+        """加载手动翻译报告，返回 {chunk_name: translated_text}"""
+        if not os.path.exists(report_path):
+            return {}
+
+        with open(report_path, 'r', encoding='utf-8') as f:
+            report = json.load(f)
+
+        return {
+            item["chunk_name"]: item.get("translated", "")
+            for item in report.get("chunks", [])
+            if item.get("translated")
+        }
+
     def _should_translate_chunk(self, chunk: Chunk) -> bool:
         """
         判断一个分块是否需要翻译。
@@ -98,6 +137,7 @@ class Orchestrator:
 
         # 统计翻译结果
         stats = TranslationStats()
+        manual_chunks = []
 
         # 使用 tqdm 显示外部循环进度（按文件）
         for item in tqdm(book.items, desc="翻译 EPUB", unit="文件"):
@@ -125,38 +165,37 @@ class Orchestrator:
                     continue
 
                 workflow = get_translator_workflow()
-                max_attempts = 3
-                for attempt in range(max_attempts):
-                    try:
-                        response = await workflow.arun(
-                            input=chunk,
-                            additional_data={"glossary": glossary, "placeholder_mgr": placeholder_mgr, "tag_map": item.placeholder}
-                        )
-                        if response.status == RunStatus.completed:
-                            if isinstance(response.content, Chunk):
-                                chunk_index = item.chunks.index(chunk)
-                                item.chunks[chunk_index] = response.content
-                                chunk = response.content
-                                stats.record(chunk.status)
-                            else:
-                                logger.error(
-                                    f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}"
-                                )
-                                stats.record_failure()
-                            parser.save_json(book)
-                            break
-                        else:
-                            logger.error(
-                                f"Translation failed for chunk {chunk.name} (attempt {attempt + 1}/{max_attempts}): status={response.status}"
-                            )
-                            if attempt == max_attempts - 1:
-                                stats.record_failure()
-                    except Exception as e:
+                try:
+                    response = await workflow.arun(
+                        input=chunk,
+                        additional_data={"glossary": glossary, "placeholder_mgr": placeholder_mgr, "tag_map": item.placeholder}
+                    )
+                    if isinstance(response.content, Chunk):
+                        chunk_index = item.chunks.index(chunk)
+                        item.chunks[chunk_index] = response.content
+                        chunk = response.content
+                        stats.record(chunk.status)
+
+                        # 记录需要手动翻译的 chunk
+                        if chunk.status == TranslationStatus.UNTRANSLATED:
+                            manual_chunks.append({
+                                "file": item.id,
+                                "chunk_name": chunk.name,
+                                "original": chunk.original,
+                                "path": item.path,
+                                "placeholder": item.placeholder,
+                                "status": chunk.status.value
+                            })
+                    else:
                         logger.error(
-                            f"Unexpected error for chunk {chunk.name} (attempt {attempt + 1}/{max_attempts}): {str(e)}"
+                            f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}"
                         )
-                        if attempt == max_attempts - 1:
-                            stats.record_failure()
+                        stats.record_failure()
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error for chunk {chunk.name}: {str(e)}"
+                    )
+                    stats.record_failure()
 
             # 恢复 item 内容
             self.replacer.restore(item)
@@ -165,6 +204,10 @@ class Orchestrator:
 
         # 打印最终统计
         logger.info(str(stats))
+
+        # 生成手动翻译报告
+        if manual_chunks:
+            self._save_manual_translation_report(manual_chunks, book.path)
 
         # 构建翻译后的 EPUB 文件
         output_path = os.path.join(os.path.dirname(book.path), f"{book.name}-cn.epub")
