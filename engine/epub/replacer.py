@@ -11,8 +11,15 @@ from engine.schemas import EpubItem
 class Replacer:
     def _validate_nav_structure(self, content: str) -> bool:
         """验证 nav 文件结构完整性"""
-        required = ["<navMap>", "<navPoint>", "<navLabel>", "<content"]
-        return all(tag in content for tag in required)
+        # NCX 格式（toc.ncx）使用这些标签
+        ncx_required = ["<navMap>", "<navPoint>", "<navLabel>", "<content"]
+        if all(tag in content for tag in ncx_required):
+            return True
+        # XHTML 格式（nav.xhtml）使用这些标签
+        xhtml_required = ["<nav", "</nav>", "<ol", "</ol>", "<li>", "</li>"]
+        if all(tag in content.lower() for tag in xhtml_required):
+            return True
+        return False
 
     def _merge_chunks(self, item: EpubItem) -> str:
         """将给定 EpubItem 的所有 Chunk 对象合并为一个字符串"""
@@ -24,12 +31,34 @@ class Replacer:
 
     def _restore_tags(self, item: EpubItem, merged_content: str) -> str:
         """使用占位符映射还原给定 EpubItem 的内容"""
-        if not merged_content or not item.placeholder:
+        if not merged_content:
             return merged_content
 
         # 重建 PlaceholderManager
         placeholder_mgr = PlaceholderManager()
-        placeholder_mgr.tag_map = item.placeholder
+        if item.placeholder:
+            placeholder_mgr.tag_map = item.placeholder
+        elif item.chunks and item.content:
+            # item.placeholder 为空但 item.content 有原始数据时，
+            # 从 item.content 解析占位符与原始标签的对应关系
+            # item.content 包含全局占位符如 [id0], [id1]
+            segments = re.split(r'(\<[^>]+\>)|(\[[id]+\d+\])', item.content)
+            pending_tag = None
+            for seg in segments:
+                if not seg:
+                    continue
+                if seg.startswith('<') and seg.endswith('>'):
+                    pending_tag = seg
+                elif seg.startswith('[id') and pending_tag:
+                    if seg not in placeholder_mgr.tag_map:
+                        placeholder_mgr.tag_map[seg] = pending_tag
+                    pending_tag = None
+                elif seg.startswith('[id'):
+                    pending_tag = None
+
+        # 如果最终还是空的，直接返回
+        if not placeholder_mgr.tag_map:
+            return merged_content
 
         # 使用 TagRestorer 恢复标签
         restorer = TagRestorer()
@@ -55,11 +84,10 @@ class Replacer:
         if not verify_html_integrity(restored_content):
             logger.error(f"HTML结构验证失败: {item.id}")
 
-        # 4.1 验证 nav 文件结构完整性
+        # 4.1 验证 nav 文件结构完整性（在占位符恢复之后）
         is_nav_file = "toc.ncx" in item.id.lower() or item.id.endswith("nav.xhtml")
         if is_nav_file and not self._validate_nav_structure(restored_content):
-            logger.error(f"Nav 结构验证失败: {item.id}，保留原文")
-            restored_content = item.content
+            logger.error(f"Nav 结构验证失败: {item.id}，但保留翻译结果")
 
         # 5. 检查是否有未恢复的占位符
         remaining = re.findall(r'\[id\d+\]', restored_content)
