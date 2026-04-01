@@ -159,3 +159,31 @@ class TestReplacer:
 
             mock_file.assert_not_called()
             assert mock_epub_item.translated is None
+
+
+class TestNavStructureValidation:
+    """测试 Nav 文件结构验证"""
+
+    def test_validate_nav_structure_valid(self):
+        """验证有效的 nav 文件结构"""
+        replacer = Replacer()
+        valid_nav = '<navMap><navPoint><navLabel><text>Chapter</text></navLabel><content src="xhtml/c1.xhtml"/></navPoint></navMap>'
+        assert replacer._validate_nav_structure(valid_nav) is True
+
+    def test_validate_nav_structure_missing_navmap(self):
+        """验证缺少 navMap 的无效 nav"""
+        replacer = Replacer()
+        invalid_nav = '<navPoint><navLabel><text>Chapter</text></navLabel></navPoint>'
+        assert replacer._validate_nav_structure(invalid_nav) is False
+
+    def test_validate_nav_structure_corrupted(self):
+        """验证损坏的 nav 内容"""
+        replacer = Replacer()
+        corrupted = '<navMap></navMap>'
+        assert replacer._validate_nav_structure(corrupted) is False
+
+    def test_validate_nav_structure_missing_navpoint(self):
+        """验证缺少 navPoint"""
+        replacer = Replacer()
+        invalid = '<navMap><navLabel><text>Chapter</text></navLabel></navMap>'
+        assert replacer._validate_nav_structure(invalid) is False

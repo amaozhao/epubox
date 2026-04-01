@@ -9,6 +9,11 @@ from engine.schemas import EpubItem
 
 
 class Replacer:
+    def _validate_nav_structure(self, content: str) -> bool:
+        """验证 nav 文件结构完整性"""
+        required = ["<navMap>", "<navPoint>", "<navLabel>", "<content"]
+        return all(tag in content for tag in required)
+
     def _merge_chunks(self, item: EpubItem) -> str:
         """将给定 EpubItem 的所有 Chunk 对象合并为一个字符串"""
         merger = Merger()
@@ -49,6 +54,12 @@ class Replacer:
         # 4. 验证 HTML 结构完整性
         if not verify_html_integrity(restored_content):
             logger.error(f"HTML结构验证失败: {item.id}")
+
+        # 4.1 验证 nav 文件结构完整性
+        is_nav_file = "toc.ncx" in item.id.lower() or item.id.endswith("nav.xhtml")
+        if is_nav_file and not self._validate_nav_structure(restored_content):
+            logger.error(f"Nav 结构验证失败: {item.id}，保留原文")
+            restored_content = item.content
 
         # 5. 检查是否有未恢复的占位符
         remaining = re.findall(r'\[id\d+\]', restored_content)
