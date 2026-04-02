@@ -40,7 +40,7 @@ class HtmlChunker:
         "pageList", "pageTarget", "spine", "itemref"
     }
 
-    def __init__(self, token_limit: int = 3000, max_placeholders_per_chunk: int = 30):
+    def __init__(self, token_limit: int = 2000, max_placeholders_per_chunk: int = 15):
         self.token_limit = token_limit
         self.max_placeholders_per_chunk = max_placeholders_per_chunk
         self.placeholder_pattern = re.compile(r'\[id\d+\]')
