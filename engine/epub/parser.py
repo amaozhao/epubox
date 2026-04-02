@@ -3,7 +3,7 @@ import os
 import zipfile
 from typing import List, Optional
 
-from engine.item import Chunker, Replacer
+from engine.item import HtmlChunker, PreCodeExtractor, TagPreserver
 from engine.schemas import EpubBook, EpubItem
 
 
@@ -70,6 +70,10 @@ class Parser:
     def parse(self) -> EpubBook:
         """
         解析 EPUB 文件，返回一个只包含可翻译文档的 EpubBook 对象。
+
+        新流程：
+        1. TagPreserver.preserve_tags() - 标签→[id0],[id1]...占位符
+        2. HtmlChunker.chunk() - 基于HTML结构分块
         """
         # 优先从 JSON 文件加载
         book = self.load_json()
@@ -92,23 +96,38 @@ class Parser:
                     if "META-INF" in relative_path:
                         continue
                     with open(file_path, "r", encoding="utf-8") as f:
-                        content = f.read()
+                        original_content = f.read()
 
-                    _replacer = Replacer()
-                    processed_content = _replacer.replace(content).rstrip()
-                    placeholder_map = _replacer.placeholder.placer_map
+                    # Step 1: 提取 pre/code 标签为占位符（二级占位符方案）
+                    pre_extractor = PreCodeExtractor()
+                    content = pre_extractor.extract(original_content)
 
-                    chunker = Chunker(limit=self.limit)
+                    # 使用新的 TagPreserver 替换标签为占位符
+                    preserver = TagPreserver()
+                    processed_content, placeholder_mgr = preserver.preserve_tags(content)
+
                     # 检测是否是 EPUB 导航文件
                     is_nav_file = "toc.ncx" in relative_path.lower() or relative_path.lower().endswith("nav.xhtml")
-                    chunks = chunker.chunk(processed_content, is_nav_file=is_nav_file)
+
+                    # 使用 HtmlChunker 分块
+                    chunker = HtmlChunker(token_limit=self.limit, max_placeholders_per_chunk=15)
+                    # 全局索引范围：0 到 placeholder_mgr.counter - 1
+                    global_indices = list(range(placeholder_mgr.counter))
+                    chunks = chunker.chunk(
+                        processed_content,
+                        global_indices,
+                        placeholder_mgr,
+                        is_nav_file=is_nav_file
+                    )
 
                     epub_item = EpubItem(
                         id=relative_path,
                         path=file_path,
-                        content=processed_content,
-                        placeholder=placeholder_map,
+                        content=original_content,
+                        placeholder=placeholder_mgr.tag_map,
                         chunks=chunks,
+                        preserved_pre=pre_extractor.preserved_pre,
+                        preserved_code=pre_extractor.preserved_code,
                     )
                     items.append(epub_item)
 

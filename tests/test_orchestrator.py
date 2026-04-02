@@ -1,7 +1,10 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import json
+import os
 import pytest
-from agno.workflow import StepOutput
+from agno.run import RunStatus
+from agno.run.workflow import WorkflowRunOutput
 
 from engine.epub import Builder, Parser, Replacer
 from engine.orchestrator import Orchestrator
@@ -104,7 +107,7 @@ class TestOrchestrator:
     # --- 测试 translate_epub 方法 ---
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
-    @patch("engine.agents.workflow.get_translator_workflow")
+    @patch("engine.orchestrator.get_translator_workflow")
     async def test_translate_epub_successful_translation(
         self, mock_get_translator_workflow, mock_parser_parse, orchestrator
     ):
@@ -156,8 +159,8 @@ class TestOrchestrator:
         # 模拟 workflow.arun 的行为，返回翻译结果
         mock_workflow = MagicMock()
         mock_workflow.arun = AsyncMock(
-            return_value=StepOutput(
-                success=True,
+            return_value=WorkflowRunOutput(
+                status=RunStatus.completed,
                 content=Chunk(
                     name="1",
                     original="<p>How are you?</p>",
@@ -165,7 +168,7 @@ class TestOrchestrator:
                     tokens=3,
                     status=TranslationStatus.COMPLETED,
                 ),
-                step_run_id="mock_run_id",
+                run_id="mock_run_id",
             )
         )
         mock_get_translator_workflow.return_value = mock_workflow
@@ -177,7 +180,7 @@ class TestOrchestrator:
         # 检查第一个 chunk 的翻译结果
         first_item_chunks = mock_book_with_chunks.items[0].chunks
         assert isinstance(first_item_chunks, list)
-        assert first_item_chunks[0].translated == "<p>你好，世界。</p>"
+        assert first_item_chunks[0].translated == "<p>你好吗？</p>"
         assert first_item_chunks[0].status == TranslationStatus.COMPLETED
 
         # 检查第三个 chunk 的翻译结果
@@ -192,7 +195,7 @@ class TestOrchestrator:
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
-    @patch("engine.agents.workflow.get_translator_workflow")
+    @patch("engine.orchestrator.get_translator_workflow")
     async def test_translate_epub_skips_translated_chunks(
         self,
         mock_get_translator_workflow,
@@ -212,8 +215,8 @@ class TestOrchestrator:
         # 模拟 get_translator_workflow 返回的 Workflow 实例
         mock_workflow = MagicMock()
         mock_workflow.arun = AsyncMock(
-            return_value=StepOutput(
-                success=True,
+            return_value=WorkflowRunOutput(
+                status=RunStatus.completed,
                 content=Chunk(
                     name="1",
                     original="<p>Hello world.</p>",
@@ -221,7 +224,7 @@ class TestOrchestrator:
                     tokens=3,
                     status=TranslationStatus.COMPLETED,
                 ),
-                step_run_id="mock_run_id",
+                run_id="mock_run_id",
             )
         )
         mock_get_translator_workflow.return_value = mock_workflow
@@ -234,7 +237,7 @@ class TestOrchestrator:
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
-    @patch("engine.agents.workflow.get_translator_workflow")
+    @patch("engine.orchestrator.get_translator_workflow")
     async def test_translate_epub_handles_errors(
         self,
         mock_get_translator_workflow,
@@ -254,11 +257,10 @@ class TestOrchestrator:
         # 模拟 get_translator_workflow 返回的 Workflow 实例，模拟失败
         mock_workflow = MagicMock()
         mock_workflow.arun = AsyncMock(
-            side_effect=StepOutput(
-                success=False,
+            return_value=WorkflowRunOutput(
+                status=RunStatus.error,
                 content=mock_book.items[0].chunks[0],
-                error="翻译步骤失败：检测到占位符不匹配。",
-                step_run_id="mock_run_id",
+                run_id="mock_run_id",
             )
         )
         mock_get_translator_workflow.return_value = mock_workflow
@@ -274,7 +276,7 @@ class TestOrchestrator:
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
-    @patch("engine.agents.workflow.get_translator_workflow")
+    @patch("engine.orchestrator.get_translator_workflow")
     async def test_translate_epub_skips_empty_chunks(
         self,
         mock_get_translator_workflow,
@@ -294,8 +296,8 @@ class TestOrchestrator:
         # 模拟 get_translator_workflow 返回的 Workflow 实例
         mock_workflow = MagicMock()
         mock_workflow.arun = AsyncMock(
-            return_value=StepOutput(
-                success=True,
+            return_value=WorkflowRunOutput(
+                status=RunStatus.completed,
                 content=Chunk(
                     name="1",
                     original="<p>Hello world.</p>",
@@ -303,7 +305,7 @@ class TestOrchestrator:
                     tokens=3,
                     status=TranslationStatus.COMPLETED,
                 ),
-                step_run_id="mock_run_id",
+                run_id="mock_run_id",
             )
         )
         mock_get_translator_workflow.return_value = mock_workflow
@@ -311,3 +313,53 @@ class TestOrchestrator:
         # 使用真实的 _should_translate_chunk
         await orchestrator.translate_epub("mock_epub_path")
         # mock_workflow.arun.assert_called_once_with(input=mock_book.items[0].chunks[0])
+
+
+class TestManualTranslationReport:
+    """测试手动翻译报告功能"""
+
+    def test_save_manual_translation_report(self, tmp_path):
+        """测试保存手动翻译报告"""
+        orchestrator = Orchestrator()
+        manual_chunks = [
+            {
+                "file": "toc.ncx",
+                "chunk_name": "abc123",
+                "original": "<navPoint><text>Chapter 1</text></navPoint>",
+                "path": "/tmp/toc.ncx",
+                "placeholder": {"[id0]": "<navPoint>"},
+                "status": "untranslated"
+            }
+        ]
+        output_path = str(tmp_path / "test.epub")
+        report_path = orchestrator._save_manual_translation_report(manual_chunks, output_path)
+
+        assert os.path.exists(report_path)
+        with open(report_path, 'r', encoding='utf-8') as f:
+            report = json.load(f)
+        assert report["total"] == 1
+        assert report["chunks"][0]["chunk_name"] == "abc123"
+
+    def test_load_manual_translations(self, tmp_path):
+        """测试加载手动翻译报告"""
+        orchestrator = Orchestrator()
+
+        report_file = tmp_path / "manual_report.json"
+        report_data = {
+            "chunks": [
+                {"chunk_name": "c1", "translated": "<p>你好</p>"},
+                {"chunk_name": "c2", "translated": ""},  # 空翻译不加载
+                {"chunk_name": "c3"},  # 无 translated 字段不加载
+            ]
+        }
+        report_file.write_text(json.dumps(report_data, ensure_ascii=False), encoding='utf-8')
+
+        result = orchestrator._load_manual_translations(str(report_file))
+        assert result == {"c1": "<p>你好</p>"}
+        assert len(result) == 1
+
+    def test_load_manual_translations_file_not_exists(self):
+        """测试加载不存在的报告文件返回空字典"""
+        orchestrator = Orchestrator()
+        result = orchestrator._load_manual_translations("/nonexistent/path/report.json")
+        assert result == {}

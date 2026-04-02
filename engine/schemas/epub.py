@@ -23,3 +23,5 @@ class EpubItem(BaseModel):
     translated: Optional[str] = None
     placeholder: Optional[Dict[str, str]] = None  # 用于存储占位符信息
     chunks: Optional[List[Chunk]] = None  # 用于存储分块信息
+    preserved_pre: Optional[List[str]] = None  # 用于存储提取的 pre 标签
+    preserved_code: Optional[List[str]] = None  # 用于存储提取的 code 标签

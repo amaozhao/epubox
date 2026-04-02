@@ -1,0 +1,91 @@
+import pytest
+
+from engine.agents.verifier import get_tag_name, is_self_closing, verify_html_integrity
+
+
+class TestVerifyHtmlIntegrity:
+    def test_well_formed_html(self):
+        """测试正确闭合的HTML"""
+        html = "<div><p>Hello</p><span>World</span></div>"
+        assert verify_html_integrity(html) is True
+
+    def test_unclosed_tag(self):
+        """测试未闭合标签"""
+        html = "<div><p>Hello</div>"
+        assert verify_html_integrity(html) is False
+
+    def test_mismatched_tags(self):
+        """测试交错标签"""
+        html = "<div><p></div></p>"
+        assert verify_html_integrity(html) is False
+
+    def test_self_closing_tags(self):
+        """测试自闭合标签"""
+        html = "<div><br/><img src='x'/><hr></div>"
+        assert verify_html_integrity(html) is True
+
+    def test_empty_string(self):
+        """测试空字符串"""
+        assert verify_html_integrity("") is True
+
+    def test_comment_tag(self):
+        """测试注释标签"""
+        html = "<div><!-- comment --><p>Hello</p></div>"
+        assert verify_html_integrity(html) is True
+
+    def test_doctype_tag(self):
+        """测试DOCTYPE标签"""
+        html = "<!DOCTYPE html><div><p>Hello</p></div>"
+        assert verify_html_integrity(html) is True
+
+    def test_unclosed_bracket(self):
+        """测试未闭合括号"""
+        html = "<div><p>Hello"
+        assert verify_html_integrity(html) is False
+
+
+class TestIsSelfClosing:
+    def test_common_self_closing(self):
+        """测试常见自闭合标签"""
+        assert is_self_closing("<br/>") is True
+        assert is_self_closing("<br />") is True
+        assert is_self_closing("<img/>") is True
+        assert is_self_closing("<hr>") is True
+        assert is_self_closing("<meta charset='utf-8'/>") is True
+
+    def test_regular_tag(self):
+        """测试普通标签"""
+        assert is_self_closing("<div>") is False
+        assert is_self_closing("</div>") is False
+        assert is_self_closing("<p>") is False
+
+    def test_xhtml_style(self):
+        """测试XHTML风格"""
+        assert is_self_closing("<input type='text'/>") is True
+        assert is_self_closing("<col width='100'/>") is True
+
+
+class TestGetTagName:
+    def test_simple_tags(self):
+        """测试简单标签"""
+        assert get_tag_name("<div>") == "div"
+        assert get_tag_name("</div>") == "div"
+        assert get_tag_name("<p>") == "p"
+        assert get_tag_name("</p>") == "p"
+
+    def test_tags_with_attributes(self):
+        """测试带属性的标签"""
+        assert get_tag_name("<img src='test.jpg'>") == "img"
+        assert get_tag_name("<a href='http://example.com'>") == "a"
+        assert get_tag_name("<input type='text' name='foo'/>") == "input"
+
+    def test_uppercase_tags(self):
+        """测试大写标签名"""
+        assert get_tag_name("<DIV>") == "div"
+        assert get_tag_name("<P class='foo'>") == "p"
+
+    def test_invalid_tags(self):
+        """测试无效标签"""
+        assert get_tag_name("< >") is None
+        assert get_tag_name("</>") is None
+        assert get_tag_name("<>") is None

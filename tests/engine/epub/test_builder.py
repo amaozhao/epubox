@@ -101,3 +101,122 @@ class TestBuilder:
             assert mimetype_content == "application/epub+zip"
             mimetype_info = zf.getinfo("mimetype")
             assert mimetype_info.compress_type == zipfile.ZIP_STORED
+
+
+class TestModifyContentOpf:
+    """测试 _modify_content_opf 方法"""
+
+    def test_opf_not_found_returns_false(self, tmp_path):
+        """测试.opf文件不存在时返回False"""
+        builder = Builder(str(tmp_path), str(tmp_path / "output.epub"))
+        result = builder._modify_content_opf(str(tmp_path / "nonexistent.opf"))
+        assert result is False
+
+    def test_opf_with_dc_language_tag(self, tmp_path):
+        """测试修改dc:language标签"""
+        opf_content = '''<?xml version="1.0"?>
+<package version="2.0">
+    <metadata>
+        <dc:language id="pub-language">en</dc:language>
+    </metadata>
+</package>'''
+        opf_path = tmp_path / "content.opf"
+        opf_path.write_text(opf_content)
+
+        builder = Builder(str(tmp_path), str(tmp_path / "output.epub"))
+        result = builder._modify_content_opf(str(opf_path))
+        assert result is True
+
+        content = opf_path.read_text()
+        assert 'id="pub-language">' in content
+
+    def test_opf_with_meta_language_tag(self, tmp_path):
+        """测试修改meta language标签"""
+        opf_content = '''<?xml version="1.0"?>
+<package version="2.0">
+    <metadata>
+        <meta id="meta-language" property="dcterms:language">en</meta>
+    </metadata>
+</package>'''
+        opf_path = tmp_path / "content.opf"
+        opf_path.write_text(opf_content)
+
+        builder = Builder(str(tmp_path), str(tmp_path / "output.epub"))
+        result = builder._modify_content_opf(str(opf_path))
+        assert result is True
+
+    def test_opf_no_language_tag(self, tmp_path):
+        """测试opf没有语言标签时记录警告但仍返回True（文件被写回）"""
+        opf_content = '''<?xml version="1.0"?>
+<package version="2.0">
+    <metadata>
+        <dc:title>Test</dc:title>
+    </metadata>
+</package>'''
+        opf_path = tmp_path / "content.opf"
+        opf_path.write_text(opf_content)
+
+        builder = Builder(str(tmp_path), str(tmp_path / "output.epub"))
+        result = builder._modify_content_opf(str(opf_path))
+        # 即使没修改也返回True（文件被写回）
+        assert result is True
+
+
+class TestFindCssFiles:
+    """测试 _find_css_files 方法"""
+
+    def test_find_css_files(self, tmp_path):
+        """测试从opf中查找CSS文件"""
+        css_content = "body { font-family: serif; }"
+        css_path = tmp_path / "style.css"
+        css_path.write_text(css_content)
+
+        opf_content = '''<?xml version="1.0"?>
+<package version="2.0">
+    <manifest>
+        <item href="style.css" media-type="text/css"/>
+    </manifest>
+</package>'''
+        opf_path = tmp_path / "content.opf"
+        opf_path.write_text(opf_content)
+
+        builder = Builder(str(tmp_path), str(tmp_path / "output.epub"))
+        css_files = builder._find_css_files(str(opf_path))
+        assert len(css_files) == 1
+        assert css_files[0] == str(css_path)
+
+
+class TestModifyCssFile:
+    """测试 _modify_css_file 方法"""
+
+    def test_modify_css_adds_fonts(self, tmp_path):
+        """测试修改CSS添加字体"""
+        css_content = "body { font-family: Arial; }"
+        css_path = tmp_path / "style.css"
+        css_path.write_text(css_content)
+
+        builder = Builder(str(tmp_path), str(tmp_path / "output.epub"))
+        result = builder._modify_css_file(str(css_path))
+        assert result is True
+
+        content = css_path.read_text()
+        assert "STYuanti" in content
+
+    def test_modify_css_code_selector(self, tmp_path):
+        """测试代码标签使用等宽字体"""
+        css_content = "code { font-family: Arial; }"
+        css_path = tmp_path / "style.css"
+        css_path.write_text(css_content)
+
+        builder = Builder(str(tmp_path), str(tmp_path / "output.epub"))
+        result = builder._modify_css_file(str(css_path))
+        assert result is True
+
+        content = css_path.read_text()
+        assert "Courier New" in content or "monospace" in content
+
+    def test_modify_css_file_not_found(self, tmp_path):
+        """测试CSS文件不存在"""
+        builder = Builder(str(tmp_path), str(tmp_path / "output.epub"))
+        result = builder._modify_css_file(str(tmp_path / "nonexistent.css"))
+        assert result is False

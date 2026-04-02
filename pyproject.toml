@@ -47,3 +47,18 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff.lint]
 extend-safe-fixes = ["E", "F401"]
+
+[tool.coverage.run]
+source = ["engine"]
+omit = [
+    "*/tests/*",
+    "*/services/glossary.py",  # 需要外部 EPUB 和 NLTK，难以单元测试
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

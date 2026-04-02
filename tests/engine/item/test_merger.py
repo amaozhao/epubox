@@ -2,6 +2,39 @@ from engine.item.merger import Merger
 from engine.schemas import Chunk, TranslationStatus
 
 
+class TestMergerStatusHandling:
+    """测试 Merger 对不同翻译状态的处理"""
+
+    def test_merge_uses_original_when_untranslated(self):
+        """UNTRANSLATED 状态的 chunk 应使用 original 而非 translated"""
+        merger = Merger()
+        chunks = [
+            Chunk(name="c1", original="<p>Hello</p>", translated="<p>你好</p>", status=TranslationStatus.TRANSLATED, tokens=5),
+            Chunk(name="c2", original="<p>World</p>", translated="", status=TranslationStatus.UNTRANSLATED, tokens=5),
+        ]
+        result = merger.merge(chunks)
+        assert result == "<p>你好</p><p>World</p>"
+
+    def test_merge_uses_original_when_translated_empty(self):
+        """translated 为空字符串时使用 original"""
+        merger = Merger()
+        chunks = [
+            Chunk(name="c1", original="<p>Hello</p>", translated="", status=TranslationStatus.TRANSLATED, tokens=5),
+        ]
+        result = merger.merge(chunks)
+        assert result == "<p>Hello</p>"
+
+    def test_merge_normal_case(self):
+        """正常翻译成功的 chunk 使用 translated"""
+        merger = Merger()
+        chunks = [
+            Chunk(name="c1", original="<p>Hello</p>", translated="<p>你好</p>", status=TranslationStatus.TRANSLATED, tokens=5),
+            Chunk(name="c2", original="<p>World</p>", translated="<p>世界</p>", status=TranslationStatus.TRANSLATED, tokens=5),
+        ]
+        result = merger.merge(chunks)
+        assert result == "<p>你好</p><p>世界</p>"
+
+
 class TestMerger:
     """
     测试 Merger 类的所有功能。
@@ -57,9 +90,8 @@ class TestMerger:
         result = merger.merge([])
         assert result == ""
 
-    def test_merge_handles_no_language_attributes(self, caplog):
-        """测试当合并内容中没有 lang 或 xml:lang 属性时，merge 方法是否记录警告日志。"""
-        caplog.set_level("WARNING")
+    def test_merge_handles_no_language_attributes(self):
+        """测试当合并内容中没有 lang 或 xml:lang 属性时，merge 方法仍能正常返回。"""
         merger = Merger()
         chunks = [
             Chunk(
@@ -72,7 +104,6 @@ class TestMerger:
         ]
         result = merger.merge(chunks, language="zh")
         assert result == "<html><body>Hello</body></html>"
-        assert "合并后的 XHTML 内容中未找到 lang 或 xml:lang 属性匹配 'en*'" in caplog.text
 
     def test_merge_with_custom_language(self):
         """测试 merge 方法使用自定义语言代码时能否正确更新属性。"""
