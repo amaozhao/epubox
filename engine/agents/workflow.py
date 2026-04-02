@@ -292,12 +292,26 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
 
     final_text = translated_text
     if corrections:
+        # 按位置从后往前替换，避免位置偏移影响后续替换
+        replacements = []
         for original, corrected in corrections.items():
-            final_text = final_text.replace(original, corrected)
-        logger.info("成功应用校对建议。")
+            start = 0
+            while True:
+                pos = final_text.find(original, start)
+                if pos == -1:
+                    break
+                replacements.append((pos, len(original), corrected))
+                start = pos + len(original)
 
-    final_text = final_text.replace("您", "你").replace("。。", "。").replace("大型语言模型", "大语言模型")
-    final_text = final_text.replace("，，", "，")
+        # 从后往前替换
+        for pos, length, corrected in sorted(replacements, reverse=True):
+            final_text = final_text[:pos] + corrected + final_text[pos + length:]
+
+        logger.info(f"成功应用 {len(replacements)} 个校对建议。")
+
+    # 后处理：统一词汇和标点
+    final_text = final_text.replace("您", "你").replace("大型语言模型", "大语言模型")
+    final_text = final_text.replace("。。", "。").replace("，，", "，")
 
     chunk.translated = final_text
     chunk.status = TranslationStatus.COMPLETED
