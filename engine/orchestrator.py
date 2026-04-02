@@ -176,6 +176,9 @@ class Orchestrator:
                         chunk = response.content
                         stats.record(chunk.status)
 
+                        # 每翻译一个 chunk 立即保存，支持断点续传
+                        parser.save_json(book)
+
                         # 记录需要手动翻译的 chunk
                         if chunk.status == TranslationStatus.UNTRANSLATED:
                             manual_chunks.append({
