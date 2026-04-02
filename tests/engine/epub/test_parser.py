@@ -105,7 +105,8 @@ class TestParser:
             ],
         )
 
-        mocker.patch("builtins.open", mock_open(read_data="<html><body>Test content.</body></html>"))
+        original_html = "<html><body>Test content.</body></html>"
+        mocker.patch("builtins.open", mock_open(read_data=original_html))
 
         book = parser_instance.parse()
 
@@ -118,6 +119,8 @@ class TestParser:
 
         item = book.items[0]
         assert item.id == "chapter1.xhtml"
+        # item.content 应该是原始 HTML，不应该是经过 TagPreserver 处理后的占位符版本
+        assert item.content == original_html
 
         assert "container.xml" not in [i.id for i in book.items]
 

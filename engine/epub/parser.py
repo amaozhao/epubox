@@ -96,11 +96,11 @@ class Parser:
                     if "META-INF" in relative_path:
                         continue
                     with open(file_path, "r", encoding="utf-8") as f:
-                        content = f.read()
+                        original_content = f.read()
 
                     # Step 1: 提取 pre/code 标签为占位符（二级占位符方案）
                     pre_extractor = PreCodeExtractor()
-                    content = pre_extractor.extract(content)
+                    content = pre_extractor.extract(original_content)
 
                     # 使用新的 TagPreserver 替换标签为占位符
                     preserver = TagPreserver()
@@ -123,7 +123,7 @@ class Parser:
                     epub_item = EpubItem(
                         id=relative_path,
                         path=file_path,
-                        content=processed_content,
+                        content=original_content,
                         placeholder=placeholder_mgr.tag_map,
                         chunks=chunks,
                         preserved_pre=pre_extractor.preserved_pre,

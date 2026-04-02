@@ -187,3 +187,31 @@ class TestNavStructureValidation:
         replacer = Replacer()
         invalid = '<navMap><navLabel><text>Chapter</text></navLabel></navMap>'
         assert replacer._validate_nav_structure(invalid) is False
+
+    def test_validate_nav_structure_xhtml_format(self):
+        """验证 XHTML 格式的 nav 文件（nav.xhtml 使用此格式）"""
+        replacer = Replacer()
+        valid_xhtml_nav = '<nav epub:type="toc"><ol><li><a href="c01.xhtml">Chapter 1</a></li></ol></nav>'
+        assert replacer._validate_nav_structure(valid_xhtml_nav) is True
+
+    def test_validate_nav_structure_xhtml_invalid(self):
+        """验证 XHTML 格式但缺少必要标签"""
+        replacer = Replacer()
+        invalid_xhtml = '<nav epub:type="toc"><ol></ol></nav>'
+        assert replacer._validate_nav_structure(invalid_xhtml) is False
+
+    def test_item_content_is_original_not_placeholder(self, tmp_path):
+        """验证 item.content 是原始 HTML 而不是占位符版本"""
+        item_path = tmp_path / "test.xhtml"
+        item_path.write_text('<p>Hello</p>')
+
+        item = EpubItem(
+            id="test.xhtml",
+            path=str(item_path),
+            content="<p>Hello</p>",
+            placeholder={"[id0]": "<p>"},
+            chunks=[],
+        )
+        # content 应该是原始 HTML，不是 "[id0]Hello" 这样的占位符版本
+        assert item.content == "<p>Hello</p>"
+        assert "[id" not in item.content

@@ -31,34 +31,12 @@ class Replacer:
 
     def _restore_tags(self, item: EpubItem, merged_content: str) -> str:
         """使用占位符映射还原给定 EpubItem 的内容"""
-        if not merged_content:
+        if not merged_content or not item.placeholder:
             return merged_content
 
         # 重建 PlaceholderManager
         placeholder_mgr = PlaceholderManager()
-        if item.placeholder:
-            placeholder_mgr.tag_map = item.placeholder
-        elif item.chunks and item.content:
-            # item.placeholder 为空但 item.content 有原始数据时，
-            # 从 item.content 解析占位符与原始标签的对应关系
-            # item.content 包含全局占位符如 [id0], [id1]
-            segments = re.split(r'(\<[^>]+\>)|(\[[id]+\d+\])', item.content)
-            pending_tag = None
-            for seg in segments:
-                if not seg:
-                    continue
-                if seg.startswith('<') and seg.endswith('>'):
-                    pending_tag = seg
-                elif seg.startswith('[id') and pending_tag:
-                    if seg not in placeholder_mgr.tag_map:
-                        placeholder_mgr.tag_map[seg] = pending_tag
-                    pending_tag = None
-                elif seg.startswith('[id'):
-                    pending_tag = None
-
-        # 如果最终还是空的，直接返回
-        if not placeholder_mgr.tag_map:
-            return merged_content
+        placeholder_mgr.tag_map = item.placeholder
 
         # 使用 TagRestorer 恢复标签
         restorer = TagRestorer()
