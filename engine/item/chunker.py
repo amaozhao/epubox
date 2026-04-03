@@ -133,16 +133,11 @@ class HtmlChunker:
                 if tag_name in self.FORBIDDEN_SPLIT_TAGS:
                     continue
 
-            # 检查是否是块级结束标签
+            # 检查是否是块级结束标签 - 只要是块级结束标签就可以分割
+            # 分割后 current_chunk 以 </p> 结尾是完整的，next_chunk 可以从文本或新标签开始
             if self._is_block_closing_tag(tag_content):
-                # 检查下一个是否是块级开始标签
-                if i + 1 < len(placeholder_positions):
-                    next_placeholder = placeholder_positions[i + 1][2]
-                    next_tag = placeholder_mgr.tag_map.get(next_placeholder, "")
-                    if self._is_block_opening_tag(next_tag):
-                        # 找到一个安全分割点
-                        priority = self._get_split_priority(tag_content)
-                        split_points.append((end, priority))
+                priority = self._get_split_priority(tag_content)
+                split_points.append((end, priority))
 
         # 按优先级排序，返回位置
         split_points.sort(key=lambda x: x[1], reverse=True)  # 高优先级优先

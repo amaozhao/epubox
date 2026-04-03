@@ -117,51 +117,29 @@ class Parser:
                     soup = BeautifulSoup(original_content, 'html.parser')
                     normalized_content = str(soup)
 
-                    # Step 1: 提取 pre/code 标签为占位符（二级占位符方案）
+                    # Step 2: 提取 pre/code/style 标签为占位符（二级占位符方案）
                     pre_extractor = PreCodeExtractor()
-                    content = pre_extractor.extract(normalized_content)
+                    content_after_pre = pre_extractor.extract(normalized_content)
 
-                    # Step 2: 检测是否是 EPUB 导航文件
+                    # Step 3: 检测是否是 EPUB 导航文件
                     is_nav_file = "toc.ncx" in relative_path.lower() or relative_path.lower().endswith("nav.xhtml")
 
-                    # Step 3: 按块级标签粗分割（返回原始 HTML 片段）
+                    # Step 4: 整个文档做 TagPreserver（将 HTML 标签替换为 [idN] 占位符）
+                    preserver = TagPreserver()
+                    content_after_tags, global_mgr = preserver.preserve_tags(content_after_pre)
+
+                    # Step 5: 使用 chunk 方法按 token_limit 分割（在块级标签边界分割）
                     chunker = HtmlChunker(token_limit=self.limit)
-                    raw_chunks = chunker.chunk_by_html_tags(content, is_nav_file=is_nav_file)
-
-                    # Step 4: 对每个 raw_chunk 单独做 TagPreserver
-                    global_mgr = PlaceholderManager()
-                    chunks = []
-                    offset = 0
                     placeholder_pattern = re.compile(r'\[id\d+\]')
+                    all_placeholders = placeholder_pattern.findall(content_after_tags)
+                    global_indices = [int(p[3:-1]) for p in all_placeholders]
 
-                    for raw_chunk in raw_chunks:
-                        preserver = TagPreserver()
-                        processed_chunk, chunk_mgr = preserver.preserve_tags(raw_chunk, global_mgr)
-
-                        # 计算这个 chunk 的全局索引范围
-                        # 注意：chunk_mgr.tag_map 累积了全局映射，不能用 len() 计算
-                        # 应该从 processed_chunk 文本中提取占位符数量
-                        chunk_placeholder_count = len(placeholder_pattern.findall(processed_chunk))
-                        chunk_indices = list(range(offset, offset + chunk_placeholder_count))
-                        offset += chunk_placeholder_count
-
-                        # 构建当前 chunk 的 local_tag_map（只包含当前 chunk 使用的占位符）
-                        local_tag_map = {}
-                        for idx in chunk_indices:
-                            global_ph = f"[id{idx}]"
-                            if global_ph in global_mgr.tag_map:
-                                local_tag_map[global_ph] = global_mgr.tag_map[global_ph]
-
-                        # 创建 Chunk 对象
-                        from engine.schemas.chunk import Chunk
-                        chunk = Chunk(
-                            name=str(uuid.uuid4())[:8],
-                            original=processed_chunk,
-                            global_indices=chunk_indices,
-                            local_tag_map=local_tag_map,
-                            tokens=count_tokens(processed_chunk)
-                        )
-                        chunks.append(chunk)
+                    chunks = chunker.chunk(
+                        text_with_placeholders=content_after_tags,
+                        global_indices=global_indices,
+                        placeholder_mgr=global_mgr,
+                        is_nav_file=is_nav_file
+                    )
 
                     epub_item = EpubItem(
                         id=relative_path,
