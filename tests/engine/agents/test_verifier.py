@@ -7,41 +7,57 @@ class TestVerifyHtmlIntegrity:
     def test_well_formed_html(self):
         """测试正确闭合的HTML"""
         html = "<div><p>Hello</p><span>World</span></div>"
-        assert verify_html_integrity(html) is True
+        is_valid, errors = verify_html_integrity(html)
+        assert is_valid is True
+        assert errors == []
 
     def test_unclosed_tag(self):
         """测试未闭合标签"""
         html = "<div><p>Hello</div>"
-        assert verify_html_integrity(html) is False
+        is_valid, errors = verify_html_integrity(html)
+        assert is_valid is False
+        assert len(errors) > 0
 
     def test_mismatched_tags(self):
         """测试交错标签"""
         html = "<div><p></div></p>"
-        assert verify_html_integrity(html) is False
+        is_valid, errors = verify_html_integrity(html)
+        assert is_valid is False
+        assert len(errors) > 0
 
     def test_self_closing_tags(self):
         """测试自闭合标签"""
         html = "<div><br/><img src='x'/><hr></div>"
-        assert verify_html_integrity(html) is True
+        is_valid, errors = verify_html_integrity(html)
+        assert is_valid is True
+        assert errors == []
 
     def test_empty_string(self):
         """测试空字符串"""
-        assert verify_html_integrity("") is True
+        is_valid, errors = verify_html_integrity("")
+        assert is_valid is True
+        assert errors == []
 
     def test_comment_tag(self):
         """测试注释标签"""
         html = "<div><!-- comment --><p>Hello</p></div>"
-        assert verify_html_integrity(html) is True
+        is_valid, errors = verify_html_integrity(html)
+        assert is_valid is True
+        assert errors == []
 
     def test_doctype_tag(self):
         """测试DOCTYPE标签"""
         html = "<!DOCTYPE html><div><p>Hello</p></div>"
-        assert verify_html_integrity(html) is True
+        is_valid, errors = verify_html_integrity(html)
+        assert is_valid is True
+        assert errors == []
 
     def test_unclosed_bracket(self):
         """测试未闭合括号"""
         html = "<div><p>Hello"
-        assert verify_html_integrity(html) is False
+        is_valid, errors = verify_html_integrity(html)
+        assert is_valid is False
+        assert len(errors) > 0
 
 
 class TestIsSelfClosing:

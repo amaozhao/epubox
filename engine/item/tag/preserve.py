@@ -36,17 +36,26 @@ class TagPreserver:
     }
 
     def __init__(self):
-        self.placeholder_mgr = PlaceholderManager()
+        self.placeholder_mgr = None
 
-    def preserve_tags(self, html: str) -> Tuple[str, PlaceholderManager]:
+    def preserve_tags(self, html: str, global_mgr=None) -> Tuple[str, PlaceholderManager]:
         """
         将HTML标签替换为占位符
 
         合并策略：相邻的标签、空白和不可翻译内容合并为一个占位符
 
+        Args:
+            html: 输入 HTML 文本
+            global_mgr: 全局 PlaceholderManager。如果为 None，则创建新的。
+
         Returns:
             (处理后的文本, PlaceholderManager实例)
         """
+        # 使用全局管理器或创建新的
+        if global_mgr is not None:
+            self.placeholder_mgr = global_mgr
+        else:
+            self.placeholder_mgr = PlaceholderManager()
         result_parts = []
         segments = re.split(r'(<[^>]+>)', html)
 

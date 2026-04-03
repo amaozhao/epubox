@@ -1,10 +1,18 @@
 import json
 import os
+import re
+import uuid
 import zipfile
 from typing import List, Optional
 
+from bs4 import BeautifulSoup
+
 from engine.item import HtmlChunker, PreCodeExtractor, TagPreserver
+from engine.item.chunker import count_tokens
+from engine.item.placeholder import PlaceholderManager
 from engine.schemas import EpubBook, EpubItem
+from engine.agents.verifier import verify_html_integrity
+from engine.core.logger import engine_logger as logger
 
 
 class Parser:
@@ -72,8 +80,10 @@ class Parser:
         解析 EPUB 文件，返回一个只包含可翻译文档的 EpubBook 对象。
 
         新流程：
-        1. TagPreserver.preserve_tags() - 标签→[id0],[id1]...占位符
-        2. HtmlChunker.chunk() - 基于HTML结构分块
+        1. BeautifulSoup 解析（规范化 HTML）
+        2. PreCodeExtractor.extract() - 提取 pre/code 标签
+        3. HtmlChunker.chunk_by_html_tags() - 按块级标签分割
+        4. TagPreserver.preserve_tags() - 对每个 chunk 单独做占位符替换
         """
         # 优先从 JSON 文件加载
         book = self.load_json()
@@ -98,33 +108,59 @@ class Parser:
                     with open(file_path, "r", encoding="utf-8") as f:
                         original_content = f.read()
 
+                    # Step 0: 验证原始 HTML/XML 完整性
+                    is_valid, errors = verify_html_integrity(original_content)
+                    if not is_valid:
+                        logger.warning(f"原始 HTML/XML 结构不完整: {relative_path}, 错误: {errors}")
+
+                    # Step 1: BeautifulSoup 解析（规范化 HTML，确保标签配对）
+                    soup = BeautifulSoup(original_content, 'html.parser')
+                    normalized_content = str(soup)
+
                     # Step 1: 提取 pre/code 标签为占位符（二级占位符方案）
                     pre_extractor = PreCodeExtractor()
-                    content = pre_extractor.extract(original_content)
+                    content = pre_extractor.extract(normalized_content)
 
-                    # 使用新的 TagPreserver 替换标签为占位符
-                    preserver = TagPreserver()
-                    processed_content, placeholder_mgr = preserver.preserve_tags(content)
-
-                    # 检测是否是 EPUB 导航文件
+                    # Step 2: 检测是否是 EPUB 导航文件
                     is_nav_file = "toc.ncx" in relative_path.lower() or relative_path.lower().endswith("nav.xhtml")
 
-                    # 使用 HtmlChunker 分块
-                    chunker = HtmlChunker(token_limit=self.limit, max_placeholders_per_chunk=15)
-                    # 全局索引范围：0 到 placeholder_mgr.counter - 1
-                    global_indices = list(range(placeholder_mgr.counter))
-                    chunks = chunker.chunk(
-                        processed_content,
-                        global_indices,
-                        placeholder_mgr,
-                        is_nav_file=is_nav_file
-                    )
+                    # Step 3: 按块级标签粗分割（返回原始 HTML 片段）
+                    chunker = HtmlChunker(token_limit=self.limit)
+                    raw_chunks = chunker.chunk_by_html_tags(content, is_nav_file=is_nav_file)
+
+                    # Step 4: 对每个 raw_chunk 单独做 TagPreserver
+                    global_mgr = PlaceholderManager()
+                    chunks = []
+                    offset = 0
+                    placeholder_pattern = re.compile(r'\[id\d+\]')
+
+                    for raw_chunk in raw_chunks:
+                        preserver = TagPreserver()
+                        processed_chunk, chunk_mgr = preserver.preserve_tags(raw_chunk, global_mgr)
+
+                        # 计算这个 chunk 的全局索引范围
+                        # 注意：chunk_mgr.tag_map 累积了全局映射，不能用 len() 计算
+                        # 应该从 processed_chunk 文本中提取占位符数量
+                        chunk_placeholder_count = len(placeholder_pattern.findall(processed_chunk))
+                        chunk_indices = list(range(offset, offset + chunk_placeholder_count))
+                        offset += chunk_placeholder_count
+
+                        # 创建 Chunk 对象
+                        from engine.schemas.chunk import Chunk
+                        chunk = Chunk(
+                            name=str(uuid.uuid4())[:8],
+                            original=processed_chunk,
+                            global_indices=chunk_indices,
+                            local_tag_map=chunk_mgr.tag_map,
+                            tokens=count_tokens(processed_chunk)
+                        )
+                        chunks.append(chunk)
 
                     epub_item = EpubItem(
                         id=relative_path,
                         path=file_path,
                         content=original_content,
-                        placeholder=placeholder_mgr.tag_map,
+                        placeholder=global_mgr.tag_map,
                         chunks=chunks,
                         preserved_pre=pre_extractor.preserved_pre,
                         preserved_code=pre_extractor.preserved_code,

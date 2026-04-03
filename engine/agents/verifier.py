@@ -1,11 +1,15 @@
 import re
-from typing import Optional
+from typing import List, Optional, Tuple
 
 
-def verify_html_integrity(html: str) -> bool:
+def verify_html_integrity(html: str) -> Tuple[bool, List[str]]:
     """
     验证HTML标签是否正确闭合
+
+    Returns:
+        Tuple[bool, List[str]]: (是否有效, 错误信息列表)
     """
+    errors = []
 
     # 使用栈来跟踪标签
     stack = []
@@ -17,7 +21,8 @@ def verify_html_integrity(html: str) -> bool:
             # 找到标签开始
             j = html.find('>', i)
             if j == -1:
-                return False  # 未找到标签结束
+                errors.append(f"标签未闭合: {html[i:i+20]}...")
+                return False, errors
 
             tag = html[i:j + 1]
 
@@ -42,8 +47,11 @@ def verify_html_integrity(html: str) -> bool:
                     stack.pop()
                 elif tag_name in stack:
                     # 标签交错
-                    return False
-                # else: 未匹配的结束标签，忽略
+                    errors.append(f"标签交错: </{tag_name}> 没有匹配的 <{tag_name}>")
+                    return False, errors
+                else:
+                    # 未匹配的结束标签
+                    errors.append(f"未匹配的结束标签: {tag}")
 
             else:
                 # 开始标签
@@ -56,7 +64,12 @@ def verify_html_integrity(html: str) -> bool:
             i += 1
 
     # 检查是否所有标签都闭合
-    return len(stack) == 0
+    if stack:
+        for tag_name in stack:
+            errors.append(f"未闭合的标签: <{tag_name}>")
+        return False, errors
+
+    return True, errors
 
 
 def is_self_closing(tag: str) -> bool:

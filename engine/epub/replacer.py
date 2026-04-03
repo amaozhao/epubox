@@ -59,8 +59,9 @@ class Replacer:
             restored_content = pre_extractor.restore(restored_content)
 
         # 4. 验证 HTML 结构完整性
-        if not verify_html_integrity(restored_content):
-            logger.error(f"HTML结构验证失败: {item.id}")
+        is_valid, integrity_errors = verify_html_integrity(restored_content)
+        if not is_valid:
+            logger.error(f"HTML结构验证失败: {item.id}, 错误: {integrity_errors}")
 
         # 4.1 验证 nav 文件结构完整性（在占位符恢复之后）
         is_nav_file = "toc.ncx" in item.id.lower() or item.id.endswith("nav.xhtml")
