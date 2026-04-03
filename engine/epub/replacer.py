@@ -51,11 +51,12 @@ class Replacer:
         # 2. 恢复占位符为原始标签
         restored_content = self._restore_tags(item, merged_content)
 
-        # 3. 恢复 pre/code 标签（二级占位符方案）
-        if item.preserved_pre or item.preserved_code:
+        # 3. 恢复 pre/code/style 标签（二级占位符方案）
+        if item.preserved_pre or item.preserved_code or item.preserved_style:
             pre_extractor = PreCodeExtractor()
             pre_extractor.preserved_pre = item.preserved_pre or []
             pre_extractor.preserved_code = item.preserved_code or []
+            pre_extractor.preserved_style = item.preserved_style or []
             restored_content = pre_extractor.restore(restored_content)
 
         # 4. 验证 HTML 结构完整性
@@ -73,13 +74,16 @@ class Replacer:
         if remaining:
             logger.error(f"还有未恢复的占位符: {remaining}")
 
-        # 6. 检查是否有未恢复的 pre/code 占位符
+        # 6. 检查是否有未恢复的 pre/code/style 占位符
         remaining_pre = re.findall(r'\[PRE:\d+\]', restored_content)
         remaining_code = re.findall(r'\[CODE:\d+\]', restored_content)
+        remaining_style = re.findall(r'\[STYLE:\d+\]', restored_content)
         if remaining_pre:
             logger.error(f"还有未恢复的PRE占位符: {remaining_pre}")
         if remaining_code:
             logger.error(f"还有未恢复的CODE占位符: {remaining_code}")
+        if remaining_style:
+            logger.error(f"还有未恢复的STYLE占位符: {remaining_style}")
 
         # 7. 保存
         if restored_content:

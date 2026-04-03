@@ -1,5 +1,5 @@
 import re
-from typing import Tuple
+from typing import List, Tuple
 
 from engine.item.placeholder import PlaceholderManager
 
@@ -42,7 +42,10 @@ class TagPreserver:
         """
         将HTML标签替换为占位符
 
-        合并策略：相邻的标签、空白和不可翻译内容合并为一个占位符
+        合并策略：相邻的标签和空白合并为一个占位符
+
+        特殊处理：对于 <span class="koboSpan"> 这样的标签，
+        会把整个标签对及其内容一起保留为占位符
 
         Args:
             html: 输入 HTML 文本
@@ -56,6 +59,7 @@ class TagPreserver:
             self.placeholder_mgr = global_mgr
         else:
             self.placeholder_mgr = PlaceholderManager()
+
         result_parts = []
         segments = re.split(r'(<[^>]+>)', html)
 
@@ -71,9 +75,26 @@ class TagPreserver:
                 result_parts.append(placeholder)
                 current_tag_group = []
 
-        for segment in segments:
+        i = 0
+        while i < len(segments):
+            segment = segments[i]
             if not segment:
+                i += 1
                 continue
+
+            # 检查是否是 koboSpan 标签（需要整体保护）
+            kobo_match = self._is_kobo_span_tag(segment)
+            if kobo_match:
+                # 找到完整的 koboSpan 标签对
+                full_span, inner_text, closing_idx = self._extract_kobo_span_pair(segments, i)
+                if full_span:
+                    # 先 flush 之前的标签组
+                    flush_tag_group()
+                    # 把整个 span 对作为一个占位符
+                    placeholder = self.placeholder_mgr.create_placeholder(full_span)
+                    result_parts.append(placeholder)
+                    i = closing_idx + 1  # 跳到 closing tag 之后
+                    continue
 
             is_tag = segment.startswith('<') and segment.endswith('>')
             is_non_trans = self._is_non_translatable(segment)
@@ -91,10 +112,49 @@ class TagPreserver:
                 # 添加可翻译文本
                 result_parts.append(segment)
 
+            i += 1
+
         # 处理末尾的标签组
         flush_tag_group()
 
         return ''.join(result_parts), self.placeholder_mgr
+
+    def _is_kobo_span_tag(self, segment: str) -> bool:
+        """检查是否是 koboSpan 开始标签"""
+        if not segment.startswith('<'):
+            return False
+        return 'kobospan' in segment.lower()
+
+    def _extract_kobo_span_pair(self, segments: List[str], start_idx: int) -> Tuple[str, str, int]:
+        """
+        从 segments 中提取完整的 koboSpan 标签对
+
+        Returns:
+            (完整的span标签对, 内部文本, closing_tag的索引)
+            例如: ('<span class="koboSpan">12</span>', '12', 2)
+        """
+        if start_idx >= len(segments):
+            return None, None, -1
+
+        opening_tag = segments[start_idx]
+        if not self._is_kobo_span_tag(opening_tag):
+            return None, None, -1
+
+        if start_idx + 1 >= len(segments):
+            return None, None, -1
+
+        inner_text = segments[start_idx + 1]
+
+        # 查找结束标签
+        for end_idx in range(start_idx + 2, len(segments)):
+            tag = segments[end_idx]
+            if tag.startswith('</span') or tag.startswith('</Span'):
+                closing_tag = tag
+                # 重建完整的 span 对
+                full_span = opening_tag + inner_text + closing_tag
+                return full_span, inner_text, end_idx
+
+        return None, None, -1
 
     def _is_non_translatable(self, tag: str) -> bool:
         """检查标签是否不可翻译"""

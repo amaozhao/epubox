@@ -145,13 +145,20 @@ class Parser:
                         chunk_indices = list(range(offset, offset + chunk_placeholder_count))
                         offset += chunk_placeholder_count
 
+                        # 构建当前 chunk 的 local_tag_map（只包含当前 chunk 使用的占位符）
+                        local_tag_map = {}
+                        for idx in chunk_indices:
+                            global_ph = f"[id{idx}]"
+                            if global_ph in global_mgr.tag_map:
+                                local_tag_map[global_ph] = global_mgr.tag_map[global_ph]
+
                         # 创建 Chunk 对象
                         from engine.schemas.chunk import Chunk
                         chunk = Chunk(
                             name=str(uuid.uuid4())[:8],
                             original=processed_chunk,
                             global_indices=chunk_indices,
-                            local_tag_map=chunk_mgr.tag_map,
+                            local_tag_map=local_tag_map,
                             tokens=count_tokens(processed_chunk)
                         )
                         chunks.append(chunk)
@@ -164,6 +171,7 @@ class Parser:
                         chunks=chunks,
                         preserved_pre=pre_extractor.preserved_pre,
                         preserved_code=pre_extractor.preserved_code,
+                        preserved_style=pre_extractor.preserved_style,
                     )
                     items.append(epub_item)
 
