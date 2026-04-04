@@ -1,6 +1,5 @@
 import json
 import os
-import re
 from datetime import datetime
 
 from tqdm import tqdm
@@ -12,6 +11,7 @@ from engine.item.tag import TagRestorer
 from engine.schemas import Chunk, TranslationStatus
 from engine.services.glossary import GlossaryExtractor, GlossaryLoader
 
+
 # 翻译结果统计
 class TranslationStats:
     def __init__(self):
@@ -21,7 +21,11 @@ class TranslationStats:
         self.pending = 0
         self.failed = 0
 
-    def record(self, status: TranslationStatus):
+    def record(self, status: TranslationStatus | None):
+        if status is None:
+            self.untranslated += 1
+            self.total += 1
+            return
         self.total += 1
         if status == TranslationStatus.TRANSLATED:
             self.translated += 1
@@ -67,14 +71,14 @@ class Orchestrator:
                     "original": chunk["original"],
                     "path": chunk["path"],
                     "placeholder": chunk.get("placeholder", {}),
-                    "status": chunk["status"]
+                    "status": chunk["status"],
                 }
                 for chunk in manual_chunks
-            ]
+            ],
         }
 
         report_path = os.path.join(os.path.dirname(output_path), "manual_translation_report.json")
-        with open(report_path, 'w', encoding='utf-8') as f:
+        with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         logger.info(f"手动翻译报告已保存: {report_path}")
         return report_path
@@ -84,7 +88,7 @@ class Orchestrator:
         if not os.path.exists(report_path):
             return {}
 
-        with open(report_path, 'r', encoding='utf-8') as f:
+        with open(report_path, "r", encoding="utf-8") as f:
             report = json.load(f)
 
         return {
@@ -161,15 +165,15 @@ class Orchestrator:
                             "preserved_pre": item.preserved_pre or [],
                             "preserved_code": item.preserved_code or [],
                             "preserved_style": item.preserved_style or [],
-                        }
+                        },
                     )
                     if isinstance(response.content, Chunk):
                         chunk_index = item.chunks.index(chunk)
                         item.chunks[chunk_index] = response.content
                         chunk = response.content
 
-                        # 每个 chunk 翻译后立即恢复 [idN]
-                        if chunk.translated and chunk.status == TranslationStatus.TRANSLATED:
+                        # 每个 chunk 翻译后立即恢复 [idN]（TRANSLATED 或 COMPLETED 都表示翻译流程完成）
+                        if chunk.translated and chunk.status in (TranslationStatus.TRANSLATED, TranslationStatus.COMPLETED):
                             restorer = TagRestorer()
                             chunk.translated = restorer.restore_tags(chunk.translated, chunk.local_tag_map)
 
@@ -180,23 +184,21 @@ class Orchestrator:
 
                         # 记录需要手动翻译的 chunk
                         if chunk.status == TranslationStatus.UNTRANSLATED:
-                            manual_chunks.append({
-                                "file": item.id,
-                                "chunk_name": chunk.name,
-                                "original": chunk.original,
-                                "path": item.path,
-                                "placeholder": item.placeholder,
-                                "status": chunk.status.value
-                            })
+                            manual_chunks.append(
+                                {
+                                    "file": item.id,
+                                    "chunk_name": chunk.name,
+                                    "original": chunk.original,
+                                    "path": item.path,
+                                    "placeholder": item.placeholder,
+                                    "status": chunk.status.value,
+                                }
+                            )
                     else:
-                        logger.error(
-                            f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}"
-                        )
+                        logger.error(f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}")
                         stats.record_failure()
                 except Exception as e:
-                    logger.error(
-                        f"Unexpected error for chunk {chunk.name}: {str(e)}"
-                    )
+                    logger.error(f"Unexpected error for chunk {chunk.name}: {str(e)}")
                     stats.record_failure()
 
             # 恢复 item 内容

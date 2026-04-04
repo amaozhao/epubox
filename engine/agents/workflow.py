@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from agno.run import RunStatus
 from agno.workflow import Step, StepInput, StepOutput, Workflow
@@ -8,7 +8,6 @@ from agno.workflow import Step, StepInput, StepOutput, Workflow
 from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
 
-from .aligner import token_alignment_fallback
 from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
@@ -63,7 +62,7 @@ def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]
 async def _call_translator(
     text: str,
     placeholder_mgr,
-    glossary: Dict[str, str] = None,
+    glossary: Optional[Dict[str, str]] = None,
     previous_translation: str | None = None,
     error_msg: str | None = None,
     use_fallback: bool = False,
@@ -112,7 +111,7 @@ async def _call_translator(
         raise
 
 
-async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict[str, str] = None, additional_data: Dict = None) -> Chunk:
+async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Optional[Dict[str, str]] = None, additional_data: Optional[Dict[str, Any]] = None) -> Chunk:
     """Phase 1 翻译：直接翻译 + 占位符验证，失败则标记待手动处理"""
     original = chunk.original
     last_error_msg = None
@@ -134,11 +133,7 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
             last_error_msg = None
             continue
 
-        if hasattr(chunk, 'global_indices') and chunk.global_indices:
-            # placeholder_mgr 现在是 dict，直接用
-            validation_tag_map = {f"[id{i}]": placeholder_mgr.get(f"[id{i}]", "") for i in chunk.global_indices}
-        else:
-            validation_tag_map = placeholder_mgr
+        validation_tag_map = placeholder_mgr
         is_valid, error_msg = validate_placeholders(translated, validation_tag_map)
         if is_valid:
             chunk.translated = translated
@@ -169,38 +164,8 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
         else:
             last_error_msg = error_msg
 
-    # Phase 1 所有重试失败 → 尝试 Phase 2: Token Alignment
-    logger.warning(f"Chunk '{chunk.name}': Phase 1 失败，尝试 Phase 2...")
-    try:
-        # 确保 validation_tag_map 已设置（用于 Phase 2）
-        if 'validation_tag_map' not in dir():
-            if hasattr(chunk, 'global_indices') and chunk.global_indices:
-                validation_tag_map = {f"[id{i}]": placeholder_mgr.get(f"[id{i}]", "") for i in chunk.global_indices}
-            else:
-                validation_tag_map = placeholder_mgr
-
-        preserved_pre = additional_data.get("preserved_pre", [])
-        preserved_code = additional_data.get("preserved_code", [])
-        preserved_style = additional_data.get("preserved_style", [])
-
-        aligned = await token_alignment_fallback(
-            original=chunk.original,
-            local_tag_map=validation_tag_map,
-            preserved_pre=preserved_pre,
-            preserved_code=preserved_code,
-            preserved_style=preserved_style
-        )
-        if aligned:
-            is_valid, _ = validate_placeholders(aligned, validation_tag_map)
-            if is_valid:
-                chunk.translated = aligned
-                chunk.status = TranslationStatus.TRANSLATED
-                return chunk
-    except Exception as e:
-        logger.warning(f"Phase 2 异常: {e}")
-
-    # Phase 2 也失败 → 标记为 UNTRANSLATED，保留原文保结构
-    logger.warning(f"Chunk '{chunk.name}': Phase 1 和 Phase 2 都失败，标记为 UNTRANSLATED")
+    # Phase 1 重试都失败 → 标记为 UNTRANSLATED，保留原文保结构
+    logger.warning(f"Chunk '{chunk.name}': Phase 1 重试失败，标记为 UNTRANSLATED")
     chunk.translated = ""
     chunk.status = TranslationStatus.UNTRANSLATED
     return chunk

@@ -15,7 +15,7 @@ class TestTagRestorer:
         mgr.counter = 2
 
         restorer = TagRestorer()
-        result = restorer.restore_tags(translated, mgr)
+        result = restorer.restore_tags(translated, mgr.tag_map)
 
         assert result == "<p>你好</p>"
 
@@ -31,7 +31,7 @@ class TestTagRestorer:
         mgr.counter = 3
 
         restorer = TagRestorer()
-        result = restorer.restore_tags(translated, mgr)
+        result = restorer.restore_tags(translated, mgr.tag_map)
 
         assert result == "<article><header><h1>Title</h1></header><p>Content</p></article>"
 
@@ -44,7 +44,7 @@ class TestTagRestorer:
         mgr.counter = 2
 
         restorer = TagRestorer()
-        result = restorer.restore_tags(translated, mgr)
+        result = restorer.restore_tags(translated, mgr.tag_map)
 
         assert result == "</p>Bonjour<p>"
 
@@ -56,7 +56,7 @@ class TestTagRestorer:
         mgr.counter = 2
 
         restorer = TagRestorer()
-        result = restorer.restore_tags(translated, mgr)
+        result = restorer.restore_tags(translated, mgr.tag_map)
 
         assert result == "<div><p><span>Hello World</span></p></div>"
 
@@ -68,7 +68,7 @@ class TestTagRestorer:
         mgr.counter = 0
 
         restorer = TagRestorer()
-        result = restorer.restore_tags(translated, mgr)
+        result = restorer.restore_tags(translated, mgr.tag_map)
 
         assert result == "Plain text"
 
@@ -85,6 +85,6 @@ class TestTagRestorer:
         mgr.counter = 4
 
         restorer = TagRestorer()
-        result = restorer.restore_tags(translated, mgr)
+        result = restorer.restore_tags(translated, mgr.tag_map)
 
         assert result == "<p>First</p><p>Second</p><p>Third</p>"

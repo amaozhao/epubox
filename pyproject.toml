@@ -12,16 +12,16 @@ dependencies = [
     "aiosqlite",
     "beautifulsoup4",
     "ebooklib",
-    "fastapi",
     "google-genai",
-    "httpx",
     "mistralai",
     "nltk",
+    "ollama",
     "openai",
     "pydantic",
     "pydantic-settings",
     "pytest",
     "pytest-asyncio",
+    "pytest-cover",
     "scikit-learn",
     "tenacity",
     "tiktoken",
@@ -47,6 +47,9 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff.lint]
 extend-safe-fixes = ["E", "F401"]
+
+[tool.mypy]
+ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["engine"]

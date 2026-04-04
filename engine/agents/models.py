@@ -3,9 +3,9 @@
 # from agno.models.google import Gemini
 from agno.models.mistral import MistralChat
 
+# from agno.models.ollama import Ollama
 # from agno.models.openrouter import OpenRouter
-from agno.models.openai.like import OpenAILike
-
+# from agno.models.openai.like import OpenAILike
 # from agno.models.nvidia import Nvidia
 from ..core.config import settings
 
@@ -16,13 +16,14 @@ from ..core.config import settings
 # model = OpenAILike(id=settings.XFYUN_GLM_MODEL, api_key=settings.XFYUN_API_KEY, base_url=settings.XFYUN_BASE_URL)
 # model = OpenAILike(id=settings.XFYUN_KIMI_MODEL, api_key=settings.XFYUN_API_KEY, base_url=settings.XFYUN_BASE_URL)
 # model = OpenAILike(id=settings.AIHUBMIX_MODEL, api_key=settings.AIHUBMIX_API_KEY, base_url=settings.AIHUBMIX_BASE_URL)
-model = OpenAILike(id=settings.BAISHAN_MODEL, api_key=settings.BAISHAN_API_KEY, base_url=settings.BAISHAN_BASE_URL)
+# model = OpenAILike(id=settings.BAISHAN_MODEL, api_key=settings.BAISHAN_API_KEY, base_url=settings.BAISHAN_BASE_URL)
+# model = Ollama(id="gemma4:e4b")
 # model = OpenRouter(id=settings.OPENROUTER_MODEL, api_key=settings.OPENROUTER_API_KEY)
 # model = Nvidia(id=settings.NVIDIA_MODEL, api_key=settings.NVIDIA_API_KEY)
 # model = Gemini(id=settings.GEMINI_MODEL, api_key=settings.GEMINI_API_KEY)
 
 # 直接使用 Mistral 模型
-# model = MistralChat(id=settings.MISTRAL_MODEL, api_key=settings.MISTRAL_API_KEY)
+model = MistralChat(id=settings.MISTRAL_MODEL, api_key=settings.MISTRAL_API_KEY)
 
 # 备用模型（Mistral，用于内容安全审核失败时 fallback）
 fallback_model = MistralChat(id=settings.MISTRAL_MODEL, api_key=settings.MISTRAL_API_KEY)

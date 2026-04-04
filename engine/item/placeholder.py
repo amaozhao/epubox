@@ -13,7 +13,7 @@ class PlaceholderManager:
     3. 全局索引恢复：将局部索引转换回全局索引
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.tag_map: Dict[str, str] = {}  # 全局占位符→原始标签
         self.counter: int = 0  # 全局计数器
 

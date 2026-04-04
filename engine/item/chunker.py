@@ -1,7 +1,7 @@
 import re
 import uuid
 import tiktoken
-from typing import List, Tuple
+from typing import List
 
 from engine.schemas.chunk import Chunk
 
@@ -40,10 +40,12 @@ class HtmlChunker:
         "pageList", "pageTarget", "spine", "itemref"
     }
 
-    def __init__(self, token_limit: int = 2000, max_placeholders_per_chunk: int = 15):
+    def __init__(self, token_limit: int = 1200, max_placeholders_per_chunk: int = 15):
         self.token_limit = token_limit
         self.max_placeholders_per_chunk = max_placeholders_per_chunk
         self.placeholder_pattern = re.compile(r'\[id\d+\]')
+        self.closing_tag_pattern = re.compile(r'</([a-zA-Z][a-zA-Z0-9]*)\s*>')
+        self.any_tag_pattern = re.compile(r'<[^>]+>')
 
     def chunk(
         self,
@@ -122,7 +124,6 @@ class HtmlChunker:
         """
 
         split_points = []
-        allowed_tags = self.ALLOWED_SPLIT_TAGS if not is_nav_file else set()
 
         for i, (start, end, placeholder, idx) in enumerate(placeholder_positions):
             tag_content = placeholder_mgr.tag_map.get(placeholder, "")
@@ -205,8 +206,8 @@ class HtmlChunker:
         """将segments合并为考虑token限制和占位符数量的chunk"""
 
         chunks = []
-        current_chunk_parts = []
-        current_indices = []
+        current_chunk_parts: list[str] = []
+        current_indices: list[int] = []
 
         for segment in segments:
             # 统计这个segment中的占位符数量
@@ -286,7 +287,7 @@ class HtmlChunker:
         return Chunk(
             name=str(uuid.uuid4())[:8],
             original=text,
-            global_indices=sorted(indices),
+            translated=None,
             local_tag_map=placeholder_mgr.get_local_tag_map(sorted(indices)),
             tokens=count_tokens(text)
         )
@@ -317,19 +318,30 @@ class HtmlChunker:
         '</tr>', '</td>', '</th>', '</li>'
     ]
 
+    # 安全分割点：块级结束标签
+    SAFE_BLOCK_END_TAGS = [
+        '</p>', '</div>', '</h1>', '</h2>', '</h3>',
+        '</h4>', '</h5>', '</h6>', '</blockquote>',
+        '</section>', '</article>', '</header>', '</footer>',
+        '</main>', '</aside>', '</figure>', '</figcaption>'
+    ]
+
     def chunk_by_html_tags(
         self,
         html: str,
-        token_limit: int = 1500,
+        token_limit: int = 1200,
         is_nav_file: bool = False
     ) -> List[str]:
         """
         按块级 HTML 标签分割
 
-        新流程：先分割 HTML，再做占位符替换
+        参考原版 Chunker 的简洁思路：
+        1. 二分查找找到 token 限制内最大的字符位置
+        2. 在这个范围内找最佳分割点
+        3. 循环处理直到完成
 
         Args:
-            html: 原始 HTML 文本（可能带 [PRE:N] 占位符）
+            html: 原始 HTML 文本
             token_limit: token 限制
             is_nav_file: 是否是导航文件（toc.ncx / nav.xhtml）
 
@@ -342,78 +354,194 @@ class HtmlChunker:
             return self._chunk_normal_html(html, token_limit)
 
     def _chunk_normal_html(self, html: str, token_limit: int) -> List[str]:
-        """
-        普通 HTML 分割策略
+        """普通 HTML 分割策略"""
+        chunks = []
+        pos = 0
+        n = len(html)
 
-        分割点优先级：
-        1. 安全块级结束标签（</p>, </div> 等）
-        2. 句子边界（当 Level 1 无法满足 token 限制时）
-        3. 容器级结束标签（</table>, </ul> 等，作为 fallback）
-        """
-        # Step 1: 找到所有块级结束标签位置
-        split_positions = self._find_block_end_positions(html, self.SAFE_BLOCK_END_TAGS)
+        while pos < n:
+            # 1. 二分查找：找到 token 限制内最大的字符位置
+            low, high = 1, n - pos
+            char_limit_end = pos
+            while low <= high:
+                mid = (low + high) // 2
+                if count_tokens(html[pos:pos + mid]) <= token_limit:
+                    char_limit_end = pos + mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
 
-        # Step 2: 构建分割结果
-        all_points = sorted([0] + list(split_positions) + [len(html)])
-        result = []
+            # 2. 在 char_limit_end 范围内找最佳分割点
+            split_at = -1
 
-        for i in range(len(all_points) - 1):
-            chunk_text = html[all_points[i]:all_points[i + 1]]
+            # 优先找允许的块级结束标签
+            for m in self.closing_tag_pattern.finditer(html, pos, char_limit_end):
+                tag_name = m.group(1).lower()
+                if tag_name in self.ALLOWED_SPLIT_TAGS:
+                    split_at = m.end()
 
-            if count_tokens(chunk_text) <= token_limit:
-                result.append(chunk_text)
-            else:
-                # 超长：在句子边界再分割
-                sub_chunks = self._split_at_sentence_boundary(chunk_text, token_limit)
-                result.extend(sub_chunks)
+            # 3. 兜底：如果没找到块级结束标签，使用硬切（避免切成极小的 chunk）
+            if split_at <= pos:
+                split_at = self._hard_split_single(html, pos, token_limit)
 
-        return [c for c in result if c.strip()]
+            # 4. 极端情况：如果硬切也失败
+            if split_at <= pos:
+                split_at = char_limit_end
+                # 检查是否切断了标签
+                last_open = html.rfind("<", pos, split_at)
+                last_close = html.rfind(">", pos, split_at)
+                if last_open > last_close:
+                    split_at = last_open
+                if split_at <= pos:
+                    split_at = max(pos + 1, char_limit_end)
+
+            # 5. 生成 Chunk
+            chunk_text = html[pos:split_at]
+            if chunk_text.strip():
+                chunks.append(chunk_text)
+            pos = split_at
+
+        # 后处理：合并太小的 chunk
+        chunks = self._merge_small_chunks(chunks, token_limit)
+
+        return [c for c in chunks if c.strip()]
 
     def _chunk_nav_file(self, html: str, token_limit: int) -> List[str]:
         """
-        导航文件分割策略
+        导航文件分割策略 - 尽可能填满到 token_limit
 
-        按 </navPoint> 分割，保持 navPoint 完整
+        核心逻辑：贪婪累积多个 navPoint，直到达到 token_limit
         """
-        # 找到所有 </navPoint> 位置
-        navpoint_pattern = r'</navPoint>'
-        navpoint_positions = [m.end() for m in re.finditer(navpoint_pattern, html)]
-
-        if not navpoint_positions:
-            # 没有 navPoint，整个文件作为一个 chunk
-            return [html] if html.strip() else []
-
         chunks = []
-        current_start = 0
+        pos = 0
+        n = len(html)
 
-        for pos in navpoint_positions:
-            chunk_text = html[current_start:pos]
+        # nav 文件只允许在 navPoint 边界分割
+        pattern = re.compile(r'</navPoint>', re.IGNORECASE)
 
-            if count_tokens(chunk_text) <= token_limit:
-                chunks.append(chunk_text)
-                current_start = pos
-            else:
-                # 超长，在句子边界再分割
-                sub_chunks = self._split_at_sentence_boundary(chunk_text, token_limit)
-                chunks.extend(sub_chunks)
-                current_start = pos
+        while pos < n:
+            # 找到所有 navPoint 边界
+            all_boundaries = [(m.end(), m.group()) for m in pattern.finditer(html, pos)]
 
-        # 处理最后一段
-        if current_start < len(html):
-            remaining = html[current_start:]
-            # 去掉空白后检查是否只是闭合标签（如 </navMap>）
-            stripped = remaining.strip()
-            if stripped and not stripped.startswith('</'):
-                # 不是只有闭合标签，正常处理
-                if count_tokens(remaining) <= token_limit:
-                    chunks.append(remaining)
+            if not all_boundaries:
+                # 没有 navPoint 了，使用普通 HTML 分割逻辑处理剩余内容
+                remaining = html[pos:]
+                if remaining.strip():
+                    # 递归使用普通 HTML 分割处理剩余内容
+                    sub_chunks = self._chunk_normal_html(remaining, token_limit)
+                    chunks.extend(sub_chunks)
+                break
+
+            # 贪婪累积：尽可能填充多个 navPoint 直到 token_limit
+            last_valid_boundary = pos
+
+            for boundary_pos, _ in all_boundaries:
+                # 检查从 pos 到这个边界的内容是否超限
+                segment = html[pos:boundary_pos]
+                segment_tokens = count_tokens(segment)
+
+                if segment_tokens <= token_limit:
+                    # 这个边界可以放入，更新 last_valid_boundary
+                    last_valid_boundary = boundary_pos
                 else:
-                    chunks.extend(self._split_at_sentence_boundary(remaining, token_limit))
-            elif stripped.startswith('</') and chunks:
-                # 只有闭合标签（如 </navMap>），合并到最后一个 chunk
-                chunks[-1] = chunks[-1] + remaining
+                    # 超限了，使用 last_valid_boundary 作为分割点
+                    break
+
+            # 如果所有边界都能放入，取最后一个
+            if last_valid_boundary == pos:
+                # 第一个边界就超限（极端情况：单个 navPoint 就超过 token_limit）
+                # 使用 _chunk_normal_html 的兜底逻辑
+                last_valid_boundary = self._find_split_point_normal(html, pos, token_limit)
+
+            chunk_text = html[pos:last_valid_boundary]
+            if chunk_text.strip():
+                chunks.append(chunk_text)
+            pos = last_valid_boundary
+
+        # 后处理：合并太小的 chunk
+        chunks = self._merge_small_chunks(chunks, token_limit)
 
         return [c for c in chunks if c.strip()]
+
+    def _merge_small_chunks(self, chunks: List[str], token_limit: int, min_ratio: float = 0.3) -> List[str]:
+        """
+        合并太小的 chunk 到相邻 chunk
+
+        优先合并到上一个 chunk（保持结构），如果 chunk 在开头则合并到下一个。
+
+        Args:
+            chunks: 分割后的 chunks
+            token_limit: token 限制
+            min_ratio: 小于 token_limit * min_ratio 的 chunk 需要合并
+
+        Returns:
+            合并后的 chunks
+        """
+        if len(chunks) < 2:
+            return chunks
+
+        min_size = token_limit * min_ratio
+        i = 0
+        while i < len(chunks):
+            chunk_tokens = count_tokens(chunks[i])
+            if chunk_tokens < min_size:
+                # 太小，需要合并
+                if i == 0:
+                    # 是第一个 chunk，合并到下一个
+                    if i + 1 < len(chunks):
+                        chunks[i + 1] = chunks[i] + chunks[i + 1]
+                        chunks.pop(i)
+                        # i 不变，继续检查新的 chunks[i]
+                    else:
+                        i += 1
+                else:
+                    # 合并到上一个
+                    chunks[i - 1] += chunks[i]
+                    chunks.pop(i)
+                    i -= 1  # 回退，继续检查前一个
+            else:
+                i += 1
+
+        return chunks
+
+    def _find_split_point_normal(self, html: str, pos: int, token_limit: int) -> int:
+        """普通 HTML 分割的兜底逻辑：在 token_limit 内找最佳分割点"""
+        n = len(html)
+
+        # 二分查找：找到 token 限制内最大的字符位置
+        low, high = 1, n - pos
+        char_limit_end = pos
+        while low <= high:
+            mid = (low + high) // 2
+            if count_tokens(html[pos:pos + mid]) <= token_limit:
+                char_limit_end = pos + mid
+                low = mid + 1
+            else:
+                high = mid - 1
+
+        # 找最后一个允许的块级结束标签
+        split_at = -1
+        for m in self.closing_tag_pattern.finditer(html, pos, char_limit_end):
+            tag_name = m.group(1).lower()
+            if tag_name in self.ALLOWED_SPLIT_TAGS:
+                split_at = m.end()
+
+        # 兜底：找任意完整标签结尾
+        if split_at <= pos:
+            for m in self.any_tag_pattern.finditer(html, pos, char_limit_end):
+                split_at = m.end()
+
+        # 极端情况
+        if split_at <= pos:
+            split_at = char_limit_end
+            last_open = html.rfind("<", pos, split_at)
+            last_close = html.rfind(">", pos, split_at)
+            if last_open > last_close:
+                split_at = last_open
+            if split_at <= pos:
+                split_at = max(pos + 1, char_limit_end)
+
+        return split_at
 
     def _is_inside_container(self, html: str, pos: int) -> bool:
         """
@@ -465,42 +593,78 @@ class HtmlChunker:
             # 找不到句子边界，按 token_limit 硬切
             return self._hard_split(text, token_limit)
 
+        # 句子边界位置列表（每个句子从上一个边界或0到当前边界）
+        boundaries = [0] + [m.end() for m in matches] + [len(text)]
+
         result = []
-        current_pos = 0
+        i = 0
 
-        for match in matches:
-            boundary = match.end()
-            sentence = text[current_pos:boundary]
+        while i < len(boundaries) - 1:
+            chunk_start = boundaries[i]
 
-            if count_tokens(sentence) <= token_limit:
-                result.append(sentence)
-                current_pos = boundary
-            else:
-                # 这个句子超限
-                if result:
-                    result.append(sentence)
-                    current_pos = boundary
+            # 二分查找：从 chunk_start 开始，能容纳多少个句子
+            left, right = i + 1, len(boundaries)
+            while left < right:
+                mid = (left + right) // 2
+                chunk_end = boundaries[mid]
+                chunk = text[chunk_start:chunk_end]
+                if count_tokens(chunk) <= token_limit:
+                    left = mid + 1
                 else:
-                    # 第一个句子就超限，硬切
-                    sub_chunks = self._hard_split(sentence, token_limit)
-                    result.extend(sub_chunks[:-1])
-                    current_pos = boundary
+                    right = mid
+
+            best_boundary = left - 1
+            if best_boundary <= i:
+                # 当前句子本身就超限，用硬切
+                chunk_end = boundaries[i + 1]
+                chunk = text[chunk_start:chunk_end]
+                result.extend(self._hard_split(chunk, token_limit))
+                i += 1
+            else:
+                result.append(text[chunk_start:boundaries[best_boundary]])
+                i = best_boundary
 
         # 处理剩余
-        remaining = text[current_pos:]
-        if remaining:
-            if count_tokens(remaining) <= token_limit:
-                result.append(remaining)
-            else:
-                result.extend(self._hard_split(remaining, token_limit))
+        if i < len(boundaries) - 1:
+            remaining = text[boundaries[i]:]
+            if remaining.strip():
+                if count_tokens(remaining) <= token_limit:
+                    result.append(remaining)
+                else:
+                    result.extend(self._hard_split(remaining, token_limit))
 
-        return result
+        return result if result else self._hard_split(text, token_limit)
+
+    def _hard_split_single(self, html: str, pos: int, token_limit: int) -> int:
+        """
+        硬切单个 chunk：从 pos 开始，找到 token_limit 内的最大字符位置
+
+        Returns:
+            int: 分割点位置
+        """
+        n = len(html)
+        low, high = pos + 1, n
+        best_end = pos
+
+        while low <= high:
+            mid = (low + high) // 2
+            if count_tokens(html[pos:mid]) <= token_limit:
+                best_end = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+
+        # 确保 best_end 有前进
+        if best_end <= pos:
+            best_end = min(pos + 1, n)
+
+        return best_end
 
     def _hard_split(self, text: str, token_limit: int) -> List[str]:
         """
         按 token_limit 硬切（极端保底方案）
 
-        从前往后，尽量在 token 限制内填充更多内容
+        使用二分查找优化，从前往后尽量在 token 限制内填充更多内容
         """
         if count_tokens(text) <= token_limit:
             return [text]
@@ -510,20 +674,21 @@ class HtmlChunker:
         text_len = len(text)
 
         while current_pos < text_len:
-            # 尝试往后扩展到 token_limit
-            best_end = current_pos
-
-            for end_pos in range(current_pos + 1, text_len + 1):
-                chunk = text[current_pos:end_pos]
+            # 二分查找当前 chunk 的结束位置
+            left, right = current_pos + 1, text_len + 1
+            while left < right:
+                mid = (left + right) // 2
+                chunk = text[current_pos:mid]
                 tokens = count_tokens(chunk)
-
                 if tokens <= token_limit:
-                    best_end = end_pos
-                elif tokens > token_limit:
-                    break
+                    left = mid + 1
+                else:
+                    right = mid
+
+            best_end = left - 1
 
             # 如果 best_end 没有前进，强制前进一个字符
-            if best_end == current_pos:
+            if best_end <= current_pos:
                 best_end = min(current_pos + 1, text_len)
 
             result.append(text[current_pos:best_end])

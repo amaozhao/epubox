@@ -1,5 +1,5 @@
 import re
-from typing import List
+from typing import List, Optional
 
 from bs4 import BeautifulSoup
 
@@ -15,7 +15,7 @@ class PreCodeExtractor:
     - 翻译后恢复原始标签
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.preserved_pre: List[str] = []   # 原始 pre 标签列表
         self.preserved_code: List[str] = []  # 原始 code 标签列表
         self.preserved_style: List[str] = [] # 原始 style 标签列表
@@ -29,6 +29,9 @@ class PreCodeExtractor:
         Returns:
             处理后的 HTML
         """
+        # XML 文件（如 toc.ncx）不需要 pre/code/style 提取，跳过
+        if html.strip().startswith('<?xml') or html.strip().startswith('<ncx'):
+            return html
         soup = BeautifulSoup(html, 'html.parser')
         self.preserved_pre = []
         self.preserved_code = []
@@ -147,7 +150,7 @@ def validate_placeholders(html: str, expected_pre: int, expected_code: int, expe
     return True
 
 
-def attempt_recovery(html: str, preserved_pre: List[str], preserved_code: List[str], preserved_style: List[str] = None) -> str:
+def attempt_recovery(html: str, preserved_pre: List[str], preserved_code: List[str], preserved_style: Optional[List[str]] = None) -> str:
     r"""
     尝试恢复可能被破坏的占位符（仅处理格式变形，不处理缺失）
 

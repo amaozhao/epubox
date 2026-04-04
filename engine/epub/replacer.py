@@ -1,25 +1,64 @@
 import re
+import xml.etree.ElementTree as ET
 
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
 from engine.item import Merger, PreCodeExtractor
-from engine.item.placeholder import PlaceholderManager
-from engine.item.tag import TagRestorer
 from engine.schemas import EpubItem
 
 
 class Replacer:
     def _validate_nav_structure(self, content: str) -> bool:
-        """验证 nav 文件结构完整性"""
-        # NCX 格式（toc.ncx）使用这些标签
-        ncx_required = ["<navMap>", "<navPoint>", "<navLabel>", "<content"]
-        if all(tag in content for tag in ncx_required):
-            return True
-        # XHTML 格式（nav.xhtml）使用这些标签
-        xhtml_required = ["<nav", "</nav>", "<ol", "</ol>", "<li>", "</li>"]
-        if all(tag in content.lower() for tag in xhtml_required):
-            return True
-        return False
+        """验证 nav 文件结构完整性（使用 XML 解析器）"""
+        try:
+            root = ET.fromstring(content)
+            ncx_ns = "{http://www.daisy.org/z3986/2005/ncx/}"
+            xhtml_ns = "{http://www.w3.org/1999/xhtml}"
+
+            # NCX 格式：根元素是 ncx，包含 navMap 且 navMap 下有 navPoint
+            if root.tag.endswith("ncx") or root.tag == f"{ncx_ns}ncx":
+                navmap = root.find(f".//{ncx_ns}navMap")
+                if navmap is None:
+                    navmap = root.find(".//navMap")
+                if navmap is not None:
+                    navpoint = navmap.find(f"./{ncx_ns}navPoint")
+                    if navpoint is None:
+                        navpoint = navmap.find("./navPoint")
+                    return navpoint is not None
+                return False
+
+            # XHTML 格式：文档包含 nav 元素，nav 下有 ol 且 ol 下有 li
+            # nav 可能是根元素（standalone nav.xhtml）或 html>body 的后代
+            if root.tag.endswith("nav") or root.tag == f"{xhtml_ns}nav":
+                # nav 是根元素
+                ol_elem = root.find(f"./{xhtml_ns}ol")
+                if ol_elem is None:
+                    ol_elem = root.find("./ol")
+                if ol_elem is not None:
+                    li_elem = ol_elem.find(f"./{xhtml_ns}li")
+                    if li_elem is None:
+                        li_elem = ol_elem.find("./li")
+                    return li_elem is not None
+                return False
+            else:
+                # nav 是后代（html>body>nav 结构）
+                nav_elem = root.find(f".//{xhtml_ns}nav")
+                if nav_elem is None:
+                    nav_elem = root.find(".//nav")
+                if nav_elem is not None:
+                    ol_elem = nav_elem.find(f"./{xhtml_ns}ol")
+                    if ol_elem is None:
+                        ol_elem = nav_elem.find("./ol")
+                    if ol_elem is not None:
+                        li_elem = ol_elem.find(f"./{xhtml_ns}li")
+                        if li_elem is None:
+                            li_elem = ol_elem.find("./li")
+                        return li_elem is not None
+                return False
+
+            return False
+        except ET.ParseError:
+            return False
 
     def _merge_chunks(self, item: EpubItem) -> str:
         """将给定 EpubItem 的所有 Chunk 对象合并为一个字符串"""
@@ -30,28 +69,22 @@ class Replacer:
         return ""
 
     def _restore_tags(self, item: EpubItem, merged_content: str) -> str:
-        """使用占位符映射还原给定 EpubItem 的内容"""
-        if not merged_content or not item.placeholder:
-            return merged_content
+        """仅返回合并后的内容，不做标签恢复
 
-        # 重建 PlaceholderManager
-        placeholder_mgr = PlaceholderManager()
-        placeholder_mgr.tag_map = item.placeholder
-
-        # 使用 TagRestorer 恢复标签
-        restorer = TagRestorer()
-        restored_content = restorer.restore_tags(merged_content, placeholder_mgr)
-        return restored_content
+        注意：[idN] 标签占位符在 orchestrator 中每个 chunk 翻译完成后已恢复。
+        pre/code/style 标签在 restore() 方法中通过 PreCodeExtractor.restore 恢复。
+        此方法仅用于接口兼容性。
+        """
+        return merged_content
 
     def restore(self, item: EpubItem):
         """恢复 EpubItem 的内容"""
         # 1. 合并 chunks
         merged_content = self._merge_chunks(item)
 
-        # 2. 恢复占位符为原始标签
-        restored_content = self._restore_tags(item, merged_content)
-
-        # 3. 恢复 pre/code/style 标签（二级占位符方案）
+        # 2. 恢复 pre/code/style 标签占位符为原始标签
+        # 注意：[idN] 标签占位符在 orchestrator 中每个 chunk 翻译完成后已恢复
+        restored_content = merged_content
         if item.preserved_pre or item.preserved_code or item.preserved_style:
             pre_extractor = PreCodeExtractor()
             pre_extractor.preserved_pre = item.preserved_pre or []
@@ -59,7 +92,7 @@ class Replacer:
             pre_extractor.preserved_style = item.preserved_style or []
             restored_content = pre_extractor.restore(restored_content)
 
-        # 4. 验证 HTML 结构完整性
+        # 3. 验证 HTML 结构完整性
         is_valid, integrity_errors = verify_html_integrity(restored_content)
         if not is_valid:
             logger.error(f"HTML结构验证失败: {item.id}, 错误: {integrity_errors}")
@@ -70,14 +103,14 @@ class Replacer:
             logger.error(f"Nav 结构验证失败: {item.id}，但保留翻译结果")
 
         # 5. 检查是否有未恢复的占位符
-        remaining = re.findall(r'\[id\d+\]', restored_content)
+        remaining = re.findall(r"\[id\d+\]", restored_content)
         if remaining:
             logger.error(f"还有未恢复的占位符: {remaining}")
 
         # 6. 检查是否有未恢复的 pre/code/style 占位符
-        remaining_pre = re.findall(r'\[PRE:\d+\]', restored_content)
-        remaining_code = re.findall(r'\[CODE:\d+\]', restored_content)
-        remaining_style = re.findall(r'\[STYLE:\d+\]', restored_content)
+        remaining_pre = re.findall(r"\[PRE:\d+\]", restored_content)
+        remaining_code = re.findall(r"\[CODE:\d+\]", restored_content)
+        remaining_style = re.findall(r"\[STYLE:\d+\]", restored_content)
         if remaining_pre:
             logger.error(f"还有未恢复的PRE占位符: {remaining_pre}")
         if remaining_code:

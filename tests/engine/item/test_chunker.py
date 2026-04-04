@@ -60,7 +60,6 @@ class TestHtmlChunker:
             assert chunk.name is not None
             assert chunk.original is not None
             assert chunk.tokens >= 0
-            assert isinstance(chunk.global_indices, list)
             assert isinstance(chunk.local_tag_map, dict)
 
     def test_empty_html(self, chunker, placeholder_mgr):
@@ -85,9 +84,10 @@ class TestHtmlChunker:
         chunker = HtmlChunker(token_limit=100)
         chunks = chunker.chunk(processed, global_indices, placeholder_mgr)
 
-        # 验证所有 chunk 的 global_indices 都是有效的
+        # 验证所有 chunk 的 local_tag_map 都是有效的
         for chunk in chunks:
-            for idx in chunk.global_indices:
+            for key in chunk.local_tag_map.keys():
+                idx = int(key[3:-1])
                 assert idx < placeholder_mgr.counter
 
     def test_nav_file_respected(self, placeholder_mgr):
@@ -217,7 +217,7 @@ class TestHtmlChunkerHelperMethods:
         # 应该被分割成2个chunk（10个占位符 / 5限制 = 2 chunks）
         assert len(chunks) == 2
         for chunk in chunks:
-            assert len(chunk.global_indices) <= 5
+            assert len(chunk.local_tag_map) <= 5
 
     def test_create_chunk(self):
         """测试创建chunk"""
@@ -231,7 +231,7 @@ class TestHtmlChunkerHelperMethods:
         chunk = chunker._create_chunk(parts, indices, mgr)
         assert chunk.name is not None
         assert chunk.original == "<p>Hello</p>"
-        assert chunk.global_indices == [0, 1]
+        assert len(chunk.local_tag_map) == 2
         assert chunk.tokens > 0
 
     def test_create_chunk_strips_boundary_newlines(self):
@@ -255,3 +255,130 @@ class TestHtmlChunkerHelperMethods:
         chunk2 = chunker._create_chunk(parts_with_middle, indices_middle, mgr2)
         # 中间的 \n 应保留
         assert "\n" in chunk2.original
+
+
+class TestChunkByHtmlTags:
+    """测试 chunk_by_html_tags 方法"""
+
+    def test_normal_html_single_chunk(self):
+        """短 HTML 应返回单个 chunk"""
+        html = "<p>Hello World!</p>"
+        chunker = HtmlChunker(token_limit=100)
+        chunks = chunker.chunk_by_html_tags(html, token_limit=100, is_nav_file=False)
+        assert len(chunks) == 1
+
+    def test_normal_html_multiple_paragraphs_accumulate(self):
+        """多个段落应累积直到超过 token_limit 才分割"""
+        # 创建多个段落，总 token 超过限制
+        paragraphs = []
+        for i in range(20):
+            paragraphs.append(f'<p>Paragraph {i} with some text content that adds up.</p>')
+
+        html = '<div>' + ''.join(paragraphs) + '</div>'
+        chunker = HtmlChunker(token_limit=500)
+
+        chunks = chunker.chunk_by_html_tags(html, token_limit=500, is_nav_file=False)
+
+        # 应该累积多个段落，不是每个段落单独成 chunk
+        assert len(chunks) < 20  # 不是每个段落一个 chunk
+        # 所有 chunk 都应在 token 限制内
+        for chunk in chunks:
+            assert count_tokens(chunk) <= 500
+
+    def test_normal_html_splits_at_block_tag(self):
+        """应在块级标签（</p>）处分割"""
+        html = "<p>First paragraph.</p><p>Second paragraph.</p><p>Third paragraph.</p>"
+        chunker = HtmlChunker(token_limit=100)
+
+        chunks = chunker.chunk_by_html_tags(html, token_limit=100, is_nav_file=False)
+
+        # 每个 chunk 应以 </p> 结尾
+        for chunk in chunks:
+            assert chunk.rstrip().endswith('</p>') or '</p>' in chunk
+
+    def test_normal_html_all_chunks_under_limit(self):
+        """所有 chunk 都应在 token 限制内"""
+        paragraphs = []
+        for i in range(30):
+            paragraphs.append(f'<p>Paragraph {i} with additional text to make the content longer.</p>')
+
+        html = '<div>' + ''.join(paragraphs) + '</div>'
+        chunker = HtmlChunker(token_limit=300)
+
+        chunks = chunker.chunk_by_html_tags(html, token_limit=300, is_nav_file=False)
+
+        for chunk in chunks:
+            assert count_tokens(chunk) <= 300, f"Chunk with {count_tokens(chunk)} tokens exceeds limit"
+
+    def test_nav_file_splits_at_navpoint(self):
+        """nav 文件应在 </navPoint> 处分割"""
+        html = '''<navMap>
+<navPoint id="np1"><navLabel><text>Chapter 1</text></navLabel><content src="ch1.xhtml"/></navPoint>
+<navPoint id="np2"><navLabel><text>Chapter 2</text></navLabel><content src="ch2.xhtml"/></navPoint>
+</navMap>'''
+        chunker = HtmlChunker(token_limit=100)
+
+        chunks = chunker.chunk_by_html_tags(html, token_limit=100, is_nav_file=True)
+
+        # nav 文件的 chunk 应该在 </navPoint> 或 </navMap> 处分割
+        for chunk in chunks:
+            text = chunk.strip()
+            assert text.endswith('</navPoint>') or text.endswith('</navMap>') or '</navPoint>' in text
+
+    def test_nav_file_all_chunks_under_limit(self):
+        """nav 文件所有 chunk 都应在 token 限制内"""
+        # 读取实际的 toc.ncx 文件
+        import os
+        toc_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tests', 'toc.ncx')
+        if os.path.exists(toc_path):
+            with open(toc_path, 'r', encoding='utf-8') as f:
+                html = f.read()
+
+            chunker = HtmlChunker(token_limit=1200)
+            chunks = chunker.chunk_by_html_tags(html, token_limit=1200, is_nav_file=True)
+
+            assert len(chunks) > 0
+            for chunk in chunks:
+                assert count_tokens(chunk) <= 1200, f"Nav chunk with {count_tokens(chunk)} tokens exceeds limit"
+
+    def test_empty_html(self):
+        """空 HTML 应返回空列表"""
+        chunker = HtmlChunker(token_limit=100)
+        chunks = chunker.chunk_by_html_tags("", token_limit=100, is_nav_file=False)
+        assert len(chunks) == 0
+
+    def test_html_without_allowed_split_tags(self):
+        """没有允许的分割标签时应使用硬切"""
+        # 创建一个没有块级结束标签的 HTML
+        html = "<span>Text without block tags.</span>" * 50
+        chunker = HtmlChunker(token_limit=100)
+
+        chunks = chunker.chunk_by_html_tags(html, token_limit=100, is_nav_file=False)
+
+        # 应该仍然能分割
+        assert len(chunks) > 0
+        for chunk in chunks:
+            assert count_tokens(chunk) <= 100
+
+    def test_single_long_sentence_hard_split(self):
+        """单个超长句子应使用硬切"""
+        html = '<p>' + 'word ' * 500 + '</p>'  # 超过 token_limit
+        chunker = HtmlChunker(token_limit=200)
+
+        chunks = chunker.chunk_by_html_tags(html, token_limit=200, is_nav_file=False)
+
+        # 应该能分割
+        assert len(chunks) > 0
+        for chunk in chunks:
+            assert count_tokens(chunk) <= 200
+
+    def test_nav_file_no_navpoint_whole_file(self):
+        """没有 navPoint 的 nav 文件应返回整个文件"""
+        html = '<navMap><content src="test.xhtml"/></navMap>'
+        chunker = HtmlChunker(token_limit=100)
+
+        chunks = chunker.chunk_by_html_tags(html, token_limit=100, is_nav_file=True)
+
+        # 没有 navPoint，应该返回整个文件
+        assert len(chunks) == 1
+        assert chunks[0] == html

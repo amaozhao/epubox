@@ -3,13 +3,13 @@ import logging
 import os
 import re
 import sys
-from typing import Dict
+from typing import Dict, cast
 
 import ebooklib
 import nltk
 from bs4 import BeautifulSoup
 from ebooklib import epub
-from nltk import pos_tag, word_tokenize
+from nltk import Tree, pos_tag, word_tokenize
 from nltk.chunk import RegexpParser
 from sklearn.feature_extraction.text import TfidfVectorizer
 
@@ -108,9 +108,9 @@ class GlossaryExtractor:
             try:
                 tokens = word_tokenize(sentence)
                 pos_tags = pos_tag(tokens)
-                chunked = self.chunker.parse(pos_tags)
+                chunked = cast(Tree, self.chunker.parse(pos_tags))
                 for subtree in chunked.subtrees(filter=lambda t: t.label() == "NP"):
-                    phrase = " ".join(word for word, tag in subtree.leaves()).lower()
+                    phrase = " ".join(word for word, _ in subtree.leaves()).lower()
                     if self._is_valid_term(phrase):
                         candidate_phrases.add(phrase)
             except Exception:
@@ -125,10 +125,10 @@ class GlossaryExtractor:
             tfidf_matrix = vectorizer.fit_transform(sentences)
         except ValueError:
             return []
-        scores = tfidf_matrix.mean(axis=0).A1
+        scores = tfidf_matrix.mean(axis=0).A1  # type: ignore
         scored_phrases = {phrase: score for phrase, score in zip(vectorizer.get_feature_names_out(), scores)}
         sorted_phrases = sorted(scored_phrases.items(), key=lambda x: x[1], reverse=True)
-        final_terms = [term.title() for term, score in sorted_phrases[:top_n]]
+        final_terms = [term.title() for term, _ in sorted_phrases[:top_n]]
         logging.info(f"   最终结果: 筛选出 Top {len(final_terms)} 个高质量术语。")
         return sorted(final_terms)
 

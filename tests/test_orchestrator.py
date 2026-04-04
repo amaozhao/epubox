@@ -107,9 +107,18 @@ class TestOrchestrator:
     # --- 测试 translate_epub 方法 ---
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
+    @patch.object(Parser, "save_json", new_callable=MagicMock)
+    @patch.object(Builder, "build", new_callable=MagicMock)
+    @patch.object(Replacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
     async def test_translate_epub_successful_translation(
-        self, mock_get_translator_workflow, mock_parser_parse, orchestrator
+        self,
+        mock_get_translator_workflow,
+        mock_replacer_restore,
+        mock_builder_build,
+        mock_parser_save_json,
+        mock_parser_parse,
+        orchestrator,
     ):
         """
         测试 translate_epub 成功翻译后，EpubBook 的状态是否正确更新。

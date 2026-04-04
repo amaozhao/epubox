@@ -1,5 +1,5 @@
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from engine.item.placeholder import PlaceholderManager
 
@@ -63,7 +63,7 @@ class TagPreserver:
         result_parts = []
         segments = re.split(r'(<[^>]+>)', html)
 
-        current_tag_group = []
+        current_tag_group: list[str] = []
         WHITESPACE_PATTERN = re.compile(r'^[\s\r\n\t]+$')
 
         def flush_tag_group():
@@ -125,7 +125,7 @@ class TagPreserver:
             return False
         return 'kobospan' in segment.lower()
 
-    def _extract_kobo_span_pair(self, segments: List[str], start_idx: int) -> Tuple[str, str, int]:
+    def _extract_kobo_span_pair(self, segments: List[str], start_idx: int) -> Tuple[Optional[str], Optional[str], int]:
         """
         从 segments 中提取完整的 koboSpan 标签对
 

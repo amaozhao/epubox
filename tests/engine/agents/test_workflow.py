@@ -220,8 +220,7 @@ class TestWorkflow:
         assert call_count[0] == 2
 
     @patch("engine.agents.workflow.get_translator")
-    @patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock, return_value=None)
-    async def test_translate_step_all_retries_fail(self, mock_aligner, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):
+    async def test_translate_step_all_retries_fail(self, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):
         """验证所有重试都失败后，chunk.translated 为空，状态为 UNTRANSLATED"""
         chunk = mock_chunk_factory(
             name="test_chunk",
@@ -913,42 +912,6 @@ class TestWorkflowHtmlTagCoverage:
         assert output.success is True
 
     # -------------------------------------------------------------------------
-    # Phase 2 Token Alignment Fallback 测试
-    # -------------------------------------------------------------------------
-
-    @pytest.mark.asyncio
-    @patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock)
-    async def test_phase2_aligner_called_on_phase1_failure(self, mock_aligner, mock_translator):
-        """验证 Phase 1 失败后调用 Phase 2 aligner"""
-        # 设置 mock：Phase 1 返回无占位符，Phase 2 返回正确结果
-        async def phase1_fail(json_input):
-            return MagicMock(content=MockTranslationResponse("无占位符翻译"))
-
-        async def phase2_success(original, local_tag_map, **kwargs):
-            # Phase 2 正确保留占位符
-            return "[id0]成功翻译[id1]"
-
-        mock_translator.arun = phase1_fail
-        mock_aligner.side_effect = phase2_success
-
-        chunk = Chunk(
-            name="phase2_test",
-            original="[id0]Hello[id1]",
-            tokens=10,
-            global_indices=[0, 1],
-            local_tag_map={"[id0]": "<p>", "[id1]": "</p>"}
-        )
-        step_input = MagicMock(
-            input=chunk,
-            additional_data={"placeholder_mgr": MagicMock()}
-        )
-        output = await translate_step(step_input)
-        # Phase 2 成功，状态应为 TRANSLATED
-        assert output.content.status == TranslationStatus.TRANSLATED
-        assert "[id0]" in output.content.translated
-        mock_aligner.assert_called_once()
-
-    # -------------------------------------------------------------------------
     # 超长文本和大量占位符测试
     # -------------------------------------------------------------------------
 
@@ -1180,39 +1143,6 @@ class TestWorkflowCoverageGaps:
             assert len(captured) >= 1
 
     # -------------------------------------------------------------------------
-    # Phase 2 异常处理
-    # -------------------------------------------------------------------------
-
-    @pytest.mark.asyncio
-    @patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock, return_value=None)
-    async def test_phase2_exception_falls_through_to_phase3(self, mock_aligner):
-        """Phase 2 抛出异常时继续到 Phase 3"""
-        with patch("engine.agents.workflow.get_translator") as mock_get_translator:
-
-            async def mock_arun(json_input):
-                # 始终返回无占位符
-                return MagicMock(content=MockTranslationResponse("翻译失败"))
-
-            mock_translator = MagicMock()
-            mock_translator.arun = mock_arun
-            mock_get_translator.return_value = mock_translator
-
-            chunk = Chunk(
-                name="phase2_exception_test",
-                original="[id0]Hello[id1]",
-                tokens=10,
-                global_indices=[0, 1],
-                local_tag_map={"[id0]": "<p>", "[id1]": "</p>"}
-            )
-            step_input = MagicMock(
-                input=chunk,
-                additional_data={"placeholder_mgr": MagicMock()}
-            )
-            output = await translate_step(step_input)
-            # Phase 2 也失败，标记为 UNTRANSLATED
-            assert output.content.status == TranslationStatus.UNTRANSLATED
-
-    # -------------------------------------------------------------------------
     # proofread_step UNTRANSLATED 跳过路径
     # -------------------------------------------------------------------------
 
@@ -1340,8 +1270,7 @@ class TestWorkflowCoverageGaps:
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    @patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock, return_value=None)
-    async def test_translator_input_includes_previous_translation(self, mock_aligner):
+    async def test_translator_input_includes_previous_translation(self):
         """translator_input 包含 previous_translation 字段（第三次重试）"""
         with patch("engine.agents.workflow.get_translator") as mock_get_translator:
             captured = []
@@ -1435,8 +1364,7 @@ class TestWorkflowCoverageGaps:
     @pytest.mark.asyncio
     async def test_translator_run_status_error_non_safety(self):
         """translator 返回 RunStatus.error 但非内容安全时走一般异常路径"""
-        with patch("engine.agents.workflow.get_translator") as mock_get_translator, \
-             patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock, return_value=None):
+        with patch("engine.agents.workflow.get_translator") as mock_get_translator:
             call_count = [0]
 
             async def mock_arun(json_input):
@@ -1551,8 +1479,7 @@ class TestWorkflowCoverageGaps:
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    @patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock, return_value=None)
-    async def test_phase1_only_missing_ids_hint(self, mock_aligner):
+    async def test_phase1_only_missing_ids_hint(self):
         """仅有 missing_ids 时构建保留提示"""
         with patch("engine.agents.workflow.get_translator") as mock_get_translator:
             captured = []
@@ -1582,8 +1509,7 @@ class TestWorkflowCoverageGaps:
             assert len(captured) >= 1
 
     @pytest.mark.asyncio
-    @patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock, return_value=None)
-    async def test_phase1_only_extra_ids_hint(self, mock_aligner):
+    async def test_phase1_only_extra_ids_hint(self):
         """仅有 extra_ids 时构建删除提示"""
         with patch("engine.agents.workflow.get_translator") as mock_get_translator:
             captured = []
@@ -1612,8 +1538,7 @@ class TestWorkflowCoverageGaps:
             assert len(captured) >= 1
 
     @pytest.mark.asyncio
-    @patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock, return_value=None)
-    async def test_phase1_extra_ids_regex_parse(self, mock_aligner):
+    async def test_phase1_extra_ids_regex_parse(self):
         """验证 extra_ids 正则解析:多余:[id2]"""
         with patch("engine.agents.workflow.get_translator") as mock_get_translator:
             async def mock_arun(json_input):
@@ -1640,52 +1565,11 @@ class TestWorkflowCoverageGaps:
             assert output.content.status == TranslationStatus.UNTRANSLATED
 
     # -------------------------------------------------------------------------
-    # Phase 2 异常处理
-    # -------------------------------------------------------------------------
-
-    @pytest.mark.asyncio
-    async def test_phase2_exception_logged(self):
-        """Phase 2 抛出异常时应被捕获并记录"""
-        with patch("engine.agents.workflow.get_translator") as mock_get_translator, \
-             patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock) as mock_aligner, \
-             patch.object(logger, "warning") as mock_warn:
-
-            async def phase1_fail(json_input):
-                return MagicMock(content=MockTranslationResponse("无占位符"))
-
-            async def phase2_raises(*args, **kwargs):
-                raise RuntimeError("Phase 2 crashed")
-
-            mock_translator = MagicMock()
-            mock_translator.arun = phase1_fail
-            mock_get_translator.return_value = mock_translator
-            mock_aligner.side_effect = phase2_raises
-
-            chunk = Chunk(
-                name="phase2_crash",
-                original="[id0]Hello[id1]",
-                tokens=10,
-                global_indices=[0, 1],
-                local_tag_map={"[id0]": "<p>", "[id1]": "</p>"}
-            )
-            step_input = MagicMock(
-                input=chunk,
-                additional_data={"placeholder_mgr": MagicMock()}
-            )
-            output = await translate_step(step_input)
-            # Phase 2 异常被捕获，继续到 Phase 3
-            assert output.content.status == TranslationStatus.UNTRANSLATED
-            # 确认有 warning 日志
-            warning_msgs = [str(c) for c in mock_warn.call_args_list]
-            assert any("Phase 2" in m for m in warning_msgs)
-
-    # -------------------------------------------------------------------------
     # _call_translator: RunStatus.error 内容安全 + non-None error_content
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    @patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock, return_value=None)
-    async def test_call_translator_safety_error_with_content(self, mock_aligner):
+    async def test_call_translator_safety_error_with_content(self):
         """RunStatus.error + content 非空时抛出 ValueError"""
         with patch("engine.agents.workflow.get_translator") as mock_get_translator:
             call_count = [0]
@@ -1809,8 +1693,7 @@ class TestWorkflowCoverageGaps:
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    @patch("engine.agents.workflow.token_alignment_fallback", new_callable=AsyncMock, return_value=None)
-    async def test_phase1_extra_ids_hint_built(self, mock_aligner):
+    async def test_phase1_extra_ids_hint_built(self):
         """Phase 1 返回多余占位符时构建正确的提示（extra_ids 路径）"""
         with patch("engine.agents.workflow._call_translator", new_callable=AsyncMock) as mock_call:
             # _call_translator 返回后，validate_placeholders 失败，返回同时缺少和多余的错误

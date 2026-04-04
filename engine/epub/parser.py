@@ -7,15 +7,15 @@ from typing import List, Optional
 
 from bs4 import BeautifulSoup
 
-from engine.item import HtmlChunker, PreCodeExtractor, TagPreserver
-from engine.item.chunker import count_tokens
-from engine.schemas import EpubBook, EpubItem, Chunk
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
+from engine.item import HtmlChunker, PreCodeExtractor, TagPreserver
+from engine.item.chunker import count_tokens
+from engine.schemas import Chunk, EpubBook, EpubItem
 
 
 class Parser:
-    def __init__(self, path: str, limit: int = 1500):
+    def __init__(self, path: str, limit: int = 1200):
         self.limit = limit
         self.path = path
         self.output_dir = self._get_output_dir()
@@ -113,8 +113,16 @@ class Parser:
                         logger.warning(f"原始 HTML/XML 结构不完整: {relative_path}, 错误: {errors}")
 
                     # Step 1: BeautifulSoup 解析（规范化 HTML，确保标签配对）
-                    soup = BeautifulSoup(original_content, 'html.parser')
-                    normalized_content = str(soup)
+                    # XML 文件（如 toc.ncx）本身是格式良好的，不需要规范化处理
+                    needs_xml = original_content.strip().startswith("<?xml") or original_content.strip().startswith(
+                        "<ncx"
+                    )
+                    if needs_xml:
+                        # XML 文件直接使用原始内容，避免 BeautifulSoup 修改标签大小写
+                        normalized_content = original_content
+                    else:
+                        soup = BeautifulSoup(original_content, "html.parser")
+                        normalized_content = str(soup)
 
                     # Step 2: 提取 pre/code/style 标签为占位符（二级占位符方案）
                     pre_extractor = PreCodeExtractor()
@@ -126,23 +134,26 @@ class Parser:
                     # Step 4: 按块级 HTML 标签分割（先分块）
                     chunker = HtmlChunker(token_limit=self.limit)
                     raw_chunks = chunker.chunk_by_html_tags(
-                        content_after_pre,
-                        token_limit=self.limit,
-                        is_nav_file=is_nav_file
+                        content_after_pre, token_limit=self.limit, is_nav_file=is_nav_file
                     )
 
                     # Step 5: 对每个 chunk 单独做 TagPreserver
                     chunks = []
+                    preserver = TagPreserver()
                     for raw_chunk in raw_chunks:
-                        chunk_text, local_mgr = TagPreserver.preserve_tags(raw_chunk)
+                        chunk_text, local_mgr = preserver.preserve_tags(raw_chunk)
                         chunk = Chunk(
                             name=str(uuid.uuid4())[:8],
                             original=chunk_text,
-                            global_indices=sorted([int(k[3:-1]) for k in local_mgr.tag_map.keys()]),
+                            translated=None,
                             local_tag_map=local_mgr.tag_map,
                             tokens=count_tokens(chunk_text),
                         )
                         chunks.append(chunk)
+
+                    # Step 6: 对 toc.ncx 合并太小的相邻 chunks
+                    if is_nav_file:
+                        chunks = self._merge_small_nav_chunks(chunks, min_tokens=500)
 
                     epub_item = EpubItem(
                         id=relative_path,
@@ -159,6 +170,100 @@ class Parser:
         self.save_json(book)
 
         return book
+
+    def _merge_small_nav_chunks(self, chunks: List[Chunk], min_tokens: int = 500) -> List[Chunk]:
+        """
+        合并 toc.ncx 中太小的相邻 chunks
+
+        流程：
+        1. 先把占位符还原成原始 HTML
+        2. 合并 HTML
+        3. 重新生成占位符
+
+        Args:
+            chunks: 原始 chunks 列表
+            min_tokens: 最小 token 阈值
+
+        Returns:
+            合并后的 chunks 列表
+        """
+        if len(chunks) <= 1:
+            return chunks
+
+        # 第一步：把每个 chunk 的占位符还原成原始 HTML
+        restored_chunks = []
+        for c in chunks:
+            restored_html = self._restore_placeholders(c)
+            restored_chunks.append(restored_html)
+
+        # 第二步：贪婪合并太小的相邻 chunks
+        merged_htmls = []
+        i = 0
+        while i < len(restored_chunks):
+            current_html = restored_chunks[i]
+            current_text = self._extract_text_from_html(current_html)
+            current_tokens = count_tokens(current_text)
+
+            j = i + 1
+            while j < len(restored_chunks):
+                next_html = restored_chunks[j]
+                next_text = self._extract_text_from_html(next_html)
+                combined_tokens = current_tokens + count_tokens(next_text)
+
+                if current_tokens >= min_tokens and combined_tokens > min_tokens * 1.5:
+                    break
+
+                current_html += next_html
+                current_tokens = combined_tokens
+                j += 1
+
+            merged_htmls.append(current_html)
+            i = j
+
+        # 第三步：重新生成占位符
+        final_chunks = []
+        preserver = TagPreserver()
+        for html in merged_htmls:
+            chunk_text, local_mgr = preserver.preserve_tags(html)
+            chunk = Chunk(
+                name=str(uuid.uuid4())[:8],
+                original=chunk_text,
+                translated=None,
+                local_tag_map=local_mgr.tag_map,
+                tokens=count_tokens(chunk_text),
+            )
+            final_chunks.append(chunk)
+
+        return final_chunks
+
+    def _restore_placeholders(self, chunk: Chunk) -> str:
+        """
+        把 chunk 中的占位符还原成原始 HTML
+
+        Args:
+            chunk: 带占位符的 chunk
+
+        Returns:
+            还原后的原始 HTML
+        """
+        result = chunk.original
+        for placeholder, original_tag in chunk.local_tag_map.items():
+            result = result.replace(placeholder, original_tag)
+        return result
+
+    def _extract_text_from_html(self, html: str) -> str:
+        """
+        从 HTML 中提取可翻译文本（去掉标签后的纯文本）
+
+        Args:
+            html: HTML 文本
+
+        Returns:
+            纯文本
+        """
+        # 去掉所有 HTML 标签
+        text = re.sub(r"<[^>]+>", "", html)
+        return text
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ class TestVerifyHtmlIntegrity:
 
     def test_self_closing_tags(self):
         """测试自闭合标签"""
-        html = "<div><br/><img src='x'/><hr></div>"
+        html = "<div><br/><img src='x'/><hr/></div>"
         is_valid, errors = verify_html_integrity(html)
         assert is_valid is True
         assert errors == []
