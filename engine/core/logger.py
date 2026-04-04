@@ -3,7 +3,13 @@ import os
 import sys
 from typing import Optional
 
-from agno.utils.log import configure_agno_logging
+from agno.utils.log import (
+    agent_logger,
+    configure_agno_logging,
+    logger,
+    team_logger,
+    workflow_logger,
+)
 
 from .config import settings
 
@@ -11,22 +17,69 @@ from .config import settings
 _configured_loggers = set()
 
 
-def setup_agno_logging():
-    """配置 Agno 框架的日志记录器"""
-    # 创建默认logger（用于 global logger 和 log_debug）
-    default_logger = _create_logger("agno", settings.LOG_LEVEL)
-    # 创建各个组件的日志记录器
-    agent_logger = _create_logger("agno.agent", settings.LOG_LEVEL)
-    team_logger = _create_logger("agno.team", settings.LOG_LEVEL)
-    workflow_logger = _create_logger("agno.workflow", settings.LOG_LEVEL)
-
-    # 配置 Agno 使用自定义日志记录器
-    configure_agno_logging(
-        custom_default_logger=default_logger,
-        custom_agent_logger=agent_logger,
-        custom_team_logger=team_logger,
-        custom_workflow_logger=workflow_logger,
+def _get_json_formatter() -> logging.Formatter:
+    """创建 JSON 格式化器"""
+    return logging.Formatter(
+        '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "name": "%(name)s", "message": "%(message)s"}',
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def _get_text_formatter() -> logging.Formatter:
+    """创建文本格式化器"""
+    return logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+
+def _setup_logger_handlers(logger_instance: logging.Logger, level_str: str) -> None:
+    """为 logger 实例设置 handlers 和 formatter"""
+    # 移除所有现有的 handlers
+    for handler in logger_instance.handlers[:]:
+        logger_instance.removeHandler(handler)
+
+    # 设置日志级别
+    try:
+        log_level = getattr(logging, level_str.upper())
+    except AttributeError:
+        log_level = logging.INFO
+
+    # 根据设置选择 formatter
+    log_format = getattr(settings, "LOG_FORMAT", "text")
+    formatter = _get_json_formatter() if log_format == "json" else _get_text_formatter()
+
+    # 添加控制台 handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(formatter)
+    logger_instance.addHandler(console_handler)
+
+    # 添加文件 handler（如果配置了）
+    log_file = getattr(settings, "LOG_FILE", None)
+    if log_file:
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(formatter)
+        logger_instance.addHandler(file_handler)
+
+    logger_instance.setLevel(log_level)
+    logger_instance.propagate = False
+
+
+def setup_agno_logging():
+    """配置 Agno 框架的日志记录器，使用统一的 JSON 格式
+
+    注意：不能直接替换 logger 对象，因为其他模块已经导入了本地引用。
+    因此我们修改已有 logger 的 handlers。
+    """
+    level_str = getattr(settings, "LOG_LEVEL", "INFO") or "INFO"
+
+    # 修改 Agno 的各个 logger 的 handlers
+    for agno_logger in (logger, agent_logger, team_logger, workflow_logger):
+        _setup_logger_handlers(agno_logger, level_str)
 
 
 def _create_logger(name: str, level: Optional[str] = None) -> logging.Logger:
