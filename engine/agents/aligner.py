@@ -1,9 +1,104 @@
 import re
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Any
 
 
 BOUNDARIES = ' \t\n\r.,;:!?，。；：？！'
+
+
+def _replace_pre_placeholders(text: str, preserved: List[str], marker_prefix: str = "__PRE") -> Tuple[str, List[Tuple[str, str]]]:
+    """
+    替换 [PRE:n]/[CODE:n]/[STYLE:n] 为临时标记
+
+    Returns:
+        (替换后的文本, [(临时标记, 原始内容), ...])
+    """
+    markers = []
+    result = text
+    for i, pre in enumerate(preserved):
+        marker = f"{marker_prefix}{i}__"
+        result = result.replace(pre, marker)
+        markers.append((marker, pre))
+    return result, markers
+
+
+def _restore_pre_placeholders(text: str, markers: List[Tuple[str, str]]) -> str:
+    """恢复 [PRE:n]/[CODE:n]/[STYLE:n]"""
+    for marker, original in markers:
+        text = text.replace(marker, original)
+    return text
+
+
+async def token_alignment_fallback(
+    original: str,
+    local_tag_map: Dict[str, str],
+    preserved_pre: List[str] = None,
+    preserved_code: List[str] = None,
+    preserved_style: List[str] = None,
+    translate_func=None
+) -> Optional[str]:
+    """
+    Phase 2: Token Alignment Fallback
+
+    1. 移除 [PRE:n]/[CODE:n]/[STYLE:n]，记录位置
+    2. 移除 [idN] 得到纯净文本
+    3. 翻译纯净文本
+    4. 词级对齐重新插入 [idN]
+    5. 恢复 [PRE:n]/[CODE:n]/[STYLE:n]
+    """
+    if preserved_pre is None:
+        preserved_pre = []
+    if preserved_code is None:
+        preserved_code = []
+    if preserved_style is None:
+        preserved_style = []
+
+    # 合并所有 pre/code/style
+    all_preserved = preserved_pre + preserved_code + preserved_style
+
+    # 1. 移除 [PRE:n]/[CODE:n]/[STYLE:n]
+    temp = original
+    pre_markers = []
+
+    if all_preserved:
+        temp, pre_markers = _replace_pre_placeholders(temp, all_preserved)
+
+    # 2. 移除 [idN]
+    placeholders = list(local_tag_map.keys())
+    clean = temp
+    for ph in placeholders:
+        clean = clean.replace(ph, "")
+
+    if not clean.strip():
+        return None
+
+    # 3. 翻译
+    if translate_func is None:
+        # 默认翻译函数（需要根据实际情况调整）
+        from engine.agents.translator import get_translator
+        translator = get_translator()
+        response = await translator.arun(clean)
+        if hasattr(response, 'content') and hasattr(response.content, 'translation'):
+            translated = response.content.translation
+        else:
+            translated = str(response.content) if response.content else ""
+    else:
+        translated = await translate_func(clean)
+
+    if not translated:
+        return None
+
+    # 4. 对齐重新插入 [idN]
+    try:
+        aligned = _align(temp, translated, placeholders)
+    except Exception:
+        return None
+
+    # 5. 恢复 [PRE:n]/[CODE:n]/[STYLE:n]
+    if pre_markers:
+        aligned = _restore_pre_placeholders(aligned, pre_markers)
+
+    return aligned
 
 
 def _find_positions(text: str, placeholders: List[str]) -> List[Tuple[int, int, str]]:

@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en" xml:lang="en">
+<head>
+<title>1. Getting Started</title>
+<meta http-equiv="default-style" content="text/html; charset=utf-8"/>
+<link rel="stylesheet" type="text/css" href="../styles/stylesheet.css"/>
+</head>
+<body epub:type="bodymatter">
+<section epub:type="chapter" role="doc-chapter" aria-labelledby="ch1">
+<span role="doc-pagebreak" epub:type="pagebreak" id="pg_1" aria-label="1"/>
+<hgroup>
+<h1 class="CHAPTER" id="ch1">
+<span class="CN"><span class="SANS_Futura_Std_Bold_Condensed_B_11">1</span></span>
+<span class="CT"><span class="SANS_Dogma_OT_Bold_B_11">GETTING STARTED</span></span>
+</h1>
+</hgroup>
+<figure class="opener"><img class="opener" src="../images/opener.jpg" role="presentation" alt=""/>
+</figure>
+<p class="INTRO">Let&#x2019;s start your Rust journey! There&#x2019;s a lot to learn, but every journey starts somewhere. In this chapter, we&#x2019;ll discuss:</p>
+<ul class="BL">
+<li class="BL-INTRO">Installing Rust on Linux, macOS, and Windows</li>
+<li class="BL-INTRO">Writing a program that prints <span class="SANS_TheSansMonoCd_W5Regular_11">Hello, world!</span></li>
+<li class="BL-INTRO">Using <span class="SANS_TheSansMonoCd_W5Regular_11">cargo</span>, Rust&#x2019;s package manager and build system</li>
+</ul>
+<section epub:type="division" aria-labelledby="sec1">
+<h2 class="H1" id="sec1"><span id="toc-link-10"/><span class="SANS_Futura_Std_Bold_B_11">Installation</span></h2>
+<p class="TNI">The first step is to install Rust. We&#x2019;ll download Rust through <span class="SANS_TheSansMonoCd_W5Regular_11">rustup</span>, a command line tool for managing Rust versions and associated tools. You&#x2019;ll need an internet connection for the download.</p>
+<span role="doc-pagebreak" epub:type="pagebreak" id="pg_2" aria-label="2"/>
+<blockquote>
+<p class="NOTE"><span class="SANS_Dogma_OT_Bold_B_15-1">NOTE</span></p>
+</blockquote>
+<p class="NOTE-TXT"><i>If you prefer not to use rustup for some reason, please see the Other Rust Installation Methods page at</i> <a href="https://forge.rust-lang.org/infra/other-installation-methods.html">https://<wbr/>forge<wbr/>.rust<wbr/>-lang<wbr/>.org<wbr/>/infra<wbr/>/other<wbr/>-installation<wbr/>-methods<wbr/>.html</a> <i>for more options.</i></p>
+<p class="TX">The following steps install the latest stable version of the Rust compiler. Rust&#x2019;s stability guarantees ensure that all the examples in the book that compile will continue to compile with newer Rust versions. The output might differ slightly between versions because Rust often improves error messages and warnings. In other words, any newer, stable version of Rust you install using these steps should work as expected with the content of this book.</p>
+<aside class="box" aria-label="box-1">
+<p class="BH"><span class="SANS_Dogma_OT_Bold_B_11">COMMAND LINE NOTATION</span></p>
+<p class="BTNIS"><span class="SANS_Futura_Std_Book_11">In this chapter and throughout the book, we&#x2019;ll show some commands used in the terminal. Lines that you should enter in a terminal all start with</span> <span class="SANS_TheSansMonoCd_W5Regular_11">$</span><span class="SANS_Futura_Std_Book_11">. You don&#x2019;t need to type the</span> <span class="SANS_TheSansMonoCd_W5Regular_11">$</span> <span class="SANS_Futura_Std_Book_11">character; it&#x2019;s the command line prompt shown to indicate the start of each command. Lines that don&#x2019;t start with</span> <span class="SANS_TheSansMonoCd_W5Regular_11">$</span> <span class="SANS_Futura_Std_Book_11">typically show the output of the previous command. Additionally, PowerShell-specific examples will use</span> <span class="SANS_TheSansMonoCd_W5Regular_11">&gt;</span> <span class="SANS_Futura_Std_Book_11">rather than</span> <span class="SANS_TheSansMonoCd_W5Regular_11">$</span><span class="SANS_Futura_Std_Book_11">.</span></p>
+</aside>
+<section epub:type="division" aria-labelledby="sec2">
+<h3 class="H2" id="sec2"><span id="toc-link-11"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Installing rustup on Linux or macOS</span></h3>
+<p class="TNI">If you&#x2019;re using Linux or macOS, open a terminal and enter the following command:</p>
+<pre class="pre1"><code>$ <b>curl --proto &apos;=</b><b>https&apos;</b><b> --tlsv1.2 </b><b>https://sh.rustup.rs</b><b> -sSf | sh</b></code></pre>
+<p class="TX">The command downloads a script and starts the installation of the <span class="SANS_TheSansMonoCd_W5Regular_11">rustup</span> tool, which installs the latest stable version of Rust. You might be prompted for your password. If the install is successful, the following line will appear:</p>
+<pre class="pre1"><code>Rust is installed now. Great!</code></pre>
+<p class="TX">You will also need a <i>linker</i>, which is a program that Rust uses to join its compiled outputs into one file. It is likely you already have one. If you get linker errors, you should install a C compiler, which will typically include a linker. A C compiler is also useful because some common Rust packages depend on C code and will need a C compiler.</p>
+<p class="TX">On macOS, you can get a C compiler by running:</p>
+<pre class="pre1"><code>$ <b>xcode-select --install</b></code></pre>
+<p class="TX"><span role="doc-pagebreak" epub:type="pagebreak" id="pg_3" aria-label="3"/>Linux users should generally install GCC or Clang, according to their distribution&#x2019;s documentation. For example, if you use Ubuntu, you can install the <span class="SANS_TheSansMonoCd_W5Regular_11">build-essential</span> package.</p>
+</section>
+<section epub:type="division" aria-labelledby="sec3">
+<h3 class="H2" id="sec3"><span id="toc-link-12"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Installing rustup on Windows</span></h3>
+<p class="TNI">On Windows, go to <a href="https://www.rust-lang.org/tools/install/"><i>https://<wbr/>www<wbr/>.rust<wbr/>-lang<wbr/>.org<wbr/>/tools<wbr/>/install<wbr/>/</i></a> and follow the instructions for installing Rust. At some point in the installation, you&#x2019;ll be prompted to install Visual Studio. This provides a linker and the native libraries needed to compile programs. If you need more help with this step, see <a href="https://rust-lang.github.io/rustup/installation/windows-msvc.html"><i>https://<wbr/>rust<wbr/>-lang<wbr/>.github<wbr/>.io<wbr/>/rustup<wbr/>/installation<wbr/>/windows<wbr/>-msvc<wbr/>.html</i></a>.</p>
+<p class="TX">The rest of this book uses commands that work in both <i>cmd</i>.<i>exe</i> and PowerShell. If there are specific differences, we&#x2019;ll explain which to use.</p>
+</section>
+<section epub:type="division" aria-labelledby="sec4">
+<h3 class="H2" id="sec4"><span id="toc-link-13"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Troubleshooting</span></h3>
+<p class="TNI">To check whether you have Rust installed correctly, open a shell and enter this line:</p>
+<pre class="pre1"><code>$ <b>rustc --version</b></code></pre>
+<p class="TX">You should see the version number, commit hash, and commit date for the latest stable version that has been released, in the following format:</p>
+<pre class="pre1"><code>rustc <var>x</var>.<var>y</var>.<var>z</var> (<var>abcabcabc yyyy-mm-dd</var>)</code></pre>
+<p class="TX">If you see this information, you have installed Rust successfully! If you don&#x2019;t see this information, check that Rust is in your <span class="SANS_TheSansMonoCd_W5Regular_11">%PATH%</span> system variable as follows.</p>
+<p class="TX">In Windows CMD, use:</p>
+<pre class="pre1"><code>&gt; <b>echo %PATH%</b></code></pre>
+<p class="TX">In PowerShell, use:</p>
+<pre class="pre1"><code>&gt; <b>echo $env:Path</b></code></pre>
+<p class="TX">In Linux and macOS, use:</p>
+<pre class="pre1"><code>$ <b>echo $PATH</b></code></pre>
+<p class="TX">If that&#x2019;s all correct and Rust still isn&#x2019;t working, there are a number of places you can get help. Find out how to get in touch with other Rustaceans (a silly nickname we call ourselves) on the community page at <a href="https://www.rust-lang.org/community/"><i>https://<wbr/>www<wbr/>.rust<wbr/>-lang<wbr/>.org<wbr/>/community<wbr/>/</i></a>.</p>
+</section>
+<section epub:type="division" aria-labelledby="sec5">
+<span role="doc-pagebreak" epub:type="pagebreak" id="pg_4" aria-label="4"/>
+<h3 class="H2" id="sec5"><span id="toc-link-14"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Updating and Uninstalling</span></h3>
+<p class="TNI">Once Rust is installed via <span class="SANS_TheSansMonoCd_W5Regular_11">rustup</span>, updating to a newly released version is easy. From your shell, run the following update script:</p>
+<pre class="pre1"><code>$ <b>rustup update</b></code></pre>
+<p class="TX">To uninstall Rust and <span class="SANS_TheSansMonoCd_W5Regular_11">rustup</span>, run the following uninstall script from your shell:</p>
+<pre class="pre1"><code>$ <b>rustup self uninstall</b></code></pre>
+</section>
+<section epub:type="division" aria-labelledby="sec6">
+<h3 class="H2" id="sec6"><span id="toc-link-15"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Reading the Local Documentation</span></h3>
+<p class="TNI">The installation of Rust also includes a local copy of the documentation so that you can read it offline. Run <span class="SANS_TheSansMonoCd_W5Regular_11">rustup doc</span> to open the local documentation in your browser.</p>
+<p class="TX">Any time a type or function is provided by the standard library and you&#x2019;re not sure what it does or how to use it, use the application programming interface (API) documentation to find out!</p>
+</section>
+<section epub:type="division" aria-labelledby="sec7">
+<h3 class="H2" id="sec7"><span id="toc-link-16"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Using Text Editors and IDEs</span></h3>
+<p class="TNI">This book makes no assumptions about what tools you use to author Rust code. Just about any text editor will get the job done! However, many text editors and integrated development environments (IDEs) have built-in support for Rust. You can always find a current list of many editors and IDEs on the tools page at <a href="https://www.rust-lang.org/tools/"><i>https://<wbr/>www<wbr/>.rust<wbr/>-lang<wbr/>.org<wbr/>/tools<wbr/>/</i></a> on the Rust website.</p>
+</section>
+</section>
+<section epub:type="division" aria-labelledby="sec8">
+<h2 class="H1" id="sec8"><span id="toc-link-17"/><span class="SANS_Futura_Std_Bold_B_11">Hello, World!</span></h2>
+<p class="TNI">Now that you&#x2019;ve installed Rust, it&#x2019;s time to write your first Rust program. It&#x2019;s traditional when learning a new language to write a little program that prints the text <span class="SANS_TheSansMonoCd_W5Regular_11">Hello, world!</span> to the screen, so we&#x2019;ll do the same here!</p>
+<blockquote>
+<p class="NOTE"><span class="SANS_Dogma_OT_Bold_B_15-1">NOTE</span></p>
+</blockquote>
+<p class="NOTE-TXT"><i>This book assumes basic familiarity with the command line. Rust makes no specific demands about your editing or tooling or where your code lives, so if you prefer to use an IDE instead of the command line, feel free to use your favorite IDE. Many IDEs now have some degree of Rust support; check the IDE&#x2019;s documentation for details. The Rust team has been focusing on enabling great IDE support via rust-analyzer. See <a href="appendix-d.xhtml">Appendix D</a> for more details.</i></p>
+<section epub:type="division" aria-labelledby="sec9">
+<h3 class="H2" id="sec9"><span id="toc-link-18"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Project Directory Setup</span></h3>
+<p class="TNI">You&#x2019;ll start by making a directory to store your Rust code. It doesn&#x2019;t matter to Rust where your code lives, but for the exercises and projects in this book, we suggest making a <i>projects</i> directory in your home directory and keeping all your projects there.</p>
+<p class="TX"><span role="doc-pagebreak" epub:type="pagebreak" id="pg_5" aria-label="5"/>Open a terminal and enter the following commands to make a <i>projects</i> directory and a directory for the &#x201C;Hello, world!&#x201D; project within the <i>projects</i> directory.</p>
+<p class="TX">For Linux, macOS, and PowerShell on Windows, enter this:</p>
+<pre class="pre1"><code>$ <b>mkdir ~/projects</b>
+$ <b>cd ~/projects</b>
+$ <b>mkdir hello_world</b>
+$ <b>cd hello_world</b></code></pre>
+<p class="TX">For Windows CMD, enter this:</p>
+<pre class="pre1"><code>&gt; <b>mkdir &quot;%USERPROFILE%\projects&quot;</b>
+&gt; <b>cd /d &quot;%USERPROFILE%\projects&quot;</b>
+&gt; <b>mkdir hello_world</b>
+&gt; <b>cd hello_world</b></code></pre>
+</section>
+<section epub:type="division" aria-labelledby="sec10">
+<h3 class="H2" id="sec10"><span id="toc-link-19"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Rust Program Basics</span></h3>
+<p class="TNI">Next, make a new source file and call it <i>main.rs</i>. Rust files always end with the <i>.rs</i> extension. If you&#x2019;re using more than one word in your filename, the convention is to use an underscore to separate them. For example, use <i>hello_world.rs</i> rather than <i>helloworld.rs</i>.</p>
+<p class="TX">Now open the <i>main.rs</i> file you just created and enter the code in <a href="chapter1.xhtml#list1-1">Listing 1-1</a>.</p>
+<a id="list1-1"/>
+<p class="Code"><i><b>main.rs</b></i></p>
+<pre class="pre1"><code>fn main() {
+    println!(&quot;Hello, world!&quot;);
+}</code></pre>
+<p class="CodeListingCaption"><span class="eSANS_Futura_Std_Book_Oblique_I_11">Listing 1-1: A program that prints Hello, world!</span></p>
+<p class="TX">Save the file and go back to your terminal window in the <i>~/projects/hello_world</i> directory. On Linux or macOS, enter the following commands to compile and run the file:</p>
+<pre class="pre1"><code>$ <b>rustc main.rs</b>
+$ <b>./main</b>
+Hello, world!</code></pre>
+<p class="TX">On Windows, enter the command <span class="SANS_TheSansMonoCd_W5Regular_11">.\main</span> instead of <span class="SANS_TheSansMonoCd_W5Regular_11">./main</span>:</p>
+<pre class="pre1"><code>&gt; <b>rustc main.rs</b>
+&gt; <b>.\main</b>
+Hello, world!</code></pre>
+<p class="TX">Regardless of your operating system, the string <span class="SANS_TheSansMonoCd_W5Regular_11">Hello, world!</span> should print to the terminal. If you don&#x2019;t see this output, refer back to &#x201C;Troubleshooting&#x201D; on <a href="chapter1.xhtml#pg_3">page 3</a> for ways to get help.</p>
+<p class="TX"><span role="doc-pagebreak" epub:type="pagebreak" id="pg_6" aria-label="6"/>If <span class="SANS_TheSansMonoCd_W5Regular_11">Hello, world!</span> did print, congratulations! You&#x2019;ve officially written a Rust program. That makes you a Rust programmer&#x2014;welcome!</p>
+</section>
+<section epub:type="division" aria-labelledby="sec11">
+<h3 class="H2" id="sec11"><span id="toc-link-20"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Anatomy of a Rust Program</span></h3>
+<p class="TNI">Let&#x2019;s review this &#x201C;Hello, world!&#x201D; program in detail. Here&#x2019;s the first piece of the puzzle:</p>
+<pre class="pre1"><code>fn main() {
+}</code></pre>
+<p class="TX">These lines define a function named <span class="SANS_TheSansMonoCd_W5Regular_11">main</span>. The <span class="SANS_TheSansMonoCd_W5Regular_11">main</span> function is special: It is always the first code that runs in every executable Rust program. Here, the first line declares a function named <span class="SANS_TheSansMonoCd_W5Regular_11">main</span> that has no parameters and returns nothing. If there were parameters, they would go inside the parentheses (<span class="SANS_TheSansMonoCd_W5Regular_11">()</span>).</p>
+<p class="TX">The function body is wrapped in curly brackets (<span class="SANS_TheSansMonoCd_W5Regular_11">{}</span>). Rust requires curly brackets around all function bodies. It&#x2019;s good style to place the opening curly bracket on the same line as the function declaration, adding one space in between.</p>
+<blockquote>
+<p class="NOTE"><span class="SANS_Dogma_OT_Bold_B_15-1">NOTE</span></p>
+</blockquote>
+<p class="NOTE-TXT"><i>If you want to stick to a standard style across Rust projects, you can use an automatic formatter tool called <span class="mono-italic">rustfmt</span> to format your code in a particular style (more on rustfmt in <a href="appendix-d.xhtml">Appendix D</a>). The Rust team has included this tool with the standard Rust distribution, as rustc is, so it should already be installed on your computer!</i></p>
+<p class="TX">The body of the <span class="SANS_TheSansMonoCd_W5Regular_11">main</span> function holds the following code:</p>
+<pre class="pre1"><code>    println!(&quot;Hello, world!&quot;);</code></pre>
+<p class="TX">This line does all the work in this little program: It prints text to the screen. There are three important details to notice here.</p>
+<p class="TX">First, <span class="SANS_TheSansMonoCd_W5Regular_11">println!</span> calls a Rust macro. If it had called a function instead, it would be entered as <span class="SANS_TheSansMonoCd_W5Regular_11">println</span> (without the <span class="SANS_TheSansMonoCd_W5Regular_11">!</span>). Rust macros are a way to write code that generates code to extend Rust syntax, and we&#x2019;ll discuss them in more detail in <a href="chapter20.xhtml">Chapter 20</a>. For now, you just need to know that using a <span class="SANS_TheSansMonoCd_W5Regular_11">!</span> means that you&#x2019;re calling a macro instead of a normal function and that macros don&#x2019;t always follow the same rules as functions.</p>
+<p class="TX">Second, you see the <span class="SANS_TheSansMonoCd_W5Regular_11">&quot;Hello, world!&quot;</span> string. We pass this string as an argument to <span class="SANS_TheSansMonoCd_W5Regular_11">println!</span>, and the string is printed to the screen.</p>
+<p class="TX">Third, we end the line with a semicolon (<span class="SANS_TheSansMonoCd_W5Regular_11">;</span>), which indicates that this expression is over and the next one is ready to begin. Most lines of Rust code end with a semicolon.</p>
+</section>
+<section epub:type="division" aria-labelledby="sec12">
+<h3 class="H2" id="sec12"><span id="toc-link-21"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Compilation and Execution</span></h3>
+<p class="TNI">You&#x2019;ve just run a newly created program, so let&#x2019;s examine each step in the process.</p>
+<p class="TX"><span role="doc-pagebreak" epub:type="pagebreak" id="pg_7" aria-label="7"/>Before running a Rust program, you must compile it using the Rust compiler by entering the <span class="SANS_TheSansMonoCd_W5Regular_11">rustc</span> command and passing it the name of your source file, like this:</p>
+<pre class="pre1"><code>$ <b>rustc main.rs</b></code></pre>
+<p class="TX">If you have a C or C++ background, you&#x2019;ll notice that this is similar to <span class="SANS_TheSansMonoCd_W5Regular_11">gcc</span> or <span class="SANS_TheSansMonoCd_W5Regular_11">clang</span>. After compiling successfully, Rust outputs a binary executable.</p>
+<p class="TX">On Linux, macOS, and PowerShell on Windows, you can see the executable by entering the <span class="SANS_TheSansMonoCd_W5Regular_11">ls</span> command in your shell:</p>
+<pre class="pre1"><code>$ <b>ls</b>
+main  main.rs</code></pre>
+<p class="TX">On Linux and macOS, you&#x2019;ll see two files. With PowerShell on Windows, you&#x2019;ll see the same three files that you would see using CMD. With CMD on Windows, you would enter the following:</p>
+<pre class="pre1"><code>&gt; <b>dir /B %= the /B option says to only show the file names =%</b>
+main.exe
+main.pdb
+main.rs</code></pre>
+<p class="TX">This shows the source code file with the <i>.rs</i> extension, the executable file (<i>main.exe</i> on Windows, but <i>main</i> on all other platforms), and, when using Windows, a file containing debugging information with the <i>.pdb</i> extension. From here, you run the <i>main</i> or <i>main.exe</i> file, like this:</p>
+<pre class="pre1"><code>$ <b>./main # or .\main on Windows</b></code></pre>
+<p class="TX">If your <i>main.rs</i> is your &#x201C;Hello, world!&#x201D; program, this line prints <span class="SANS_TheSansMonoCd_W5Regular_11">Hello, world!</span> to your terminal.</p>
+<p class="TX">If you&#x2019;re more familiar with a dynamic language, such as Ruby, Python, or JavaScript, you might not be used to compiling and running a program as separate steps. Rust is an <i>ahead-of-time compiled</i> language, meaning you can compile a program and give the executable to someone else, and they can run it even without having Rust installed. If you give someone a <i>.rb</i>, <i>.py</i>, or <i>.js</i> file, they need to have a Ruby, Python, or JavaScript implementation installed (respectively). But in those languages, you only need one command to compile and run your program. Everything is a trade-off in language design.</p>
+<p class="TX">Just compiling with <span class="SANS_TheSansMonoCd_W5Regular_11">rustc</span> is fine for simple programs, but as your project grows, you&#x2019;ll want to manage all the options and make it easy to share your code. Next, we&#x2019;ll introduce you to the Cargo tool, which will help you write real-world Rust programs.</p>
+</section>
+</section>
+<section epub:type="division" aria-labelledby="sec13">
+<h2 class="H1" id="sec13"><span id="toc-link-22"/><span class="SANS_Futura_Std_Bold_B_11">Hello, Cargo!</span></h2>
+<p class="TNI">Cargo is Rust&#x2019;s build system and package manager. Most Rustaceans use this tool to manage their Rust projects because Cargo handles a lot of tasks <span role="doc-pagebreak" epub:type="pagebreak" id="pg_8" aria-label="8"/>for you, such as building your code, downloading the libraries your code depends on, and building those libraries. (We call the libraries that your code needs <i>dependencies</i>.)</p>
+<p class="TX">The simplest Rust programs, like the one we&#x2019;ve written so far, don&#x2019;t have any dependencies. If we had built the &#x201C;Hello, world!&#x201D; project with Cargo, it would only use the part of Cargo that handles building your code. As you write more complex Rust programs, you&#x2019;ll add dependencies, and if you start a project using Cargo, adding dependencies will be much easier to do.</p>
+<p class="TX">Because the vast majority of Rust projects use Cargo, the rest of this book assumes that you&#x2019;re using Cargo too. Cargo comes installed with Rust if you used the official installers discussed in &#x201C;Installation&#x201D; on <a href="chapter1.xhtml#pg_1">page 1</a>. If you installed Rust through some other means, check whether Cargo is installed by entering the following in your terminal:</p>
+<pre class="pre1"><code>$ <b>cargo --version</b></code></pre>
+<p class="TX">If you see a version number, you have it! If you see an error, such as <span class="SANS_TheSansMonoCd_W5Regular_11">command not found</span>, look at the documentation for your method of installation to determine how to install Cargo separately.</p>
+<section epub:type="division" aria-labelledby="sec14">
+<h3 class="H2" id="sec14"><span id="toc-link-23"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Creating a Project with Cargo</span></h3>
+<p class="TNI">Let&#x2019;s create a new project using Cargo and look at how it differs from our original &#x201C;Hello, world!&#x201D; project. Navigate back to your <i>projects</i> directory (or wherever you decided to store your code). Then, on any operating system, run the following:</p>
+<pre class="pre1"><code>$ <b>cargo new hello_cargo</b>
+$ <b>cd hello_cargo</b></code></pre>
+<p class="TX">The first command creates a new directory and project called <i>hello_cargo</i>. We&#x2019;ve named our project <i>hello_cargo</i>, and Cargo creates its files in a directory of the same name.</p>
+<p class="TX">Go into the <i>hello_cargo</i> directory and list the files. You&#x2019;ll see that Cargo has generated two files and one directory for us: a <i>Cargo.toml</i> file and a <i>src</i> directory with a <i>main.rs</i> file inside.</p>
+<p class="TX">It has also initialized a new Git repository along with a <i>.gitignore</i> file. Git files won&#x2019;t be generated if you run <span class="SANS_TheSansMonoCd_W5Regular_11">cargo new</span> within an existing Git repository; you can override this behavior by using <span class="SANS_TheSansMonoCd_W5Regular_11">cargo new --vcs=git</span>.</p>
+<blockquote>
+<p class="NOTE"><span class="SANS_Dogma_OT_Bold_B_15-1">NOTE</span></p>
+</blockquote>
+<p class="NOTE-TXT"><i>Git is a common version control system. You can change <span class="mono-italic">cargo</span> new to use a different version control system or no version control system by using the <span class="mono-italic">--vcs</span> flag. Run <span class="mono-italic">cargo new --help</span> to see the available options.</i></p>
+<p class="TX">Open <i>Cargo.toml</i> in your text editor of choice. It should look similar to the code in <a href="chapter1.xhtml#list1-2">Listing 1-2</a>.</p>
+<a id="list1-2"/>
+<p class="Code"><i><b>Cargo.toml</b></i></p>
+<pre class="pre1"><code><span role="doc-pagebreak" epub:type="pagebreak" id="pg_9" aria-label="9"/>[package]
+name = &quot;hello_cargo&quot;
+version = &quot;0.1.0&quot;
+edition = &quot;2024&quot;
+
+[dependencies]</code></pre>
+<p class="CodeListingCaption"><span class="eSANS_Futura_Std_Book_Oblique_I_11">Listing 1-2: The contents of</span> <span class="eSANS_Futura_Std_Book_11">Cargo.toml</span> <span class="eSANS_Futura_Std_Book_Oblique_I_11">generated by cargo new</span></p>
+<p class="TX">This file is in the <i>TOML (Tom&#x2019;s Obvious, Minimal Language)</i> format, which is Cargo&#x2019;s configuration format.</p>
+<p class="TX">The first line, <span class="SANS_TheSansMonoCd_W5Regular_11">[package]</span>, is a section heading that indicates that the following statements are configuring a package. As we add more information to this file, we&#x2019;ll add other sections.</p>
+<p class="TX">The next three lines set the configuration information Cargo needs to compile your program: the name, the version, and the edition of Rust to use. We&#x2019;ll talk about the <span class="SANS_TheSansMonoCd_W5Regular_11">edition</span> key in <a href="appendix-e.xhtml">Appendix E</a>.</p>
+<p class="TX">The last line, <span class="SANS_TheSansMonoCd_W5Regular_11">[dependencies]</span>, is the start of a section for you to list any of your project&#x2019;s dependencies. In Rust, packages of code are referred to as <i>crates</i>. We won&#x2019;t need any other crates for this project, but we will in the first project in <a href="chapter2.xhtml">Chapter 2</a>, so we&#x2019;ll use this dependencies section then.</p>
+<p class="TX">Now open <i>src/main.rs</i> and take a look:</p>
+<p class="Code"><i><b>src/main.rs</b></i></p>
+<pre class="pre1"><code>fn main() {
+    println!(&quot;Hello, world!&quot;);
+}</code></pre>
+<p class="TX">Cargo has generated a &#x201C;Hello, world!&#x201D; program for you, just like the one we wrote in <a href="chapter1.xhtml#list1-1">Listing 1-1</a>! So far, the differences between our project and the project Cargo generated are that Cargo placed the code in the <i>src</i> directory, and we have a <i>Cargo.toml</i> configuration file in the top directory.</p>
+<p class="TX">Cargo expects your source files to live inside the <i>src</i> directory. The top-level project directory is just for README files, license information, configuration files, and anything else not related to your code. Using Cargo helps you organize your projects. There&#x2019;s a place for everything, and everything is in its place.</p>
+<p class="TX">If you started a project that doesn&#x2019;t use Cargo, as we did with the &#x201C;Hello, world!&#x201D; project, you can convert it to a project that does use Cargo. Move the project code into the <i>src</i> directory and create an appropriate <i>Cargo.toml</i> file. One easy way to get that <i>Cargo.toml</i> file is to run <span class="SANS_TheSansMonoCd_W5Regular_11">cargo init</span>, which will create it for you automatically.</p>
+</section>
+<section epub:type="division" aria-labelledby="sec15">
+<h3 class="H2" id="sec15"><span id="toc-link-24"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Building and Running a Cargo Project</span></h3>
+<p class="TNI">Now let&#x2019;s look at what&#x2019;s different when we build and run the &#x201C;Hello, world!&#x201D; program with Cargo! From your <i>hello_cargo</i> directory, build your project by entering the following command:</p>
+<pre class="pre1"><code>$ <b>cargo build</b>
+   Compiling hello_cargo v0.1.0 (file:///projects/hello_cargo)
+    Finished dev [unoptimized + debuginfo] target(s) in 2.85 secs</code></pre>
+<p class="TX"><span role="doc-pagebreak" epub:type="pagebreak" id="pg_10" aria-label="10"/>This command creates an executable file in <i>target/debug/hello_cargo</i> (or <i>target\debug\hello_cargo.exe</i> on Windows) rather than in your current directory. Because the default build is a debug build, Cargo puts the binary in a directory named <i>debug</i>. You can run the executable with this command:</p>
+<pre class="pre1"><code>$ <b>./target/debug/hello_cargo # or .\target\debug\hello_cargo.exe on Windows</b>
+Hello, world!</code></pre>
+<p class="TX">If all goes well, <span class="SANS_TheSansMonoCd_W5Regular_11">Hello, world!</span> should print to the terminal. Running <span class="SANS_TheSansMonoCd_W5Regular_11">cargo build</span> for the first time also causes Cargo to create a new file at the top level: <i>Cargo.lock</i>. This file keeps track of the exact versions of dependencies in your project. This project doesn&#x2019;t have dependencies, so the file is a bit sparse. You won&#x2019;t ever need to change this file manually; Cargo manages its contents for you.</p>
+<p class="TX">We just built a project with <span class="SANS_TheSansMonoCd_W5Regular_11">cargo build</span> and ran it with <span class="SANS_TheSansMonoCd_W5Regular_11">./target/debug/hello_cargo</span>, but we can also use <span class="SANS_TheSansMonoCd_W5Regular_11">cargo run</span> to compile the code and then run the resultant executable all in one command:</p>
+<pre class="pre1"><code>$ <b>cargo run</b>
+    Finished dev [unoptimized + debuginfo] target(s) in 0.0 secs
+     Running `target/debug/hello_cargo`
+Hello, world!</code></pre>
+<p class="TX">Using <span class="SANS_TheSansMonoCd_W5Regular_11">cargo run</span> is more convenient than having to remember to run <span class="SANS_TheSansMonoCd_W5Regular_11">cargo build</span> and then use the whole path to the binary, so most developers use <span class="SANS_TheSansMonoCd_W5Regular_11">cargo run</span>.</p>
+<p class="TX">Notice that this time we didn&#x2019;t see output indicating that Cargo was compiling <span class="SANS_TheSansMonoCd_W5Regular_11">hello_cargo</span>. Cargo figured out that the files hadn&#x2019;t changed, so it didn&#x2019;t rebuild but just ran the binary. If you had modified your source code, Cargo would have rebuilt the project before running it, and you would have seen this output:</p>
+<pre class="pre1"><code>$ <b>cargo run</b>
+   Compiling hello_cargo v0.1.0 (file:///projects/hello_cargo)
+    Finished dev [unoptimized + debuginfo] target(s) in 0.33 secs
+     Running `target/debug/hello_cargo`
+Hello, world!</code></pre>
+<p class="TX">Cargo also provides a command called <span class="SANS_TheSansMonoCd_W5Regular_11">cargo check</span>. This command quickly checks your code to make sure it compiles but doesn&#x2019;t produce an executable:</p>
+<pre class="pre1"><code>$ <b>cargo check</b>
+   Checking hello_cargo v0.1.0 (file:///projects/hello_cargo)
+    Finished dev [unoptimized + debuginfo] target(s) in 0.32 secs</code></pre>
+<p class="TX">Why would you not want an executable? Often, <span class="SANS_TheSansMonoCd_W5Regular_11">cargo check</span> is much faster than <span class="SANS_TheSansMonoCd_W5Regular_11">cargo build</span> because it skips the step of producing an executable. If you&#x2019;re continually checking your work while writing the code, using <span class="SANS_TheSansMonoCd_W5Regular_11">cargo</span> <span role="doc-pagebreak" epub:type="pagebreak" id="pg_11" aria-label="11"/><span class="SANS_TheSansMonoCd_W5Regular_11">check</span> will speed up the process of letting you know if your project is still compiling! Therefore, many Rustaceans run <span class="SANS_TheSansMonoCd_W5Regular_11">cargo check</span> periodically as they write their program to make sure it compiles. Then, they run <span class="SANS_TheSansMonoCd_W5Regular_11">cargo build</span> when they&#x2019;re ready to use the executable.</p>
+<p class="TX">Let&#x2019;s recap what we&#x2019;ve learned so far about Cargo:</p>
+<ul class="BL">
+<li class="BL">We can create a project using <span class="SANS_TheSansMonoCd_W5Regular_11">cargo new</span>.</li>
+<li class="BL">We can build a project using <span class="SANS_TheSansMonoCd_W5Regular_11">cargo build</span>.</li>
+<li class="BL">We can build and run a project in one step using <span class="SANS_TheSansMonoCd_W5Regular_11">cargo run</span>.</li>
+<li class="BL">We can build a project without producing a binary to check for errors using <span class="SANS_TheSansMonoCd_W5Regular_11">cargo check</span>.</li>
+<li class="BL">Instead of saving the result of the build in the same directory as our code, Cargo stores it in the <i>target/debug</i> directory.</li>
+</ul>
+<p class="TX">An additional advantage of using Cargo is that the commands are the same no matter which operating system you&#x2019;re working on. So, at this point, we&#x2019;ll no longer provide specific instructions for Linux and macOS versus Windows.</p>
+</section>
+<section epub:type="division" aria-labelledby="sec16">
+<h3 class="H2" id="sec16"><span id="toc-link-25"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Building for Release</span></h3>
+<p class="TNI">When your project is finally ready for release, you can use <span class="SANS_TheSansMonoCd_W5Regular_11">cargo build --release</span> to compile it with optimizations. This command will create an executable in <i>target/release</i> instead of <i>target/debug</i>. The optimizations make your Rust code run faster, but turning them on lengthens the time it takes for your program to compile. This is why there are two different profiles: one for development, when you want to rebuild quickly and often, and another for building the final program you&#x2019;ll give to a user that won&#x2019;t be rebuilt repeatedly and that will run as fast as possible. If you&#x2019;re benchmarking your code&#x2019;s running time, be sure to run <span class="SANS_TheSansMonoCd_W5Regular_11">cargo build --release</span> and benchmark with the executable in <i>target/release</i>.</p>
+</section>
+<section epub:type="division" aria-labelledby="sec17">
+<h3 class="H2" id="sec17"><span id="toc-link-26"/><span class="SANS_Futura_Std_Bold_Condensed_Oblique_BI_11">Leveraging Cargo&#x2019;s Conventions</span></h3>
+<p class="TNI">With simple projects, Cargo doesn&#x2019;t provide a lot of value over just using <span class="SANS_TheSansMonoCd_W5Regular_11">rustc</span>, but it will prove its worth as your programs become more intricate. Once programs grow to multiple files or need a dependency, it&#x2019;s much easier to let Cargo coordinate the build.</p>
+<p class="TX">Even though the <span class="SANS_TheSansMonoCd_W5Regular_11">hello_cargo</span> project is simple, it now uses much of the real tooling you&#x2019;ll use in the rest of your Rust career. In fact, to work on any existing projects, you can use the following commands to check out the code using Git, change to that project&#x2019;s directory, and build:</p>
+<pre class="pre1"><code>$ <b>git clone example.org/someproject</b>
+$ <b>cd someproject</b>
+$ <b>cargo build</b></code></pre>
+<p class="TX">For more information about Cargo, check out its documentation at <a href="https://doc.rust-lang.org/cargo/"><i>https://<wbr/>doc<wbr/>.rust<wbr/>-lang<wbr/>.org<wbr/>/cargo<wbr/>/</i></a>.</p>
+</section>
+</section>
+<section epub:type="conclusion" role="doc-conclusion" aria-labelledby="sec18">
+<span role="doc-pagebreak" epub:type="pagebreak" id="pg_12" aria-label="12"/>
+<h2 class="H1" id="sec18"><span id="toc-link-27"/><span class="SANS_Futura_Std_Bold_B_11">Summary</span></h2>
+<p class="TNI">You&#x2019;re already off to a great start on your Rust journey! In this chapter, you learned how to:</p>
+<ul class="BL">
+<li class="BL">Install the latest stable version of Rust using <span class="SANS_TheSansMonoCd_W5Regular_11">rustup</span>.</li>
+<li class="BL">Update to a newer Rust version.</li>
+<li class="BL">Open locally installed documentation.</li>
+<li class="BL">Write and run a &#x201C;Hello, world!&#x201D; program using <span class="SANS_TheSansMonoCd_W5Regular_11">rustc</span> directly.</li>
+<li class="BL">Create and run a new project using the conventions of Cargo.</li>
+</ul>
+<p class="TX">This is a good time to build a more substantial program to get used to reading and writing Rust code. So, in <a href="chapter2.xhtml">Chapter 2</a>, we&#x2019;ll build a guessing game program. If you would rather start by learning how common programming concepts work in Rust, see <a href="chapter3.xhtml">Chapter 3</a> and then return to <a href="chapter2.xhtml">Chapter 2</a>.</p>
+</section>
+</section>
+</body>
+</html>

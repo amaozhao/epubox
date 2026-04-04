@@ -28,6 +28,15 @@ class TestPreCodeExtractor:
         assert result == "<p>text</p>[CODE:0]"
         assert extractor.preserved_code == ["<code>x=1</code>"]
 
+    def test_extract_single_style(self):
+        """测试单个 style 标签提取"""
+        html = "<style>body { color: red; }</style><p>text</p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "[STYLE:0]<p>text</p>"
+        assert extractor.preserved_style == ["<style>body { color: red; }</style>"]
+
     def test_extract_nested_pre_code(self):
         """测试嵌套的 pre>code 提取"""
         html = "<pre><code>nested</code></pre>"
@@ -90,6 +99,44 @@ class TestPreCodeExtractor:
         assert "<pre>" in extractor.preserved_pre[0]
         assert "<code>" in extractor.preserved_pre[0]
 
+    def test_extract_nested_style_in_pre(self):
+        """测试嵌套的 style 在 pre 中"""
+        html = "<pre><style>.x { color: red; }</style></pre>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "[PRE:0]"
+        assert "<style>" in extractor.preserved_pre[0]
+
+    def test_extract_multiple_styles(self):
+        """测试多个 style 标签提取"""
+        html = "<style>a{}</style><style>b{}</style><p>text</p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[STYLE:0]" in result
+        assert "[STYLE:1]" in result
+        assert extractor.preserved_style == ["<style>a{}</style>", "<style>b{}</style>"]
+
+    def test_extract_style_preserves_attributes(self):
+        """测试 style 标签提取保留属性"""
+        html = '<style type="text/css">.cls { color: blue; }</style>'
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[STYLE:0]" in result
+        assert 'type="text/css"' in extractor.preserved_style[0]
+
+    def test_extract_pre_code_style_together(self):
+        """测试 pre、code、style 同时存在"""
+        html = "<pre>code</pre><style>.x{}</style><code>x=1</code>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:0]" in result
+        assert "[STYLE:0]" in result
+        assert "[CODE:0]" in result
+
 
 class TestRestore:
     """测试恢复功能"""
@@ -141,6 +188,35 @@ class TestRestore:
         result = extractor.restore(html)
 
         assert result == "<code>B</code><p>Hello</p><code>A</code>"
+
+    def test_restore_style(self):
+        """测试恢复 style 标签"""
+        html = "[STYLE:0]<p>翻译后</p>"
+        extractor = PreCodeExtractor()
+        extractor.preserved_style = ["<style>body { color: red; }</style>"]
+        result = extractor.restore(html)
+
+        assert result == "<style>body { color: red; }</style><p>翻译后</p>"
+
+    def test_restore_pre_code_style_order(self):
+        """测试恢复顺序：先 style，后 code，后 pre"""
+        html = "[PRE:0][CODE:0][STYLE:0]"
+        extractor = PreCodeExtractor()
+        extractor.preserved_pre = ["<pre>P</pre>"]
+        extractor.preserved_code = ["<code>C</code>"]
+        extractor.preserved_style = ["<style>S</style>"]
+        result = extractor.restore(html)
+
+        assert result == "<pre>P</pre><code>C</code><style>S</style>"
+
+    def test_restore_shuffled_style(self):
+        """测试 style 占位符打乱后的恢复"""
+        html = "[STYLE:1]<p>Hello</p>[STYLE:0]"
+        extractor = PreCodeExtractor()
+        extractor.preserved_style = ["<style>A</style>", "<style>B</style>"]
+        result = extractor.restore(html)
+
+        assert result == "<style>B</style><p>Hello</p><style>A</style>"
 
 
 class TestValidatePlaceholders:

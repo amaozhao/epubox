@@ -25,3 +25,4 @@ class EpubItem(BaseModel):
     chunks: Optional[List[Chunk]] = None  # 用于存储分块信息
     preserved_pre: Optional[List[str]] = None  # 用于存储提取的 pre 标签
     preserved_code: Optional[List[str]] = None  # 用于存储提取的 code 标签
+    preserved_style: Optional[List[str]] = None  # 用于存储提取的 style 标签

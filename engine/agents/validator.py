@@ -22,9 +22,9 @@ def validate_placeholders(text: str, tag_map: Dict[str, str]) -> Tuple[bool, str
     if missing or extra:
         error_parts = []
         if missing:
-            error_parts.append(f"缺少:{[f'[id{i}]' for i in sorted(missing)]}")
+            error_parts.append(f"缺少:{','.join(f'[id{i}]' for i in sorted(missing))}")
         if extra:
-            error_parts.append(f"多余:{[f'[id{i}]' for i in sorted(extra)]}")
+            error_parts.append(f"多余:{','.join(f'[id{i}]' for i in sorted(extra))}")
         return False, ", ".join(error_parts)
 
     # 2. 检查顺序 - 不排序，直接比较实际出现顺序
