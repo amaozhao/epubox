@@ -1,10 +1,9 @@
-import re
 import xml.etree.ElementTree as ET
 
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
 from engine.item import Merger, PreCodeExtractor
-from engine.schemas import EpubItem
+from engine.schemas import EpubItem, TranslationStatus
 
 
 class Replacer:
@@ -102,21 +101,10 @@ class Replacer:
         if is_nav_file and not self._validate_nav_structure(restored_content):
             logger.error(f"Nav 结构验证失败: {item.id}，但保留翻译结果")
 
-        # 5. 检查是否有未恢复的占位符
-        remaining = re.findall(r"\[id\d+\]", restored_content)
-        if remaining:
-            logger.error(f"还有未恢复的占位符: {remaining}")
-
-        # 6. 检查是否有未恢复的 pre/code/style 占位符
-        remaining_pre = re.findall(r"\[PRE:\d+\]", restored_content)
-        remaining_code = re.findall(r"\[CODE:\d+\]", restored_content)
-        remaining_style = re.findall(r"\[STYLE:\d+\]", restored_content)
-        if remaining_pre:
-            logger.error(f"还有未恢复的PRE占位符: {remaining_pre}")
-        if remaining_code:
-            logger.error(f"还有未恢复的CODE占位符: {remaining_code}")
-        if remaining_style:
-            logger.error(f"还有未恢复的STYLE占位符: {remaining_style}")
+        # 5. 检查是否有未翻译的 chunk
+        untranslated_chunks = [c.name for c in item.chunks if c.status != TranslationStatus.COMPLETED]
+        if untranslated_chunks:
+            logger.error(f"以下 chunk 未完成翻译: {untranslated_chunks}, 文件: {item.id}")
 
         # 7. 保存
         if restored_content:

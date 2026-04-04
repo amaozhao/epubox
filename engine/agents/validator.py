@@ -22,15 +22,19 @@ def validate_placeholders(text: str, tag_map: Dict[str, str]) -> Tuple[bool, str
     if missing or extra:
         error_parts = []
         if missing:
-            error_parts.append(f"缺少:{','.join(f'[id{i}]' for i in sorted(missing))}")
+            missing_str = ", ".join([f"[id{i}]" for i in sorted(missing)])
+            error_parts.append(f"缺少: {missing_str}")
         if extra:
-            error_parts.append(f"多余:{','.join(f'[id{i}]' for i in sorted(extra))}")
-        return False, ", ".join(error_parts)
+            extra_str = ", ".join([f"[id{i}]" for i in sorted(extra)])
+            error_parts.append(f"多余: {extra_str}")
+        return False, "; ".join(error_parts)
 
     # 2. 检查顺序 - 不排序，直接比较实际出现顺序
     original_order = [int(x) for x in re.findall(pattern, text)]
     if original_order != expected_indices:
-        return False, f"顺序错误: 期望{[f'[id{i}]' for i in expected_indices]}, 实际{[f'[id{i}]' for i in original_order]}"
+        expected_str = ", ".join([f"[id{i}]" for i in expected_indices])
+        actual_str = ", ".join([f"[id{i}]" for i in original_order])
+        return False, f"顺序错误: 期望 [{expected_str}], 实际 [{actual_str}]"
 
     # 3. 检查完整性
     for ph in tag_map:
