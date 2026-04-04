@@ -13,6 +13,8 @@ _configured_loggers = set()
 
 def setup_agno_logging():
     """配置 Agno 框架的日志记录器"""
+    # 创建默认logger（用于 global logger 和 log_debug）
+    default_logger = _create_logger("agno", settings.LOG_LEVEL)
     # 创建各个组件的日志记录器
     agent_logger = _create_logger("agno.agent", settings.LOG_LEVEL)
     team_logger = _create_logger("agno.team", settings.LOG_LEVEL)
@@ -20,7 +22,10 @@ def setup_agno_logging():
 
     # 配置 Agno 使用自定义日志记录器
     configure_agno_logging(
-        custom_agent_logger=agent_logger, custom_team_logger=team_logger, custom_workflow_logger=workflow_logger
+        custom_default_logger=default_logger,
+        custom_agent_logger=agent_logger,
+        custom_team_logger=team_logger,
+        custom_workflow_logger=workflow_logger,
     )
 
 
