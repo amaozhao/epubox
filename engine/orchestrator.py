@@ -8,7 +8,7 @@ from tqdm import tqdm
 from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
 from engine.epub import Builder, Parser, Replacer
-from engine.item.placeholder import PlaceholderManager
+from engine.item.tag import TagRestorer
 from engine.schemas import Chunk, TranslationStatus
 from engine.services.glossary import GlossaryExtractor, GlossaryLoader
 
@@ -146,18 +146,6 @@ class Orchestrator:
             if not item.chunks:
                 continue
 
-            # 从 item.placeholder 重建 PlaceholderManager
-            placeholder_mgr = PlaceholderManager()
-            if item.placeholder:
-                placeholder_mgr.tag_map = item.placeholder
-                # counter 必须是最大索引+1，避免新占位符与已有高索引冲突
-                indices = []
-                for key in item.placeholder:
-                    m = re.search(r'\[id(\d+)\]', key)
-                    if m:
-                        indices.append(int(m.group(1)))
-                placeholder_mgr.counter = (max(indices) + 1) if indices else 0
-
             for _, chunk in enumerate(item.chunks):
                 # 在开始工作流前，判断该分块是否需要翻译
                 if not self._should_translate_chunk(chunk):
@@ -168,12 +156,23 @@ class Orchestrator:
                 try:
                     response = await workflow.arun(
                         input=chunk,
-                        additional_data={"glossary": glossary, "placeholder_mgr": placeholder_mgr, "tag_map": item.placeholder}
+                        additional_data={
+                            "glossary": glossary,
+                            "preserved_pre": item.preserved_pre or [],
+                            "preserved_code": item.preserved_code or [],
+                            "preserved_style": item.preserved_style or [],
+                        }
                     )
                     if isinstance(response.content, Chunk):
                         chunk_index = item.chunks.index(chunk)
                         item.chunks[chunk_index] = response.content
                         chunk = response.content
+
+                        # 每个 chunk 翻译后立即恢复 [idN]
+                        if chunk.translated and chunk.status == TranslationStatus.TRANSLATED:
+                            restorer = TagRestorer()
+                            chunk.translated = restorer.restore_tags(chunk.translated, chunk.local_tag_map)
+
                         stats.record(chunk.status)
 
                         # 每翻译一个 chunk 立即保存，支持断点续传

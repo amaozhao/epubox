@@ -8,6 +8,7 @@ from agno.workflow import Step, StepInput, StepOutput, Workflow
 from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
 
+from .aligner import token_alignment_fallback
 from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
@@ -76,10 +77,8 @@ async def _call_translator(
         previous_translation: 上一次翻译失败的结果（用于重试时参考）
         error_msg: 上一次翻译失败的具体错误信息
     """
-    # 提取文本中的占位符索引
-    text_placeholder_indices = _get_placeholder_indices(text)
-    # 构建验证用的 tag_map（使用全局索引作为 key，与 chunk.original 一致）
-    validation_tag_map = {f"[id{i}]": placeholder_mgr.tag_map.get(f"[id{i}]", "") for i in text_placeholder_indices}
+    # 构建验证用的 tag_map（local_tag_map 已经是需要的格式）
+    validation_tag_map = {k: placeholder_mgr.get(k, "") for k in placeholder_mgr if k.startswith("[id")}
     # 过滤出文本中出现的术语
     filtered_glossary = filter_glossary_terms(text, glossary) if glossary else {}
     translator_input = {
@@ -113,7 +112,7 @@ async def _call_translator(
         raise
 
 
-async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict[str, str] = None) -> Chunk:
+async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict[str, str] = None, additional_data: Dict = None) -> Chunk:
     """Phase 1 翻译：直接翻译 + 占位符验证，失败则标记待手动处理"""
     original = chunk.original
     last_error_msg = None
@@ -127,7 +126,7 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
         except Exception as e:
             error_str = str(e)
             if not used_fallback and is_content_safety_error(error_str):
-                logger.warning(f"主模型翻译失败（内容安全审核），尝试使用备用模型...")
+                logger.warning("主模型翻译失败（内容安全审核），尝试使用备用模型...")
                 used_fallback = True
                 last_error_msg = None
                 continue
@@ -136,9 +135,10 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
             continue
 
         if hasattr(chunk, 'global_indices') and chunk.global_indices:
-            validation_tag_map = {f"[id{i}]": placeholder_mgr.tag_map.get(f"[id{i}]", "") for i in chunk.global_indices}
+            # placeholder_mgr 现在是 dict，直接用
+            validation_tag_map = {f"[id{i}]": placeholder_mgr.get(f"[id{i}]", "") for i in chunk.global_indices}
         else:
-            validation_tag_map = placeholder_mgr.tag_map
+            validation_tag_map = placeholder_mgr
         is_valid, error_msg = validate_placeholders(translated, validation_tag_map)
         if is_valid:
             chunk.translated = translated
@@ -149,16 +149,12 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
         # 分离"缺少"和"多余"，避免把多余占位符误认为缺失
         missing_ids: set[int] = set()
         extra_ids: set[int] = set()
-        for m in re.findall(r'缺少:\[([^\]]+)\]', error_msg):
-            for item in m.replace('[id', '').replace(']', '').split(','):
-                item = item.strip()
-                if item.startswith('id'):
-                    missing_ids.add(int(item[2:]))
-        for m in re.findall(r'多余:\[([^\]]+)\]', error_msg):
-            for item in m.replace('[id', '').replace(']', '').split(','):
-                item = item.strip()
-                if item.startswith('id'):
-                    extra_ids.add(int(item[2:]))
+        # 提取所有 [idN] 模式，支持多个占位符
+        for m in re.findall(r'\[id(\d+)\]', error_msg.split('多余:')[0].split('缺少:')[1] if '缺少:' in error_msg else ''):
+            missing_ids.add(int(m))
+        extra_part = error_msg.split('多余:')[1] if '多余:' in error_msg else ''
+        for m in re.findall(r'\[id(\d+)\]', extra_part):
+            extra_ids.add(int(m))
         all_missing_ids.update(missing_ids)
 
         hint_parts = []
@@ -173,8 +169,38 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
         else:
             last_error_msg = error_msg
 
-    # 所有重试都失败 → 标记为 UNTRANSLATED，保留原文保结构
-    logger.warning(f"Chunk '{chunk.name}': 翻译重试全部失败，标记为 UNTRANSLATED")
+    # Phase 1 所有重试失败 → 尝试 Phase 2: Token Alignment
+    logger.warning(f"Chunk '{chunk.name}': Phase 1 失败，尝试 Phase 2...")
+    try:
+        # 确保 validation_tag_map 已设置（用于 Phase 2）
+        if 'validation_tag_map' not in dir():
+            if hasattr(chunk, 'global_indices') and chunk.global_indices:
+                validation_tag_map = {f"[id{i}]": placeholder_mgr.get(f"[id{i}]", "") for i in chunk.global_indices}
+            else:
+                validation_tag_map = placeholder_mgr
+
+        preserved_pre = additional_data.get("preserved_pre", [])
+        preserved_code = additional_data.get("preserved_code", [])
+        preserved_style = additional_data.get("preserved_style", [])
+
+        aligned = await token_alignment_fallback(
+            original=chunk.original,
+            local_tag_map=validation_tag_map,
+            preserved_pre=preserved_pre,
+            preserved_code=preserved_code,
+            preserved_style=preserved_style
+        )
+        if aligned:
+            is_valid, _ = validate_placeholders(aligned, validation_tag_map)
+            if is_valid:
+                chunk.translated = aligned
+                chunk.status = TranslationStatus.TRANSLATED
+                return chunk
+    except Exception as e:
+        logger.warning(f"Phase 2 异常: {e}")
+
+    # Phase 2 也失败 → 标记为 UNTRANSLATED，保留原文保结构
+    logger.warning(f"Chunk '{chunk.name}': Phase 1 和 Phase 2 都失败，标记为 UNTRANSLATED")
     chunk.translated = ""
     chunk.status = TranslationStatus.UNTRANSLATED
     return chunk
@@ -184,7 +210,6 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
 async def translate_step(step_input: StepInput) -> StepOutput:
     chunk: Chunk = step_input.input  # type: ignore
     additional_data = step_input.additional_data or {}
-    placeholder_mgr = additional_data.get("placeholder_mgr")
     glossary = additional_data.get("glossary", {})
 
     if chunk.status == TranslationStatus.TRANSLATED and chunk.translated:
@@ -196,13 +221,14 @@ async def translate_step(step_input: StepInput) -> StepOutput:
         chunk.status = TranslationStatus.TRANSLATED
         return StepOutput(content=chunk)
 
-    if not placeholder_mgr:
-        error_msg = "翻译步骤失败：缺少 placeholder_mgr"
+    # 使用 chunk.local_tag_map（每个 chunk 独立的局部占位符映射）
+    if not chunk.local_tag_map:
+        error_msg = "翻译步骤失败：缺少 local_tag_map"
         logger.error(error_msg)
         return StepOutput(content=chunk, success=False, error=error_msg)
 
     try:
-        chunk = await _translate_with_fallback(chunk, placeholder_mgr, glossary)
+        chunk = await _translate_with_fallback(chunk, chunk.local_tag_map, glossary, additional_data)
         return StepOutput(content=chunk)
     except Exception as e:
         error_msg = f"翻译步骤失败：{e}"
@@ -244,7 +270,7 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
             if response.status == RunStatus.error:
                 error_content = str(response.content) if response.content else ""
                 if not used_fallback and is_content_safety_error(error_content):
-                    logger.warning(f"主模型校对失败（内容安全审核），尝试使用备用模型...")
+                    logger.warning("主模型校对失败（内容安全审核），尝试使用备用模型...")
                     used_fallback = True
                     continue
             logger.warning(f"校对步骤失败：代理返回了意外的响应类型 (attempt {attempt + 1}/{max_attempts})")

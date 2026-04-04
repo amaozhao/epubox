@@ -9,8 +9,7 @@ from bs4 import BeautifulSoup
 
 from engine.item import HtmlChunker, PreCodeExtractor, TagPreserver
 from engine.item.chunker import count_tokens
-from engine.item.placeholder import PlaceholderManager
-from engine.schemas import EpubBook, EpubItem
+from engine.schemas import EpubBook, EpubItem, Chunk
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
 
@@ -124,28 +123,31 @@ class Parser:
                     # Step 3: 检测是否是 EPUB 导航文件
                     is_nav_file = "toc.ncx" in relative_path.lower() or relative_path.lower().endswith("nav.xhtml")
 
-                    # Step 4: 整个文档做 TagPreserver（将 HTML 标签替换为 [idN] 占位符）
-                    preserver = TagPreserver()
-                    content_after_tags, global_mgr = preserver.preserve_tags(content_after_pre)
-
-                    # Step 5: 使用 chunk 方法按 token_limit 分割（在块级标签边界分割）
+                    # Step 4: 按块级 HTML 标签分割（先分块）
                     chunker = HtmlChunker(token_limit=self.limit)
-                    placeholder_pattern = re.compile(r'\[id\d+\]')
-                    all_placeholders = placeholder_pattern.findall(content_after_tags)
-                    global_indices = [int(p[3:-1]) for p in all_placeholders]
-
-                    chunks = chunker.chunk(
-                        text_with_placeholders=content_after_tags,
-                        global_indices=global_indices,
-                        placeholder_mgr=global_mgr,
+                    raw_chunks = chunker.chunk_by_html_tags(
+                        content_after_pre,
+                        token_limit=self.limit,
                         is_nav_file=is_nav_file
                     )
+
+                    # Step 5: 对每个 chunk 单独做 TagPreserver
+                    chunks = []
+                    for raw_chunk in raw_chunks:
+                        chunk_text, local_mgr = TagPreserver.preserve_tags(raw_chunk)
+                        chunk = Chunk(
+                            name=str(uuid.uuid4())[:8],
+                            original=chunk_text,
+                            global_indices=sorted([int(k[3:-1]) for k in local_mgr.tag_map.keys()]),
+                            local_tag_map=local_mgr.tag_map,
+                            tokens=count_tokens(chunk_text),
+                        )
+                        chunks.append(chunk)
 
                     epub_item = EpubItem(
                         id=relative_path,
                         path=file_path,
                         content=original_content,
-                        placeholder=global_mgr.tag_map,
                         chunks=chunks,
                         preserved_pre=pre_extractor.preserved_pre,
                         preserved_code=pre_extractor.preserved_code,

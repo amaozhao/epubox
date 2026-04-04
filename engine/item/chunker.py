@@ -415,6 +415,26 @@ class HtmlChunker:
 
         return [c for c in chunks if c.strip()]
 
+    def _is_inside_container(self, html: str, pos: int) -> bool:
+        """
+        检查位置是否在容器标签（table/ul/ol）内部
+
+        Args:
+            html: HTML文本
+            pos: 要检查的位置（分割点）
+
+        Returns:
+            bool: 如果位置在容器内部返回True，否则返回False
+        """
+        before, after = html[:pos], html[pos:]
+        for container in ['table', 'ul', 'ol']:
+            opens = list(re.finditer(f'<{container}[^>]*>', before))
+            if opens:
+                # 检查是否有对应的结束标签在 after 中
+                if re.search(f'</{container}>', after):
+                    return True
+        return False
+
     def _find_block_end_positions(self, html: str, tags: List[str]) -> set:
         """
         找到所有给定标签的结束位置
@@ -425,7 +445,10 @@ class HtmlChunker:
         positions = set()
         for tag in tags:
             for match in re.finditer(re.escape(tag), html):
-                positions.add(match.end())
+                end_pos = match.end()
+                # 跳过在容器标签内部的分割点
+                if not self._is_inside_container(html, end_pos):
+                    positions.add(end_pos)
         return positions
 
     def _split_at_sentence_boundary(self, text: str, token_limit: int) -> List[str]:
