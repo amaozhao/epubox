@@ -8,9 +8,7 @@ class TranslationStatus(str, Enum):
     """
 
     PENDING = "pending"  # 待处理
-    IN_PROGRESS = "in_progress"  # 正在翻译
     TRANSLATED = "translated"  # 已翻译
-    FAILED = "failed"  # 翻译失败
     SKIPPED = "skipped"  # 跳过
     COMPLETED = "completed"  # 完成
     UNTRANSLATED = "untranslated"  # 未翻译（Phase 3 Fallback保留原文）

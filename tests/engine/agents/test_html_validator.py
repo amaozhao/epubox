@@ -1,4 +1,3 @@
-import pytest
 
 from engine.agents.html_validator import HtmlValidator, validate_html_structure
 

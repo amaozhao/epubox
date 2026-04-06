@@ -107,7 +107,6 @@ class TestOrchestrator:
     # --- 测试 translate_epub 方法 ---
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
-    @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
@@ -116,7 +115,6 @@ class TestOrchestrator:
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
-        mock_parser_save_json,
         mock_parser_parse,
         orchestrator,
     ):
@@ -175,7 +173,7 @@ class TestOrchestrator:
                     original="<p>How are you?</p>",
                     translated="<p>你好吗？</p>",
                     tokens=3,
-                    status=TranslationStatus.COMPLETED,
+                    status=TranslationStatus.TRANSLATED,
                 ),
                 run_id="mock_run_id",
             )
@@ -190,18 +188,16 @@ class TestOrchestrator:
         first_item_chunks = mock_book_with_chunks.items[0].chunks
         assert isinstance(first_item_chunks, list)
         assert first_item_chunks[0].translated == "<p>你好吗？</p>"
-        assert first_item_chunks[0].status == TranslationStatus.COMPLETED
+        assert first_item_chunks[0].status == TranslationStatus.TRANSLATED
 
         # 检查第三个 chunk 的翻译结果
         third_item_chunks = mock_book_with_chunks.items[2].chunks
         assert isinstance(third_item_chunks, list)
         assert third_item_chunks[0].translated == "<p>你好吗？</p>"
-        assert third_item_chunks[0].status == TranslationStatus.COMPLETED
+        assert third_item_chunks[0].status == TranslationStatus.TRANSLATED
 
     @pytest.mark.asyncio
-    # @patch("engine.orchestrator.tqdm", side_effect=lambda iterable, **kwargs: iterable)
     @patch.object(Parser, "parse", new_callable=MagicMock)
-    @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
@@ -210,7 +206,6 @@ class TestOrchestrator:
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
-        mock_parser_save_json,
         mock_parser_parse,
         orchestrator,
         mock_book,
@@ -243,7 +238,6 @@ class TestOrchestrator:
 
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
-    @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
@@ -252,7 +246,6 @@ class TestOrchestrator:
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
-        mock_parser_save_json,
         mock_parser_parse,
         orchestrator,
         mock_book,
@@ -282,7 +275,6 @@ class TestOrchestrator:
 
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
-    @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
@@ -291,7 +283,6 @@ class TestOrchestrator:
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
-        mock_parser_save_json,
         mock_parser_parse,
         orchestrator,
         mock_book,

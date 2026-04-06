@@ -1,10 +1,4 @@
-import pytest
-
-from engine.item.precode import (
-    PreCodeExtractor,
-    attempt_recovery,
-    validate_placeholders,
-)
+from engine.item.precode import PreCodeExtractor
 
 
 class TestPreCodeExtractor:
@@ -217,75 +211,6 @@ class TestRestore:
         result = extractor.restore(html)
 
         assert result == "<style>B</style><p>Hello</p><style>A</style>"
-
-
-class TestValidatePlaceholders:
-    """测试验证功能"""
-
-    def test_validate_valid(self):
-        """测试验证通过"""
-        html = "[PRE:0][CODE:0][id0]你好[id1]"
-        assert validate_placeholders(html, 1, 1) is True
-
-    def test_validate_missing_pre(self):
-        """测试缺少 pre 占位符"""
-        html = "[CODE:0][id0]你好[id1]"
-        assert validate_placeholders(html, 1, 1) is False
-
-    def test_validate_missing_code(self):
-        """测试缺少 code 占位符"""
-        html = "[PRE:0][id0]你好[id1]"
-        assert validate_placeholders(html, 1, 1) is False
-
-    def test_validate_extra_pre(self):
-        """测试多余的 pre 占位符"""
-        html = "[PRE:0][PRE:1][CODE:0][id0]你好[id1]"
-        assert validate_placeholders(html, 1, 1) is False
-
-    def test_validate_multiple(self):
-        """测试多个占位符"""
-        html = "[PRE:0][PRE:1][CODE:0][CODE:1]"
-        assert validate_placeholders(html, 2, 2) is True
-        assert validate_placeholders(html, 2, 1) is False
-
-
-class TestAttemptRecovery:
-    """测试容错恢复"""
-
-    def test_recovery_semicolon(self):
-        """测试修复分号"""
-        html = "[PRE;0]<p>[CODE;1]</p>"
-        result = attempt_recovery(html, [], [])
-        assert "[PRE:0]" in result
-        assert "[CODE:1]" in result
-
-    def test_recovery_extra_space(self):
-        """测试修复多余空格"""
-        html = "[PRE: 0]<p>[CODE: 1]</p>"
-        result = attempt_recovery(html, [], [])
-        assert "[PRE:0]" in result
-        assert "[CODE:1]" in result
-
-    def test_recovery_mixed(self):
-        """测试混合修复"""
-        html = "[PRE; 0]<p>[CODE; 1]</p>"
-        result = attempt_recovery(html, [], [])
-        assert "[PRE:0]" in result
-        assert "[CODE:1]" in result
-
-    def test_recovery_unrecoverable(self):
-        """测试不可恢复的情况（丢失括号）"""
-        html = "PRE:0"  # 丢失左括号
-        result = attempt_recovery(html, [], [])
-        # 应该保持不变
-        assert "PRE:0" in result
-
-    def test_recovery_preserves_content(self):
-        """测试恢复后内容不变"""
-        html = "[PRE;0]Hello[CODE;1]"
-        result = attempt_recovery(html, [], [])
-        # Hello 应该不受影响
-        assert "Hello" in result
 
 
 class TestFullFlow:

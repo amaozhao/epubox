@@ -1,4 +1,3 @@
-import pytest
 
 from engine.agents.verifier import get_tag_name, is_self_closing, verify_html_integrity
 
