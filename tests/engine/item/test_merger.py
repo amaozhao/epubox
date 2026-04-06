@@ -406,3 +406,88 @@ class TestMerger:
         result = merger.merge(chunks, original_content=original_content)
         assert "<!DOCTYPE html>" in result, f"DOCTYPE should be preserved. Got: {result[:100]}"
         assert '<?xml version="1.0"' in result, f"XML declaration should be preserved. Got: {result[:100]}"
+
+    def test_merge_ncx_with_unclosed_meta_tags_fixed(self):
+        """测试 NCX 文件中未闭合的 meta 标签被自动修复（来自真实数据）"""
+        merger = Merger()
+        # 模拟 toc.ncx 的 chunks，translated 中 meta 标签没有闭合
+        chunks = [
+            Chunk(
+                name="/div/ncx[1]/head[1]",
+                original='<head>\n\t<meta name="dtb:uid" content="urn:uuid:90938ff6-9eb4-4854-80de-07e95790fe9e" />\n\t<meta name="dtb:depth" content="0" />\n</head>',
+                translated='<head>\n\t<meta name="dtb:uid" content="urn:uuid:90938ff6-9eb4-4854-80de-07e95790fe9e">\n\t<meta name="dtb:depth" content="0">\n</head>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=50,
+                local_tag_map={},
+            ),
+            Chunk(
+                name="/div/ncx[1]/docTitle[1]",
+                original='<docTitle>\n\t<text>Ship an MCP Server in Python</text>\n</docTitle>',
+                translated='<doctitle>\n\t<text>用 Python 快速构建 MCP 服务器</text>\n</doctitle>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=20,
+                local_tag_map={},
+            ),
+        ]
+        # 真实的 original_content 来自 toc.ncx
+        original_content = '''<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+\t<head>
+\t\t<meta name="dtb:uid" content="urn:uuid:90938ff6-9eb4-4854-80de-07e95790fe9e" />
+\t\t<meta name="dtb:depth" content="0" />
+\t</head>
+\t<docTitle>
+\t\t<text>Ship an MCP Server in Python</text>
+\t</docTitle>
+</ncx>'''
+        result = merger.merge(chunks, original_content=original_content)
+        # 验证 XML 声明保留
+        assert '<?xml version="1.0"' in result, f"XML declaration should be preserved. Got: {result[:100]}"
+        # 验证 meta 标签被修复为自闭合
+        assert '<meta name="dtb:uid" content="urn:uuid:90938ff6-9eb4-4854-80de-07e95790fe9e"/>' in result, f"meta should be self-closed. Got: {result}"
+        # 验证翻译内容保留
+        assert "用 Python 快速构建 MCP 服务器" in result, f"Translation should be preserved. Got: {result}"
+
+    def test_merge_html_with_doctype_and_xml_preserved(self):
+        """测试 HTML 文件保留 DOCTYPE 和 XML 声明（来自真实数据 cover.xhtml）"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="/div/html[1]/head[1]",
+                original='<head>\n\t<title>Cover</title>\n</head>',
+                translated='<head>\n<title>封面</title>\n</head>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={},
+            ),
+            Chunk(
+                name="/div/html[1]/body[1]/figure[1]",
+                original='<figure style="text-align:center;" epub:type="cover">\n\t\t<img src="image/1.png" alt="Cover" />\n\t</figure>',
+                translated='<figure epub:type="cover" style="text-align:center;">\n<img alt="封面图片" role="doc-cover" src="image/1.png" style="max-width:100%;">\n</figure>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=30,
+                local_tag_map={},
+            ),
+        ]
+        # 真实的 original_content 来自 cover.xhtml
+        original_content = '''<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US" xmlns:epub="http://www.idpf.org/2007/ops">
+\t<head>
+\t\t<title>Cover</title>
+\t</head>
+\t<body>
+\t\t<figure style="text-align:center;" epub:type="cover">
+\t\t\t<img src="image/1.png" alt="Cover" />
+\t\t</figure>
+\t</body>
+</html>'''
+        result = merger.merge(chunks, original_content=original_content)
+        # 验证 XML 声明保留
+        assert '<?xml version="1.0"' in result, f"XML declaration should be preserved. Got: {result[:150]}"
+        # 验证 DOCTYPE 保留
+        assert "<!DOCTYPE html>" in result, f"DOCTYPE should be preserved. Got: {result[:150]}"
+        # 验证 html 标签保留（带 lang 属性已翻译）
+        assert "<html" in result, f"html tag should be present. Got: {result[:150]}"
+        # 验证翻译内容保留
+        assert "封面" in result, f"Translation should be preserved. Got: {result}"
