@@ -63,12 +63,12 @@ class Merger:
         translated = "".join(merged_chunks)
 
         # Step 5: 检查并修复 void 元素被错误地写成非自闭合形式
-        # 例如 <link ...> 而不是 <link .../>
+        # 例如 <link ...> 而不是 <link .../> 或 <col> 而不是 <col/>
         void_elements = ["link", "meta", "br", "hr", "img", "input", "area", "base", "col", "embed", "param", "source", "track", "wbr"]
         for tag in void_elements:
-            # 匹配 <tag ...> 后面没有 /> 或 </tag> 的情况（未闭合）
-            # 匹配 <tag attr="value"> 这种形式
-            pattern = rf'<({tag})\s+([^>]+?)(?<!/)>(?!</{tag}>)'
+            # 匹配 <tag ...> 或 <tag> 后面没有 /> 或 </tag> 的情况（未闭合）
+            # \s* 允许没有属性的标签（如 <col>）
+            pattern = rf'<({tag})\s*([^/>]*?)(?<!/)>(?!</{tag}>)'
             fixed, count = re.subn(pattern, r'<\1 \2/>', translated, flags=re.IGNORECASE)
             if count > 0:
                 logger.warning(f"修复了 {count} 个未闭合的 <{tag}> 标签")
