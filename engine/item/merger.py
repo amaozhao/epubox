@@ -63,6 +63,9 @@ class Merger:
         # Step 5: 如果合并结果缺少 <html> 包裹，使用原文重建
         translated = self._ensure_html_wrapper(translated, chunks, original_content)
 
+        # Step 6: 强制确保 DOCTYPE 存在（如果原文有，但翻译后丢失了）
+        translated = self._ensure_doctype(translated, chunks, original_content)
+
         # Step 6: 替换 lang 属性
         lang_pattern = r'lang="en[^"]*"|xml:lang="en[^"]*"'
         if re.search(lang_pattern, translated):
@@ -79,18 +82,28 @@ class Merger:
 
         策略：
         1. 如果翻译内容已经有 <html> 开头，直接返回
-        2. 如果提供了 original_content，从中提取 <html> 标签和 xmlns 属性
-        3. 否则检查 chunks 的 original 是否包含 <html> 标签
+        2. 如果以 DOCTYPE 开头但没有 <html>，保留 DOCTYPE，只添加 XML 声明
+        3. 如果是 fragment，用原文的 <html> 包裹
         """
         stripped = content.strip()
         if not stripped:
             return content
 
         # 如果已经有 <html> 开头（chunks 本身就包含完整 html），直接返回
-        if stripped.startswith("<html") or stripped.startswith("<!DOCTYPE") or stripped.startswith("<!doctype"):
+        if stripped.startswith("<html"):
             return content
 
-        # 优先使用 original_content
+        # 如果以 DOCTYPE 开头，说明已经有完整 HTML，但可能缺少 XML 声明
+        if stripped.startswith("<!DOCTYPE") or stripped.startswith("<!doctype"):
+            source = original_content if original_content else (chunks[0].original if chunks else "")
+            xml_decl = ""
+            xml_match = re.search(r'<\?xml[^?]+\?\>', source)
+            if xml_match:
+                xml_decl = xml_match.group(0) + "\n"
+            # 保留原有 content，只在前面加上 XML 声明
+            return xml_decl + content
+
+        # 否则是 fragment，需要包裹
         source = original_content if original_content else (chunks[0].original if chunks else "")
 
         # 提取 XML 声明和 <html> 标签
@@ -113,4 +126,33 @@ class Merger:
         new_content += stripped + "\n"
         new_content += "</html>\n"
 
+        return new_content
+
+    def _ensure_doctype(self, content: str, chunks: List[Chunk], original_content: str = "") -> str:
+        """
+        确保 DOCTYPE 存在。如果原文有 DOCTYPE 但翻译后丢失了，从原文提取并添加。
+        """
+        # 如果已经有 DOCTYPE，直接返回
+        if re.search(r'<!DOCTYPE', content, re.IGNORECASE):
+            return content
+
+        # 从原文提取 DOCTYPE
+        source = original_content if original_content else (chunks[0].original if chunks else "")
+        doctype_match = re.search(r'<!DOCTYPE[^>]+>', source, re.IGNORECASE)
+        if not doctype_match:
+            return content  # 原文也没有 DOCTYPE，不需要添加
+
+        doctype = doctype_match.group(0)
+        # 提取 XML 声明（如果有）
+        xml_decl = ""
+        xml_match = re.search(r'<\?xml[^?]+\?>', source)
+        if xml_match:
+            xml_decl = xml_match.group(0) + "\n"
+
+        # 在 <html> 之前插入 DOCTYPE
+        html_pos = content.find("<html")
+        if html_pos == -1:
+            return content
+
+        new_content = xml_decl + doctype + "\n" + content
         return new_content

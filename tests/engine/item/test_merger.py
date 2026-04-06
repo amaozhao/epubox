@@ -372,3 +372,37 @@ class TestMerger:
         assert '<html xml:lang="zh"><body>World</body></html>' in result
         assert 'lang="en' not in result
         assert 'xml:lang="en' not in result
+
+    def test_merge_preserves_doctype_when_lost_in_translation(self):
+        """测试当 LLM 翻译丢失 DOCTYPE 时，merge 能从原文恢复"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="c1",
+                original='<!DOCTYPE html><html lang="en"><body><p>Hello</p></body></html>',
+                translated='<html lang="zh"><body><p>你好</p></body></html>',  # LLM 丢失了 DOCTYPE
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+            ),
+        ]
+        result = merger.merge(chunks, original_content='<!DOCTYPE html><html lang="en"><body><p>Hello</p></body></html>')
+        assert "<!DOCTYPE html>" in result, f"DOCTYPE should be preserved. Got: {result[:100]}"
+
+    def test_merge_preserves_doctype_and_xml_declaration(self):
+        """测试当原文有 DOCTYPE 和 XML 声明时，翻译后都能保留"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="c1",
+                original='<html lang="en"><body><p>Hello</p></body></html>',
+                translated='<html lang="zh"><body><p>你好</p></body></html>',  # LLM 丢失了 XML 声明和 DOCTYPE
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+            ),
+        ]
+        original_content = '''<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE html>
+<html lang="en"><body><p>Hello</p></body></html>'''
+        result = merger.merge(chunks, original_content=original_content)
+        assert "<!DOCTYPE html>" in result, f"DOCTYPE should be preserved. Got: {result[:100]}"
+        assert '<?xml version="1.0"' in result, f"XML declaration should be preserved. Got: {result[:100]}"
