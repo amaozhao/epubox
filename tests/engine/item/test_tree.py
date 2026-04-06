@@ -142,7 +142,8 @@ class TestToHtml:
     def test_self_closing_tag(self):
         root = parse_html("<p>line<br>end</p>")
         html = root.to_html()
-        assert "<br>" in html
+        # Self-closing tags should use XHTML style <tag />
+        assert "<br />" in html
 
     def test_entity_encoding_in_output(self):
         root = parse_html("<p>a &lt; b</p>")

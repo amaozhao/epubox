@@ -125,11 +125,20 @@ class TreeNode:
         if self.is_text_node():
             return encode_entities(self.text)
 
-        parts = [f"<{self.tag}"]
+        parts = []
+        # Include XML declaration and DOCTYPE for root node
+        if self.tag == "div" and "_xml_declaration" in self.attributes:
+            parts.append(self.attributes["_xml_declaration"] + "\n")
+        if self.tag == "div" and "_doctype" in self.attributes:
+            parts.append(self.attributes["_doctype"] + "\n")
+
+        parts.append(f"<{self.tag}")
         for k, v in self.attributes.items():
+            if k.startswith("_"):
+                continue  # Skip special attributes
             parts.append(f' {k}="{encode_entities(v)}"')
         if self.is_self_closing() and not self.children:
-            parts.append(">")
+            parts.append(" />")
             return "".join(parts)
         parts.append(">")
 
@@ -163,6 +172,8 @@ class _TreeBuilder(HTMLParser):
         self.root = TreeNode(tag="div", attributes={}, children=[], parent=None, text="")
         self.stack: list[TreeNode] = [self.root]
         self._open_tags: list[str] = []
+        self._xml_declaration: str = ""
+        self._doctype: str = ""
 
     @property
     def _current(self) -> TreeNode:
@@ -214,6 +225,19 @@ class _TreeBuilder(HTMLParser):
         node.parent = self._current
         self._current.children.append(node)
 
+    def handle_decl(self, decl: str) -> None:
+        """Handle DOCTYPE declarations and other declarations."""
+        decl = decl.strip()
+        if decl.lower().startswith("doctype"):
+            self._doctype = f"<!{decl}>"
+
+    def handle_pi(self, data: str) -> None:
+        """Handle processing instructions (e.g., XML declaration)."""
+        data = data.strip()
+        if data.lower().startswith("xml "):
+            # data already contains the trailing ?, e.g., "xml version=\"1.0\"?"
+            self._xml_declaration = f"<?{data}"
+
 
 def parse_html(html: str) -> TreeNode:
     """
@@ -221,9 +245,16 @@ def parse_html(html: str) -> TreeNode:
 
     A synthetic <div> root is always returned. Text nodes are represented
     as TreeNode instances with tag="" and non-empty text.
+    The root node may have special attributes '_xml_declaration' and '_doctype'
+    if those were present in the original HTML.
     """
     builder = _TreeBuilder()
     builder.feed(html)
+    # Store XML declaration and DOCTYPE in the root node's attributes
+    if builder._xml_declaration:
+        builder.root.attributes["_xml_declaration"] = builder._xml_declaration
+    if builder._doctype:
+        builder.root.attributes["_doctype"] = builder._doctype
     return builder.root
 
 
