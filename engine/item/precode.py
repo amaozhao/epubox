@@ -29,8 +29,10 @@ class PreCodeExtractor:
         Returns:
             处理后的 HTML
         """
-        # XML 文件（如 toc.ncx）不需要 pre/code/style 提取，跳过
-        if html.strip().startswith('<?xml') or html.strip().startswith('<ncx'):
+        # toc.ncx 等纯 XML 导航文件不需要 pre/code/style 提取，跳过
+        # 判断依据：没有 <html> 标签且包含 <ncx> 的是纯 XML 文件
+        stripped = html.strip()
+        if '<html' not in stripped and (stripped.startswith('<?xml') or '<ncx' in stripped):
             return html
         soup = BeautifulSoup(html, 'html.parser')
         self.preserved_pre = []
@@ -51,30 +53,21 @@ class PreCodeExtractor:
                     if child.name == 'pre':
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
-                        # 递归处理子节点（处理内层嵌套）
-                        if hasattr(child, 'children'):
-                            process_node(child)
-                        # 替换当前 pre 标签
+                        # 整个 pre 是不透明单元，不递归处理内部子节点
                         placeholder = f"[PRE:{len(self.preserved_pre)}]"
                         self.preserved_pre.append(original)
                         child.replace_with(BeautifulSoup(placeholder, 'html.parser'))
                     elif child.name == 'code':
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
-                        # 递归处理子节点（处理内层嵌套）
-                        if hasattr(child, 'children'):
-                            process_node(child)
-                        # 替换当前 code 标签
+                        # 整个 code 是不透明单元，不递归处理内部子节点
                         placeholder = f"[CODE:{len(self.preserved_code)}]"
                         self.preserved_code.append(original)
                         child.replace_with(BeautifulSoup(placeholder, 'html.parser'))
                     elif child.name == 'style':
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
-                        # 递归处理子节点（处理内层嵌套）
-                        if hasattr(child, 'children'):
-                            process_node(child)
-                        # 替换当前 style 标签
+                        # 整个 style 是不透明单元，不递归处理内部子节点
                         placeholder = f"[STYLE:{len(self.preserved_style)}]"
                         self.preserved_style.append(original)
                         child.replace_with(BeautifulSoup(placeholder, 'html.parser'))

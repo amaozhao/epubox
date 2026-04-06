@@ -4,6 +4,7 @@ from datetime import datetime
 
 from tqdm import tqdm
 
+from engine.agents.html_validator import HtmlValidator
 from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
 from engine.epub import Builder, Parser, Replacer
@@ -150,6 +151,19 @@ class Orchestrator:
             if not item.chunks:
                 continue
 
+            # Step X: 验证 chunk 拆分后的 local_tag_map 和标签栈是否正确
+            restored_chunks = []
+            chunk_names = [c.name for c in item.chunks]
+            for c in item.chunks:
+                restored = c.original
+                for placeholder, original_tag in c.local_tag_map.items():
+                    restored = restored.replace(placeholder, original_tag)
+                restored_chunks.append(restored)
+            validator = HtmlValidator()
+            valid, errors = validator.validate_merged(restored_chunks, chunk_names)
+            if not valid:
+                logger.warning(f"文件 {item.id} 的 chunk 拆分后 HTML 结构异常: {errors}")
+
             for _, chunk in enumerate(item.chunks):
                 # 在开始工作流前，判断该分块是否需要翻译
                 if not self._should_translate_chunk(chunk):
@@ -171,11 +185,6 @@ class Orchestrator:
                         chunk_index = item.chunks.index(chunk)
                         item.chunks[chunk_index] = response.content
                         chunk = response.content
-
-                        # 每个 chunk 翻译后立即恢复 [idN]（TRANSLATED 或 COMPLETED 都表示翻译流程完成）
-                        if chunk.translated and chunk.status in (TranslationStatus.TRANSLATED, TranslationStatus.COMPLETED):
-                            restorer = TagRestorer()
-                            chunk.translated = restorer.restore_tags(chunk.translated, chunk.local_tag_map)
 
                         stats.record(chunk.status)
 

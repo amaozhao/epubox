@@ -5,7 +5,6 @@ from typing import Optional
 
 from agno.utils.log import (
     agent_logger,
-    configure_agno_logging,
     logger,
     team_logger,
     workflow_logger,
@@ -27,9 +26,7 @@ def _get_json_formatter() -> logging.Formatter:
 
 def _get_text_formatter() -> logging.Formatter:
     """创建文本格式化器"""
-    return logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    return logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
 
 def _setup_logger_handlers(logger_instance: logging.Logger, level_str: str) -> None:
@@ -95,7 +92,7 @@ def _create_logger(name: str, level: Optional[str] = None) -> logging.Logger:
         logger.setLevel(logging.NOTSET)
 
     # 设置日志级别
-    level_str = (level or getattr(settings, "LOG_LEVEL", "INFO") or "INFO")
+    level_str = level or getattr(settings, "LOG_LEVEL", "INFO") or "INFO"
     try:
         log_level = getattr(logging, level_str.upper())
     except AttributeError:

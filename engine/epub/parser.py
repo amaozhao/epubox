@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from bs4 import BeautifulSoup
 
+from engine.agents.html_validator import HtmlValidator
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
 from engine.item import HtmlChunker, PreCodeExtractor, TagPreserver
@@ -150,6 +151,19 @@ class Parser:
                             tokens=count_tokens(chunk_text),
                         )
                         chunks.append(chunk)
+
+                    # Step 5.1: 验证 chunk 拆分后的 local_tag_map 和标签栈是否正确
+                    restored_chunks = []
+                    chunk_names = [c.name for c in chunks]
+                    for c in chunks:
+                        restored = c.original
+                        for placeholder, original_tag in c.local_tag_map.items():
+                            restored = restored.replace(placeholder, original_tag)
+                        restored_chunks.append(restored)
+                    validator = HtmlValidator()
+                    valid, errors = validator.validate_merged(restored_chunks, chunk_names)
+                    if not valid:
+                        logger.warning(f"文件 {relative_path} 拆分后 HTML 结构异常: {errors}")
 
                     # Step 6: 对 toc.ncx 合并太小的相邻 chunks
                     if is_nav_file:

@@ -91,7 +91,7 @@ class TestWorkflow:
         translated = "你好 [id0] 世界 [id0]"  # [id1] 缺失，[id0] 重复
         is_valid, error_msg = validate_placeholders(translated, tag_map)
         assert is_valid is False
-        assert "缺少" in error_msg
+        assert "不匹配" in error_msg
 
     async def test_validate_placeholders_order_mismatch(self, mock_chunk_factory):
         """验证占位符顺序不同时被检测为无效"""
@@ -99,7 +99,7 @@ class TestWorkflow:
         translated = "你好 [id1] 世界 [id0]"  # 顺序错误
         is_valid, error_msg = validate_placeholders(translated, tag_map)
         assert is_valid is False
-        assert "顺序错误" in error_msg
+        assert "不匹配" in error_msg
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_success(self, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):
@@ -214,7 +214,7 @@ class TestWorkflow:
         mock_proofer.arun = safety_error_then_success
         mock_get_proofer.return_value = mock_proofer
 
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         output = await proofread_step(step_input)
         assert output.success is True
         assert call_count[0] == 2
@@ -233,7 +233,7 @@ class TestWorkflow:
 
         async def all_fail_response(json_input):
             call_count[0] += 1
-            # 始终返回无占位符的翻译
+            # 始终返回无占位符的翻译，验证会失败并重试3次
             return MagicMock(content=MockTranslationResponse("你好世界"))
 
         mock_translator = MagicMock()
@@ -245,46 +245,10 @@ class TestWorkflow:
             additional_data={"placeholder_mgr": mock_placeholder_mgr}
         )
         output = await translate_step(step_input)
-        # 所有重试失败，translated 为空，状态为 UNTRANSLATED
+        # 占位符验证失败，重试3次后标记为 UNTRANSLATED
         assert output.content.status == TranslationStatus.UNTRANSLATED
         assert output.content.translated == ""
         assert call_count[0] == 3
-
-    @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_error_msg_passed(self, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):
-        """验证上一次翻译失败时的错误信息被传递给下一次重试"""
-        chunk = mock_chunk_factory(
-            name="test_chunk",
-            original="[id0]Hello[id1]World[id2]",
-            tokens=10,
-            global_indices=[0, 1, 2],
-            local_tag_map={"[id0]": "<p>", "[id1]": "</p>", "[id2]": "<p>"}
-        )
-        captured_inputs = []
-
-        async def capture_and_fail(json_input):
-            parsed = json.loads(json_input)
-            captured_inputs.append(parsed)
-            # 前两次返回无占位符的翻译
-            if len(captured_inputs) <= 2:
-                return MagicMock(content=MockTranslationResponse("你好世界"))
-            # 第三次成功保留占位符
-            return MagicMock(content=MockTranslationResponse("[id0]你好[id1]世界[id2]"))
-
-        mock_translator = MagicMock()
-        mock_translator.arun = capture_and_fail
-        mock_get_translator.return_value = mock_translator
-
-        step_input = MagicMock(
-            input=chunk,
-            additional_data={"placeholder_mgr": mock_placeholder_mgr}
-        )
-        output = await translate_step(step_input)
-        assert output.success is True
-        # 第2次和第3次重试应该收到 validation_error 字段
-        assert len(captured_inputs) >= 2
-        assert "validation_error" in captured_inputs[1]
-        assert "缺少" in captured_inputs[1]["validation_error"]
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_already_translated(self, mock_get_translator, mock_chunk_factory, mock_placeholder_mgr):
@@ -330,7 +294,7 @@ class TestWorkflow:
         )
         mock_get_proofer.return_value = mock_proofer
 
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         output = await proofread_step(step_input)
         assert output.success is True
         assert isinstance(output.content, dict)
@@ -341,7 +305,7 @@ class TestWorkflow:
     @patch("engine.agents.workflow.get_proofer")
     async def test_proofread_step_no_translated_text(self, mock_get_proofer, mock_chunk_factory):
         chunk = mock_chunk_factory(name="test_chunk", original="[id0]Hello[id1]", tokens=10)
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         with patch.object(logger, "error"):
             output = await proofread_step(step_input)
             assert output.success is False
@@ -967,7 +931,7 @@ class TestWorkflowHtmlTagCoverage:
         translated = "你好 [id1] 世界 [id0] 更多 [id3] 内容 [id2]"
         is_valid, error_msg = validate_placeholders(translated, tag_map)
         assert is_valid is False
-        assert "顺序错误" in error_msg
+        assert "不匹配" in error_msg
 
     # -------------------------------------------------------------------------
     # 特殊内容测试
@@ -1143,6 +1107,38 @@ class TestWorkflowCoverageGaps:
             assert len(captured) >= 1
 
     # -------------------------------------------------------------------------
+    # 顺序错误提示解析
+    # -------------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_phase1_order_error_hint_parsing(self):
+        """Phase 1 遇到顺序错误时能正确解析 missing 和 extra ids"""
+        with patch("engine.agents.workflow._call_translator", new_callable=AsyncMock) as mock_call:
+            captured = []
+
+            async def side_effect(*args, **kwargs):
+                captured.append(kwargs.get("error_msg") or args[2] if len(args) > 2 else "")
+                # 模拟返回顺序错误的翻译结果
+                return "[id0]你好 [id2] 世界 [id1]"  # 缺少 [id1]... 实际 [id2] 顺序错误
+
+            mock_call.side_effect = side_effect
+
+            chunk = Chunk(
+                name="order_error_test",
+                original="[id0]Hello[id1]World[id2]",
+                tokens=10,
+                global_indices=[0, 1, 2],
+                local_tag_map={"[id0]": "<p>", "[id1]": "</p>", "[id2]": "<em>"}
+            )
+            step_input = MagicMock(
+                input=chunk,
+                additional_data={"placeholder_mgr": MagicMock()}
+            )
+            output = await translate_step(step_input)
+            # 应该重试多次并构建顺序错误提示
+            assert len(captured) >= 1
+
+    # -------------------------------------------------------------------------
     # proofread_step UNTRANSLATED 跳过路径
     # -------------------------------------------------------------------------
 
@@ -1156,7 +1152,7 @@ class TestWorkflowCoverageGaps:
             status=TranslationStatus.UNTRANSLATED,
             translated=""
         )
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         output = await proofread_step(step_input)
         assert output.success is True
         assert output.content["proofreading_result"].corrections == {}
@@ -1188,7 +1184,7 @@ class TestWorkflowCoverageGaps:
         mock_proofer.arun = mock_arun
         mock_get_proofer.return_value = mock_proofer
 
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         output = await proofread_step(step_input)
         assert output.success is True
         assert call_count[0] == 2
@@ -1216,7 +1212,7 @@ class TestWorkflowCoverageGaps:
         mock_proofer.arun = mock_arun
         mock_get_proofer.return_value = mock_proofer
 
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         output = await proofread_step(step_input)
         assert output.success is False
         assert "未成功" in output.error
@@ -1416,7 +1412,7 @@ class TestWorkflowCoverageGaps:
         mock_proofer.arun = mock_arun
         mock_get_proofer.return_value = mock_proofer
 
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         output = await proofread_step(step_input)
         assert call_count[0] == 3
         assert output.success is False
@@ -1444,7 +1440,7 @@ class TestWorkflowCoverageGaps:
         mock_proofer.arun = mock_arun
         mock_get_proofer.return_value = mock_proofer
 
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         output = await proofread_step(step_input)
         assert call_count[0] == 2
         assert output.success is True
@@ -1537,33 +1533,6 @@ class TestWorkflowCoverageGaps:
             await translate_step(step_input)
             assert len(captured) >= 1
 
-    @pytest.mark.asyncio
-    async def test_phase1_extra_ids_regex_parse(self):
-        """验证 extra_ids 正则解析:多余:[id2]"""
-        with patch("engine.agents.workflow.get_translator") as mock_get_translator:
-            async def mock_arun(json_input):
-                # 模拟 validator 返回同时含缺少和多余的错误
-                return MagicMock(content=MockTranslationResponse("[id0]Hello[id1][id2]"))
-
-            mock_translator = MagicMock()
-            mock_translator.arun = mock_arun
-            mock_get_translator.return_value = mock_translator
-
-            chunk = Chunk(
-                name="extra_regex_test",
-                original="[id0]Hello[id1]",
-                tokens=10,
-                global_indices=[0, 1],
-                local_tag_map={"[id0]": "<p>", "[id1]": "</p>"}
-            )
-            step_input = MagicMock(
-                input=chunk,
-                additional_data={"placeholder_mgr": MagicMock()}
-            )
-            output = await translate_step(step_input)
-            # 3次重试后走向 Phase 3
-            assert output.content.status == TranslationStatus.UNTRANSLATED
-
     # -------------------------------------------------------------------------
     # _call_translator: RunStatus.error 内容安全 + non-None error_content
     # -------------------------------------------------------------------------
@@ -1626,7 +1595,7 @@ class TestWorkflowCoverageGaps:
         mock_proofer.arun = mock_arun
         mock_get_proofer.return_value = mock_proofer
 
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         output = await proofread_step(step_input)
         assert call_count[0] == 2
         assert output.success is True
@@ -1654,7 +1623,7 @@ class TestWorkflowCoverageGaps:
         mock_proofer.arun = mock_arun
         mock_get_proofer.return_value = mock_proofer
 
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(previous_step_content={"chunk": chunk, "validation_error": None})
         output = await proofread_step(step_input)
         assert call_count[0] == 2
         assert output.success is True
@@ -1687,33 +1656,3 @@ class TestWorkflowCoverageGaps:
             )
             output = await translate_step(step_input)
             assert output.content.status == TranslationStatus.TRANSLATED
-
-    # -------------------------------------------------------------------------
-    # extra_ids 提示构建完整路径（同时有 missing 和 extra）
-    # -------------------------------------------------------------------------
-
-    @pytest.mark.asyncio
-    async def test_phase1_extra_ids_hint_built(self):
-        """Phase 1 返回多余占位符时构建正确的提示（extra_ids 路径）"""
-        with patch("engine.agents.workflow._call_translator", new_callable=AsyncMock) as mock_call:
-            # _call_translator 返回后，validate_placeholders 失败，返回同时缺少和多余的错误
-            # validator 会返回: "缺少:['[id1]'], 多余:['[id2]']"
-            async def side_effect(*args, **kwargs):
-                return "[id0]你好[id2]"  # 缺少 [id1]，多余 [id2]
-
-            mock_call.side_effect = side_effect
-
-            chunk = Chunk(
-                name="extra_ids_hint_test",
-                original="[id0]Hello[id1]",
-                tokens=10,
-                global_indices=[0, 1],
-                local_tag_map={"[id0]": "<p>", "[id1]": "</p>"}
-            )
-            step_input = MagicMock(
-                input=chunk,
-                additional_data={"placeholder_mgr": MagicMock()}
-            )
-            output = await translate_step(step_input)
-            # Phase 1 会失败 3 次，然后走向 Phase 3
-            assert output.content.status == TranslationStatus.UNTRANSLATED

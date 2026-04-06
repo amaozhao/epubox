@@ -2,6 +2,169 @@ from engine.item.merger import Merger
 from engine.schemas import Chunk, TranslationStatus
 
 
+class TestMergerPlaceholderRestore:
+    """测试 Merger 对占位符的恢复（集成测试）"""
+
+    def test_translated_with_placeholders_restored(self):
+        """translated 包含占位符，在 merge 时应该被恢复为实际标签"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="c1",
+                original="<p><em>Hello</em></p>",
+                translated="<p><em>你好</em></p>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={},  # 没有占位符，因为 original 中没有 [idN]
+            ),
+        ]
+        result = merger.merge(chunks)
+        # 直接就是正确 HTML
+        assert "<em>" in result
+        assert "</em>" in result
+        assert "你好" in result
+
+    def test_translated_with_inline_placeholders(self):
+        """translated 包含占位符，在 merge 时应该被恢复为实际标签"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="c1",
+                original="<p>[id0]Hello[id1]</p>",
+                translated="<p>[id0]你好[id1]</p>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                # [id0] = <em> 开头, [id1] = </em> 结尾
+                local_tag_map={"[id0]": "<em>", "[id1]": "</em>"},
+            ),
+        ]
+        result = merger.merge(chunks)
+        # 占位符应该被恢复为实际标签
+        assert "<em>" in result
+        assert "</em>" in result
+        assert "[id0]" not in result
+        assert "[id1]" not in result
+        assert "你好" in result
+
+    def test_multiple_chunks_placeholders_restored(self):
+        """多个 chunk 的占位符都应该被正确恢复"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="c1",
+                original="<p>[id0]Hello[id1]</p>",
+                translated="<p>[id0]你好[id1]</p>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                # [id0] = <em> 开头, [id1] = </em> 结尾 - 成对出现
+                local_tag_map={"[id0]": "<em>", "[id1]": "</em>"},
+            ),
+            Chunk(
+                name="c2",
+                original="<p>[id0]World[id1]</p>",
+                translated="<p>[id0]世界[id1]</p>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={"[id0]": "<strong>", "[id1]": "</strong>"},
+            ),
+        ]
+        result = merger.merge(chunks)
+        assert "[id0]" not in result
+        assert "[id1]" not in result
+        assert "<em>" in result
+        assert "</em>" in result
+        assert "<strong>" in result
+        assert "</strong>" in result
+        assert "你好" in result
+        assert "世界" in result
+
+    def test_untranslated_chunk_uses_original_with_restore(self):
+        """UNTRANSLATED chunk 应该使用 original，并恢复其占位符"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="c1",
+                original="<p><em>Hello</em></p>",
+                translated="<p><em>你好</em></p>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={},
+            ),
+            Chunk(
+                name="c2",
+                original="<p><strong>World</strong></p>",
+                translated="",  # 翻译失败
+                status=TranslationStatus.UNTRANSLATED,
+                tokens=10,
+                local_tag_map={},
+            ),
+        ]
+        result = merger.merge(chunks)
+        # Chunk 1 使用 original
+        assert "<strong>" in result
+        assert "World" in result
+
+
+class TestMergerHtmlValidation:
+    """测试 Merger 的 HTML 验证功能（集成测试）"""
+
+    def test_valid_html_passes_validation(self):
+        """正确的 HTML 结构应该通过验证"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="c1",
+                original="<p>Hello</p>",
+                translated="<p>你好</p>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={},
+            ),
+            Chunk(
+                name="c2",
+                original="<p>World</p>",
+                translated="<p>世界</p>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={},
+            ),
+        ]
+        result = merger.merge(chunks)
+        # 应该正确合并
+        assert "<p>" in result
+        assert "</p>" in result
+        assert "你好" in result
+        assert "世界" in result
+
+    def test_chunk_boundary_tag_tracking(self):
+        """测试跨 chunk 边界的标签追踪"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="c1",
+                original="<p>Hello <em>",
+                translated="<p>你好 <em>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={},
+            ),
+            Chunk(
+                name="c2",
+                original="text</em></p>",
+                translated="文本</em></p>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={},
+            ),
+        ]
+        result = merger.merge(chunks)
+        # 跨 chunk 的 <em>...</em> 应该正确配对
+        assert "<em>" in result
+        assert "</em>" in result
+        assert "<p>" in result
+        assert "</p>" in result
+
+
 class TestMergerStatusHandling:
     """测试 Merger 对不同翻译状态的处理"""
 

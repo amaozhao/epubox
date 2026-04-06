@@ -11,27 +11,20 @@ description = (
 )
 
 instructions = [
-    "1. **JSON OUTPUT ONLY**: Return ONLY a raw JSON object: {\"translation\": \"...\"}. No markdown, no explanations.",
-    "2. **TRANSLATION**: Translate 'text_to_translate' into natural, fluent, simplified Chinese. Use the 'glossaries' dictionary for technical terms.",
-    "3. **PLACEHOLDERS - CRITICAL - DO NOT DUPLICATE**:",
+    "1. **TRANSLATION**: Translate 'text_to_translate' into natural, fluent, simplified Chinese. Use the 'glossaries' dictionary for technical terms.",
+    "2. **PLACEHOLDERS - STRICT RULES**:",
     "   - 'placeholder_count': the EXACT number of [idN] markers in 'text_to_translate'.",
     "   - 'untranslatable_placeholders': a list of ALL [idN] markers you must preserve.",
     "   - Copy EVERY [idN] from input to output VERBATIM — each appears exactly once, in the SAME relative position as in the original.",
-    "   - **PLACEHOLDER TRACKING METHOD**:",
-    "     1. First, write down ALL placeholder indices in order: [id0], [id1], [id2], ...",
-    "     2. For each placeholder you copy to output, CROSS IT OFF your list.",
-    "     3. Translate the TEXT BETWEEN placeholders, not the placeholders themselves.",
-    "     4. NEVER cross off the same placeholder twice.",
-    "     5. Before outputting, verify: crossed-off count == placeholder_count.",
-    "   - **NEVER repeat the last placeholder after translation is complete** — do NOT append any [idN] after the final translated text.",
-    "   - Never generate new placeholder indices like [id99] or [id100].",
-    "   - **ABSOLUTELY FORBIDDEN**: Skipping, reordering, duplicating, or inventing placeholder indices.",
-    "   - **COUNT CHECK**: Before returning, count [idN] in your output — it MUST equal 'placeholder_count'.",
-    "   - If 'validation_error' reports missing placeholders, add them back at their correct positions.",
-    "   - **PRE/CODE PLACEHOLDERS**: `[PRE:n]` and `[CODE:n]` are code block placeholders. Do NOT translate, modify, or delete them. Copy VERBATIM.",
-    "4. **XML/HTML**: Preserve structural tags. Do NOT delete <link>, <meta>, <br/>, <img>. Remove empty container tags like <a href='...'></a>.",
-    "   - **EPUB NAVIGATION TAGS** (MUST preserve): <navLabel>, <content>, <navPoint>, <navMap>, <pageList>, <pageTarget>, <spine>, <itemref>, <nav>, <ol>, <ul>, <li>. Keep all attributes. Translate only text content inside.",
-    "5. **FINAL CHECK**: Verify the count of [idN] in your output equals 'placeholder_count'.",
+    "   - **MANDATORY RULES**:",
+    "     1. **IN ORDER**: Placeholders must appear in ascending order: [id0], [id1], [id2], ... NEVER reorder.",
+    "     2. **NO MISSING**: Every placeholder from 0 to n-1 must appear exactly once. NEVER skip any.",
+    "     3. **NO EXTRA**: NEVER add placeholders not in the original. Never invent [id99], [id100], etc.",
+    "     4. **NO DUPLICATE**: Each placeholder appears exactly once. NEVER repeat.",
+    "   - **TRANSLATION METHOD**: Translate text BETWEEN placeholders only. Never translate placeholders themselves.",
+    "   - **IF validation_error REPORTS issues**: Read the error, identify missing/extra/wrong-order placeholders, and correct them before returning.",
+    "   - **GLOBAL PLACEHOLDERS**: `[PRE:n]`, `[CODE:n]`, `[STYLE:n]`, `[idn]` etc. are ALL placeholders. Copy VERBATIM, do NOT translate, modify, or delete them.",
+    "3. **FINAL VERIFICATION**: Before returning, count [idN] in your output — it MUST equal 'placeholder_count' exactly.",
 ]
 
 
