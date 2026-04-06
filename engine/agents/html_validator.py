@@ -1,5 +1,7 @@
 import re
-from typing import List, Tuple, Optional
+from typing import List, Tuple
+
+from lxml import etree
 
 
 class HtmlValidator:
@@ -50,7 +52,9 @@ class HtmlValidator:
         chunk_name: str
     ) -> Tuple[bool, List[dict]]:
         """
-        验证单个 chunk 的 HTML 结构
+        验证单个 chunk 的 HTML 结构（解析层面的错误，不检查未闭合标签）
+
+        注意：对于跨 chunk 的情况，未闭合标签是正常的，应该使用 validate_merged() 来检查。
 
         Returns:
             Tuple[bool, List[dict]]: (是否有效, 当前 chunk 的错误列表)
@@ -154,7 +158,7 @@ class HtmlValidator:
             # 不匹配，记录错误
             self.errors.append({
                 "type": "tag_mismatch",
-                "message": f"标签不匹配",
+                "message": "标签不匹配",
                 "expected": f"</{stack_tag}> (来自 Chunk[{stack_chunk_idx}])",
                 "actual": f"</{tag_name}> (Chunk[{chunk_index}])",
                 "chunk_index": chunk_index,
@@ -166,6 +170,26 @@ class HtmlValidator:
     def get_stack_state(self) -> List[Tuple[str, int]]:
         """获取当前栈状态，用于调试"""
         return self.stack.copy()
+
+    def validate_with_lxml(self, html: str) -> Tuple[bool, List[str]]:
+        """
+        使用 lxml 验证 HTML/XML 语法（严格验证）
+
+        Returns:
+            Tuple[bool, List[str]]: (是否有效, 错误信息列表)
+        """
+        errors = []
+        if not html or not html.strip():
+            return True, errors
+        try:
+            etree.fromstring(html.encode("utf-8") if isinstance(html, str) else html)
+            return True, errors
+        except etree.XMLSyntaxError as e:
+            errors.append(f"XML/HTML语法错误: {str(e)}")
+            return False, errors
+        except Exception as e:
+            errors.append(f"解析错误: {str(e)}")
+            return False, errors
 
 
 def validate_html_structure(html: str) -> Tuple[bool, List[str]]:

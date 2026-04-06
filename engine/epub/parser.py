@@ -10,9 +10,9 @@ from bs4 import BeautifulSoup
 from engine.agents.html_validator import HtmlValidator
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
-from engine.item import HtmlChunker, PreCodeExtractor, TagPreserver
-from engine.item.chunker import count_tokens
+from engine.item import PreCodeExtractor, chunk_html, add_context_to_chunks, count_tokens
 from engine.schemas import Chunk, EpubBook, EpubItem
+from engine.schemas.translator import TranslationStatus
 
 
 class Parser:
@@ -83,7 +83,7 @@ class Parser:
         1. BeautifulSoup 解析（规范化 HTML）
         2. PreCodeExtractor.extract() - 提取 pre/code 标签
         3. HtmlChunker.chunk_by_html_tags() - 按块级标签分割
-        4. TagPreserver.preserve_tags() - 对每个 chunk 单独做占位符替换
+        4. Create Chunk objects directly from ChunkState (HTML tags preserved)
         """
         # 优先从 JSON 文件加载
         book = self.load_json()
@@ -133,35 +133,25 @@ class Parser:
                     is_nav_file = "toc.ncx" in relative_path.lower() or relative_path.lower().endswith("nav.xhtml")
 
                     # Step 4: 按块级 HTML 标签分割（先分块）
-                    chunker = HtmlChunker(token_limit=self.limit)
-                    raw_chunks = chunker.chunk_by_html_tags(
-                        content_after_pre, token_limit=self.limit, is_nav_file=is_nav_file
-                    )
+                    raw_chunk_states = chunk_html(content_after_pre, token_limit=self.limit)
+                    raw_chunks = add_context_to_chunks(raw_chunk_states)
 
-                    # Step 5: 对每个 chunk 单独做 TagPreserver
+                    # Step 5: Create Chunk objects directly from ChunkState
                     chunks = []
-                    preserver = TagPreserver()
-                    for raw_chunk in raw_chunks:
-                        chunk_text, local_mgr = preserver.preserve_tags(raw_chunk)
+                    for cs in raw_chunks:
                         chunk = Chunk(
-                            name=str(uuid.uuid4())[:8],
-                            original=chunk_text,
+                            name=cs.xpath,
+                            original=cs.original,
                             translated=None,
-                            local_tag_map=local_mgr.tag_map,
-                            tokens=count_tokens(chunk_text),
+                            status=TranslationStatus.PENDING,
+                            tokens=cs.tokens,
                         )
                         chunks.append(chunk)
 
-                    # Step 5.1: 验证 chunk 拆分后的 local_tag_map 和标签栈是否正确
-                    restored_chunks = []
+                    # Step 5.1: 验证 chunk 拆分后的 HTML 结构
                     chunk_names = [c.name for c in chunks]
-                    for c in chunks:
-                        restored = c.original
-                        for placeholder, original_tag in c.local_tag_map.items():
-                            restored = restored.replace(placeholder, original_tag)
-                        restored_chunks.append(restored)
                     validator = HtmlValidator()
-                    valid, errors = validator.validate_merged(restored_chunks, chunk_names)
+                    valid, errors = validator.validate_merged([c.original for c in chunks], chunk_names)
                     if not valid:
                         logger.warning(f"文件 {relative_path} 拆分后 HTML 结构异常: {errors}")
 
@@ -190,9 +180,8 @@ class Parser:
         合并 toc.ncx 中太小的相邻 chunks
 
         流程：
-        1. 先把占位符还原成原始 HTML
-        2. 合并 HTML
-        3. 重新生成占位符
+        1. 贪婪合并太小的相邻 chunks
+        2. 创建新的 Chunk 对象
 
         Args:
             chunks: 原始 chunks 列表
@@ -204,25 +193,19 @@ class Parser:
         if len(chunks) <= 1:
             return chunks
 
-        # 第一步：把每个 chunk 的占位符还原成原始 HTML
-        restored_chunks = []
-        for c in chunks:
-            restored_html = self._restore_placeholders(c)
-            restored_chunks.append(restored_html)
-
-        # 第二步：贪婪合并太小的相邻 chunks
+        # 贪婪合并太小的相邻 chunks
+        # 注意：用 HTML tokens 而非文本 tokens 判断，因为翻译按 HTML 整体进行
         merged_htmls = []
         i = 0
-        while i < len(restored_chunks):
-            current_html = restored_chunks[i]
-            current_text = self._extract_text_from_html(current_html)
-            current_tokens = count_tokens(current_text)
+        while i < len(chunks):
+            current_html = chunks[i].original
+            current_tokens = count_tokens(current_html)
 
             j = i + 1
-            while j < len(restored_chunks):
-                next_html = restored_chunks[j]
-                next_text = self._extract_text_from_html(next_html)
-                combined_tokens = current_tokens + count_tokens(next_text)
+            while j < len(chunks):
+                next_html = chunks[j].original
+                next_tokens = count_tokens(next_html)
+                combined_tokens = current_tokens + next_tokens
 
                 if current_tokens >= min_tokens and combined_tokens > min_tokens * 1.5:
                     break
@@ -234,36 +217,19 @@ class Parser:
             merged_htmls.append(current_html)
             i = j
 
-        # 第三步：重新生成占位符
+        # 创建新的 Chunk 对象
         final_chunks = []
-        preserver = TagPreserver()
         for html in merged_htmls:
-            chunk_text, local_mgr = preserver.preserve_tags(html)
             chunk = Chunk(
                 name=str(uuid.uuid4())[:8],
-                original=chunk_text,
+                original=html,
                 translated=None,
-                local_tag_map=local_mgr.tag_map,
-                tokens=count_tokens(chunk_text),
+                status=TranslationStatus.PENDING,
+                tokens=count_tokens(html),
             )
             final_chunks.append(chunk)
 
         return final_chunks
-
-    def _restore_placeholders(self, chunk: Chunk) -> str:
-        """
-        把 chunk 中的占位符还原成原始 HTML
-
-        Args:
-            chunk: 带占位符的 chunk
-
-        Returns:
-            还原后的原始 HTML
-        """
-        result = chunk.original
-        for placeholder, original_tag in chunk.local_tag_map.items():
-            result = result.replace(placeholder, original_tag)
-        return result
 
     def _extract_text_from_html(self, html: str) -> str:
         """

@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from agno.run import RunStatus
 from agno.workflow import Step, StepInput, StepOutput, Workflow
@@ -12,7 +12,7 @@ from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
 from .translator import get_translator
-from .validator import validate_placeholders
+from .validator import validate_html_pairing, validate_html_with_context
 
 # 需要内容安全审核 fallback 的错误码
 CONTENT_SAFETY_ERROR_CODES = {10014, 500, 400}
@@ -32,20 +32,10 @@ def is_content_safety_error(error_msg: str = "", status_code: int | None = None)
     return False
 
 
-def _get_placeholder_indices(text: str) -> List[int]:
-    """提取文本中所有占位符的索引"""
-    matches = re.findall(r"\[id(\d+)\]", text)
-    return [int(m) for m in matches]
-
-
-def _get_placeholders_from_indices(indices: List[int]) -> List[str]:
-    """将索引列表转换为占位符字符串列表"""
-    return [f"[id{i}]" for i in indices]
-
-
 def _has_translatable_content(text: str) -> bool:
-    """检查文本是否包含可翻译内容（排除纯占位符）"""
-    clean = re.sub(r"\[id\d+\]", "", text)
+    """检查文本是否包含可翻译内容（排除 HTML 标签）"""
+    # Remove HTML tags for content check
+    clean = re.sub(r"<[^>]+>", "", text)
     return bool(clean.strip())
 
 
@@ -61,7 +51,6 @@ def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]
 
 async def _call_translator(
     text: str,
-    placeholder_mgr,
     glossary: Optional[Dict[str, str]] = None,
     previous_translation: str | None = None,
     error_msg: str | None = None,
@@ -70,20 +59,15 @@ async def _call_translator(
     """调用翻译模型
 
     Args:
-        text: 待翻译文本
-        placeholder_mgr: 占位符管理器
+        text: 待翻译文本（HTML 格式，标签需要保留）
         glossary: 术语表
         previous_translation: 上一次翻译失败的结果（用于重试时参考）
         error_msg: 上一次翻译失败的具体错误信息
     """
-    # 构建验证用的 tag_map（local_tag_map 已经是需要的格式）
-    validation_tag_map = {k: placeholder_mgr.get(k, "") for k in placeholder_mgr if k.startswith("[id")}
     # 过滤出文本中出现的术语
     filtered_glossary = filter_glossary_terms(text, glossary) if glossary else {}
     translator_input = {
         "text_to_translate": text,
-        "placeholder_count": len(validation_tag_map),
-        "untranslatable_placeholders": list(validation_tag_map.keys()),
         "glossaries": filtered_glossary,
     }
     # 如果有上一次失败的翻译结果，加入输入中让模型参考
@@ -105,6 +89,31 @@ async def _call_translator(
                 raise ValueError(f"内容安全审核失败: {error_content[:100]}")
         if isinstance(raw_content, TranslationResponse):
             return raw_content.translation
+        # 当 raw_content 是字符串时，可能是 Agno JSON 解析失败的情况
+        if isinstance(raw_content, str):
+            # 去掉可能的前缀文字（如 "Here is the translation:"）
+            cleaned = raw_content.strip()
+            # 尝试 JSON 解析
+            try:
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, dict) and "translation" in parsed:
+                    return parsed["translation"]
+            except (json.JSONDecodeError, ValueError):
+                pass
+            # 如果 JSON 解析失败，检查字符串内容是否像 HTML
+            if cleaned.startswith("<") and cleaned.endswith(">"):
+                # 看起来像是直接的 HTML 翻译结果，直接使用
+                logger.warning(f"Agno returned raw string, using as translation directly")
+                return cleaned
+            # 尝试直接提取 translation 字段
+            match = re.search(r'"translation"\s*:\s*"([^"]*)"', cleaned, re.DOTALL)
+            if match:
+                translation = match.group(1)
+                translation = translation.encode().decode('unicode_escape')
+                return translation
+            # 最后尝试：把整个字符串作为翻译结果返回
+            logger.warning(f"Could not parse translation response, using raw content")
+            return cleaned
         raise ValueError(f"翻译响应格式错误: {type(raw_content)}")
     except Exception as e:
         logger.error(f"翻译模型调用异常: {type(e).__name__}: {e}")
@@ -113,10 +122,9 @@ async def _call_translator(
 
 async def _translate_with_fallback(
     chunk: Chunk,
-    placeholder_mgr,
     glossary: Optional[Dict[str, str]] = None,
 ) -> Chunk:
-    """Phase 1 翻译：翻译后验证占位符，失败则重试"""
+    """翻译：翻译 HTML 并验证标签配对"""
     original = chunk.original
     last_error_msg = None
     last_translation = None
@@ -125,19 +133,24 @@ async def _translate_with_fallback(
     for attempt in range(MAX_TRANSLATION_RETRIES):
         try:
             translated = await _call_translator(
-                original, placeholder_mgr, glossary, last_translation, last_error_msg, use_fallback=used_fallback
+                original, glossary, last_translation, last_error_msg, use_fallback=used_fallback
             )
             translated = translated.replace("\\n", "\n")
 
-            # 验证占位符
-            is_valid, error_msg = validate_placeholders(translated, placeholder_mgr)
+            # 验证 HTML 标签配对
+            # 第一次验证用简单错误，后续重试用详细上下文
+            if attempt == 0:
+                is_valid, error_msg = validate_html_pairing(original, translated)
+            else:
+                is_valid, error_msg = validate_html_with_context(original, translated)
+
             if is_valid:
                 chunk.translated = translated
                 chunk.status = TranslationStatus.TRANSLATED
                 return chunk
 
             # 验证失败，将错误信息传给下一次重试
-            logger.warning(f"Chunk '{chunk.name}' 占位符验证失败: {error_msg}，重试...")
+            logger.warning(f"Chunk '{chunk.name}' HTML 验证失败: {error_msg}，重试...")
             last_error_msg = error_msg
             last_translation = translated
             continue
@@ -167,34 +180,46 @@ async def translate_step(step_input: StepInput) -> StepOutput:
     additional_data = step_input.additional_data or {}
     glossary = additional_data.get("glossary", {})
 
+    # 如果 chunk 已有翻译结果（可能是手动翻译），跳过翻译步骤
     if chunk.status == TranslationStatus.TRANSLATED and chunk.translated:
-        return StepOutput(content=chunk)
+        logger.info(f"Chunk '{chunk.name}' 已有翻译结果，跳过翻译步骤")
+        # 返回与后续步骤兼容的格式
+        return StepOutput(content={"chunk": chunk, "validation_error": None})
 
     if not _has_translatable_content(chunk.original):
         logger.info(f"Chunk '{chunk.name}' 无可翻译内容，直接返回原文")
         chunk.translated = chunk.original
         chunk.status = TranslationStatus.TRANSLATED
-        return StepOutput(content=chunk)
-
-    # 使用 chunk.local_tag_map（每个 chunk 独立的局部占位符映射）
-    if not chunk.local_tag_map:
-        error_msg = "翻译步骤失败：缺少 local_tag_map"
-        logger.error(error_msg)
-        return StepOutput(content=chunk, success=False, error=error_msg)
+        return StepOutput(content={"chunk": chunk, "validation_error": None})
 
     try:
-        chunk = await _translate_with_fallback(chunk, chunk.local_tag_map, glossary)
-        return StepOutput(content=chunk)
+        chunk = await _translate_with_fallback(chunk, glossary)
+        return StepOutput(content={"chunk": chunk, "validation_error": None})
     except Exception as e:
         error_msg = f"翻译步骤失败：{e}"
         logger.error(error_msg)
-        return StepOutput(content=chunk, success=False, error=error_msg)
+        return StepOutput(content={"chunk": chunk, "validation_error": error_msg}, success=False, error=error_msg)
 
 
 # Step 2: Validate
 def validation_step(step_input: StepInput) -> StepOutput:
-    """独立验证步骤：验证占位符是否正确"""
-    chunk: Chunk = step_input.previous_step_content  # type: ignore
+    """独立验证步骤：验证 HTML 标签配对"""
+    step_data = step_input.previous_step_content
+
+    # 处理不同格式的输入（兼容重试场景）
+    if isinstance(step_data, dict):
+        chunk = step_data.get("chunk")
+        if chunk is None:
+            error_msg = "验证步骤失败：无法从 previous_step_content 获取 chunk"
+            logger.error(error_msg)
+            return StepOutput(content={"chunk": None, "validation_error": error_msg}, success=False, error=error_msg)
+    else:
+        chunk = step_data
+
+    if not isinstance(chunk, Chunk):
+        error_msg = f"验证步骤失败：chunk 不是 Chunk 对象，而是 {type(chunk)}"
+        logger.error(error_msg)
+        return StepOutput(content={"chunk": chunk, "validation_error": error_msg}, success=False, error=error_msg)
 
     # 翻译失败或无可翻译内容，跳过验证
     if chunk.status == TranslationStatus.UNTRANSLATED:
@@ -206,10 +231,10 @@ def validation_step(step_input: StepInput) -> StepOutput:
         logger.error(error_msg)
         return StepOutput(content={"chunk": chunk, "validation_error": error_msg}, success=False, error=error_msg)
 
-    # 验证占位符
-    is_valid, error_msg = validate_placeholders(chunk.translated, chunk.local_tag_map)
+    # 验证 HTML 标签配对
+    is_valid, error_msg = validate_html_pairing(chunk.original, chunk.translated)
     if not is_valid:
-        logger.warning(f"Chunk '{chunk.name}' 占位符验证失败: {error_msg}")
+        logger.warning(f"Chunk '{chunk.name}' HTML 验证失败: {error_msg}")
         chunk.status = TranslationStatus.UNTRANSLATED
         chunk.translated = ""
         return StepOutput(content={"chunk": chunk, "validation_error": error_msg})
@@ -240,7 +265,6 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
 
     proofer_input = {
         "text_to_proofread": translated,
-        "untranslatable_placeholders": _get_placeholders_from_indices(_get_placeholder_indices(chunk.original)),
     }
 
     max_attempts = 3
@@ -337,7 +361,7 @@ def get_translator_workflow() -> Workflow:
     """构建并返回翻译工作流（翻译→验证→校对→修正）"""
     return Workflow(
         name="TranslatorWorkflow",
-        description="智能翻译工作流：直接翻译+占位符验证+校对提升质量",
+        description="智能翻译工作流：直接翻译 HTML + 标签验证 + 校对提升质量",
         steps=[
             Step(name="translate", executor=translate_step),
             Step(name="validate", executor=validation_step),

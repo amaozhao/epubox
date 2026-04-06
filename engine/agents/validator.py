@@ -1,45 +1,102 @@
 import re
-from typing import Dict, List, Tuple
+from typing import List, Tuple
+
+from engine.agents.html_validator import HtmlValidator
 
 
 class ValidationError(Exception):
-    """占位符验证错误"""
+    """HTML validation error"""
 
-    def __init__(self, message: str, missing_ids: List[int] | None = None, extra_ids: List[int] | None = None):
+    def __init__(self, message: str, errors: List[dict] | None = None):
         super().__init__(message)
         self.message = message
-        self.missing_ids = missing_ids or []
-        self.extra_ids = extra_ids or []
+        self.errors = errors or []
 
 
-def validate_placeholders(text: str, tag_map: Dict[str, str]) -> Tuple[bool, str]:
-    """严格验证占位符：顺序和存在性。返回 (是否有效, 错误信息)"""
-    if not tag_map:
+def validate_html_pairing(original: str, translated: str) -> Tuple[bool, str]:
+    """
+    Validate that HTML tags in translated text are properly paired.
+
+    检查两个层面：
+    1. 解析错误（标签不匹配、意外闭合等）
+    2. 未闭合标签（单个 chunk 必须闭合）
+
+    Returns (is_valid, error_message)
+    """
+    if not translated:
+        return False, "Translated content is empty"
+
+    validator = HtmlValidator()
+
+    # Validate translated HTML structure using stack tracker
+    translated_valid, translated_errors = validator.validate_chunk(translated, 0, "translated")
+    if not translated_valid:
+        error_details = []
+        for err in translated_errors:
+            if err.get("type") == "tag_mismatch":
+                error_details.append(
+                    f"标签不匹配: 期望 {err.get('expected')}, 实际 {err.get('actual')}"
+                )
+            elif err.get("type") == "unexpected_close":
+                error_details.append(f"意外的闭合标签 {err.get('actual')}")
+            else:
+                error_details.append(str(err))
+        return False, f"Translated HTML has structure issues: {'; '.join(error_details)}"
+
+    # 检查未闭合标签（单个 chunk 必须完全闭合）
+    if validator.stack:
+        unclosed_tags = [tag for tag, _ in validator.stack]
+        return False, f"Translated HTML has unclosed tags: {unclosed_tags} (chunk must be fully closed)"
+
+    return True, ""
+
+
+def validate_html_with_context(original: str, translated: str) -> Tuple[bool, str]:
+    """
+    验证 HTML 标签配对，并提供详细上下文用于 LLM 修复。
+
+    Returns:
+        Tuple[bool, str]: (是否有效, 详细的错误上下文信息)
+    """
+    if not translated:
+        return False, "Translated content is empty"
+
+    validator = HtmlValidator()
+    translated_valid, translated_errors = validator.validate_chunk(translated, 0, "translated")
+
+    if translated_valid and not validator.stack:
         return True, ""
 
-    # 从 text 中按顺序提取所有占位符
-    found_placeholders = re.findall(r"\[id\d+\]", text)
+    # 构建详细的错误信息
+    error_parts = []
 
-    # 从 tag_map.keys() 按顺序获取所有占位符
-    expected_placeholders = list(tag_map.keys())
+    # 1. 解析错误
+    if translated_errors:
+        error_parts.append("解析错误:")
+        for err in translated_errors:
+            if err.get("type") == "tag_mismatch":
+                error_parts.append(
+                    f"  - 标签不匹配: 期望 {err.get('expected')}, 实际 {err.get('actual')}"
+                )
+            elif err.get("type") == "unexpected_close":
+                error_parts.append(f"  - 意外的闭合标签: {err.get('actual')}")
 
-    # 先检查长度
-    if len(found_placeholders) != len(expected_placeholders):
-        # 计算缺少和多出的占位符
-        found_set = set(found_placeholders)
-        expected_set = set(expected_placeholders)
-        missing = sorted(expected_set - found_set, key=lambda x: int(x[3:-1]))
-        extra = sorted(found_set - expected_set, key=lambda x: int(x[3:-1]))
-        parts = []
-        if missing:
-            parts.append(f"缺少 {missing}")
-        if extra:
-            parts.append(f"多余 {extra}")
-        return False, ", ".join(parts)
+    # 2. 未闭合标签
+    if validator.stack:
+        error_parts.append(f"未闭合的标签: {[tag for tag, _ in validator.stack]}")
 
-    # 逐个比较
-    for i, (found, expected) in enumerate(zip(found_placeholders, expected_placeholders)):
-        if found != expected:
-            return False, f"占位符不匹配: 位置 {i} 期望 [{expected}], 实际 [{found}]"
+    # 3. 提供 HTML 片段对比
+    error_parts.append("\n原文片段 (前后各50字符):")
+    error_parts.append(f"  {repr(original[max(0, len(original)//2-50):len(original)//2+50])}")
+    error_parts.append("\n翻译片段 (前后各50字符):")
+    error_parts.append(f"  {repr(translated[max(0, len(translated)//2-50):len(translated)//2+50])}")
 
+    return False, "\n".join(error_parts)
+
+
+def validate_placeholders(text: str, tag_map: dict) -> Tuple[bool, str]:
+    """
+    Legacy function - always returns True since we no longer use placeholders.
+    Kept for backward compatibility.
+    """
     return True, ""

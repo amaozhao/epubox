@@ -1,6 +1,5 @@
 import xml.etree.ElementTree as ET
 
-from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
 from engine.item import Merger, PreCodeExtractor
 from engine.schemas import EpubItem, TranslationStatus
@@ -63,16 +62,15 @@ class Replacer:
         """将给定 EpubItem 的所有 Chunk 对象合并为一个字符串"""
         merger = Merger()
         if item.chunks:
-            merged_content = merger.merge(item.chunks)
+            merged_content = merger.merge(item.chunks, original_content=item.content)
             return merged_content
         return ""
 
     def _restore_tags(self, item: EpubItem, merged_content: str) -> str:
-        """仅返回合并后的内容，不做标签恢复
+        """仅返回合并后的内容。
 
-        注意：[idN] 标签占位符在 orchestrator 中每个 chunk 翻译完成后已恢复。
-        pre/code/style 标签在 restore() 方法中通过 PreCodeExtractor.restore 恢复。
-        此方法仅用于接口兼容性。
+        Note: With the new architecture, HTML tags are preserved directly in translation.
+        This method is kept for interface compatibility.
         """
         return merged_content
 
@@ -91,20 +89,10 @@ class Replacer:
             pre_extractor.preserved_style = item.preserved_style or []
             restored_content = pre_extractor.restore(restored_content)
 
-        # 3. 验证 HTML 结构完整性
-        is_valid, integrity_errors = verify_html_integrity(restored_content)
-        if not is_valid:
-            logger.error(f"HTML结构验证失败: {item.id}, 错误: {integrity_errors}")
-
-        # 4.1 验证 nav 文件结构完整性（在占位符恢复之后）
-        is_nav_file = "toc.ncx" in item.id.lower() or item.id.endswith("nav.xhtml")
-        if is_nav_file and not self._validate_nav_structure(restored_content):
-            logger.error(f"Nav 结构验证失败: {item.id}，但保留翻译结果")
-
-        # 5. 检查是否有未翻译的 chunk
+        # 3. 检查是否有未翻译的 chunk（每个 chunk 已在 merger 中验证过结构）
         untranslated_chunks = [c.name for c in item.chunks if c.status != TranslationStatus.COMPLETED]
         if untranslated_chunks:
-            logger.error(f"以下 chunk 未完成翻译: {untranslated_chunks}, 文件: {item.id}")
+            logger.warning(f"以下 chunk 未完成翻译: {untranslated_chunks}, 文件: {item.id}")
 
         # 7. 保存
         if restored_content:

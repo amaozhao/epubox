@@ -8,7 +8,7 @@ from engine.agents.html_validator import HtmlValidator
 from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
 from engine.epub import Builder, Parser, Replacer
-from engine.item.tag import TagRestorer
+from engine.item.precode import PreCodeExtractor
 from engine.schemas import Chunk, TranslationStatus
 from engine.services.glossary import GlossaryExtractor, GlossaryLoader
 
@@ -20,7 +20,6 @@ class TranslationStats:
         self.translated = 0
         self.untranslated = 0
         self.pending = 0
-        self.failed = 0
 
     def record(self, status: TranslationStatus | None):
         if status is None:
@@ -35,16 +34,12 @@ class TranslationStats:
         elif status == TranslationStatus.PENDING:
             self.pending += 1
 
-    def record_failure(self):
-        self.failed += 1
-
     def __str__(self):
         return (
             f"翻译统计: 总数={self.total}, "
             f"成功={self.translated}, "
             f"失败={self.untranslated}, "
-            f"跳过={self.pending}, "
-            f"错误={self.failed}"
+            f"跳过={self.pending}"
         )
 
 
@@ -103,7 +98,7 @@ class Orchestrator:
         判断一个分块是否需要翻译。
 
         判断逻辑：
-        1. 如果 chunk.status 属性为 COMPLETED，则认为它已经翻译过，返回 False。
+        1. 如果 chunk.status 属性为 COMPLETED 或 TRANSLATED，则认为它已经翻译过，返回 False。
         2. 否则，返回 True，表示需要进行翻译。
 
         Args:
@@ -112,7 +107,7 @@ class Orchestrator:
         Returns:
             如果需要翻译则返回 True，否则返回 False。
         """
-        if chunk.status == TranslationStatus.COMPLETED:
+        if chunk.status in (TranslationStatus.COMPLETED, TranslationStatus.TRANSLATED):
             return False
         return True
 
@@ -151,20 +146,22 @@ class Orchestrator:
             if not item.chunks:
                 continue
 
-            # Step X: 验证 chunk 拆分后的 local_tag_map 和标签栈是否正确
-            restored_chunks = []
+            # Step 0: 严格 XML 验证原文（在 chunk 之前）
+            xml_validator = HtmlValidator()
+            xml_valid, xml_errors = xml_validator.validate_with_lxml(item.content)
+            if not xml_valid:
+                logger.warning(f"文件 {item.id} 的原文 XML 验证失败: {xml_errors}")
+                # 仍然尝试翻译，但记录警告
+
+            # Step X: 验证 chunk 拆分后的 HTML 结构是否正确
             chunk_names = [c.name for c in item.chunks]
-            for c in item.chunks:
-                restored = c.original
-                for placeholder, original_tag in c.local_tag_map.items():
-                    restored = restored.replace(placeholder, original_tag)
-                restored_chunks.append(restored)
             validator = HtmlValidator()
-            valid, errors = validator.validate_merged(restored_chunks, chunk_names)
+            valid, errors = validator.validate_merged([c.original for c in item.chunks], chunk_names)
             if not valid:
                 logger.warning(f"文件 {item.id} 的 chunk 拆分后 HTML 结构异常: {errors}")
 
-            for _, chunk in enumerate(item.chunks):
+            # 使用 tqdm 显示 chunk 进度
+            for chunk in tqdm(item.chunks, desc=f"  Chunk", unit="个", leave=False):
                 # 在开始工作流前，判断该分块是否需要翻译
                 if not self._should_translate_chunk(chunk):
                     stats.record(chunk.status)
@@ -181,38 +178,47 @@ class Orchestrator:
                             "preserved_style": item.preserved_style or [],
                         },
                     )
-                    if isinstance(response.content, Chunk):
+                    # 处理 workflow 返回的不同格式
+                    workflow_content = response.content
+                    if isinstance(workflow_content, dict):
+                        # workflow 返回 {"chunk": chunk, ...} 格式
+                        result_chunk = workflow_content.get("chunk")
+                        if isinstance(result_chunk, Chunk):
+                            chunk_index = item.chunks.index(chunk)
+                            item.chunks[chunk_index] = result_chunk
+                            chunk = result_chunk
+                            stats.record(chunk.status)
+                        else:
+                            logger.error(f"workflow.content['chunk'] 不是 Chunk: {type(result_chunk)}")
+                    elif isinstance(workflow_content, Chunk):
                         chunk_index = item.chunks.index(chunk)
-                        item.chunks[chunk_index] = response.content
-                        chunk = response.content
-
+                        item.chunks[chunk_index] = workflow_content
+                        chunk = workflow_content
                         stats.record(chunk.status)
-
-                        # 每翻译一个 chunk 立即保存，支持断点续传
-                        parser.save_json(book)
-
-                        # 记录需要手动翻译的 chunk
-                        if chunk.status == TranslationStatus.UNTRANSLATED:
-                            manual_chunks.append(
-                                {
-                                    "file": item.id,
-                                    "chunk_name": chunk.name,
-                                    "original": chunk.original,
-                                    "path": item.path,
-                                    "placeholder": item.placeholder,
-                                    "status": chunk.status.value,
-                                }
-                            )
                     else:
-                        logger.error(f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}")
-                        stats.record_failure()
+                        logger.error(f"Invalid response.content type for chunk {chunk.name}: {type(workflow_content)}")
+
+                    # 每翻译一个 chunk 立即保存到 JSON，支持断点续传
+                    parser.save_json(book)
+
+                    # 记录需要手动翻译的 chunk
+                    if chunk.status == TranslationStatus.UNTRANSLATED:
+                        manual_chunks.append(
+                            {
+                                "file": item.id,
+                                "chunk_name": chunk.name,
+                                "original": chunk.original,
+                                "path": item.path,
+                                "placeholder": item.placeholder,
+                                "status": chunk.status.value,
+                            }
+                        )
                 except Exception as e:
                     logger.error(f"Unexpected error for chunk {chunk.name}: {str(e)}")
-                    stats.record_failure()
 
             # 恢复 item 内容
             self.replacer.restore(item)
-            # 保存当前 item 的翻译结果
+            # 保存当前 item 的翻译结果到 JSON
             parser.save_json(book)
 
         # 打印最终统计

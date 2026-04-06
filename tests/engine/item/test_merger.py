@@ -3,10 +3,10 @@ from engine.schemas import Chunk, TranslationStatus
 
 
 class TestMergerPlaceholderRestore:
-    """测试 Merger 对占位符的恢复（集成测试）"""
+    """测试 Merger 在新架构下的行为（无占位符）"""
 
-    def test_translated_with_placeholders_restored(self):
-        """translated 包含占位符，在 merge 时应该被恢复为实际标签"""
+    def test_translated_with_html_tags_preserved(self):
+        """translated 直接包含 HTML 标签，在 merge 时应该被直接使用"""
         merger = Merger()
         chunks = [
             Chunk(
@@ -15,7 +15,7 @@ class TestMergerPlaceholderRestore:
                 translated="<p><em>你好</em></p>",
                 status=TranslationStatus.TRANSLATED,
                 tokens=10,
-                local_tag_map={},  # 没有占位符，因为 original 中没有 [idN]
+                local_tag_map={},
             ),
         ]
         result = merger.merge(chunks)
@@ -24,53 +24,28 @@ class TestMergerPlaceholderRestore:
         assert "</em>" in result
         assert "你好" in result
 
-    def test_translated_with_inline_placeholders(self):
-        """translated 包含占位符，在 merge 时应该被恢复为实际标签"""
+    def test_multiple_chunks_html_preserved(self):
+        """多个 chunk 的 HTML 标签都应该被直接保留"""
         merger = Merger()
         chunks = [
             Chunk(
                 name="c1",
-                original="<p>[id0]Hello[id1]</p>",
-                translated="<p>[id0]你好[id1]</p>",
+                original="<p><em>Hello</em></p>",
+                translated="<p><em>你好</em></p>",
                 status=TranslationStatus.TRANSLATED,
                 tokens=10,
-                # [id0] = <em> 开头, [id1] = </em> 结尾
-                local_tag_map={"[id0]": "<em>", "[id1]": "</em>"},
-            ),
-        ]
-        result = merger.merge(chunks)
-        # 占位符应该被恢复为实际标签
-        assert "<em>" in result
-        assert "</em>" in result
-        assert "[id0]" not in result
-        assert "[id1]" not in result
-        assert "你好" in result
-
-    def test_multiple_chunks_placeholders_restored(self):
-        """多个 chunk 的占位符都应该被正确恢复"""
-        merger = Merger()
-        chunks = [
-            Chunk(
-                name="c1",
-                original="<p>[id0]Hello[id1]</p>",
-                translated="<p>[id0]你好[id1]</p>",
-                status=TranslationStatus.TRANSLATED,
-                tokens=10,
-                # [id0] = <em> 开头, [id1] = </em> 结尾 - 成对出现
-                local_tag_map={"[id0]": "<em>", "[id1]": "</em>"},
+                local_tag_map={},
             ),
             Chunk(
                 name="c2",
-                original="<p>[id0]World[id1]</p>",
-                translated="<p>[id0]世界[id1]</p>",
+                original="<p><strong>World</strong></p>",
+                translated="<p><strong>世界</strong></p>",
                 status=TranslationStatus.TRANSLATED,
                 tokens=10,
-                local_tag_map={"[id0]": "<strong>", "[id1]": "</strong>"},
+                local_tag_map={},
             ),
         ]
         result = merger.merge(chunks)
-        assert "[id0]" not in result
-        assert "[id1]" not in result
         assert "<em>" in result
         assert "</em>" in result
         assert "<strong>" in result
@@ -78,8 +53,8 @@ class TestMergerPlaceholderRestore:
         assert "你好" in result
         assert "世界" in result
 
-    def test_untranslated_chunk_uses_original_with_restore(self):
-        """UNTRANSLATED chunk 应该使用 original，并恢复其占位符"""
+    def test_untranslated_chunk_uses_original(self):
+        """UNTRANSLATED chunk 应该使用 original"""
         merger = Merger()
         chunks = [
             Chunk(
@@ -100,7 +75,8 @@ class TestMergerPlaceholderRestore:
             ),
         ]
         result = merger.merge(chunks)
-        # Chunk 1 使用 original
+        # Chunk 1 使用 translated，Chunk 2 使用 original
+        assert "<em>" in result
         assert "<strong>" in result
         assert "World" in result
 
@@ -247,11 +223,98 @@ class TestMerger:
         assert 'lang="en' not in result
         assert 'xml:lang="en' not in result
 
+    def test_merge_reconstructs_html_wrapper_from_fragments(self):
+        """测试当 chunks 是 HTML 片段（缺少 <html> 包裹）时，merge 能重建完整结构。"""
+        merger = Merger()
+        # 模拟 toc.xhtml 被分割成多个片段：head、nav 等
+        chunks = [
+            Chunk(
+                name="/div/html[1]/head[1]",
+                original='<head>\n<title>Contents</title>\n</head>',
+                translated='<head>\n<title>目录</title>\n</head>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=11,
+            ),
+            Chunk(
+                name="/div/html[1]/body[1]/nav[1]",
+                original='<nav id="toc"><h2>Contents</h2><ol><li><a href="ch01.xhtml">Chapter 1</a></li></ol></nav>',
+                translated='<nav id="toc"><h2>目录</h2><ol><li><a href="ch01.xhtml">第一章</a></li></ol></nav>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=65,
+            ),
+        ]
+        # 模拟真实场景：传入完整的 original_content（replacer 会传 item.content）
+        original_content = '''<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en-US" xml:lang="en-US">
+<head>
+<title>Contents</title>
+</head>
+<body>
+<nav id="toc"><h2>Contents</h2><ol><li><a href="ch01.xhtml">Chapter 1</a></li></ol></nav>
+</body>
+</html>'''
+        result = merger.merge(chunks, original_content=original_content)
+
+        # 验证重建了完整的 <html> 包裹（可能以 <?xml 开头）
+        assert "<html " in result
+        assert "</html>" in result
+        # 验证翻译内容
+        assert "目录" in result
+        assert "第一章" in result
+
+    def test_merge_reconstructs_html_with_namespace_attributes(self):
+        """测试重建 HTML 时保留 xmlns 和 epub 命名空间属性。"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="/div/html[1]/head[1]",
+                original='<head><title>Test</title></head>',
+                translated='<head><title>测试</title></head>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=8,
+            ),
+            Chunk(
+                name="/div/html[1]/body[1]/p[1]",
+                original='<p>Hello</p>',
+                translated='<p>你好</p>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=5,
+            ),
+        ]
+        # 传入完整的 original_content 以便提取 xmlns 属性
+        original_content = '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Test</title></head><body><p>Hello</p></body></html>'
+        result = merger.merge(chunks, original_content=original_content)
+
+        # 验证 xmlns 属性被保留
+        assert 'xmlns="http://www.w3.org/1999/xhtml"' in result
+        # 验证翻译
+        assert "测试" in result
+        assert "你好" in result
+
     def test_merge_handles_empty_chunks(self):
         """测试 merge 方法处理空 chunks 列表时返回空字符串。"""
         merger = Merger()
         result = merger.merge([])
         assert result == ""
+
+    def test_merge_does_not_add_head_when_original_has_none(self):
+        """测试当原文没有 <head> 时，merge 不会错误添加。"""
+        merger = Merger()
+        # 模拟一个没有 head 的 HTML 片段
+        chunks = [
+            Chunk(
+                name="c1",
+                original="<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>Hello</p></body></html>",
+                translated="<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>你好</p></body></html>",
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+            ),
+        ]
+        result = merger.merge(chunks)
+        # 原文没有 <head>，翻译后也不应该有
+        assert "<p>你好</p>" in result
+        # 不应该有 <head></head> 被添加
+        assert "<head></head>" not in result
 
     def test_merge_handles_no_language_attributes(self):
         """测试当合并内容中没有 lang 或 xml:lang 属性时，merge 方法仍能正常返回。"""
