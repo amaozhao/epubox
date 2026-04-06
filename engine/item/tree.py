@@ -235,8 +235,9 @@ class _TreeBuilder(HTMLParser):
         """Handle processing instructions (e.g., XML declaration)."""
         data = data.strip()
         if data.lower().startswith("xml "):
-            # data already contains the trailing ?, e.g., "xml version=\"1.0\"?"
-            self._xml_declaration = f"<?{data}"
+            # data contains "xml version=\"1.0\" encoding=\"UTF-8\"?",
+            # we need to add <? and ?> to form the complete declaration
+            self._xml_declaration = f"<?{data}>"
 
 
 def parse_html(html: str) -> TreeNode:

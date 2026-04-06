@@ -202,3 +202,118 @@ class TestFindByXpath:
         assert p is not None
         assert p.tag == "p"
         # Without index, returns first match
+
+
+class TestXmlDeclarationAndDoctype:
+    """Test preservation of XML declaration and DOCTYPE."""
+
+    def test_xml_declaration_preserved(self):
+        """XML declaration should be preserved in to_html output."""
+        original = '<?xml version="1.0" encoding="UTF-8" standalone="no"?><html><body><p>test</p></body></html>'
+        root = parse_html(original)
+        result = root.to_html()
+        # XML declaration is preserved (may have newline after)
+        assert '<?xml version="1.0" encoding="UTF-8" standalone="no"?>' in result
+
+    def test_doctype_preserved(self):
+        """DOCTYPE should be preserved in to_html output."""
+        original = '<!DOCTYPE html><html><body><p>test</p></body></html>'
+        root = parse_html(original)
+        result = root.to_html()
+        assert '<!DOCTYPE html>' in result
+
+    def test_xml_and_doctype_together(self):
+        """Both XML declaration and DOCTYPE should be preserved."""
+        original = '''<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE html>
+<html><body><p>test</p></body></html>'''
+        root = parse_html(original)
+        result = root.to_html()
+        assert '<?xml' in result
+        assert '<!DOCTYPE html>' in result
+
+
+class TestSelfClosingTags:
+    """Test self-closing tags are properly handled."""
+
+    def test_link_self_closing(self):
+        """<link /> should be preserved as self-closing."""
+        original = '<html><head><link href="style.css" rel="stylesheet"/></head><body><p>test</p></body></html>'
+        root = parse_html(original)
+        result = root.to_html()
+        assert '<link' in result
+        assert '/>' in result or '/ >' in result
+
+    def test_br_self_closing(self):
+        """<br/> should be preserved as self-closing."""
+        original = '<p>line1<br/>line2</p>'
+        root = parse_html(original)
+        result = root.to_html()
+        assert '<br />' in result
+
+    def test_img_self_closing(self):
+        """<img /> should be preserved as self-closing."""
+        original = '<p><img src="test.png" alt="test"/></p>'
+        root = parse_html(original)
+        result = root.to_html()
+        assert '<img' in result
+        assert '/>' in result or '/ >' in result
+
+    def test_hr_self_closing(self):
+        """<hr/> should be preserved as self-closing."""
+        original = '<p>before<hr/>after</p>'
+        root = parse_html(original)
+        result = root.to_html()
+        assert '<hr />' in result
+
+    def test_meta_self_closing(self):
+        """<meta /> should be preserved as self-closing."""
+        original = '<html><head><meta charset="utf-8"/></head><body><p>test</p></body></html>'
+        root = parse_html(original)
+        result = root.to_html()
+        assert '<meta' in result
+        assert '/>' in result or '/ >' in result
+
+    def test_multiple_self_closing_tags(self):
+        """Multiple different self-closing tags should all be preserved."""
+        original = '''<html>
+<head>
+<link href="a.css" rel="stylesheet"/>
+<meta name="keywords" content="test"/>
+</head>
+<body>
+<img src="a.png" alt="a"/>
+<hr/>
+<p>text<br/></p>
+</body>
+</html>'''
+        root = parse_html(original)
+        result = root.to_html()
+        assert '<link' in result and '/>' in result
+        assert '<meta' in result and '/>' in result
+        assert '<img' in result and '/>' in result
+        assert '<hr />' in result
+        assert '<br />' in result
+
+
+class TestTagOrderPreservation:
+    """Test that tag order is preserved through parse/serialize cycle."""
+
+    def test_head_body_order_preserved(self):
+        """<head> should come before <body> in serialized output."""
+        original = '<html><head><title>Test</title></head><body><p>Hello</p></body></html>'
+        root = parse_html(original)
+        result = root.to_html()
+        head_pos = result.find('<head>')
+        body_pos = result.find('<body>')
+        assert head_pos < body_pos, "head should come before body"
+
+    def test_nested_tag_order_preserved(self):
+        """Nested tag order should be preserved."""
+        original = '<div><p><span>text</span></p></div>'
+        root = parse_html(original)
+        result = root.to_html()
+        assert result.find('<p>') < result.find('</p>')
+        assert result.find('<span>') < result.find('</span>')
+        assert result.find('<div>') < result.find('<p>')
+        assert result.find('</p>') < result.find('</div>')
