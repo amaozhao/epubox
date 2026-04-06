@@ -62,22 +62,17 @@ class Merger:
         # Step 4: 最终合并
         translated = "".join(merged_chunks)
 
-        # Step 5: 检查是否有 void 元素被错误地写成非自闭合形式
+        # Step 5: 检查并修复 void 元素被错误地写成非自闭合形式
         # 例如 <link ...> 而不是 <link .../>
         void_elements = ["link", "meta", "br", "hr", "img", "input", "area", "base", "col", "embed", "param", "source", "track", "wbr"]
         for tag in void_elements:
-            # 匹配 <tag ...> 但不是 <tag .../>
-            pattern = rf'<{tag}\s+[^>]*[^/]>(?!</{tag}>)'
-            if re.search(pattern, translated, re.IGNORECASE):
-                logger.warning(f"发现可能未闭合的 void 元素 <{tag}>，将回退到原文")
-                # 回退到原文合并
-                fallback = []
-                for chunk in chunks:
-                    fallback.append(chunk.original)
-                translated = "".join(fallback)
-                translated = self._ensure_html_wrapper(translated, chunks, original_content)
-                translated = self._ensure_doctype(translated, chunks, original_content)
-                return translated
+            # 匹配 <tag ...> 后面没有 /> 或 </tag> 的情况（未闭合）
+            # 匹配 <tag attr="value"> 这种形式
+            pattern = rf'<({tag})\s+([^>]+?)(?<!/)>(?!</{tag}>)'
+            fixed, count = re.subn(pattern, r'<\1 \2/>', translated, flags=re.IGNORECASE)
+            if count > 0:
+                logger.warning(f"修复了 {count} 个未闭合的 <{tag}> 标签")
+                translated = fixed
 
         # Step 6: 如果合并结果缺少 <html> 包裹，使用原文重建
         translated = self._ensure_html_wrapper(translated, chunks, original_content)
@@ -97,11 +92,12 @@ class Merger:
 
     def _ensure_html_wrapper(self, content: str, chunks: List[Chunk], original_content: str = "") -> str:
         """
-        确保内容有完整的 <html> 包裹。
+        确保内容有完整的 XML 声明。
 
         策略：
-        1. 如果原文有 XML 声明和 DOCTYPE，用原文的头部包裹 translated 的 <html> 内容
-        2. 如果原文没有这些声明，保持原样
+        1. 如果原文有 XML 声明但翻译后丢失了，添加回去
+        2. 对于 HTML 文档，还需要保留 DOCTYPE
+        3. 对于其他 XML 文档（如 NCX），只添加 XML 声明
         """
         stripped = content.strip()
         if not stripped:
@@ -121,22 +117,44 @@ class Merger:
         if doctype_match:
             doctype = doctype_match.group(0) + "\n"
 
-        # 检查 translated 是否已经有完整的 <html> 包裹（以 <html 开头）
-        if stripped.startswith("<html"):
-            # 如果原文有 XML 声明或 DOCTYPE，需要添加在前面
-            if xml_decl or doctype:
+        # 检查 translated 是否已经有 XML 声明
+        if re.search(r'<\?xml', stripped):
+            # 已有 XML 声明，检查是否需要添加 DOCTYPE
+            if doctype and not re.search(r'<!DOCTYPE', stripped, re.IGNORECASE):
                 return xml_decl + doctype + content
             return content
 
-        # 如果以 DOCTYPE 开头但没有 <html>
+        # 检查 translated 是否以 DOCTYPE 开头
         if stripped.startswith("<!DOCTYPE") or stripped.startswith("<!doctype"):
-            # 只添加 XML 声明（DOCTYPE 已经有了）
             if xml_decl:
                 return xml_decl + content
             return content
 
+        # 检查 translated 是否已经有 <html> 包裹
+        if stripped.startswith("<html"):
+            if xml_decl or doctype:
+                return xml_decl + doctype + content
+            return content
+
         # 否则是 fragment，需要包裹
+        # 对于 HTML，用 <html> 包裹
         html_match = re.search(r'<html[^>]*>', source, re.IGNORECASE)
+        if html_match:
+            html_open_tag = html_match.group(0)
+            new_content = xml_decl
+            new_content += doctype
+            new_content += html_open_tag + "\n"
+            new_content += stripped + "\n"
+            new_content += "</html>\n"
+            return new_content
+
+        # 对于其他 XML 文档（如 NCX），只添加 XML 声明
+        # 检查是否有任何根元素标签
+        root_match = re.match(r'<([a-zA-Z][a-zA-Z0-9]*)[^>]*>', stripped)
+        if root_match and xml_decl:
+            return xml_decl + content
+
+        return content
 
         # 如果原文没有 <html> 标签，说明只是简单 fragment，不需要包裹
         if not html_match:
