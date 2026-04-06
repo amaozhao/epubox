@@ -1,6 +1,8 @@
 import re
 from typing import List
 
+from lxml import etree
+
 from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
 from engine.agents.html_validator import HtmlValidator
@@ -60,7 +62,24 @@ class Merger:
         # Step 4: 最终合并
         translated = "".join(merged_chunks)
 
-        # Step 5: 如果合并结果缺少 <html> 包裹，使用原文重建
+        # Step 5: 检查是否有 void 元素被错误地写成非自闭合形式
+        # 例如 <link ...> 而不是 <link .../>
+        void_elements = ["link", "meta", "br", "hr", "img", "input", "area", "base", "col", "embed", "param", "source", "track", "wbr"]
+        for tag in void_elements:
+            # 匹配 <tag ...> 但不是 <tag .../>
+            pattern = rf'<{tag}\s+[^>]*[^/]>(?!</{tag}>)'
+            if re.search(pattern, translated, re.IGNORECASE):
+                logger.warning(f"发现可能未闭合的 void 元素 <{tag}>，将回退到原文")
+                # 回退到原文合并
+                fallback = []
+                for chunk in chunks:
+                    fallback.append(chunk.original)
+                translated = "".join(fallback)
+                translated = self._ensure_html_wrapper(translated, chunks, original_content)
+                translated = self._ensure_doctype(translated, chunks, original_content)
+                return translated
+
+        # Step 6: 如果合并结果缺少 <html> 包裹，使用原文重建
         translated = self._ensure_html_wrapper(translated, chunks, original_content)
 
         # Step 6: 强制确保 DOCTYPE 存在（如果原文有，但翻译后丢失了）
@@ -81,37 +100,42 @@ class Merger:
         确保内容有完整的 <html> 包裹。
 
         策略：
-        1. 如果翻译内容已经有 <html> 开头，直接返回
-        2. 如果以 DOCTYPE 开头但没有 <html>，保留 DOCTYPE，只添加 XML 声明
-        3. 如果是 fragment，用原文的 <html> 包裹
+        1. 如果原文有 XML 声明和 DOCTYPE，用原文的头部包裹 translated 的 <html> 内容
+        2. 如果原文没有这些声明，保持原样
         """
         stripped = content.strip()
         if not stripped:
             return content
 
-        # 如果已经有 <html> 开头（chunks 本身就包含完整 html），直接返回
-        if stripped.startswith("<html"):
-            return content
-
-        # 如果以 DOCTYPE 开头，说明已经有完整 HTML，但可能缺少 XML 声明
-        if stripped.startswith("<!DOCTYPE") or stripped.startswith("<!doctype"):
-            source = original_content if original_content else (chunks[0].original if chunks else "")
-            xml_decl = ""
-            xml_match = re.search(r'<\?xml[^?]+\?\>', source)
-            if xml_match:
-                xml_decl = xml_match.group(0) + "\n"
-            # 保留原有 content，只在前面加上 XML 声明
-            return xml_decl + content
-
-        # 否则是 fragment，需要包裹
         source = original_content if original_content else (chunks[0].original if chunks else "")
 
-        # 提取 XML 声明和 <html> 标签
+        # 提取原文的 XML 声明
         xml_decl = ""
         xml_match = re.search(r'<\?xml[^?]+\?\>', source)
         if xml_match:
             xml_decl = xml_match.group(0) + "\n"
 
+        # 提取原文的 DOCTYPE
+        doctype = ""
+        doctype_match = re.search(r'<!DOCTYPE[^>]+>', source, re.IGNORECASE)
+        if doctype_match:
+            doctype = doctype_match.group(0) + "\n"
+
+        # 检查 translated 是否已经有完整的 <html> 包裹（以 <html 开头）
+        if stripped.startswith("<html"):
+            # 如果原文有 XML 声明或 DOCTYPE，需要添加在前面
+            if xml_decl or doctype:
+                return xml_decl + doctype + content
+            return content
+
+        # 如果以 DOCTYPE 开头但没有 <html>
+        if stripped.startswith("<!DOCTYPE") or stripped.startswith("<!doctype"):
+            # 只添加 XML 声明（DOCTYPE 已经有了）
+            if xml_decl:
+                return xml_decl + content
+            return content
+
+        # 否则是 fragment，需要包裹
         html_match = re.search(r'<html[^>]*>', source, re.IGNORECASE)
 
         # 如果原文没有 <html> 标签，说明只是简单 fragment，不需要包裹
@@ -122,6 +146,7 @@ class Merger:
 
         # 构建完整结构
         new_content = xml_decl
+        new_content += doctype
         new_content += html_open_tag + "\n"
         new_content += stripped + "\n"
         new_content += "</html>\n"
