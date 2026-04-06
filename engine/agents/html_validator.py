@@ -27,14 +27,17 @@ class HtmlValidator:
         "small", "sub", "sup", "mark", "span", "del", "ins"
     }
 
-    # 自闭合标签（不需要配对）
-    SELF_CLOSING_TAGS = {
+    # 自闭合/空元素标签（不需要配对，也不会入栈）
+    VOID_ELEMENTS = {
         "br", "hr", "img", "input", "meta", "link", "area",
         "base", "col", "embed", "param", "source", "track", "wbr"
     }
 
-    # 所有需要追踪的标签
-    TRACKED_TAGS = BLOCK_TAGS | INLINE_PAIRED_TAGS
+    # 兼容性别名
+    SELF_CLOSING_TAGS = VOID_ELEMENTS
+
+    # 所有需要追踪的标签（排除自闭合标签）
+    TRACKED_TAGS = (BLOCK_TAGS | INLINE_PAIRED_TAGS) - VOID_ELEMENTS
 
     def __init__(self):
         self.stack: List[Tuple[str, int]] = []  # (tag_name, chunk_index)

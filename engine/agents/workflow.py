@@ -103,16 +103,16 @@ async def _call_translator(
             # 如果 JSON 解析失败，检查字符串内容是否像 HTML
             if cleaned.startswith("<") and cleaned.endswith(">"):
                 # 看起来像是直接的 HTML 翻译结果，直接使用
-                logger.warning(f"Agno returned raw string, using as translation directly")
+                logger.warning("Agno returned raw string, using as translation directly")
                 return cleaned
             # 尝试直接提取 translation 字段
             match = re.search(r'"translation"\s*:\s*"([^"]*)"', cleaned, re.DOTALL)
             if match:
                 translation = match.group(1)
-                translation = translation.encode().decode('unicode_escape')
+                translation = translation.encode().decode("unicode_escape")
                 return translation
             # 最后尝试：把整个字符串作为翻译结果返回
-            logger.warning(f"Could not parse translation response, using raw content")
+            logger.warning("Could not parse translation response, using raw content")
             return cleaned
         raise ValueError(f"翻译响应格式错误: {type(raw_content)}")
     except Exception as e:
