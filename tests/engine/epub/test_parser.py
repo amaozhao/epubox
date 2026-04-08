@@ -4,7 +4,9 @@ from unittest.mock import MagicMock, call, mock_open
 import pytest
 
 from engine.epub.parser import Parser
+from engine.item.chunker import ChunkState
 from engine.schemas import EpubBook
+from engine.schemas.translator import TranslationStatus
 
 
 @pytest.fixture(autouse=True)
@@ -12,17 +14,9 @@ def setup_mocks(mocker):
     """
     为所有测试用例设置通用的 mock，以确保测试的独立性。
     """
-    # 模拟 TagPreserver 类
-    mocked_preserver = MagicMock()
-    mocked_preserver.preserve_tags.return_value = ("", MagicMock(tag_map={}, counter=0))
-
-    mocker.patch("engine.epub.parser.TagPreserver", return_value=mocked_preserver)
-
-    # 模拟 HtmlChunker 类
-    mocked_chunker = MagicMock()
-    mocked_chunker.chunk.return_value = []
-
-    mocker.patch("engine.epub.parser.HtmlChunker", return_value=mocked_chunker)
+    # Mock chunk_html 和 add_context_to_chunks（返回空列表，不产生 chunks）
+    mocker.patch("engine.epub.parser.chunk_html", return_value=[])
+    mocker.patch("engine.epub.parser.add_context_to_chunks", return_value=[])
 
 
 @pytest.fixture
@@ -92,7 +86,7 @@ class TestParser:
         zip_mock.extract.assert_called_once_with(zip_mock.infolist.return_value[1], parser_instance.output_dir)
 
     def test_parse_correctly_processes_files(self, mocker, parser_instance):
-        """测试 parse 方法能正确解析文件、调用 replacer 并返回 EpubBook。"""
+        """测试 parse 方法能正确解析文件并返回 EpubBook。"""
         mocker.patch.object(parser_instance, "extract")
         mocker.patch.object(parser_instance, "load_json", return_value=None)
         mocker.patch.object(parser_instance, "save_json")
@@ -119,7 +113,7 @@ class TestParser:
 
         item = book.items[0]
         assert item.id == "chapter1.xhtml"
-        # item.content 应该是原始 HTML，不应该是经过 TagPreserver 处理后的占位符版本
+        # item.content 应该是原始 HTML
         assert item.content == original_html
 
         assert "container.xml" not in [i.id for i in book.items]
@@ -152,7 +146,7 @@ class TestParser:
 
 
 class TestParserChunkValidation:
-    """测试 chunk 拆分后的 local_tag_map 验证逻辑（Step 5.1）"""
+    """测试 chunk 拆分后的 HTML 结构验证逻辑（Step 5.1）"""
 
     def test_parse_valid_chunks_no_warning(self, mocker):
         """验证结构正确的 chunks 不会产生警告"""
@@ -179,29 +173,18 @@ class TestParserChunkValidation:
         mock_pre_extractor.preserved_style = []
         mocker.patch("engine.epub.parser.PreCodeExtractor", return_value=mock_pre_extractor)
 
-        # Mock HtmlChunker 返回两个有效 chunk
-        mock_chunker = MagicMock()
-        mock_chunker.chunk_by_html_tags.return_value = [
-            "<p>Hello</p>",
-            "<p>World</p>",
-        ]
-        mocker.patch("engine.epub.parser.HtmlChunker", return_value=mock_chunker)
+        # Mock chunk_html 返回两个 ChunkState（直接包含 HTML，不使用占位符）
+        def mock_chunk_html(html, token_limit=None):
+            return [
+                ChunkState(xpath="/div[1]/p[1]", original="<p>Hello</p>", tokens=10, status=TranslationStatus.PENDING),
+                ChunkState(xpath="/div[1]/p[2]", original="<p>World</p>", tokens=10, status=TranslationStatus.PENDING),
+            ]
 
-        # Mock count_tokens 避免真实调用
-        mocker.patch("engine.epub.parser.count_tokens", return_value=10)
+        def mock_add_context(chunks):
+            return chunks
 
-        # Mock TagPreserver 返回正确的 local_tag_map
-        call_count = [0]
-        def mock_preserve_tags(text):
-            call_count[0] += 1
-            # 模拟占位符映射
-            if call_count[0] == 1:
-                return ("[id0]Hello[id1]", MagicMock(tag_map={"[id0]": "<p>", "[id1]": "</p>"}))
-            else:
-                return ("[id0]World[id1]", MagicMock(tag_map={"[id0]": "<p>", "[id1]": "</p>"}))
-        mock_preserver = MagicMock()
-        mock_preserver.preserve_tags.side_effect = mock_preserve_tags
-        mocker.patch("engine.epub.parser.TagPreserver", return_value=mock_preserver)
+        mocker.patch("engine.epub.parser.chunk_html", side_effect=mock_chunk_html)
+        mocker.patch("engine.epub.parser.add_context_to_chunks", side_effect=mock_add_context)
 
         # Spy on logger.warning
         mock_logger = mocker.patch("engine.epub.parser.logger")
@@ -211,7 +194,7 @@ class TestParserChunkValidation:
         # 验证生成了 2 个 chunk
         assert len(book.items) == 1
         assert len(book.items[0].chunks) == 2
-        # 验证没有警告（local_tag_map 正确且栈验证通过）
+        # 验证没有警告（HTML 结构正确）
         warning_calls = [c for c in mock_logger.warning.call_args_list if "拆分后 HTML 结构异常" in str(c)]
         assert len(warning_calls) == 0
 
@@ -238,37 +221,24 @@ class TestParserChunkValidation:
         mock_pre_extractor.preserved_style = []
         mocker.patch("engine.epub.parser.PreCodeExtractor", return_value=mock_pre_extractor)
 
-        # 模拟 chunker 在 </p> 后分割，然后又遇到 <p>（标签顺序颠倒）
+        # 模拟 chunk_html 在 </p> 后分割，然后又遇到 <p>（标签顺序颠倒）
         # 例如：chunk 0 = "Hello</p>"，chunk 1 = "<p>World"
-        mock_chunker = MagicMock()
-        mock_chunker.chunk_by_html_tags.return_value = [
-            "Hello</p>",
-            "<p>World",
-        ]
-        mocker.patch("engine.epub.parser.HtmlChunker", return_value=mock_chunker)
+        def mock_chunk_html(html, token_limit=None):
+            return [
+                ChunkState(xpath="/div[1]/p[1]", original="Hello</p>", tokens=10, status=TranslationStatus.PENDING),
+                ChunkState(xpath="/div[1]/p[2]", original="<p>World", tokens=10, status=TranslationStatus.PENDING),
+            ]
 
-        # Mock count_tokens 避免真实调用
-        mocker.patch("engine.epub.parser.count_tokens", return_value=10)
+        def mock_add_context(chunks):
+            return chunks
 
-        # chunk 0: [id0] = </p>, chunk 1: [id0] = <p>
-        # restore 后: chunk0 = "Hello</p>", chunk1 = "<p>World"
-        # 验证时：chunk0 遇到 </p> 但栈为空 → unexpected_close error
-        call_count = [0]
-        def mock_preserve_tags(text):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return ("Hello[id0]", MagicMock(tag_map={"[id0]": "</p>"}))
-            else:
-                return ("[id0]World", MagicMock(tag_map={"[id0]": "<p>"}))
-        mock_preserver = MagicMock()
-        mock_preserver.preserve_tags.side_effect = mock_preserve_tags
-        mocker.patch("engine.epub.parser.TagPreserver", return_value=mock_preserver)
+        mocker.patch("engine.epub.parser.chunk_html", side_effect=mock_chunk_html)
+        mocker.patch("engine.epub.parser.add_context_to_chunks", side_effect=mock_add_context)
 
         mock_logger = mocker.patch("engine.epub.parser.logger")
 
-        book = parser.parse()
+        parser.parse()
 
         # 应该有警告：chunk0 遇到 </p> 时栈为空（unexpected_close）
         warning_calls = [c for c in mock_logger.warning.call_args_list if "拆分后 HTML 结构异常" in str(c)]
         assert len(warning_calls) == 1
-

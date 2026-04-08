@@ -97,6 +97,60 @@ class TestOrchestrator:
         )
         assert orchestrator._should_translate_chunk(chunk) is False
 
+    @pytest.mark.asyncio
+    @patch.object(Parser, "parse", new_callable=MagicMock)
+    @patch.object(Builder, "build", new_callable=MagicMock)
+    @patch.object(Replacer, "restore", new_callable=MagicMock)
+    @patch("engine.orchestrator.get_translator_workflow")
+    async def test_translated_chunk_still_runs_workflow(
+        self,
+        mock_get_translator_workflow,
+        mock_replacer_restore,
+        mock_builder_build,
+        mock_parser_parse,
+        orchestrator,
+        mock_book,
+    ):
+        """
+        测试当 chunk 已经是 TRANSLATED 状态时，仍然会运行 workflow 进行验证。
+        """
+        # 创建一个已有翻译结果的 chunk
+        translated_chunk = Chunk(
+            name="item1_chunk1",
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+            tokens=5,
+        )
+        mock_book.items[0].chunks[0] = translated_chunk
+        mock_parser_parse.return_value = mock_book
+
+        # 模拟 workflow 返回
+        mock_workflow = MagicMock()
+        mock_workflow.arun = AsyncMock(
+            return_value=WorkflowRunOutput(
+                status=RunStatus.completed,
+                content={
+                    "chunk": Chunk(
+                        name="item1_chunk1",
+                        original="<p>Hello</p>",
+                        translated="<p>你好</p>",
+                        tokens=5,
+                        status=TranslationStatus.COMPLETED,
+                    ),
+                    "validation_error": None,
+                },
+                run_id="mock_run_id",
+            )
+        )
+        mock_get_translator_workflow.return_value = mock_workflow
+
+        # 运行翻译
+        await orchestrator.translate_epub("mock_epub_path")
+
+        # 验证 workflow 被调用了
+        mock_workflow.arun.assert_called()
+
     def test_should_translate_chunk_with_empty_string(self, orchestrator):
         """
         测试当 translated 属性为空字符串时，_should_translate_chunk 方法返回 True。
@@ -107,7 +161,6 @@ class TestOrchestrator:
     # --- 测试 translate_epub 方法 ---
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
-    @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
@@ -116,7 +169,6 @@ class TestOrchestrator:
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
-        mock_parser_save_json,
         mock_parser_parse,
         orchestrator,
     ):
@@ -175,7 +227,7 @@ class TestOrchestrator:
                     original="<p>How are you?</p>",
                     translated="<p>你好吗？</p>",
                     tokens=3,
-                    status=TranslationStatus.COMPLETED,
+                    status=TranslationStatus.TRANSLATED,
                 ),
                 run_id="mock_run_id",
             )
@@ -190,18 +242,16 @@ class TestOrchestrator:
         first_item_chunks = mock_book_with_chunks.items[0].chunks
         assert isinstance(first_item_chunks, list)
         assert first_item_chunks[0].translated == "<p>你好吗？</p>"
-        assert first_item_chunks[0].status == TranslationStatus.COMPLETED
+        assert first_item_chunks[0].status == TranslationStatus.TRANSLATED
 
         # 检查第三个 chunk 的翻译结果
         third_item_chunks = mock_book_with_chunks.items[2].chunks
         assert isinstance(third_item_chunks, list)
         assert third_item_chunks[0].translated == "<p>你好吗？</p>"
-        assert third_item_chunks[0].status == TranslationStatus.COMPLETED
+        assert third_item_chunks[0].status == TranslationStatus.TRANSLATED
 
     @pytest.mark.asyncio
-    # @patch("engine.orchestrator.tqdm", side_effect=lambda iterable, **kwargs: iterable)
     @patch.object(Parser, "parse", new_callable=MagicMock)
-    @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
@@ -210,7 +260,6 @@ class TestOrchestrator:
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
-        mock_parser_save_json,
         mock_parser_parse,
         orchestrator,
         mock_book,
@@ -243,7 +292,6 @@ class TestOrchestrator:
 
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
-    @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
@@ -252,7 +300,6 @@ class TestOrchestrator:
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
-        mock_parser_save_json,
         mock_parser_parse,
         orchestrator,
         mock_book,
@@ -282,7 +329,6 @@ class TestOrchestrator:
 
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
-    @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(Replacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
@@ -291,7 +337,6 @@ class TestOrchestrator:
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
-        mock_parser_save_json,
         mock_parser_parse,
         orchestrator,
         mock_book,

@@ -1,9 +1,6 @@
-import re
-from typing import List, Optional
+from typing import List
 
 from bs4 import BeautifulSoup
-
-from engine.core.logger import engine_logger as logger
 
 
 class PreCodeExtractor:
@@ -115,64 +112,3 @@ class PreCodeExtractor:
     @property
     def style_count(self) -> int:
         return len(self.preserved_style)
-
-
-def validate_placeholders(html: str, expected_pre: int, expected_code: int, expected_style: int = 0) -> bool:
-    """
-    验证占位符是否完整
-
-    Returns:
-        True 如果所有占位符都存在且格式正确
-    """
-    pre_found = len(re.findall(r'\[PRE:\d+\]', html))
-    code_found = len(re.findall(r'\[CODE:\d+\]', html))
-    style_found = len(re.findall(r'\[STYLE:\d+\]', html))
-
-    if pre_found != expected_pre:
-        logger.error(f"PRE占位符数量不匹配: 期望{expected_pre}, 实际{pre_found}")
-        return False
-
-    if code_found != expected_code:
-        logger.error(f"CODE占位符数量不匹配: 期望{expected_code}, 实际{code_found}")
-        return False
-
-    if style_found != expected_style:
-        logger.error(f"STYLE占位符数量不匹配: 期望{expected_style}, 实际{style_found}")
-        return False
-
-    return True
-
-
-def attempt_recovery(html: str, preserved_pre: List[str], preserved_code: List[str], preserved_style: Optional[List[str]] = None) -> str:
-    r"""
-    尝试恢复可能被破坏的占位符（仅处理格式变形，不处理缺失）
-
-    可修复的模式：
-    - [PRE;\d+] → [PRE:\d+]  （分号变冒号）
-    - [PRE: \d+] → [PRE:\d+] （多余空格）
-    - [CODE;\d+] → [CODE:\d+]
-    - [CODE: \d+] → [CODE:\d+]
-    - [STYLE;\d+] → [STYLE:\d+]
-    - [STYLE: \d+] → [STYLE:\d+]
-
-    不可修复的模式（只能报告错误）：
-    - PRE:0 （丢失左方括号）
-    - [PRE: （丢失右方括号）
-    - [PRE0] （丢失冒号）
-
-    注意：修复后需要重新验证！
-    """
-    # 先修复多余空格（包括分号后面的空格）
-    html = re.sub(r'\[PRE:\s+(\d+)\]', r'[PRE:\1]', html)
-    html = re.sub(r'\[CODE:\s+(\d+)\]', r'[CODE:\1]', html)
-    html = re.sub(r'\[STYLE:\s+(\d+)\]', r'[STYLE:\1]', html)
-    html = re.sub(r'\[PRE;\s+(\d+)\]', r'[PRE;\1]', html)
-    html = re.sub(r'\[CODE;\s+(\d+)\]', r'[CODE;\1]', html)
-    html = re.sub(r'\[STYLE;\s+(\d+)\]', r'[STYLE;\1]', html)
-
-    # 再修复分号
-    html = re.sub(r'\[PRE;(\d+)\]', r'[PRE:\1]', html)
-    html = re.sub(r'\[CODE;(\d+)\]', r'[CODE:\1]', html)
-    html = re.sub(r'\[STYLE;(\d+)\]', r'[STYLE:\1]', html)
-
-    return html
