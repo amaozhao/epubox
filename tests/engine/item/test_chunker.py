@@ -1,257 +1,137 @@
+from unittest.mock import patch
+
 import pytest
 
-from engine.item.chunker import HtmlChunker, count_tokens
-from engine.item.placeholder import PlaceholderManager
-from engine.item.tag import TagPreserver
-from engine.schemas.translator import TranslationStatus
+from engine.item.chunker import DomChunker, Block, count_tokens
 
 
-class TestHtmlChunker:
-    """测试 HtmlChunker 类的核心功能和边界情况"""
+class TestDomChunker:
+    """测试 DomChunker 类"""
 
-    @pytest.fixture
-    def placeholder_mgr(self):
-        """创建测试用 PlaceholderManager"""
-        mgr = PlaceholderManager()
-        return mgr
-
-    @pytest.fixture
-    def chunker(self):
-        """为每个测试提供一个 HtmlChunker 实例"""
-        return HtmlChunker(token_limit=30)
-
-    def test_count_tokens(self):
-        """测试 token 计数功能"""
-        assert count_tokens("Hello World") > 0
-        assert count_tokens("") == 0
-
-    def test_init(self):
-        """测试 HtmlChunker 初始化"""
-        chunker = HtmlChunker(token_limit=100)
-        assert chunker.token_limit == 100
-
-    def test_short_html(self, chunker, placeholder_mgr):
-        """测试短 HTML 内容，应返回单个 Chunk"""
-        html = "<p>Hello World!</p>"
-        processed, mgr = TagPreserver().preserve_tags(html)
-        placeholder_mgr.tag_map = mgr.tag_map
-        placeholder_mgr.counter = mgr.counter
-        global_indices = list(range(placeholder_mgr.counter))
-
-        chunks = chunker.chunk(processed, global_indices, placeholder_mgr)
-
+    def test_basic_chunk(self):
+        """测试基本分块：短 HTML 应返回单个 chunk"""
+        html = "<html><body><p>Hello World</p></body></html>"
+        chunker = DomChunker(token_limit=100)
+        chunks = chunker.chunk(html)
         assert len(chunks) == 1
-        assert chunks[0].tokens <= chunker.token_limit
-        assert chunks[0].name is not None
+        assert "<p>Hello World</p>" in chunks[0].original
+        assert len(chunks[0].xpaths) == 1
 
-    def test_chunk_data_integrity(self, placeholder_mgr):
-        """测试生成的 Chunk 对象的属性是否正确"""
-        html = "<div><p>Hello</p><p>World</p></div>"
-        processed, mgr = TagPreserver().preserve_tags(html)
-        placeholder_mgr.tag_map = mgr.tag_map
-        placeholder_mgr.counter = mgr.counter
-        global_indices = list(range(placeholder_mgr.counter))
+    def test_greedy_merge(self):
+        """测试贪心合并：多个小元素合并到 token_limit"""
+        html = "<html><body><p>A</p><p>B</p><p>C</p></body></html>"
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html)
+        # token_limit 足够大，所有元素应合并为一个 chunk
+        assert len(chunks) == 1
+        assert len(chunks[0].xpaths) == 3
 
-        chunker = HtmlChunker(token_limit=100)
-        chunks = chunker.chunk(processed, global_indices, placeholder_mgr)
-
-        assert len(chunks) >= 1
+    def test_split_on_limit(self):
+        """测试超限分割：总 token 超过 limit 时分割"""
+        # 创建足够多的内容
+        paragraphs = "".join(f"<p>Paragraph {i} with some longer text content here</p>" for i in range(20))
+        html = f"<html><body>{paragraphs}</body></html>"
+        chunker = DomChunker(token_limit=50)
+        chunks = chunker.chunk(html)
+        assert len(chunks) > 1
+        # 每个 chunk 都应有 xpaths
         for chunk in chunks:
-            assert chunk.name is not None
-            assert chunk.original is not None
-            assert chunk.tokens >= 0
-            assert isinstance(chunk.global_indices, list)
-            assert isinstance(chunk.local_tag_map, dict)
+            assert len(chunk.xpaths) >= 1
 
-    def test_empty_html(self, chunker, placeholder_mgr):
+    def test_skip_img(self):
+        """测试跳过 img 标签"""
+        html = "<html><body><p>Text</p><img src='test.png'/><p>More</p></body></html>"
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html)
+        assert len(chunks) == 1
+        assert "img" not in chunks[0].original
+
+    def test_skip_pure_placeholder(self):
+        """测试跳过纯 PreCode 占位符"""
+        html = "<html><body><p>Text</p>[PRE:0]<p>More</p></body></html>"
+        # BeautifulSoup 会将 [PRE:0] 作为文本节点，_should_skip 返回 True
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html)
+        # [PRE:0] 是裸文本节点，应被跳过
+        assert len(chunks) == 1
+
+    def test_atomic_tags_not_split(self):
+        """测试 ATOMIC_TAGS（table/ul/ol）不被拆分"""
+        html = "<html><body><table><tr><td>Cell 1</td><td>Cell 2</td></tr><tr><td>Cell 3</td><td>Cell 4</td></tr></table></body></html>"
+        chunker = DomChunker(token_limit=10)  # 很小的 limit
+        chunks = chunker.chunk(html)
+        # table 应该完整保留在一个 chunk 中
+        assert len(chunks) == 1
+        assert "<table>" in chunks[0].original
+
+    def test_title_collection(self):
+        """测试 <title> 被收集到 chunk 中"""
+        html = "<html><head><title>My Book</title></head><body><p>Content</p></body></html>"
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html)
+        assert len(chunks) == 1
+        assert "<title>My Book</title>" in chunks[0].original
+        assert any("title" in xpath for xpath in chunks[0].xpaths)
+
+    def test_nav_file(self):
+        """测试导航文件分块"""
+        html = '<ncx><navMap><navPoint id="ch1"><navLabel><text>Chapter 1</text></navLabel><content src="ch1.xhtml"/></navPoint></navMap></ncx>'
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html, is_nav_file=True)
+        assert len(chunks) >= 1
+
+    def test_empty_html(self):
         """测试空 HTML"""
-        html = ""
-        processed, mgr = TagPreserver().preserve_tags(html)
-        placeholder_mgr.tag_map = mgr.tag_map
-        placeholder_mgr.counter = mgr.counter
-        global_indices = list(range(placeholder_mgr.counter)) if placeholder_mgr.counter > 0 else []
+        html = "<html><body></body></html>"
+        chunker = DomChunker(token_limit=100)
+        chunks = chunker.chunk(html)
+        assert len(chunks) == 0
 
-        chunks = chunker.chunk(processed, global_indices, placeholder_mgr)
-        assert len(chunks) >= 0
+    def test_xpaths_correct(self):
+        """测试 xpath 路径正确性"""
+        html = "<html><body><h1>Title</h1><p>First</p><p>Second</p></body></html>"
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html)
+        xpaths = chunks[0].xpaths
+        assert "/html/body/h1" in xpaths
+        assert "/html/body/p[1]" in xpaths
+        assert "/html/body/p[2]" in xpaths
 
-    def test_preserves_placeholder_indices(self, placeholder_mgr):
-        """测试分块后占位符索引被正确保留"""
-        html = "<p>Hello</p><p>World</p>"
-        processed, mgr = TagPreserver().preserve_tags(html)
-        placeholder_mgr.tag_map = mgr.tag_map
-        placeholder_mgr.counter = mgr.counter
-        global_indices = list(range(placeholder_mgr.counter))
-
-        chunker = HtmlChunker(token_limit=100)
-        chunks = chunker.chunk(processed, global_indices, placeholder_mgr)
-
-        # 验证所有 chunk 的 global_indices 都是有效的
-        for chunk in chunks:
-            for idx in chunk.global_indices:
-                assert idx < placeholder_mgr.counter
-
-    def test_nav_file_respected(self, placeholder_mgr):
-        """测试导航文件标记被正确传递"""
-        html = "<navMap><navPoint><navLabel>Chapter 1</navLabel><content src=\"ch1.xhtml\"/></navPoint></navMap>"
-        processed, mgr = TagPreserver().preserve_tags(html)
-        placeholder_mgr.tag_map = mgr.tag_map
-        placeholder_mgr.counter = mgr.counter
-        global_indices = list(range(placeholder_mgr.counter))
-
-        chunker = HtmlChunker(token_limit=1000)
-        # 导航文件模式
-        chunks = chunker.chunk(processed, global_indices, placeholder_mgr, is_nav_file=True)
-
-        # 导航文件应该保持完整性
+    def test_recursive_oversized(self):
+        """测试超限元素递归到子元素"""
+        html = "<html><body><div><p>Short 1</p><p>Short 2</p></div></body></html>"
+        chunker = DomChunker(token_limit=10)  # 很小，div 超限
+        chunks = chunker.chunk(html)
+        # div 超限但非 ATOMIC，应递归到 p 级别
         assert len(chunks) >= 1
 
+    def test_skip_no_text_content(self):
+        """测试跳过无文本内容的元素"""
+        html = "<html><body><div></div><p>Text</p></body></html>"
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html)
+        assert len(chunks) == 1
+        assert "<p>Text</p>" in chunks[0].original
 
-class TestHtmlChunkerHelperMethods:
-    """测试 HtmlChunker 的辅助方法"""
+    def test_empty_title(self):
+        """测试空 title 不被收集"""
+        html = "<html><head><title></title></head><body><p>Text</p></body></html>"
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html)
+        assert len(chunks) == 1
+        assert "<title>" not in chunks[0].original
 
-    def test_is_block_closing_tag(self):
-        """测试块级结束标签判断"""
-        chunker = HtmlChunker(token_limit=100)
-        assert chunker._is_block_closing_tag("</p>") is True
-        assert chunker._is_block_closing_tag("</div>") is True
-        assert chunker._is_block_closing_tag("</h1>") is True
-        assert chunker._is_block_closing_tag("<p>") is False
-        assert chunker._is_block_closing_tag("</span>") is False
+    def test_count_tokens_fallback(self):
+        """测试 tiktoken 模型未找到时的 fallback（覆盖 lines 16-17）"""
+        with patch("engine.item.chunker.tiktoken.encoding_for_model", side_effect=KeyError):
+            tokens = count_tokens("hello world")
+            assert tokens > 0
 
-    def test_is_block_opening_tag(self):
-        """测试块级开始标签判断"""
-        chunker = HtmlChunker(token_limit=100)
-        assert chunker._is_block_opening_tag("<p>") is True
-        assert chunker._is_block_opening_tag("<div>") is True
-        assert chunker._is_block_opening_tag("<h1>") is True
-        assert chunker._is_block_opening_tag("</p>") is False
-        assert chunker._is_block_opening_tag("<span>") is False
-
-    def test_extract_tag_name(self):
-        """测试标签名提取"""
-        chunker = HtmlChunker(token_limit=100)
-        assert chunker._extract_tag_name("<p>") == "p"
-        assert chunker._extract_tag_name("</div>") == "div"
-        assert chunker._extract_tag_name("<h1 class='title'>") == "h1"
-        assert chunker._extract_tag_name("<br/>") == "br"
-        assert chunker._extract_tag_name("<img src='x'/>") == "img"
-
-    def test_get_split_priority(self):
-        """测试分割优先级"""
-        chunker = HtmlChunker(token_limit=100)
-        assert chunker._get_split_priority("</h1>") == 100
-        assert chunker._get_split_priority("</h2>") == 100
-        assert chunker._get_split_priority("</h3>") == 100
-        assert chunker._get_split_priority("</p>") == 50
-        assert chunker._get_split_priority("</li>") == 30
-        assert chunker._get_split_priority("</div>") == 30
-        assert chunker._get_split_priority("</span>") == 10
-
-    def test_find_placeholder_positions(self):
-        """测试占位符位置查找"""
-        chunker = HtmlChunker(token_limit=100)
-
-        text = "[id0]Hello[id1] World[id2]"
-        positions = chunker._find_placeholder_positions(text)
-
-        assert len(positions) == 3
-        # positions: (start, end, placeholder, index)
-        assert positions[0][3] == 0  # [id0]
-        assert positions[1][3] == 1  # [id1]
-        assert positions[2][3] == 2  # [id2]
-
-    def test_find_safe_split_points(self):
-        """测试安全分割点查找"""
-        chunker = HtmlChunker(token_limit=100)
-        html = "<div><p>First</p><p>Second</p></div>"
-        processed, mgr = TagPreserver().preserve_tags(html)
-
-        positions = chunker._find_placeholder_positions(processed)
-        split_points = chunker._find_safe_split_points(processed, positions, mgr, is_nav_file=False)
-
-        # 应该在 </p> 后找到分割点
-        assert isinstance(split_points, list)
-
-    def test_split_at_points(self):
-        """测试在分割点分割文本"""
-        chunker = HtmlChunker(token_limit=100)
-        text = "Hello World Test"
-        split_points = [6]  # 在 "World" 之前
-        segments = chunker._split_at_points(text, split_points)
-        assert len(segments) == 2
-        assert segments[0] == "Hello "
-        assert segments[1] == "World Test"
-
-    def test_split_at_points_no_splits(self):
-        """测试无分割点时返回原文本"""
-        chunker = HtmlChunker(token_limit=100)
-        text = "Hello World"
-        segments = chunker._split_at_points(text, [])
-        assert segments == ["Hello World"]
-
-    def test_merge_into_chunks(self):
-        """测试合并segments为chunks"""
-        chunker = HtmlChunker(token_limit=50)
-        segments = ["<p>Hello</p>", "<p>World</p>"]
-        global_indices = [0, 1, 2, 3]
-        mgr = PlaceholderManager()
-        mgr.tag_map = {"[id0]": "<p>", "[id1]": "</p>", "[id2]": "<p>", "[id3]": "</p>"}
-        mgr.counter = 4
-
-        chunks = chunker._merge_into_chunks(segments, global_indices, mgr)
-        assert len(chunks) >= 1
-        assert all(hasattr(c, 'name') for c in chunks)
-
-    def test_merge_into_chunks_respects_max_placeholders(self):
-        """验证单个segment超限时按max_placeholders_per_chunk强制分割"""
-        chunker = HtmlChunker(token_limit=10000, max_placeholders_per_chunk=5)
-        # 创建一个包含10个占位符的单个segment
-        segment = "[id0][id1][id2][id3][id4][id5][id6][id7][id8][id9]Hello World"
-        global_indices = list(range(10))
-        mgr = PlaceholderManager()
-        for i in range(10):
-            mgr.tag_map[f"[id{i}]"] = f"<tag{i}>"
-        mgr.counter = 10
-
-        chunks = chunker._merge_into_chunks([segment], global_indices, mgr)
-        # 应该被分割成2个chunk（10个占位符 / 5限制 = 2 chunks）
-        assert len(chunks) == 2
-        for chunk in chunks:
-            assert len(chunk.global_indices) <= 5
-
-    def test_create_chunk(self):
-        """测试创建chunk"""
-        chunker = HtmlChunker(token_limit=100)
-        parts = ["<p>Hello</p>"]
-        indices = [0, 1]
-        mgr = PlaceholderManager()
-        mgr.tag_map = {"[id0]": "<p>", "[id1]": "</p>"}
-        mgr.counter = 2
-
-        chunk = chunker._create_chunk(parts, indices, mgr)
-        assert chunk.name is not None
-        assert chunk.original == "<p>Hello</p>"
-        assert chunk.global_indices == [0, 1]
-        assert chunk.tokens > 0
-
-    def test_create_chunk_strips_boundary_newlines(self):
-        """验证 chunk 首尾的 \\n 被正确删除"""
-        chunker = HtmlChunker(token_limit=100)
-        parts = ["\n<p>Hello</p>\n"]
-        indices = [0, 1]
-        mgr = PlaceholderManager()
-        mgr.tag_map = {"[id0]": "<p>", "[id1]": "</p>"}
-        mgr.counter = 2
-
-        chunk = chunker._create_chunk(parts, indices, mgr)
-        # 首尾的 \n 应被删除
-        assert chunk.original == "<p>Hello</p>"
-        # 中间的 \n（如果有）应保留
-        parts_with_middle = ["\n<p>Hello</p>\n<p>World</p>\n"]
-        indices_middle = [0, 1, 2, 3]
-        mgr2 = PlaceholderManager()
-        mgr2.tag_map = {"[id0]": "<p>", "[id1]": "</p>", "[id2]": "<p>", "[id3]": "</p>"}
-        mgr2.counter = 4
-        chunk2 = chunker._create_chunk(parts_with_middle, indices_middle, mgr2)
-        # 中间的 \n 应保留
-        assert "\n" in chunk2.original
+    def test_whitespace_only_children_skipped(self):
+        """测试空白文本节点被跳过（覆盖 line 107）"""
+        # 元素之间有换行和空格的 HTML
+        html = "<html><body>\n  <p>Text</p>\n  </body></html>"
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html)
+        assert len(chunks) == 1
+        assert "Text" in chunks[0].original

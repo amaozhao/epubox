@@ -1,217 +1,226 @@
-from unittest.mock import mock_open, patch
-
 import pytest
 
-from engine.epub.replacer import Replacer
+from engine.agents.verifier import validate_translated_html, verify_final_html
+from engine.epub.replacer import DomReplacer
 from engine.schemas import Chunk, EpubItem
+from engine.schemas.translator import TranslationStatus
 
 
-@pytest.fixture
-def mock_epub_item(tmp_path):
-    """创建一个包含模拟数据的 EpubItem 实例。"""
-    item_path = tmp_path / "test_item.html"
-    item_path.touch()
+class TestDomReplacer:
+    """测试 DomReplacer 类"""
 
-    return EpubItem(
-        id="test_id",
-        path=str(item_path),
-        content="[id0]This is a [id1]test[id2].[id3]",
-        translated=None,
-        placeholder={"[id0]": "<p>", "[id1]": "<b>", "[id2]": "</b>", "[id3]": "</p>"},
-        chunks=[
-            Chunk(
-                name="1",
-                original="[id0]This is a [id1]test[id2].[id3]",
-                translated="[id0]这是一个 [id1]测试[id2]。[id3]",
-                tokens=7,
-                global_indices=[0, 1, 2, 3],
-                local_tag_map={"[id0]": "<p>", "[id1]": "<b>", "[id2]": "</b>", "[id3]": "</p>"}
-            ),
-        ],
-    )
-
-
-@pytest.fixture
-def mock_epub_item_with_precode(tmp_path):
-    """创建一个包含 pre/code 标签的 EpubItem 实例。"""
-    item_path = tmp_path / "test_item.html"
-    item_path.touch()
-
-    return EpubItem(
-        id="test_id",
-        path=str(item_path),
-        content="[PRE:0]<p>[id0]Hello[id1]</p>[CODE:0]",
-        translated=None,
-        placeholder={"[id0]": "<b>", "[id1]": "</b>"},
-        chunks=[
-            Chunk(
-                name="1",
-                original="[PRE:0]<p>[id0]Hello[id1]</p>[CODE:0]",
-                translated="[PRE:0]<p>[id0]你好[id1]</p>[CODE:0]",
-                tokens=10,
-                global_indices=[0],
-                local_tag_map={"[id0]": "<b>", "[id1]": "</b>"}
-            ),
-        ],
-        preserved_pre=["<pre>function test() {}</pre>"],
-        preserved_code=["<code>x = 1</code>"],
-    )
-
-
-class TestReplacer:
-    """测试 epub/replacer.py 中的 Replacer 类。"""
-
-    def test_restore_successful(self, mock_epub_item):
-        """测试 restore 方法在正常情况下能否正确合并、还原并写入文件。"""
-        merged_content = "[id0]这是一个 [id1]测试[id2]。[id3]"
-        restored_content = "<p>这是一个 <b>测试</b>。</p>"
-
-        with (
-            patch.object(Replacer, "_merge_chunks", return_value=merged_content) as mock_merge_chunks,
-            patch.object(Replacer, "_restore_tags", return_value=restored_content) as mock_restore_tags,
-            patch("builtins.open", new_callable=mock_open) as mock_file,
-        ):
-            replacer = Replacer()
-            replacer.restore(mock_epub_item)
-
-            mock_merge_chunks.assert_called_once_with(mock_epub_item)
-            mock_restore_tags.assert_called_once_with(mock_epub_item, merged_content)
-
-            mock_file.assert_called_once_with(mock_epub_item.path, "w", encoding="utf-8")
-            mock_file().write.assert_called_once_with(restored_content)
-
-            assert mock_epub_item.translated == restored_content
-
-    def test_restore_with_no_chunks(self, mock_epub_item):
-        """测试当 EpubItem 没有分块时，restore 方法的行为。"""
-        mock_epub_item.chunks = []
-
-        with (
-            patch.object(Replacer, "_merge_chunks", return_value="") as mock_merge_chunks,
-            patch.object(Replacer, "_restore_tags", return_value="") as mock_restore_tags,
-            patch("builtins.open", new_callable=mock_open) as mock_file,
-        ):
-            replacer = Replacer()
-            replacer.restore(mock_epub_item)
-
-            mock_merge_chunks.assert_called_once_with(mock_epub_item)
-            mock_restore_tags.assert_called_once_with(mock_epub_item, "")
-
-            mock_file.assert_not_called()
-
-            assert mock_epub_item.translated is None
-
-    def test_restore_with_no_placeholder(self, mock_epub_item):
-        """测试当 EpubItem 没有占位符时，restore 方法的行为。"""
-        mock_epub_item.placeholder = {}
-        merged_content = "[id0]这是一个测试。[id1]"
-
-        with (
-            patch.object(Replacer, "_merge_chunks", return_value=merged_content) as mock_merge_chunks,
-            patch.object(Replacer, "_restore_tags", return_value=merged_content) as mock_restore_tags,
-            patch("builtins.open", new_callable=mock_open) as mock_file,
-        ):
-            replacer = Replacer()
-            replacer.restore(mock_epub_item)
-
-            mock_merge_chunks.assert_called_once_with(mock_epub_item)
-            mock_restore_tags.assert_called_once_with(mock_epub_item, merged_content)
-
-            mock_file.assert_called_once_with(mock_epub_item.path, "w", encoding="utf-8")
-            mock_file().write.assert_called_once_with(merged_content)
-
-            assert mock_epub_item.translated == merged_content
-
-    def test_restore_with_preserved_precode(self, mock_epub_item_with_precode):
-        """测试带有 pre/code 标签的恢复。"""
-        merged_content = "[PRE:0]<p>[id0]你好[id1]</p>[CODE:0]"
-        # _restore_tags mock 返回已恢复 id 占位符的内容
-        tags_restored_content = "[PRE:0]<p><b>你好</b></p>[CODE:0]"
-        final_content = "<pre>function test() {}</pre><p><b>你好</b></p><code>x = 1</code>"
-
-        with (
-            patch.object(Replacer, "_merge_chunks", return_value=merged_content) as mock_merge_chunks,
-            patch.object(Replacer, "_restore_tags", return_value=tags_restored_content) as mock_restore_tags,
-            patch("builtins.open", new_callable=mock_open) as mock_file,
-        ):
-            replacer = Replacer()
-            replacer.restore(mock_epub_item_with_precode)
-
-            mock_merge_chunks.assert_called_once_with(mock_epub_item_with_precode)
-            mock_restore_tags.assert_called_once_with(mock_epub_item_with_precode, merged_content)
-
-            mock_file.assert_called_once_with(mock_epub_item_with_precode.path, "w", encoding="utf-8")
-            mock_file().write.assert_called_once_with(final_content)
-
-            assert mock_epub_item_with_precode.translated == final_content
-
-    def test_restore_empty_content(self, mock_epub_item):
-        """测试空内容的恢复。"""
-        mock_epub_item.chunks = []
-
-        with (
-            patch.object(Replacer, "_merge_chunks", return_value="") as mock_merge_chunks,
-            patch.object(Replacer, "_restore_tags", return_value="") as mock_restore_tags,
-            patch("builtins.open", new_callable=mock_open) as mock_file,
-        ):
-            replacer = Replacer()
-            replacer.restore(mock_epub_item)
-
-            mock_file.assert_not_called()
-            assert mock_epub_item.translated is None
-
-
-class TestNavStructureValidation:
-    """测试 Nav 文件结构验证"""
-
-    def test_validate_nav_structure_valid(self):
-        """验证有效的 nav 文件结构"""
-        replacer = Replacer()
-        valid_nav = '<navMap><navPoint><navLabel><text>Chapter</text></navLabel><content src="xhtml/c1.xhtml"/></navPoint></navMap>'
-        assert replacer._validate_nav_structure(valid_nav) is True
-
-    def test_validate_nav_structure_missing_navmap(self):
-        """验证缺少 navMap 的无效 nav"""
-        replacer = Replacer()
-        invalid_nav = '<navPoint><navLabel><text>Chapter</text></navLabel></navPoint>'
-        assert replacer._validate_nav_structure(invalid_nav) is False
-
-    def test_validate_nav_structure_corrupted(self):
-        """验证损坏的 nav 内容"""
-        replacer = Replacer()
-        corrupted = '<navMap></navMap>'
-        assert replacer._validate_nav_structure(corrupted) is False
-
-    def test_validate_nav_structure_missing_navpoint(self):
-        """验证缺少 navPoint"""
-        replacer = Replacer()
-        invalid = '<navMap><navLabel><text>Chapter</text></navLabel></navMap>'
-        assert replacer._validate_nav_structure(invalid) is False
-
-    def test_validate_nav_structure_xhtml_format(self):
-        """验证 XHTML 格式的 nav 文件（nav.xhtml 使用此格式）"""
-        replacer = Replacer()
-        valid_xhtml_nav = '<nav epub:type="toc"><ol><li><a href="c01.xhtml">Chapter 1</a></li></ol></nav>'
-        assert replacer._validate_nav_structure(valid_xhtml_nav) is True
-
-    def test_validate_nav_structure_xhtml_invalid(self):
-        """验证 XHTML 格式但缺少必要标签"""
-        replacer = Replacer()
-        invalid_xhtml = '<nav epub:type="toc"><ol></ol></nav>'
-        assert replacer._validate_nav_structure(invalid_xhtml) is False
-
-    def test_item_content_is_original_not_placeholder(self, tmp_path):
-        """验证 item.content 是原始 HTML 而不是占位符版本"""
-        item_path = tmp_path / "test.xhtml"
-        item_path.write_text('<p>Hello</p>')
-
+    def test_basic_restore(self):
+        """测试基本恢复：单个 chunk 的 xpath 替换"""
         item = EpubItem(
-            id="test.xhtml",
-            path=str(item_path),
-            content="<p>Hello</p>",
-            placeholder={"[id0]": "<p>"},
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><p>Hello</p></body></html>",
+        )
+        chunk = Chunk(
+            name="test0001",
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.COMPLETED,
+            tokens=10,
+            xpaths=["/html/body/p"],
+        )
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        assert "<p>你好</p>" in result
+        assert "<p>Hello</p>" not in result
+
+    def test_multiple_xpaths(self):
+        """测试多 xpath 替换"""
+        item = EpubItem(
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><h1>Title</h1><p>First</p><p>Second</p></body></html>",
+        )
+        chunk = Chunk(
+            name="test0002",
+            original="<h1>Title</h1>\n<p>First</p>\n<p>Second</p>",
+            translated="<h1>标题</h1>\n<p>第一</p>\n<p>第二</p>",
+            status=TranslationStatus.COMPLETED,
+            tokens=20,
+            xpaths=["/html/body/h1", "/html/body/p[1]", "/html/body/p[2]"],
+        )
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        assert "标题" in result
+        assert "第一" in result
+        assert "第二" in result
+
+    def test_skip_untranslated(self):
+        """测试跳过 UNTRANSLATED 的 chunk"""
+        item = EpubItem(
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><p>Hello</p></body></html>",
+        )
+        chunk = Chunk(
+            name="test0003",
+            original="<p>Hello</p>",
+            translated="<p>Hello</p>",
+            status=TranslationStatus.UNTRANSLATED,
+            tokens=10,
+            xpaths=["/html/body/p"],
+        )
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        # UNTRANSLATED 应被跳过，保留原文
+        assert "<p>Hello</p>" in result
+
+    def test_precode_restore(self):
+        """测试 PreCode 占位符恢复"""
+        item = EpubItem(
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><p>Text</p><pre>code()</pre></body></html>",
+            preserved_pre=["<pre>code()</pre>"],
+        )
+        chunk = Chunk(
+            name="test0004",
+            original="<p>Text</p>",
+            translated="<p>文本</p>",
+            status=TranslationStatus.COMPLETED,
+            tokens=10,
+            xpaths=["/html/body/p"],
+        )
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        assert "文本" in result
+
+    def test_no_chunks(self):
+        """测试无 chunks 时返回原内容"""
+        item = EpubItem(
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><p>Hello</p></body></html>",
             chunks=[],
         )
-        # content 应该是原始 HTML，不是 "[id0]Hello" 这样的占位符版本
-        assert item.content == "<p>Hello</p>"
-        assert "[id" not in item.content
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        assert result == item.content
+
+    def test_translated_elements_fewer_than_xpaths(self):
+        """测试翻译后元素数少于 xpath 数时 break（覆盖 line 85）"""
+        item = EpubItem(
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><p>A</p><p>B</p></body></html>",
+        )
+        chunk = Chunk(
+            name="test0010",
+            original="<p>A</p>\n<p>B</p>",
+            translated="<p>甲</p>",  # 只有 1 个元素，但 xpaths 有 2 个
+            status=TranslationStatus.COMPLETED,
+            tokens=10,
+            xpaths=["/html/body/p[1]", "/html/body/p[2]"],
+        )
+        item.chunks = [chunk]
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        assert "甲" in result  # 第一个被替换
+        assert "B" in result   # 第二个保留原文
+
+    def test_xpath_not_found(self):
+        """测试 xpath 未找到时 warning（覆盖 line 90）"""
+        item = EpubItem(
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><p>Hello</p></body></html>",
+        )
+        chunk = Chunk(
+            name="test0011",
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.COMPLETED,
+            tokens=10,
+            xpaths=["/html/body/div"],  # 不存在的 xpath
+        )
+        item.chunks = [chunk]
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        assert "Hello" in result  # 原文保留
+
+    def test_verify_failure_logged(self):
+        """测试验证失败时记录错误（覆盖 line 58）"""
+        item = EpubItem(
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><p>Hello</p></body></html>",
+        )
+        chunk = Chunk(
+            name="test0012",
+            original="<p>Hello</p>",
+            translated="<p>[PRE:0] 你好</p>",  # 残留占位符会验证失败
+            status=TranslationStatus.COMPLETED,
+            tokens=10,
+            xpaths=["/html/body/p"],
+        )
+        item.chunks = [chunk]
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        # 即使验证失败，也应该返回结果
+        assert result is not None
+
+
+class TestValidateTranslatedHtml:
+    """测试翻译结果验证"""
+
+    def test_valid(self):
+        """测试有效的翻译"""
+        is_valid, _ = validate_translated_html("<p>Hello</p>", "<p>你好</p>")
+        assert is_valid
+
+    def test_element_count_mismatch(self):
+        """测试元素数量不一致"""
+        is_valid, error = validate_translated_html("<p>A</p>", "<p>A</p><p>B</p>")
+        assert not is_valid
+        assert "元素数量不一致" in error
+
+    def test_tag_name_mismatch(self):
+        """测试标签名不一致"""
+        is_valid, error = validate_translated_html("<p>A</p>", "<div>A</div>")
+        assert not is_valid
+        assert "标签不一致" in error
+
+    def test_placeholder_preserved(self):
+        """测试占位符完整保留"""
+        is_valid, _ = validate_translated_html(
+            "<p>[PRE:0] text</p>", "<p>[PRE:0] 文本</p>"
+        )
+        assert is_valid
+
+    def test_placeholder_missing(self):
+        """测试占位符丢失"""
+        is_valid, error = validate_translated_html(
+            "<p>[PRE:0] text</p>", "<p>文本</p>"
+        )
+        assert not is_valid
+        assert "占位符" in error
+
+
+class TestVerifyFinalHtml:
+    """测试最终 HTML 验证"""
+
+    def test_valid_xml(self):
+        """测试有效的 XHTML"""
+        html = "<html><body><p>Hello</p></body></html>"
+        is_valid, _ = verify_final_html(html, html)
+        assert is_valid
+
+    def test_residual_placeholder(self):
+        """测试残留占位符检测"""
+        html = "<html><body><p>[PRE:0]</p></body></html>"
+        is_valid, error = verify_final_html("", html)
+        assert not is_valid
+        assert "残留占位符" in error

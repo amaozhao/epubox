@@ -1,15 +1,11 @@
 import json
 import os
-import re
-import uuid
 import zipfile
 from typing import List, Optional
 
 from bs4 import BeautifulSoup
 
-from engine.item import HtmlChunker, PreCodeExtractor, TagPreserver
-from engine.item.chunker import count_tokens
-from engine.item.placeholder import PlaceholderManager
+from engine.item import DomChunker, PreCodeExtractor
 from engine.schemas import EpubBook, EpubItem
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
@@ -79,11 +75,10 @@ class Parser:
         """
         解析 EPUB 文件，返回一个只包含可翻译文档的 EpubBook 对象。
 
-        新流程：
+        流程：
         1. BeautifulSoup 解析（规范化 HTML）
-        2. PreCodeExtractor.extract() - 提取 pre/code 标签
-        3. HtmlChunker.chunk_by_html_tags() - 按块级标签分割
-        4. TagPreserver.preserve_tags() - 对每个 chunk 单独做占位符替换
+        2. PreCodeExtractor.extract() - 提取 pre/code/style 标签为占位符
+        3. DomChunker.chunk() - DOM 级别分块，返回 List[Chunk]
         """
         # 优先从 JSON 文件加载
         book = self.load_json()
@@ -124,20 +119,10 @@ class Parser:
                     # Step 3: 检测是否是 EPUB 导航文件
                     is_nav_file = "toc.ncx" in relative_path.lower() or relative_path.lower().endswith("nav.xhtml")
 
-                    # Step 4: 整个文档做 TagPreserver（将 HTML 标签替换为 [idN] 占位符）
-                    preserver = TagPreserver()
-                    content_after_tags, global_mgr = preserver.preserve_tags(content_after_pre)
-
-                    # Step 5: 使用 chunk 方法按 token_limit 分割（在块级标签边界分割）
-                    chunker = HtmlChunker(token_limit=self.limit)
-                    placeholder_pattern = re.compile(r'\[id\d+\]')
-                    all_placeholders = placeholder_pattern.findall(content_after_tags)
-                    global_indices = [int(p[3:-1]) for p in all_placeholders]
-
-                    chunks = chunker.chunk(
-                        text_with_placeholders=content_after_tags,
-                        global_indices=global_indices,
-                        placeholder_mgr=global_mgr,
+                    # Step 4: 使用 DomChunker 进行 DOM 级别分块
+                    dom_chunker = DomChunker(token_limit=self.limit)
+                    chunks = dom_chunker.chunk(
+                        html=content_after_pre,
                         is_nav_file=is_nav_file
                     )
 
@@ -145,7 +130,6 @@ class Parser:
                         id=relative_path,
                         path=file_path,
                         content=original_content,
-                        placeholder=global_mgr.tag_map,
                         chunks=chunks,
                         preserved_pre=pre_extractor.preserved_pre,
                         preserved_code=pre_extractor.preserved_code,

@@ -12,17 +12,11 @@ def setup_mocks(mocker):
     """
     为所有测试用例设置通用的 mock，以确保测试的独立性。
     """
-    # 模拟 TagPreserver 类
-    mocked_preserver = MagicMock()
-    mocked_preserver.preserve_tags.return_value = ("", MagicMock(tag_map={}, counter=0))
-
-    mocker.patch("engine.epub.parser.TagPreserver", return_value=mocked_preserver)
-
-    # 模拟 HtmlChunker 类
+    # 模拟 DomChunker 类
     mocked_chunker = MagicMock()
     mocked_chunker.chunk.return_value = []
 
-    mocker.patch("engine.epub.parser.HtmlChunker", return_value=mocked_chunker)
+    mocker.patch("engine.epub.parser.DomChunker", return_value=mocked_chunker)
 
 
 @pytest.fixture

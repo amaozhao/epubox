@@ -1,6 +1,6 @@
 import pytest
 
-from engine.agents.verifier import get_tag_name, is_self_closing, verify_html_integrity
+from engine.agents.verifier import get_tag_name, is_self_closing, verify_final_html, verify_html_integrity
 
 
 class TestVerifyHtmlIntegrity:
@@ -105,3 +105,40 @@ class TestGetTagName:
         assert get_tag_name("< >") is None
         assert get_tag_name("</>") is None
         assert get_tag_name("<>") is None
+
+
+class TestVerifyHtmlIntegrityEdgeCases:
+    """覆盖 verify_html_integrity 的边界分支"""
+
+    def test_unclosed_angle_bracket(self):
+        """测试 < 后没有 >（覆盖 lines 29-30）"""
+        html = "<div><p"
+        is_valid, errors = verify_html_integrity(html)
+        assert is_valid is False
+        assert "标签未闭合" in errors[0]
+
+    def test_closing_tag_empty_name(self):
+        """测试结束标签名为空（覆盖 lines 48-49）"""
+        # </ > 以 </ 开头但标签名为空，get_tag_name 返回 None，被跳过
+        html = "<div></ ></div>"
+        is_valid, errors = verify_html_integrity(html)
+        # </ > 被跳过，</div> 正常 pop div，结果有效
+        assert is_valid is True
+
+    def test_unmatched_closing_tag(self):
+        """测试未匹配的结束标签（覆盖 line 59）"""
+        # </span> 不在栈中，记录错误但继续；最终返回 True（栈为空）
+        html = "</span>"
+        is_valid, errors = verify_html_integrity(html)
+        assert "未匹配的结束标签" in errors[0]
+
+
+class TestVerifyFinalHtmlEdgeCases:
+    """覆盖 verify_final_html 的边界分支"""
+
+    def test_invalid_xml(self):
+        """测试 XML 格式错误（覆盖 lines 153-154）"""
+        html = "<html><body><p>unclosed"
+        is_valid, error = verify_final_html("", html)
+        assert is_valid is False
+        assert "XML 格式错误" in error

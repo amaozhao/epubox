@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -15,5 +15,5 @@ class Chunk(BaseModel):
     translated: Optional[str] = Field(None, description="翻译后的文本")
     status: Optional[TranslationStatus] = TranslationStatus.PENDING
     tokens: int = Field(0, description="当前chunk估算的token数")
-    global_indices: List[int] = Field(default_factory=list, description="全局占位符索引列表")
-    local_tag_map: Dict[str, str] = Field(default_factory=dict, description="局部占位符到标签的映射")
+    # chunk 内各元素在原始 DOM 中的 xpath 路径，用于追踪翻译结果回写位置
+    xpaths: List[str] = Field(default_factory=list, description="chunk 内各元素的 xpath 路径列表")

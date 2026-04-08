@@ -1,6 +1,5 @@
 import json
-import re
-from typing import Dict, List
+from typing import Dict
 
 from agno.run import RunStatus
 from agno.workflow import Step, StepInput, StepOutput, Workflow
@@ -12,7 +11,7 @@ from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
 from .translator import get_translator
-from .validator import validate_placeholders
+from engine.agents.verifier import validate_translated_html
 
 # 需要内容安全审核 fallback 的错误码
 CONTENT_SAFETY_ERROR_CODES = {10014, 500, 400}
@@ -32,23 +31,6 @@ def is_content_safety_error(error_msg: str = "", status_code: int | None = None)
     return False
 
 
-def _get_placeholder_indices(text: str) -> List[int]:
-    """提取文本中所有占位符的索引"""
-    matches = re.findall(r'\[id(\d+)\]', text)
-    return [int(m) for m in matches]
-
-
-def _get_placeholders_from_indices(indices: List[int]) -> List[str]:
-    """将索引列表转换为占位符字符串列表"""
-    return [f"[id{i}]" for i in indices]
-
-
-def _has_translatable_content(text: str) -> bool:
-    """检查文本是否包含可翻译内容（排除纯占位符）"""
-    clean = re.sub(r'\[id\d+\]', '', text)
-    return bool(clean.strip())
-
-
 def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]:
     """从文本中过滤出出现在术语表中的术语"""
     found_terms = {}
@@ -61,7 +43,6 @@ def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]
 
 async def _call_translator(
     text: str,
-    placeholder_mgr,
     glossary: Dict[str, str] = None,
     previous_translation: str | None = None,
     error_msg: str | None = None,
@@ -71,27 +52,17 @@ async def _call_translator(
 
     Args:
         text: 待翻译文本
-        placeholder_mgr: 占位符管理器
         glossary: 术语表
         previous_translation: 上一次翻译失败的结果（用于重试时参考）
         error_msg: 上一次翻译失败的具体错误信息
     """
-    # 提取文本中的占位符索引
-    text_placeholder_indices = _get_placeholder_indices(text)
-    # 构建验证用的 tag_map（使用全局索引作为 key，与 chunk.original 一致）
-    validation_tag_map = {f"[id{i}]": placeholder_mgr.tag_map.get(f"[id{i}]", "") for i in text_placeholder_indices}
-    # 过滤出文本中出现的术语
     filtered_glossary = filter_glossary_terms(text, glossary) if glossary else {}
     translator_input = {
         "text_to_translate": text,
-        "placeholder_count": len(validation_tag_map),
-        "untranslatable_placeholders": list(validation_tag_map.keys()),
         "glossaries": filtered_glossary,
     }
-    # 如果有上一次失败的翻译结果，加入输入中让模型参考
     if previous_translation:
         translator_input["previous_translation"] = previous_translation
-    # 如果有错误信息，加入输入中帮助模型理解问题
     if error_msg:
         translator_input["validation_error"] = error_msg
 
@@ -100,7 +71,6 @@ async def _call_translator(
         response = await translator.arun(json.dumps(translator_input, ensure_ascii=False, indent=2))
 
         raw_content = response.content
-        # 检查是否是内容安全审核错误
         if response.status == RunStatus.error:
             error_content = str(raw_content) if raw_content else ""
             if is_content_safety_error(error_content):
@@ -113,16 +83,15 @@ async def _call_translator(
         raise
 
 
-async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict[str, str] = None) -> Chunk:
-    """Phase 1 翻译：直接翻译 + 占位符验证，失败则标记待手动处理"""
+async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None) -> Chunk:
+    """翻译并用 validate_translated_html 验证 HTML 结构，失败则标记待手动处理"""
     original = chunk.original
     last_error_msg = None
     used_fallback = False
-    all_missing_ids: set[int] = set()
 
     for attempt in range(MAX_TRANSLATION_RETRIES):
         try:
-            translated = await _call_translator(original, placeholder_mgr, glossary, None, last_error_msg, use_fallback=used_fallback)
+            translated = await _call_translator(original, glossary, None, last_error_msg, use_fallback=used_fallback)
             translated = translated.replace("\\n", "\n")
         except Exception as e:
             error_str = str(e)
@@ -135,43 +104,14 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
             last_error_msg = None
             continue
 
-        if hasattr(chunk, 'global_indices') and chunk.global_indices:
-            validation_tag_map = {f"[id{i}]": placeholder_mgr.tag_map.get(f"[id{i}]", "") for i in chunk.global_indices}
-        else:
-            validation_tag_map = placeholder_mgr.tag_map
-        is_valid, error_msg = validate_placeholders(translated, validation_tag_map)
+        is_valid, error_msg = validate_translated_html(original, translated)
         if is_valid:
             chunk.translated = translated
             chunk.status = TranslationStatus.TRANSLATED
             return chunk
 
         logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 失败: {error_msg}")
-        # 分离"缺少"和"多余"，避免把多余占位符误认为缺失
-        missing_ids: set[int] = set()
-        extra_ids: set[int] = set()
-        for m in re.findall(r'缺少:\[([^\]]+)\]', error_msg):
-            for item in m.replace('[id', '').replace(']', '').split(','):
-                item = item.strip()
-                if item.startswith('id'):
-                    missing_ids.add(int(item[2:]))
-        for m in re.findall(r'多余:\[([^\]]+)\]', error_msg):
-            for item in m.replace('[id', '').replace(']', '').split(','):
-                item = item.strip()
-                if item.startswith('id'):
-                    extra_ids.add(int(item[2:]))
-        all_missing_ids.update(missing_ids)
-
-        hint_parts = []
-        if missing_ids:
-            missing_str = ", ".join(sorted([f"[id{i}]" for i in sorted(missing_ids)]))
-            hint_parts.append(f"请保留以下占位符: {missing_str}")
-        if extra_ids:
-            extra_str = ", ".join(sorted([f"[id{i}]" for i in sorted(extra_ids)]))
-            hint_parts.append(f"请删除以下占位符，不要出现在输出中: {extra_str}")
-        if hint_parts:
-            last_error_msg = f"{error_msg} （{'；'.join(hint_parts)}）"
-        else:
-            last_error_msg = error_msg
+        last_error_msg = error_msg
 
     # 所有重试都失败 → 标记为 UNTRANSLATED，保留原文保结构
     logger.warning(f"Chunk '{chunk.name}': 翻译重试全部失败，标记为 UNTRANSLATED")
@@ -184,25 +124,19 @@ async def _translate_with_fallback(chunk: Chunk, placeholder_mgr, glossary: Dict
 async def translate_step(step_input: StepInput) -> StepOutput:
     chunk: Chunk = step_input.input  # type: ignore
     additional_data = step_input.additional_data or {}
-    placeholder_mgr = additional_data.get("placeholder_mgr")
     glossary = additional_data.get("glossary", {})
 
     if chunk.status == TranslationStatus.TRANSLATED and chunk.translated:
         return StepOutput(content=chunk)
 
-    if not _has_translatable_content(chunk.original):
+    if not chunk.original or not chunk.original.strip():
         logger.info(f"Chunk '{chunk.name}' 无可翻译内容，直接返回原文")
         chunk.translated = chunk.original
         chunk.status = TranslationStatus.TRANSLATED
         return StepOutput(content=chunk)
 
-    if not placeholder_mgr:
-        error_msg = "翻译步骤失败：缺少 placeholder_mgr"
-        logger.error(error_msg)
-        return StepOutput(content=chunk, success=False, error=error_msg)
-
     try:
-        chunk = await _translate_with_fallback(chunk, placeholder_mgr, glossary)
+        chunk = await _translate_with_fallback(chunk, glossary)
         return StepOutput(content=chunk)
     except Exception as e:
         error_msg = f"翻译步骤失败：{e}"
@@ -228,7 +162,7 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
             error=error_msg,
         )
 
-    proofer_input = {"text_to_proofread": translated, "untranslatable_placeholders": _get_placeholders_from_indices(_get_placeholder_indices(chunk.original))}
+    proofer_input = {"text_to_proofread": translated}
 
     max_attempts = 3
     proofreading_result = None
@@ -323,7 +257,7 @@ def get_translator_workflow() -> Workflow:
     """构建并返回翻译工作流（翻译→校对→修正）"""
     return Workflow(
         name="TranslatorWorkflow",
-        description="智能翻译工作流：直接翻译+占位符保护，校对提升质量",
+        description="智能翻译工作流：直接翻译+HTML结构验证，校对提升质量",
         steps=[
             Step(name="translate", executor=translate_step),
             Step(name="proofread", executor=proofread_step),

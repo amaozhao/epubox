@@ -1,14 +1,12 @@
 import json
 import os
-import re
 from datetime import datetime
 
 from tqdm import tqdm
 
 from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
-from engine.epub import Builder, Parser, Replacer
-from engine.item.placeholder import PlaceholderManager
+from engine.epub import Builder, Parser, DomReplacer
 from engine.schemas import Chunk, TranslationStatus
 from engine.services.glossary import GlossaryExtractor, GlossaryLoader
 
@@ -53,7 +51,7 @@ class Orchestrator:
         初始化编排器实例。
         """
         super().__init__(*args, **kwargs)
-        self.replacer = Replacer()
+        self.replacer = DomReplacer()
 
     def _save_manual_translation_report(self, manual_chunks: list, output_path: str):
         """保存手动翻译报告到 JSON 文件"""
@@ -92,6 +90,28 @@ class Orchestrator:
             for item in report.get("chunks", [])
             if item.get("translated")
         }
+
+    def _should_process_chunk(self, chunk) -> bool:
+        """判断 chunk 是否需要处理"""
+        if chunk.status == TranslationStatus.COMPLETED:
+            return False  # 已完成，跳过
+
+        if chunk.status == TranslationStatus.TRANSLATED and chunk.translated:
+            return True  # 已翻译但未校对，需要继续校对流程
+
+        if chunk.status == TranslationStatus.UNTRANSLATED and chunk.translated and chunk.translated != chunk.original:
+            # 手动翻译后的 chunk：用户编辑了 translated 字段
+            chunk.status = TranslationStatus.TRANSLATED
+            return True  # 进入校对流程
+
+        if chunk.status == TranslationStatus.UNTRANSLATED:
+            # 翻译失败且未手动编辑 → 跳过，避免重复失败
+            return False
+
+        if chunk.status == TranslationStatus.PENDING:
+            return True  # 待翻译
+
+        return False  # 未知状态，安全跳过
 
     def _should_translate_chunk(self, chunk: Chunk) -> bool:
         """
@@ -146,21 +166,9 @@ class Orchestrator:
             if not item.chunks:
                 continue
 
-            # 从 item.placeholder 重建 PlaceholderManager
-            placeholder_mgr = PlaceholderManager()
-            if item.placeholder:
-                placeholder_mgr.tag_map = item.placeholder
-                # counter 必须是最大索引+1，避免新占位符与已有高索引冲突
-                indices = []
-                for key in item.placeholder:
-                    m = re.search(r'\[id(\d+)\]', key)
-                    if m:
-                        indices.append(int(m.group(1)))
-                placeholder_mgr.counter = (max(indices) + 1) if indices else 0
-
             for _, chunk in enumerate(item.chunks):
-                # 在开始工作流前，判断该分块是否需要翻译
-                if not self._should_translate_chunk(chunk):
+                # 在开始工作流前，判断该分块是否需要处理
+                if not self._should_process_chunk(chunk):
                     stats.record(chunk.status)
                     continue
 
@@ -168,7 +176,7 @@ class Orchestrator:
                 try:
                     response = await workflow.arun(
                         input=chunk,
-                        additional_data={"glossary": glossary, "placeholder_mgr": placeholder_mgr, "tag_map": item.placeholder}
+                        additional_data={"glossary": glossary, "tag_map": item.placeholder}
                     )
                     if isinstance(response.content, Chunk):
                         chunk_index = item.chunks.index(chunk)
@@ -201,7 +209,8 @@ class Orchestrator:
                     stats.record_failure()
 
             # 恢复 item 内容
-            self.replacer.restore(item)
+            dom_replacer = DomReplacer()
+            dom_replacer.restore(item)
             # 保存当前 item 的翻译结果
             parser.save_json(book)
 

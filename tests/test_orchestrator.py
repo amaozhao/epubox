@@ -6,7 +6,7 @@ import pytest
 from agno.run import RunStatus
 from agno.run.workflow import WorkflowRunOutput
 
-from engine.epub import Builder, Parser, Replacer
+from engine.epub import Builder, Parser, DomReplacer
 from engine.orchestrator import Orchestrator
 from engine.schemas import Chunk, EpubBook, EpubItem, TranslationStatus
 
@@ -194,7 +194,7 @@ class TestOrchestrator:
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
-    @patch.object(Replacer, "restore", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
     async def test_translate_epub_skips_translated_chunks(
         self,
@@ -236,7 +236,7 @@ class TestOrchestrator:
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
-    @patch.object(Replacer, "restore", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
     async def test_translate_epub_handles_errors(
         self,
@@ -275,7 +275,7 @@ class TestOrchestrator:
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
-    @patch.object(Replacer, "restore", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
     async def test_translate_epub_skips_empty_chunks(
         self,

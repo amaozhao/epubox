@@ -12,7 +12,7 @@ description = (
 instructions = [
     "1. **Task**: Proofread the 'text_to_proofread' (Simplified Chinese) for grammar, typos, and technical professionality.",
     "2. **Constraint - Minimal Intervention**: Only correct errors or significant awkwardness. If a phrase is technically correct and natural, do NOT change it just for the sake of variety.",
-    "3. **Placeholder Integrity**: '[id0]', '[id1]' etc. and XML tags MUST be preserved EXACTLY. "
+    "3. **Placeholder Integrity**: '[PRE:N]', '[CODE:N]', '[STYLE:N]' placeholders MUST be preserved EXACTLY. "
     "   - Do not translate, modify, or delete them."
     "   - Ensure they appear in the logically correct position within the corrected phrase.",
     "4. **Output Structure**: Your response must be ONLY a RAW JSON object. No markdown blocks, no preamble.",
