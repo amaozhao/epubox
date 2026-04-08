@@ -15,39 +15,76 @@ class ValidationError(Exception):
         self.errors = errors or []
 
 
+def _count_unclosed_tags(html: str) -> dict:
+    """统计未闭合标签的数量（按标签类型分组）"""
+    validator = HtmlValidator()
+    validator._parse_html(html, 0)
+    counts = {}
+    for tag, _ in validator.stack:
+        counts[tag] = counts.get(tag, 0) + 1
+    return counts
+
+
 def validate_html_pairing(original: str, translated: str) -> Tuple[bool, str]:
     """
     Validate that HTML tags in translated text are properly paired.
 
+    注意：此验证用于单个 chunk 片段，chunk 可能是 HTML 的不完整部分
+    （如缺少 </body></html>）。因此不使用 lxml 严格验证，只用 HtmlValidator
+    检查 chunk 内部的标签配对错误。
+
     检查两个层面：
-    1. lxml 严格 XML 解析（能检测标签缺失、结构错误等）
-    2. 栈验证（未闭合标签检测）
+    1. 标签配对错误检测（unexpected_close, tag_mismatch）
+    2. 内容完整性检查（检测 LLM 删减内容的问题）
+    3. 未闭合标签数量对比（原文 vs 译文）
 
     Returns (is_valid, error_message)
     """
     if not translated:
         return False, "Translated content is empty"
 
-    # 首先用 lxml 严格验证 - 这能检测出 <ol> 被删除导致 <li> 孤立等问题
-    try:
-        # 用 XML 解析器严格验证
-        etree.fromstring(translated.encode("utf-8"))
-    except etree.XMLSyntaxError as e:
-        error_msg = str(e)
-        # 提取有用的错误信息
-        if "Opening and ending tag mismatch" in error_msg:
-            return False, f"XML结构错误: {error_msg}"
-        if "unexpected end tag" in error_msg.lower():
-            return False, f"XML结构错误: {error_msg}"
-        return False, f"XML解析错误: {error_msg}"
+    # 内容完整性检查：检测 LLM 删减内容的问题
+    # 对比原文和译文的段落/行数差异
+    # 使用 [\s>] 来匹配 <p> 或 <p class="..."> 等情况
+    original_blocks = len(re.findall(r'<p[\s>][^>]*>', original)) + len(re.findall(r'<div[\s>][^>]*>', original))
+    translated_blocks = len(re.findall(r'<p[\s>][^>]*>', translated)) + len(re.findall(r'<div[\s>][^>]*>', translated))
 
-    # 额外用栈验证器检查未闭合标签
+    # 如果译文段落数明显少于原文（差距超过 2 个），可能是 LLM 删减了内容
+    if original_blocks > 0 and translated_blocks < original_blocks - 2:
+        return False, f"内容被删减: 原文有 {original_blocks} 个段落块，译文只有 {translated_blocks} 个"
+
+    # 用 HtmlValidator 检查 chunk 内部的标签配对错误
+    # 注意：不检查 validator.stack，因为跨 chunk 的标签（如 <body> 在 Chunk 0 打开，
+    # </body> 在 Chunk N 闭合）是正常的，不应该算作错误
+    # 真正能判断 LLM 翻译错误的是 unexpected_close（意外闭合）和 tag_mismatch（闭合标签不匹配）
     validator = HtmlValidator()
     translated_valid, translated_errors = validator.validate_chunk(translated, 0, "translated")
 
-    if validator.stack:
-        unclosed_tags = [tag for tag, _ in validator.stack]
-        return False, f"Translated HTML has unclosed tags: {unclosed_tags}"
+    # 只检查标签配对错误，不检查未闭合标签（那些可能是跨 chunk 的正常标签）
+    if not translated_valid:
+        error_msgs = []
+        for err in translated_errors:
+            if err.get("type") == "unexpected_close":
+                error_msgs.append(f"意外的闭合标签: {err.get('actual')}")
+            elif err.get("type") == "tag_mismatch":
+                error_msgs.append(f"标签不匹配: 期望 {err.get('expected')}, 实际 {err.get('actual')}")
+            elif err.get("type") == "unclosed_leaf_tag":
+                error_msgs.append(f"叶子标签未闭合: {err.get('tag')}")
+        if error_msgs:
+            return False, "; ".join(error_msgs)
+        return False, str(translated_errors) if translated_errors else "HTML structure error"
+
+    # 原文/译文未闭合标签数量对比
+    original_unclosed = _count_unclosed_tags(original)
+    translated_unclosed = _count_unclosed_tags(translated)
+
+    # 如果原文有未闭合标签，检查译文是否也有相似数量
+    if original_unclosed:
+        original_total = sum(original_unclosed.values())
+        translated_total = sum(translated_unclosed.values())
+        # 译文的未闭合标签数量应该与原文相近（允许一定差异）
+        if translated_total > original_total + 2:
+            return False, f"译文未闭合标签过多: 原文有 {original_total} 个未闭合，译文有 {translated_total} 个"
 
     return True, ""
 

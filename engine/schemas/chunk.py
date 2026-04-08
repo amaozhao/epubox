@@ -15,3 +15,4 @@ class Chunk(BaseModel):
     translated: Optional[str] = Field(None, description="翻译后的HTML")
     status: Optional[TranslationStatus] = TranslationStatus.PENDING
     tokens: int = Field(0, description="当前chunk估算的token数")
+    needs_translation: bool = Field(True, description="是否需要翻译（前缀/后缀Chunk不需要翻译）")

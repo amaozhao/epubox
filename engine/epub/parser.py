@@ -145,6 +145,7 @@ class Parser:
                             translated=None,
                             status=TranslationStatus.PENDING,
                             tokens=cs.tokens,
+                            needs_translation=getattr(cs, 'needs_translation', True),
                         )
                         chunks.append(chunk)
 

@@ -106,15 +106,14 @@ class TestHtmlValidatorMismatched:
         assert len(errors) > 0
 
     def test_unclosed_tag(self):
-        """未闭合标签 - validate_chunk 不检查栈是否为空，只检查标签匹配"""
+        """未闭合标签 - 叶子标签未闭合是错误"""
         validator = HtmlValidator()
         html = "<div><p>Hello<span>World"
         valid, errors = validator.validate_chunk(html, 0, "test")
-        # validate_chunk 不会检查未闭合标签（因为跨 chunk 可能正常）
-        # 只检查标签是否匹配
-        assert valid is True  # 没有标签冲突，只是未闭合
-        # 栈中应该有未闭合的标签
-        assert len(validator.stack) == 3  # div, p, span
+        # 叶子标签未闭合是错误
+        assert valid is False
+        # p 和 span 是叶子标签，应该报错
+        assert any(e["type"] == "unclosed_leaf_tag" and e["tag"] in ("p", "span") for e in errors)
 
 
 class TestHtmlValidatorChunkBoundary:
@@ -124,36 +123,34 @@ class TestHtmlValidatorChunkBoundary:
         """跨 chunk 边界但正确配对"""
         validator = HtmlValidator()
 
-        # Chunk 0: 打开 <p> 和 <em>
-        html1 = "<p>Hello <em>"
+        # Chunk 0: 打开 <div> 和 <em> - div 是容器标签，em 是叶子标签
+        html1 = "<div><p>Hello <em>"
         valid1, errors1 = validator.validate_chunk(html1, 0, "chunk0")
-        assert valid1 is True
-        # 栈中应该有 p 和 em
-        assert ("em", 0) in validator.stack
-        assert ("p", 0) in validator.stack
+        # 叶子标签 em 未闭合是错误
+        assert valid1 is False
+        assert any(e["type"] == "unclosed_leaf_tag" and e["tag"] == "em" for e in errors1)
 
-        # Chunk 1: 先闭合 </em> 再闭合 </p>
-        html2 = "text</em></p>"
+        # Chunk 1: 先闭合 </em> 再闭合 </p> 再闭合 </div>
+        html2 = "text</em></p></div>"
         valid2, errors2 = validator.validate_chunk(html2, 1, "chunk1")
+        # 全部闭合，应该没有错误
         assert valid2 is True
-        # 栈应该清空（两个都闭合了）
-        assert validator.stack == []
 
     def test_chunk_boundary_with_paragraph(self):
         """跨 chunk 边界的段落标签"""
         validator = HtmlValidator()
 
-        # Chunk 0: 打开 <p>
-        html1 = "<p>Hello"
+        # Chunk 0: 打开 <div>（容器标签）
+        html1 = "<div><p>Hello"
         valid1, errors1 = validator.validate_chunk(html1, 0, "chunk0")
-        assert valid1 is True
-        assert ("p", 0) in validator.stack
+        # p 是叶子标签，未闭合是错误
+        assert valid1 is False
+        assert any(e["type"] == "unclosed_leaf_tag" and e["tag"] == "p" for e in errors1)
 
-        # Chunk 1: 闭合 </p>
-        html2 = " World</p>"
+        # Chunk 1: 闭合 </p> 和 </div>
+        html2 = " World</p></div>"
         valid2, errors2 = validator.validate_chunk(html2, 1, "chunk1")
         assert valid2 is True
-        assert validator.stack == []
 
     def test_chunk_boundary_mismatched(self):
         """跨 chunk 边界但标签不匹配"""
@@ -203,16 +200,17 @@ class TestHtmlValidatorChunkBoundary:
         """测试合并后有未闭合标签"""
         validator = HtmlValidator()
 
+        # 使用容器标签来测试合并后的未闭合检查
         chunks = [
-            "<p>Hello <em>",  # <em> 未闭合
-            "text</p>"
+            "<div><table><tr>",  # 容器标签未闭合
+            "text</tr></div>"
         ]
         chunk_names = ["chunk0", "chunk1"]
 
         valid, errors = validator.validate_merged(chunks, chunk_names)
         assert valid is False
-        # 检查错误类型是 unclosed_tags
-        assert any(e["type"] == "unclosed_tags" for e in errors)
+        # 检查错误类型是 unclosed_container_tags
+        assert any(e["type"] == "unclosed_container_tags" for e in errors)
 
 
 class TestValidateHtmlStructure:
@@ -259,3 +257,157 @@ class TestHtmlValidatorWithPlaceholders:
         valid, errors = validator.validate_chunk(html, 0, "test")
         assert valid is True
         assert errors == []
+
+
+class TestLeafTagUnclosedDetection:
+    """Phase 5: 测试叶子标签未闭合检测"""
+
+    def test_li_unclosed_is_error(self):
+        """li 标签未闭合是错误"""
+        validator = HtmlValidator()
+        html = "<ol><li>Item 1<li>Item 2"  # 缺少 </li>
+        valid, errors = validator.validate_chunk(html, 0, "test")
+        assert valid is False
+        assert any(e["type"] == "unclosed_leaf_tag" and e["tag"] == "li" for e in errors)
+
+    def test_h1_unclosed_is_error(self):
+        """h1 标签未闭合是错误"""
+        validator = HtmlValidator()
+        html = "<h1>Heading<h2>Another"
+        valid, errors = validator.validate_chunk(html, 0, "test")
+        assert valid is False
+        assert any(e["type"] == "unclosed_leaf_tag" and e["tag"] in ("h1", "h2") for e in errors)
+
+    def test_em_unclosed_is_error(self):
+        """em 标签未闭合是错误"""
+        validator = HtmlValidator()
+        html = "<p>Hello <em>world"
+        valid, errors = validator.validate_chunk(html, 0, "test")
+        assert valid is False
+        assert any(e["type"] == "unclosed_leaf_tag" and e["tag"] == "em" for e in errors)
+
+    def test_container_tag_unclosed_is_ok(self):
+        """容器标签（div）未闭合是正常的"""
+        validator = HtmlValidator()
+        html = "<div><p>Hello</p>"
+        valid, errors = validator.validate_chunk(html, 0, "test")
+        # div 是容器标签，未闭合是正常的
+        assert valid is True
+        # p 已闭合，div 未闭合（跨 chunk），所以栈应该只有 div
+        assert ("div", 0) in validator.stack
+
+    def test_nav_unclosed_is_ok(self):
+        """nav 标签未闭合是正常的（ol 已闭合，只有 nav 未闭合）"""
+        validator = HtmlValidator()
+        html = "<nav><ol><li>Item</li></ol>"
+        valid, errors = validator.validate_chunk(html, 0, "test")
+        assert valid is True
+        # nav 是容器标签未闭合，ol 已闭合，li 已闭合
+        assert ("nav", 0) in validator.stack
+        assert ("ol", 0) not in validator.stack
+
+
+class TestContainerTagCrossChunk:
+    """Phase 5: 测试容器标签跨 chunk 正常"""
+
+    def test_nav_cross_chunk_is_valid(self):
+        """nav 标签跨 chunk 是正常的"""
+        validator = HtmlValidator()
+
+        # Chunk 0: 打开 nav 和 ol，li 未闭合是叶子标签错误
+        html1 = "<nav><ol><li>Item 1"
+        valid1, errors1 = validator.validate_chunk(html1, 0, "chunk0")
+        # li 是叶子标签，未闭合是错误
+        assert valid1 is False
+        assert ("nav", 0) in validator.stack
+        assert ("ol", 0) in validator.stack
+        assert ("li", 0) in validator.stack
+
+        # Chunk 1: 闭合
+        html2 = "</li></ol></nav>"
+        valid2, errors2 = validator.validate_chunk(html2, 1, "chunk1")
+        assert valid2 is True
+        assert validator.stack == []
+
+    def test_table_cross_chunk_is_valid(self):
+        """table 标签跨 chunk 是正常的"""
+        validator = HtmlValidator()
+
+        # Chunk 0: 打开 table，td 打开后立即闭合，只留 table 和 tr
+        html1 = "<table><tr><td>Cell</td>"
+        valid1, errors1 = validator.validate_chunk(html1, 0, "chunk0")
+        assert valid1 is True
+        # table 和 tr 是容器标签未闭合
+        assert ("table", 0) in validator.stack
+        assert ("tr", 0) in validator.stack
+
+        # Chunk 1: 闭合 - td closes tr closes table
+        html2 = "</tr></table>"
+        valid2, errors2 = validator.validate_chunk(html2, 1, "chunk1")
+        assert valid2 is True
+        assert validator.stack == []
+
+    def test_ncx_cross_chunk_is_valid(self):
+        """NCX 标签跨 chunk 是正常的"""
+        validator = HtmlValidator()
+
+        # Chunk 0: 打开 ncx 和 navMap
+        html1 = "<?xml version=\"1.0\"?><ncx><navMap><navPoint>"
+        valid1, errors1 = validator.validate_chunk(html1, 0, "chunk0")
+        assert valid1 is True
+        assert ("ncx", 0) in validator.stack
+        assert ("navmap", 0) in validator.stack
+        assert ("navpoint", 0) in validator.stack
+
+        # Chunk 1: 闭合
+        html2 = "</navPoint></navMap></ncx>"
+        valid2, errors2 = validator.validate_chunk(html2, 1, "chunk1")
+        assert valid2 is True
+        assert validator.stack == []
+
+    def test_merged_ncx_valid(self):
+        """合并后的 NCX 内容验证通过"""
+        validator = HtmlValidator()
+
+        chunks = [
+            "<?xml version=\"1.0\"?><ncx><navMap><navPoint><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>",
+        ]
+        chunk_names = ["ncx_chunk"]
+
+        valid, errors = validator.validate_merged(chunks, chunk_names)
+        assert valid is True
+        assert errors == []
+
+    def test_leaf_tag_across_chunk_is_error(self):
+        """叶子标签（如 p）跨 chunk 未闭合是错误"""
+        validator = HtmlValidator()
+
+        # Chunk 0: 打开 <p> 但不闭合
+        html1 = "<div><p>Hello"
+        valid1, errors1 = validator.validate_chunk(html1, 0, "chunk0")
+        assert valid1 is False
+        assert any(e["type"] == "unclosed_leaf_tag" and e["tag"] == "p" for e in errors1)
+
+        # Chunk 1: 闭合 </p>
+        html2 = " World</p></div>"
+        valid2, errors2 = validator.validate_chunk(html2, 1, "chunk1")
+        assert valid2 is True
+
+    def test_container_tag_closed_in_later_chunk(self):
+        """容器标签（div）在后续 chunk 中正确闭合"""
+        validator = HtmlValidator()
+
+        # Chunk 0: 打开 div，p 已闭合（section 不是容器所以是叶子标签错误）
+        html1 = "<section><div><p>Para 1</p>"
+        valid1, errors1 = validator.validate_chunk(html1, 0, "chunk0")
+        # section 不是容器标签，未闭合是错误
+        assert valid1 is False
+        assert ("section", 0) in validator.stack
+        assert ("div", 0) in validator.stack
+
+        # Chunk 1: 继续并闭合
+        html2 = "<p>Para 2</p></div></section>"
+        valid2, errors2 = validator.validate_chunk(html2, 1, "chunk1")
+        assert valid2 is True
+        assert validator.stack == []
+

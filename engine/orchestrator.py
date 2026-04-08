@@ -8,7 +8,6 @@ from engine.agents.html_validator import HtmlValidator
 from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
 from engine.epub import Builder, Parser, Replacer
-from engine.item.precode import PreCodeExtractor
 from engine.schemas import Chunk, TranslationStatus
 from engine.services.glossary import GlossaryExtractor, GlossaryLoader
 
@@ -27,7 +26,9 @@ class TranslationStats:
             self.total += 1
             return
         self.total += 1
-        if status == TranslationStatus.TRANSLATED:
+        if status == TranslationStatus.COMPLETED:
+            self.translated += 1
+        elif status == TranslationStatus.TRANSLATED:
             self.translated += 1
         elif status == TranslationStatus.UNTRANSLATED:
             self.untranslated += 1
@@ -161,12 +162,13 @@ class Orchestrator:
                 logger.warning(f"文件 {item.id} 的 chunk 拆分后 HTML 结构异常: {errors}")
 
             # 使用 tqdm 显示 chunk 进度
-            for chunk in tqdm(item.chunks, desc=f"  Chunk", unit="个", leave=False):
-                # 在开始工作流前，判断该分块是否需要翻译
-                if not self._should_translate_chunk(chunk):
-                    stats.record(chunk.status)
+            for chunk in tqdm(item.chunks, desc="  Chunk", unit="个", leave=False):
+                # 跳过不需要翻译的 chunks（前缀/后缀 chunk）
+                if not chunk.needs_translation:
+                    chunk.status = TranslationStatus.COMPLETED
                     continue
 
+                # 所有需要翻译的 chunks 都进入 workflow，workflow 内部会判断是否跳过翻译
                 workflow = get_translator_workflow()
                 try:
                     response = await workflow.arun(

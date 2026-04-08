@@ -109,7 +109,10 @@ async def _call_translator(
             match = re.search(r'"translation"\s*:\s*"([^"]*)"', cleaned, re.DOTALL)
             if match:
                 translation = match.group(1)
-                translation = translation.encode().decode("unicode_escape")
+                try:
+                    translation = translation.encode().decode("unicode_escape")
+                except (UnicodeDecodeError, ValueError) as e:
+                    logger.warning(f"unicode_escape decode failed: {e}, using raw translation")
                 return translation
             # 最后尝试：把整个字符串作为翻译结果返回
             logger.warning("Could not parse translation response, using raw content")
@@ -167,9 +170,9 @@ async def _translate_with_fallback(
             last_translation = None
             continue
 
-    # 翻译失败
-    logger.warning(f"Chunk '{chunk.name}': 翻译失败，标记为 UNTRANSLATED")
-    chunk.translated = ""
+    # 翻译失败，使用原文代替
+    logger.warning(f"Chunk '{chunk.name}': 翻译失败，使用原文代替")
+    chunk.translated = original
     chunk.status = TranslationStatus.UNTRANSLATED
     return chunk
 
@@ -180,10 +183,9 @@ async def translate_step(step_input: StepInput) -> StepOutput:
     additional_data = step_input.additional_data or {}
     glossary = additional_data.get("glossary", {})
 
-    # 如果 chunk 已有翻译结果（可能是手动翻译），跳过翻译步骤
-    if chunk.status == TranslationStatus.TRANSLATED and chunk.translated:
-        logger.info(f"Chunk '{chunk.name}' 已有翻译结果，跳过翻译步骤")
-        # 返回与后续步骤兼容的格式
+    # 只有 PENDING 状态才执行翻译
+    if chunk.status != TranslationStatus.PENDING:
+        logger.info(f"Chunk '{chunk.name}' status={chunk.status}，跳过翻译步骤")
         return StepOutput(content={"chunk": chunk, "validation_error": None})
 
     if not _has_translatable_content(chunk.original):
@@ -221,9 +223,9 @@ def validation_step(step_input: StepInput) -> StepOutput:
         logger.error(error_msg)
         return StepOutput(content={"chunk": chunk, "validation_error": error_msg}, success=False, error=error_msg)
 
-    # 翻译失败或无可翻译内容，跳过验证
-    if chunk.status == TranslationStatus.UNTRANSLATED:
-        logger.info(f"Chunk '{chunk.name}' 翻译失败，跳过验证步骤")
+    # 只有 TRANSLATED 状态才执行验证
+    if chunk.status != TranslationStatus.TRANSLATED:
+        logger.info(f"Chunk '{chunk.name}' status={chunk.status}，跳过验证步骤")
         return StepOutput(content={"chunk": chunk, "validation_error": None})
 
     if not chunk.translated:
@@ -246,14 +248,13 @@ def validation_step(step_input: StepInput) -> StepOutput:
 async def proofread_step(step_input: StepInput) -> StepOutput:
     step_data: dict = step_input.previous_step_content  # type: ignore
     chunk: Chunk = step_data["chunk"]
-    validation_error = step_data.get("validation_error")
-    translated = getattr(chunk, "translated")
 
-    # 翻译失败或验证失败，跳过校对
-    if chunk.status == TranslationStatus.UNTRANSLATED or validation_error:
-        logger.info(f"Chunk '{chunk.name}' 翻译失败或验证失败，跳过校对步骤")
+    # 只有 TRANSLATED 状态才执行校对
+    if chunk.status != TranslationStatus.TRANSLATED:
+        logger.info(f"Chunk '{chunk.name}' status={chunk.status}，跳过校对步骤")
         return StepOutput(content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})})
 
+    translated = getattr(chunk, "translated")
     if not translated or not isinstance(translated, str):
         error_msg = "校对步骤失败：没有从上一步收到有效的翻译文本。"
         logger.error(error_msg)
@@ -312,14 +313,13 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
     step_data: dict = step_input.previous_step_content  # type: ignore
     chunk: Chunk = step_data["chunk"]
     proofreading_result: ProofreadingResult = step_data["proofreading_result"]
-    validation_error = step_data.get("validation_error")
-    translated_text = chunk.translated
 
-    # 翻译失败或验证失败，跳过应用校对建议
-    if chunk.status == TranslationStatus.UNTRANSLATED or validation_error:
-        logger.info(f"Chunk '{chunk.name}' 翻译失败或验证失败，跳过应用校对建议步骤")
+    # 只有 TRANSLATED 状态才执行应用校对建议
+    if chunk.status != TranslationStatus.TRANSLATED:
+        logger.info(f"Chunk '{chunk.name}' status={chunk.status}，跳过应用校对建议步骤")
         return StepOutput(content=chunk)
 
+    translated_text = chunk.translated
     if not translated_text or not isinstance(translated_text, str):
         error_msg = "应用校对建议步骤失败：缺少翻译文本。"
         logger.error(error_msg)

@@ -1,8 +1,6 @@
 import re
 from typing import List
 
-from lxml import etree
-
 from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
 from engine.agents.html_validator import HtmlValidator
@@ -28,25 +26,28 @@ class Merger:
         if not chunks:
             return ""
 
-        # Step 1: 直接使用 chunks 的 translated 或 original
+        # Step 1: 使用 chunks 的 translated 或 original
+        # - needs_translation=False 的 chunk（前缀/后缀）直接使用 original
+        # - needs_translation=True 的 chunk 按状态决定
         merged_chunks = []
         for chunk in chunks:
-            if chunk.status == TranslationStatus.UNTRANSLATED or not chunk.translated:
+            if not chunk.needs_translation:
+                # 前缀/后缀 chunk 不翻译，直接使用 original
+                merged_chunks.append(chunk.original)
+            elif chunk.status == TranslationStatus.UNTRANSLATED or not chunk.translated:
                 merged_chunks.append(chunk.original)
             else:
                 merged_chunks.append(chunk.translated)
 
         # Step 2: 验证每个 chunk 翻译后的结构
+        # 注意：不检查 validator.stack，因为跨 chunk 的标签闭合是正常的
+        # 例如 <nav> 在 chunk 1 打开，在 chunk 3 闭合，这是合法的
+        # validate_chunk 只验证单个 chunk 内部的标签配对错误（如意外闭合）
         validator = HtmlValidator()
         for i, (chunk_html, chunk) in enumerate(zip(merged_chunks, chunks)):
             valid, errors = validator.validate_chunk(chunk_html, i, chunk.name)
 
-            # 额外检查：chunk 中有未闭合标签也算验证失败
-            chunk_unclosed = [tag for tag, idx in validator.stack if idx == i]
-
-            if not valid or chunk_unclosed:
-                if chunk_unclosed:
-                    errors = [{"type": "unclosed_tags", "details": chunk_unclosed}]
+            if not valid:
                 logger.warning(
                     f"Chunk[{i}] ({chunk.name}) 翻译后 HTML 结构异常，"
                     f"回退到 original: {errors}"
@@ -55,24 +56,48 @@ class Merger:
                 # 标记为 UNTRANSLATED，这样 replacer 知道内容已回退
                 chunk.status = TranslationStatus.UNTRANSLATED
 
-        # Step 3: 注意！不检查 validator.stack，因为跨 chunk 的标签闭合是正常的
-        # 例如 <p> 在 chunk 1 打开，在 chunk 2 闭合，这是合法的
-        # Step 2 已经验证了每个 chunk 内部的标签配对
+        # Step 3: 最终合并（跨 chunk 的标签在合并时自动闭合）
 
         # Step 4: 最终合并
         translated = "".join(merged_chunks)
 
+        # Step 4.1: 验证合并后的标签闭合情况
+        # 使用 HtmlValidator 追踪所有 chunks 合并后的栈状态
+        final_validator = HtmlValidator()
+        final_valid, final_errors = final_validator.validate_merged(
+            merged_chunks, [c.name for c in chunks]
+        )
+        if not final_valid:
+            logger.warning(f"合并后 HTML 结构异常: {final_errors}")
+            # 合并失败时，使用原文重建
+            translated = "".join(chunk.original for chunk in chunks)
+
         # Step 5: 检查并修复 void 元素被错误地写成非自闭合形式
-        # 例如 <link ...> 而不是 <link .../> 或 <col> 而不是 <col/>
+        # 例如 <link ...> 而不是 <link .../> 或 <br> 而不是 <br/>
         void_elements = ["link", "meta", "br", "hr", "img", "input", "area", "base", "col", "embed", "param", "source", "track", "wbr"]
         for tag in void_elements:
             # 匹配 <tag ...> 或 <tag> 后面没有 /> 或 </tag> 的情况（未闭合）
-            # \s* 允许没有属性的标签（如 <col>）
-            pattern = rf'<({tag})\s*([^/>]*?)(?<!/)>(?!</{tag}>)'
-            fixed, count = re.subn(pattern, r'<\1 \2/>', translated, flags=re.IGNORECASE)
+            # 注意：不能用 [^/>]* 因为属性值可能包含 / (如 src="image/1.png")
+            # 使用 [^>]* 匹配到 > 然后用 (?<!/) 排除 />
+            # 关键：使用 \b 确保匹配完整的标签名，避免匹配到如 colgroup 这样的标签
+            pattern = rf'<({tag})\b([^>]*?)(?<!/)>(?!</{tag}>)'
+            fixed, count = re.subn(
+                pattern,
+                lambda m: f'<{m.group(1)} {m.group(2).strip()}/>' if m.group(2).strip() else f'<{m.group(1)} />',
+                translated,
+                flags=re.IGNORECASE
+            )
             if count > 0:
                 logger.warning(f"修复了 {count} 个未闭合的 <{tag}> 标签")
                 translated = fixed
+
+        # Step 5.1: 修复 pagebreak div（BeautifulSoup 会把 <div ... /> 变成 <div ...></div>）
+        # Apple Books 要求 pagebreak div 是自闭合的
+        pagebreak_pattern = r'<div([^>]*epub:type="pagebreak"[^>]*)></div>'
+        fixed, count = re.subn(pagebreak_pattern, r'<div\1/>', translated, flags=re.IGNORECASE)
+        if count > 0:
+            logger.warning(f"修复了 {count} 个 pagebreak div 为自闭合形式")
+            translated = fixed
 
         # Step 6: 如果合并结果缺少 <html> 包裹，使用原文重建
         translated = self._ensure_html_wrapper(translated, chunks, original_content)
@@ -155,21 +180,6 @@ class Merger:
             return xml_decl + content
 
         return content
-
-        # 如果原文没有 <html> 标签，说明只是简单 fragment，不需要包裹
-        if not html_match:
-            return content
-
-        html_open_tag = html_match.group(0)
-
-        # 构建完整结构
-        new_content = xml_decl
-        new_content += doctype
-        new_content += html_open_tag + "\n"
-        new_content += stripped + "\n"
-        new_content += "</html>\n"
-
-        return new_content
 
     def _ensure_doctype(self, content: str, chunks: List[Chunk], original_content: str = "") -> str:
         """

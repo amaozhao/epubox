@@ -1,63 +1,9 @@
-import xml.etree.ElementTree as ET
-
 from engine.core.logger import engine_logger as logger
 from engine.item import Merger, PreCodeExtractor
 from engine.schemas import EpubItem, TranslationStatus
 
 
 class Replacer:
-    def _validate_nav_structure(self, content: str) -> bool:
-        """验证 nav 文件结构完整性（使用 XML 解析器）"""
-        try:
-            root = ET.fromstring(content)
-            ncx_ns = "{http://www.daisy.org/z3986/2005/ncx/}"
-            xhtml_ns = "{http://www.w3.org/1999/xhtml}"
-
-            # NCX 格式：根元素是 ncx，包含 navMap 且 navMap 下有 navPoint
-            if root.tag.endswith("ncx") or root.tag == f"{ncx_ns}ncx":
-                navmap = root.find(f".//{ncx_ns}navMap")
-                if navmap is None:
-                    navmap = root.find(".//navMap")
-                if navmap is not None:
-                    navpoint = navmap.find(f"./{ncx_ns}navPoint")
-                    if navpoint is None:
-                        navpoint = navmap.find("./navPoint")
-                    return navpoint is not None
-                return False
-
-            # XHTML 格式：文档包含 nav 元素，nav 下有 ol 且 ol 下有 li
-            # nav 可能是根元素（standalone nav.xhtml）或 html>body 的后代
-            if root.tag.endswith("nav") or root.tag == f"{xhtml_ns}nav":
-                # nav 是根元素
-                ol_elem = root.find(f"./{xhtml_ns}ol")
-                if ol_elem is None:
-                    ol_elem = root.find("./ol")
-                if ol_elem is not None:
-                    li_elem = ol_elem.find(f"./{xhtml_ns}li")
-                    if li_elem is None:
-                        li_elem = ol_elem.find("./li")
-                    return li_elem is not None
-                return False
-            else:
-                # nav 是后代（html>body>nav 结构）
-                nav_elem = root.find(f".//{xhtml_ns}nav")
-                if nav_elem is None:
-                    nav_elem = root.find(".//nav")
-                if nav_elem is not None:
-                    ol_elem = nav_elem.find(f"./{xhtml_ns}ol")
-                    if ol_elem is None:
-                        ol_elem = nav_elem.find("./ol")
-                    if ol_elem is not None:
-                        li_elem = ol_elem.find(f"./{xhtml_ns}li")
-                        if li_elem is None:
-                            li_elem = ol_elem.find("./li")
-                        return li_elem is not None
-                return False
-
-            return False
-        except ET.ParseError:
-            return False
-
     def _merge_chunks(self, item: EpubItem) -> str:
         """将给定 EpubItem 的所有 Chunk 对象合并为一个字符串"""
         merger = Merger()

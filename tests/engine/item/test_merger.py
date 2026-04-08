@@ -448,7 +448,73 @@ class TestMerger:
         # 验证翻译内容保留
         assert "用 Python 快速构建 MCP 服务器" in result, f"Translation should be preserved. Got: {result}"
 
-    def test_merge_html_with_doctype_and_xml_preserved(self):
+    def test_merge_void_elements_all_fixed(self):
+        """测试所有 void 元素未闭合时都能被修复"""
+        merger = Merger()
+        # 测试所有 void 元素
+        void_test_cases = [
+            ("img", '<img src="image/cover.png" alt="Cover">', '<img src="image/cover.png" alt="Cover"/>'),
+            ("link", '<link href="css/style.css" rel="stylesheet">', '<link href="css/style.css" rel="stylesheet"/>'),
+            ("meta", '<meta name="keywords" content="python,mcp">', '<meta name="keywords" content="python,mcp"/>'),
+            ("br", '<br>', '<br />'),  # 修复后有空格
+            ("hr", '<hr>', '<hr />'),  # 修复后有空格
+            ("input", '<input type="text" name="username">', '<input type="text" name="username"/>'),
+            ("area", '<area shape="rect" coords="0,0,100,100" href="page.html">', '<area shape="rect" coords="0,0,100,100" href="page.html"/>'),
+            ("base", '<base href="https://example.com">', '<base href="https://example.com"/>'),
+            ("col", '<col>', '<col />'),  # 修复后有空格
+            ("embed", '<embed src="video.mp4" type="video/mp4">', '<embed src="video.mp4" type="video/mp4"/>'),
+            ("param", '<param name="autoplay" value="true">', '<param name="autoplay" value="true"/>'),
+            ("source", '<source src="audio.mp3" type="audio/mpeg">', '<source src="audio.mp3" type="audio/mpeg"/>'),
+            ("track", '<track kind="subtitles" src="subs.vtt">', '<track kind="subtitles" src="subs.vtt"/>'),
+            ("wbr", '<wbr>', '<wbr />'),  # 修复后有空格
+        ]
+
+        for tag, unclosed, expected in void_test_cases:
+            chunks = [
+                Chunk(
+                    name="c1",
+                    original=f'<p>before</p>',
+                    translated=f'<p>before</p>{unclosed}<p>after</p>',
+                    status=TranslationStatus.TRANSLATED,
+                    tokens=10,
+                    local_tag_map={},
+                ),
+            ]
+            result = merger.merge(chunks, original_content='<html><body></body></html>')
+            assert expected in result, f"{tag}: expected {expected} in result, got: {result[:200]}"
+
+    def test_merge_pagebreak_div_self_closing(self):
+        """测试 pagebreak div 被修复为自闭合形式（Apple Books 要求）"""
+        merger = Merger()
+        chunks = [
+            Chunk(
+                name="c1",
+                original='<div id="page1" role="doc-pagebreak" aria-label="1" epub:type="pagebreak" />',
+                translated='<div aria-label="1" epub:type="pagebreak" id="page1" role="doc-pagebreak"></div><p>Page 1 content</p>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={},
+            ),
+            Chunk(
+                name="c2",
+                original='<div id="page2" role="doc-pagebreak" aria-label="2" epub:type="pagebreak" />',
+                translated='<div aria-label="2" epub:type="pagebreak" id="page2" role="doc-pagebreak"></div><p>Page 2 content</p>',
+                status=TranslationStatus.TRANSLATED,
+                tokens=10,
+                local_tag_map={},
+            ),
+        ]
+        original_content = '<html><body></body></html>'
+        result = merger.merge(chunks, original_content=original_content)
+
+        # 验证 pagebreak div 被修复为自闭合形式
+        assert '<div aria-label="1" epub:type="pagebreak" id="page1" role="doc-pagebreak"/>' in result
+        assert '<div aria-label="2" epub:type="pagebreak" id="page2" role="doc-pagebreak"/>' in result
+        # 确保不是非自闭合形式
+        assert 'aria-label="1" epub:type="pagebreak" id="page1" role="doc-pagebreak"></div>' not in result
+        assert 'aria-label="2" epub:type="pagebreak" id="page2" role="doc-pagebreak"></div>' not in result
+
+
         """测试 HTML 文件保留 DOCTYPE 和 XML 声明（来自真实数据 cover.xhtml）"""
         merger = Merger()
         chunks = [

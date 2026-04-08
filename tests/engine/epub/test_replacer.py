@@ -31,32 +31,6 @@ def mock_epub_item(tmp_path):
     )
 
 
-@pytest.fixture
-def mock_epub_item_with_precode(tmp_path):
-    """创建一个包含 pre/code 标签的 EpubItem 实例。"""
-    item_path = tmp_path / "test_item.html"
-    item_path.touch()
-
-    return EpubItem(
-        id="test_id",
-        path=str(item_path),
-        content="<pre>function test() {}</pre><p><b>Hello</b></p><code>x = 1</code>",
-        translated=None,
-        placeholder={},
-        chunks=[
-            Chunk(
-                name="1",
-                original="<p><b>Hello</b></p>",
-                translated="<p><b>你好</b></p>",
-                status=TranslationStatus.TRANSLATED,
-                tokens=10,
-                local_tag_map={}
-            ),
-        ],
-        preserved_pre=["<pre>function test() {}</pre>"],
-        preserved_code=["<code>x = 1</code>"],
-    )
-
 
 class TestReplacer:
     """测试 epub/replacer.py 中的 Replacer 类。"""
@@ -115,29 +89,6 @@ class TestReplacer:
 
             assert mock_epub_item.translated == merged_content
 
-    @pytest.mark.skip(reason="PreCodeExtractor.restore behavior changed in new architecture")
-    def test_restore_with_preserved_precode(self, mock_epub_item_with_precode):
-        """测试带有 pre/code 标签的恢复。
-
-        pre/code 标签通过 PreCodeExtractor.restore 恢复。
-        """
-        merged_content = "[PRE:0]<p><b>你好</b></p>[CODE:0]"
-        final_content = "<pre>function test() {}</pre><p><b>你好</b></p><code>x = 1</code>"
-
-        with (
-            patch.object(Replacer, "_merge_chunks", return_value=merged_content) as mock_merge_chunks,
-            patch("builtins.open", new_callable=mock_open) as mock_file,
-        ):
-            replacer = Replacer()
-            replacer.restore(mock_epub_item_with_precode)
-
-            mock_merge_chunks.assert_called_once_with(mock_epub_item_with_precode)
-
-            mock_file.assert_called_once_with(mock_epub_item_with_precode.path, "w", encoding="utf-8")
-            mock_file().write.assert_called_once_with(final_content)
-
-            assert mock_epub_item_with_precode.translated == final_content
-
     def test_restore_empty_content(self, mock_epub_item):
         """测试空内容的恢复。"""
         mock_epub_item.chunks = []
@@ -153,46 +104,8 @@ class TestReplacer:
             assert mock_epub_item.translated is None
 
 
-class TestNavStructureValidation:
-    """测试 Nav 文件结构验证（使用 XML 解析器）"""
-
-    def test_validate_nav_structure_valid(self):
-        """验证有效的 NCX 文件结构"""
-        replacer = Replacer()
-        valid_nav = '<?xml version="1.0" encoding="utf-8"?><ncx version="2005-1"><navMap><navPoint><navLabel><text>Chapter</text></navLabel><content src="xhtml/c1.xhtml"/></navPoint></navMap></ncx>'
-        assert replacer._validate_nav_structure(valid_nav) is True
-
-    def test_validate_nav_structure_missing_navmap(self):
-        """验证缺少 navMap 的无效 nav（XML 解析会成功但结构不正确）"""
-        replacer = Replacer()
-        invalid_nav = '<ncx><navPoint><navLabel><text>Chapter</text></navLabel></navPoint></ncx>'
-        assert replacer._validate_nav_structure(invalid_nav) is False
-
-    def test_validate_nav_structure_corrupted(self):
-        """验证损坏的 nav 内容（无效 XML）"""
-        replacer = Replacer()
-        corrupted = '<navMap></navMap>'
-        assert replacer._validate_nav_structure(corrupted) is False
-
-    def test_validate_nav_structure_missing_navpoint(self):
-        """验证缺少 navPoint 的 NCX 结构（XML 有效但内容不完整）"""
-        replacer = Replacer()
-        invalid = '<?xml version="1.0" encoding="utf-8"?><ncx version="2005-1"><navMap></navMap></ncx>'
-        # 根元素是 ncx，XML 解析成功，但内容缺少 navPoint
-        assert replacer._validate_nav_structure(invalid) is False
-
-    def test_validate_nav_structure_xhtml_format(self):
-        """验证 XHTML 格式的 nav 文件（nav.xhtml 使用此格式）"""
-        replacer = Replacer()
-        valid_xhtml_nav = '<?xml version="1.0" encoding="utf-8"?><nav xmlns="http://www.w3.org/1999/xhtml"><ol><li><a href="c01.xhtml">Chapter 1</a></li></ol></nav>'
-        assert replacer._validate_nav_structure(valid_xhtml_nav) is True
-
-    def test_validate_nav_structure_xhtml_invalid(self):
-        """验证 XHTML 格式但缺少必要标签"""
-        replacer = Replacer()
-        invalid_xhtml = '<?xml version="1.0" encoding="utf-8"?><nav xmlns="http://www.w3.org/1999/xhtml"><ol></ol></nav>'
-        # 根元素是 nav，XML 解析成功，但内容缺少 li
-        assert replacer._validate_nav_structure(invalid_xhtml) is False
+class TestItemContent:
+    """测试 EpubItem 内容相关"""
 
     def test_item_content_is_original(self, tmp_path):
         """验证 item.content 是原始 HTML"""
