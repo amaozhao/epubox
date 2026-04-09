@@ -109,7 +109,8 @@ class TestOrchestrator:
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
-    @patch.object(DomReplacer, "restore", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", return_value=None)
+    @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
     @patch("engine.orchestrator.GlossaryExtractor")
@@ -118,6 +119,7 @@ class TestOrchestrator:
         mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
+        mock_shutil,
         mock_replacer_restore,
         mock_builder_build,
         mock_parser_save_json,
@@ -207,11 +209,11 @@ class TestOrchestrator:
         assert third_item_chunks[0].status == TranslationStatus.COMPLETED
 
     @pytest.mark.asyncio
-    # @patch("engine.orchestrator.tqdm", side_effect=lambda iterable, **kwargs: iterable)
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
-    @patch.object(DomReplacer, "restore", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", return_value=None)
+    @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
     @patch("engine.orchestrator.GlossaryExtractor")
@@ -220,6 +222,7 @@ class TestOrchestrator:
         mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
+        mock_shutil,
         mock_replacer_restore,
         mock_builder_build,
         mock_parser_save_json,
@@ -261,7 +264,8 @@ class TestOrchestrator:
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
-    @patch.object(DomReplacer, "restore", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", return_value=None)
+    @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
     @patch("engine.orchestrator.GlossaryExtractor")
@@ -270,6 +274,7 @@ class TestOrchestrator:
         mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
+        mock_shutil,
         mock_replacer_restore,
         mock_builder_build,
         mock_parser_save_json,
@@ -308,7 +313,8 @@ class TestOrchestrator:
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
     @patch.object(Builder, "build", new_callable=MagicMock)
-    @patch.object(DomReplacer, "restore", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", return_value=None)
+    @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
     @patch("engine.orchestrator.GlossaryExtractor")
@@ -317,6 +323,7 @@ class TestOrchestrator:
         mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
+        mock_shutil,
         mock_replacer_restore,
         mock_builder_build,
         mock_parser_save_json,

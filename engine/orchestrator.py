@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from datetime import datetime
 
 from tqdm import tqdm
@@ -22,7 +23,7 @@ class TranslationStats:
 
     def record(self, status: TranslationStatus):
         self.total += 1
-        if status == TranslationStatus.TRANSLATED:
+        if status in (TranslationStatus.TRANSLATED, TranslationStatus.COMPLETED):
             self.translated += 1
         elif status == TranslationStatus.UNTRANSLATED:
             self.untranslated += 1
@@ -206,14 +207,7 @@ class Orchestrator:
                     logger.error(f"Unexpected error for chunk {chunk.name}: {str(e)}")
                     stats.record_failure()
 
-            # 恢复 item 内容
-            dom_replacer = DomReplacer()
-            dom_replacer.restore(item)
-            # 将翻译后的内容写回 temp 目录（Builder 打包的是 temp 目录）
-            if item.translated:
-                with open(item.path, "w", encoding="utf-8") as f:
-                    f.write(item.translated)
-            # 保存当前 item 的翻译结果
+            # 每处理完一个 item，保存进度（断点续传）
             parser.save_json(book)
 
         # 打印最终统计
@@ -223,7 +217,28 @@ class Orchestrator:
         if manual_chunks:
             self._save_manual_translation_report(manual_chunks, book.path)
 
-        # 构建翻译后的 EPUB 文件
+        # 将原始解压目录复制到输出目录（保持原始目录不变）
+        output_extract_dir = book.extract_path + "_output"
+        if os.path.exists(book.extract_path):
+            if os.path.exists(output_extract_dir):
+                shutil.rmtree(output_extract_dir)
+            shutil.copytree(book.extract_path, output_extract_dir)
+
+            # 将翻译结果写入输出目录（原始目录永不修改）
+            dom_replacer = DomReplacer()
+            for item in book.items:
+                if not item.chunks:
+                    continue
+                translated_content = dom_replacer.restore(item)
+                if translated_content:
+                    rel_path = os.path.relpath(item.path, book.extract_path)
+                    output_item_path = os.path.join(output_extract_dir, rel_path)
+                    with open(output_item_path, "w", encoding="utf-8") as f:
+                        f.write(translated_content)
+        else:
+            logger.warning(f"原始解压目录不存在，跳过写入: {book.extract_path}")
+
+        # 从输出目录构建 EPUB
         output_path = os.path.join(os.path.dirname(book.path), f"{book.name}-cn.epub")
-        builder = Builder(book.extract_path, output_path)
+        builder = Builder(output_extract_dir, output_path)
         builder.build()
