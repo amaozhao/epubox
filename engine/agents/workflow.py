@@ -143,6 +143,7 @@ async def translate_step(step_input: StepInput) -> StepOutput:
         logger.error(error_msg)
         return StepOutput(content=chunk, success=False, error=error_msg)
 
+
 # Step 2: Proofread
 async def proofread_step(step_input: StepInput) -> StepOutput:
     chunk: Chunk = step_input.previous_step_content  # type: ignore
@@ -239,7 +240,7 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
 
         # 从后往前替换
         for pos, length, corrected in sorted(replacements, reverse=True):
-            final_text = final_text[:pos] + corrected + final_text[pos + length:]
+            final_text = final_text[:pos] + corrected + final_text[pos + length :]
 
         logger.info(f"成功应用 {len(replacements)} 个校对建议。")
 

@@ -19,9 +19,9 @@ def count_tokens(text: str) -> int:
 
 
 class Block(NamedTuple):
-    html: str       # 元素的 HTML 字符串
-    tokens: int     # token 数估算
-    xpath: str      # 元素在 DOM 中的路径
+    html: str  # 元素的 HTML 字符串
+    tokens: int  # token 数估算
+    xpath: str  # 元素在 DOM 中的路径
 
 
 class DomChunker:
@@ -55,13 +55,13 @@ class DomChunker:
         Returns:
             chunks 列表
         """
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(html, "html.parser")
 
         # 1. 找到内容容器
         if is_nav_file:
-            container = soup.find('navMap') or soup
+            container = soup.find("navMap") or soup
         else:
-            container = soup.find('body') or soup
+            container = soup.find("body") or soup
 
         # 2. 收集可翻译的块元素
         blocks = self._collect_blocks(container)
@@ -78,18 +78,20 @@ class DomChunker:
 
     def _collect_title_block(self, soup) -> List[Block]:
         """收集 <head><title> 作为可翻译块"""
-        head = soup.find('head')
+        head = soup.find("head")
         if not head:
             return []
-        title = head.find('title')
+        title = head.find("title")
         if not title or not title.get_text(strip=True):
             return []
         title_html = str(title)
-        return [Block(
-            html=title_html,
-            tokens=count_tokens(title_html),
-            xpath=get_xpath(title),
-        )]
+        return [
+            Block(
+                html=title_html,
+                tokens=count_tokens(title_html),
+                xpath=get_xpath(title),
+            )
+        ]
 
     def _collect_blocks(self, container) -> List[Block]:
         """
@@ -115,7 +117,7 @@ class DomChunker:
 
             if child_tokens <= self.token_limit:
                 blocks.append(Block(html=child_html, tokens=child_tokens, xpath=xpath))
-            elif hasattr(child, 'name') and child.name in self.ATOMIC_TAGS:
+            elif hasattr(child, "name") and child.name in self.ATOMIC_TAGS:
                 # 不可拆分容器：整体作为一个块（可能超限）
                 blocks.append(Block(html=child_html, tokens=child_tokens, xpath=xpath))
             else:
@@ -158,7 +160,7 @@ class DomChunker:
 
     def _should_skip(self, element) -> bool:
         """判断元素是否不需要翻译"""
-        if not hasattr(element, 'name') or not element.name:
+        if not hasattr(element, "name") or not element.name:
             # NavigableString — 裸文本节点无法生成有意义的 xpath，跳过
             return True
 
@@ -167,6 +169,5 @@ class DomChunker:
 
         # 检查元素是否有实际文本内容
         text_content = element.get_text(strip=True)
-        clean_text = re.sub(r'\[(PRE|CODE|STYLE):\d+\]', '', text_content)
+        clean_text = re.sub(r"\[(PRE|CODE|STYLE):\d+\]", "", text_content)
         return not clean_text.strip()
-

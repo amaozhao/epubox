@@ -75,7 +75,7 @@ class TestPreCodeExtractor:
         extractor = PreCodeExtractor()
         result = extractor.extract(html)
 
-        assert '[PRE:0]' in result
+        assert "[PRE:0]" in result
         assert 'class="python"' in extractor.preserved_pre[0]
         assert 'id="test"' in extractor.preserved_pre[0]
 
@@ -315,3 +315,125 @@ class TestFullFlow:
         step2 = extractor.restore(step1)
         assert "<pre>" in step2
         assert "<p>" in step2
+
+
+class TestReplaceWithSimplified:
+    """
+    验证 replace_with(placeholder) 与 replace_with(BeautifulSoup(placeholder)) 行为一致。
+
+    这些测试确保简化后的实现产生与简化前完全相同的结果。
+    """
+
+    def test_basic_pre_replacement(self):
+        """基本 pre 替换：占位符作为纯文本插入，不被解析为 HTML"""
+        html = "<p>before</p><pre>code content</pre><p>after</p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:0]" in result
+        assert "<pre>" not in result
+        assert "<p>before</p>" in result
+        assert "<p>after</p>" in result
+
+    def test_basic_code_replacement(self):
+        """基本 code 替换：占位符正确插入"""
+        html = "<p>before</p><code>x = 1</code><p>after</p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[CODE:0]" in result
+        assert "<code>" not in result
+        assert "<p>before</p>" in result
+        assert "<p>after</p>" in result
+
+    def test_basic_style_replacement(self):
+        """基本 style 替换：占位符正确插入"""
+        html = "<style>.cls { color: red; }</style><p>text</p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[STYLE:0]" in result
+        assert "<style>" not in result
+        assert "<p>text</p>" in result
+
+    def test_nested_tags_pre_contains_code(self):
+        """嵌套标签：pre 中含 code，pre 整体以 [PRE:0] 替换。
+        实现先递归处理 pre 的子节点（提取内层 code），再保存 pre 的原始字符串，
+        因此 code 也会被独立保存，但最终输出只有 [PRE:0] 占位符。
+        """
+        html = "<div><pre><code>nested code</code></pre></div>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        # 最终输出：整个 pre 被替换为单一占位符
+        assert result == "<div>[PRE:0]</div>"
+        assert extractor.pre_count == 1
+        # 内层 code 在递归时也被保存（实现细节）
+        assert extractor.code_count == 1
+        # pre 保存的是原始字符串（含嵌套 code）
+        assert "<code>nested code</code>" in extractor.preserved_pre[0]
+
+    def test_multiple_tags_all_types(self):
+        """多个标签（所有类型）：每个都有独立占位符"""
+        html = "<style>a{}</style><pre>code1</pre><code>inline</code><pre>code2</pre><style>b{}</style>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[STYLE:0]" in result
+        assert "[PRE:0]" in result
+        assert "[CODE:0]" in result
+        assert "[PRE:1]" in result
+        assert "[STYLE:1]" in result
+        assert extractor.pre_count == 2
+        assert extractor.code_count == 1
+        assert extractor.style_count == 2
+
+    def test_roundtrip_pre(self):
+        """往返测试 pre：提取后恢复，结果与原始 HTML 一致（经 BS4 解析后）"""
+        from bs4 import BeautifulSoup
+
+        html = "<div><p>Hello</p><pre>def f(): pass</pre></div>"
+        extractor = PreCodeExtractor()
+        extracted = extractor.extract(html)
+        restored = extractor.restore(extracted)
+
+        # 用 BS4 规范化比较，避免空白差异
+        original_normalized = str(BeautifulSoup(html, "html.parser"))
+        assert restored == original_normalized
+
+    def test_roundtrip_code(self):
+        """往返测试 code：提取后恢复，结果与原始一致"""
+        from bs4 import BeautifulSoup
+
+        html = "<p>Use <code>print()</code> here.</p>"
+        extractor = PreCodeExtractor()
+        extracted = extractor.extract(html)
+        restored = extractor.restore(extracted)
+
+        original_normalized = str(BeautifulSoup(html, "html.parser"))
+        assert restored == original_normalized
+
+    def test_roundtrip_style(self):
+        """往返测试 style：提取后恢复，结果与原始一致"""
+        from bs4 import BeautifulSoup
+
+        html = "<style>body { margin: 0; }</style><p>content</p>"
+        extractor = PreCodeExtractor()
+        extracted = extractor.extract(html)
+        restored = extractor.restore(extracted)
+
+        original_normalized = str(BeautifulSoup(html, "html.parser"))
+        assert restored == original_normalized
+
+    def test_placeholder_is_plain_text_not_parsed(self):
+        """占位符为纯文本，不被 BS4 误解析为标签"""
+        html = "<pre>x</pre>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        # [PRE:0] 中的方括号不会被解析为 HTML 标签
+        assert "[PRE:0]" in result
+        # 不应出现任何多余标签包裹
+        assert "<" not in result.replace("<html>", "").replace("<body>", "").replace("</html>", "").replace(
+            "</body>", ""
+        )

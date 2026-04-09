@@ -35,7 +35,7 @@ class DomReplacer:
             return item.content
 
         # 1. 解析原始 HTML
-        soup = BeautifulSoup(item.content, 'html.parser')
+        soup = BeautifulSoup(item.content, "html.parser")
 
         # 2. 按 xpath 替换
         for chunk in item.chunks:
@@ -68,9 +68,8 @@ class DomReplacer:
 
         关键假设：翻译后的 HTML 与原始 chunk 有相同数量、相同顺序的顶层元素
         """
-        translated_soup = BeautifulSoup(chunk.translated, 'html.parser')
-        translated_elements = [e for e in translated_soup.children
-                               if hasattr(e, 'name') and e.name]
+        translated_soup = BeautifulSoup(chunk.translated, "html.parser")
+        translated_elements = [e for e in translated_soup.children if hasattr(e, "name") and e.name]
 
         # 校验：翻译后元素数量应与 xpath 数量一致
         if len(translated_elements) != len(chunk.xpaths):

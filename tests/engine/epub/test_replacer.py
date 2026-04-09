@@ -129,7 +129,7 @@ class TestDomReplacer:
         replacer = DomReplacer()
         result = replacer.restore(item)
         assert "甲" in result  # 第一个被替换
-        assert "B" in result   # 第二个保留原文
+        assert "B" in result  # 第二个保留原文
 
     def test_xpath_not_found(self):
         """测试 xpath 未找到时 warning（覆盖 line 90）"""
@@ -195,16 +195,12 @@ class TestValidateTranslatedHtml:
 
     def test_placeholder_preserved(self):
         """测试占位符完整保留"""
-        is_valid, _ = validate_translated_html(
-            "<p>[PRE:0] text</p>", "<p>[PRE:0] 文本</p>"
-        )
+        is_valid, _ = validate_translated_html("<p>[PRE:0] text</p>", "<p>[PRE:0] 文本</p>")
         assert is_valid
 
     def test_placeholder_missing(self):
         """测试占位符丢失"""
-        is_valid, error = validate_translated_html(
-            "<p>[PRE:0] text</p>", "<p>文本</p>"
-        )
+        is_valid, error = validate_translated_html("<p>[PRE:0] text</p>", "<p>文本</p>")
         assert not is_valid
         assert "占位符" in error
 

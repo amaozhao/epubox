@@ -107,13 +107,30 @@ class TestOrchestrator:
     # --- 测试 translate_epub 方法 ---
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
+    @patch.object(Parser, "save_json", new_callable=MagicMock)
+    @patch.object(Builder, "build", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
+    @patch("engine.orchestrator.GlossaryLoader")
+    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_successful_translation(
-        self, mock_get_translator_workflow, mock_parser_parse, orchestrator
+        self,
+        mock_glossary_extractor,
+        mock_glossary_loader,
+        mock_get_translator_workflow,
+        mock_replacer_restore,
+        mock_builder_build,
+        mock_parser_save_json,
+        mock_parser_parse,
+        orchestrator,
     ):
         """
         测试 translate_epub 成功翻译后，EpubBook 的状态是否正确更新。
         """
+        # 模拟术语表加载（避免文件 I/O）
+        mock_glossary_loader.return_value.load.return_value = {}
+        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
+
         # 定义测试数据：一个包含三个 EpubItem，其中两个需要翻译的 EpubBook 实例
         mock_chunk1 = Chunk(
             name="1", original="<p>Hello world.</p>", translated=None, tokens=3, status=TranslationStatus.PENDING
@@ -129,7 +146,7 @@ class TestOrchestrator:
             items=[
                 EpubItem(
                     id="item1",
-                    path="item1.html",
+                    path="/mock/path/test_epub/item1.html",
                     content="<p>Hello world.</p>",
                     translated=None,
                     placeholder=None,
@@ -137,7 +154,7 @@ class TestOrchestrator:
                 ),
                 EpubItem(
                     id="item2",
-                    path="item2.html",
+                    path="/mock/path/test_epub/item2.html",
                     content="<p>No chunks here.</p>",
                     translated=None,
                     placeholder=None,
@@ -145,7 +162,7 @@ class TestOrchestrator:
                 ),
                 EpubItem(
                     id="item3",
-                    path="item3.html",
+                    path="/mock/path/test_epub/item3.html",
                     content="<p>How are you?</p>",
                     translated=None,
                     placeholder=None,
@@ -196,8 +213,12 @@ class TestOrchestrator:
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(DomReplacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
+    @patch("engine.orchestrator.GlossaryLoader")
+    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_skips_translated_chunks(
         self,
+        mock_glossary_extractor,
+        mock_glossary_loader,
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
@@ -209,6 +230,10 @@ class TestOrchestrator:
         """
         测试当分块已被翻译时，translate_epub 能正确跳过。
         """
+        # 模拟术语表加载（避免文件 I/O）
+        mock_glossary_loader.return_value.load.return_value = {}
+        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
+
         # 模拟 Parser 的行为
         mock_parser_parse.return_value = mock_book
 
@@ -238,8 +263,12 @@ class TestOrchestrator:
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(DomReplacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
+    @patch("engine.orchestrator.GlossaryLoader")
+    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_handles_errors(
         self,
+        mock_glossary_extractor,
+        mock_glossary_loader,
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
@@ -251,6 +280,10 @@ class TestOrchestrator:
         """
         测试当 TranslatorWorkflow 返回错误响应时，translate_epub 能正确处理。
         """
+        # 模拟术语表加载（避免文件 I/O）
+        mock_glossary_loader.return_value.load.return_value = {}
+        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
+
         # 模拟 Parser 的行为
         mock_parser_parse.return_value = mock_book
 
@@ -277,8 +310,12 @@ class TestOrchestrator:
     @patch.object(Builder, "build", new_callable=MagicMock)
     @patch.object(DomReplacer, "restore", new_callable=MagicMock)
     @patch("engine.orchestrator.get_translator_workflow")
+    @patch("engine.orchestrator.GlossaryLoader")
+    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_skips_empty_chunks(
         self,
+        mock_glossary_extractor,
+        mock_glossary_loader,
         mock_get_translator_workflow,
         mock_replacer_restore,
         mock_builder_build,
@@ -290,6 +327,10 @@ class TestOrchestrator:
         """
         测试当 EpubItem 的 chunks 为空时，translate_epub 能正确跳过翻译流程。
         """
+        # 模拟术语表加载（避免文件 I/O）
+        mock_glossary_loader.return_value.load.return_value = {}
+        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
+
         # 模拟 Parser 的行为
         mock_parser_parse.return_value = mock_book
 
@@ -328,14 +369,14 @@ class TestManualTranslationReport:
                 "original": "<navPoint><text>Chapter 1</text></navPoint>",
                 "path": "/tmp/toc.ncx",
                 "placeholder": {"[id0]": "<navPoint>"},
-                "status": "untranslated"
+                "status": "untranslated",
             }
         ]
         output_path = str(tmp_path / "test.epub")
         report_path = orchestrator._save_manual_translation_report(manual_chunks, output_path)
 
         assert os.path.exists(report_path)
-        with open(report_path, 'r', encoding='utf-8') as f:
+        with open(report_path, "r", encoding="utf-8") as f:
             report = json.load(f)
         assert report["total"] == 1
         assert report["chunks"][0]["chunk_name"] == "abc123"
@@ -352,7 +393,7 @@ class TestManualTranslationReport:
                 {"chunk_name": "c3"},  # 无 translated 字段不加载
             ]
         }
-        report_file.write_text(json.dumps(report_data, ensure_ascii=False), encoding='utf-8')
+        report_file.write_text(json.dumps(report_data, ensure_ascii=False), encoding="utf-8")
 
         result = orchestrator._load_manual_translations(str(report_file))
         assert result == {"c1": "<p>你好</p>"}

@@ -11,7 +11,7 @@ description = (
 )
 
 instructions = [
-    "1. **JSON OUTPUT ONLY**: Return ONLY {\"translation\": \"...\"}.",
+    '1. **JSON OUTPUT ONLY**: Return ONLY {"translation": "..."}.',
     "2. **TRANSLATION**: Translate the HTML content into natural, fluent, simplified Chinese.",
     "3. **HTML STRUCTURE**:",
     "   - Preserve ALL HTML tags exactly as they are.",

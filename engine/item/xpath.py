@@ -16,16 +16,15 @@ def get_xpath(element) -> str:
     parts = []
     current = element
     while current.parent:
-        if hasattr(current, 'name') and current.name:
-            siblings = [s for s in current.parent.children
-                       if hasattr(s, 'name') and s.name == current.name]
+        if hasattr(current, "name") and current.name:
+            siblings = [s for s in current.parent.children if hasattr(s, "name") and s.name == current.name]
             if len(siblings) > 1:
                 index = siblings.index(current) + 1
                 parts.append(f"{current.name}[{index}]")
             else:
                 parts.append(current.name)
         current = current.parent
-    return '/' + '/'.join(reversed(parts))
+    return "/" + "/".join(reversed(parts))
 
 
 def find_by_xpath(soup, xpath: str):
@@ -43,18 +42,17 @@ def find_by_xpath(soup, xpath: str):
     从根节点逐级向下查找，解析每段的标签名和可选索引。
     无索引时默认为第 1 个。
     """
-    parts = [p for p in xpath.split('/') if p]
+    parts = [p for p in xpath.split("/") if p]
     current = soup
 
     for part in parts:
-        match = re.match(r'^(\w+)(?:\[(\d+)\])?$', part)
+        match = re.match(r"^(\w+)(?:\[(\d+)\])?$", part)
         if not match:
             return None
         tag_name = match.group(1)
         index = int(match.group(2)) if match.group(2) else 1
 
-        children = [c for c in current.children
-                   if hasattr(c, 'name') and c.name == tag_name]
+        children = [c for c in current.children if hasattr(c, "name") and c.name == tag_name]
         if index > len(children):
             return None
         current = children[index - 1]

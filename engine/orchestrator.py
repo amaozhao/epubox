@@ -10,6 +10,7 @@ from engine.epub import Builder, Parser, DomReplacer
 from engine.schemas import Chunk, TranslationStatus
 from engine.services.glossary import GlossaryExtractor, GlossaryLoader
 
+
 # 翻译结果统计
 class TranslationStats:
     def __init__(self):
@@ -65,14 +66,14 @@ class Orchestrator:
                     "original": chunk["original"],
                     "path": chunk["path"],
                     "placeholder": chunk.get("placeholder", {}),
-                    "status": chunk["status"]
+                    "status": chunk["status"],
                 }
                 for chunk in manual_chunks
-            ]
+            ],
         }
 
         report_path = os.path.join(os.path.dirname(output_path), "manual_translation_report.json")
-        with open(report_path, 'w', encoding='utf-8') as f:
+        with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         logger.info(f"手动翻译报告已保存: {report_path}")
         return report_path
@@ -82,7 +83,7 @@ class Orchestrator:
         if not os.path.exists(report_path):
             return {}
 
-        with open(report_path, 'r', encoding='utf-8') as f:
+        with open(report_path, "r", encoding="utf-8") as f:
             report = json.load(f)
 
         return {
@@ -175,8 +176,7 @@ class Orchestrator:
                 workflow = get_translator_workflow()
                 try:
                     response = await workflow.arun(
-                        input=chunk,
-                        additional_data={"glossary": glossary, "tag_map": item.placeholder}
+                        input=chunk, additional_data={"glossary": glossary, "tag_map": item.placeholder}
                     )
                     if isinstance(response.content, Chunk):
                         chunk_index = item.chunks.index(chunk)
@@ -189,28 +189,30 @@ class Orchestrator:
 
                         # 记录需要手动翻译的 chunk
                         if chunk.status == TranslationStatus.UNTRANSLATED:
-                            manual_chunks.append({
-                                "file": item.id,
-                                "chunk_name": chunk.name,
-                                "original": chunk.original,
-                                "path": item.path,
-                                "placeholder": item.placeholder,
-                                "status": chunk.status.value
-                            })
+                            manual_chunks.append(
+                                {
+                                    "file": item.id,
+                                    "chunk_name": chunk.name,
+                                    "original": chunk.original,
+                                    "path": item.path,
+                                    "placeholder": item.placeholder,
+                                    "status": chunk.status.value,
+                                }
+                            )
                     else:
-                        logger.error(
-                            f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}"
-                        )
+                        logger.error(f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}")
                         stats.record_failure()
                 except Exception as e:
-                    logger.error(
-                        f"Unexpected error for chunk {chunk.name}: {str(e)}"
-                    )
+                    logger.error(f"Unexpected error for chunk {chunk.name}: {str(e)}")
                     stats.record_failure()
 
             # 恢复 item 内容
             dom_replacer = DomReplacer()
             dom_replacer.restore(item)
+            # 将翻译后的内容写回 temp 目录（Builder 打包的是 temp 目录）
+            if item.translated:
+                with open(item.path, "w", encoding="utf-8") as f:
+                    f.write(item.translated)
             # 保存当前 item 的翻译结果
             parser.save_json(book)
 

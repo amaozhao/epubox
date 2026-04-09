@@ -138,7 +138,9 @@ class TestParser:
         mocker.patch.object(parser_instance, "extract")
         mocker.patch.object(parser_instance, "load_json", return_value=None)
         mocker.patch.object(parser_instance, "save_json")
-        mocker.patch("os.walk", return_value=[(parser_instance.output_dir, (), ("image.jpg", "style.css", "font.otf"))])
+        mocker.patch(
+            "os.walk", return_value=[(parser_instance.output_dir, (), ("image.jpg", "style.css", "font.otf"))]
+        )
 
         book = parser_instance.parse()
 

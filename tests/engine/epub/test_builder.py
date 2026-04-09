@@ -114,12 +114,12 @@ class TestModifyContentOpf:
 
     def test_opf_with_dc_language_tag(self, tmp_path):
         """测试修改dc:language标签"""
-        opf_content = '''<?xml version="1.0"?>
+        opf_content = """<?xml version="1.0"?>
 <package version="2.0">
     <metadata>
         <dc:language id="pub-language">en</dc:language>
     </metadata>
-</package>'''
+</package>"""
         opf_path = tmp_path / "content.opf"
         opf_path.write_text(opf_content)
 
@@ -132,12 +132,12 @@ class TestModifyContentOpf:
 
     def test_opf_with_meta_language_tag(self, tmp_path):
         """测试修改meta language标签"""
-        opf_content = '''<?xml version="1.0"?>
+        opf_content = """<?xml version="1.0"?>
 <package version="2.0">
     <metadata>
         <meta id="meta-language" property="dcterms:language">en</meta>
     </metadata>
-</package>'''
+</package>"""
         opf_path = tmp_path / "content.opf"
         opf_path.write_text(opf_content)
 
@@ -147,12 +147,12 @@ class TestModifyContentOpf:
 
     def test_opf_no_language_tag(self, tmp_path):
         """测试opf没有语言标签时记录警告但仍返回True（文件被写回）"""
-        opf_content = '''<?xml version="1.0"?>
+        opf_content = """<?xml version="1.0"?>
 <package version="2.0">
     <metadata>
         <dc:title>Test</dc:title>
     </metadata>
-</package>'''
+</package>"""
         opf_path = tmp_path / "content.opf"
         opf_path.write_text(opf_content)
 
@@ -171,12 +171,12 @@ class TestFindCssFiles:
         css_path = tmp_path / "style.css"
         css_path.write_text(css_content)
 
-        opf_content = '''<?xml version="1.0"?>
+        opf_content = """<?xml version="1.0"?>
 <package version="2.0">
     <manifest>
         <item href="style.css" media-type="text/css"/>
     </manifest>
-</package>'''
+</package>"""
         opf_path = tmp_path / "content.opf"
         opf_path.write_text(opf_content)
 

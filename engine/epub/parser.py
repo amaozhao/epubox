@@ -109,7 +109,7 @@ class Parser:
                         logger.warning(f"原始 HTML/XML 结构不完整: {relative_path}, 错误: {errors}")
 
                     # Step 1: BeautifulSoup 解析（规范化 HTML，确保标签配对）
-                    soup = BeautifulSoup(original_content, 'html.parser')
+                    soup = BeautifulSoup(original_content, "html.parser")
                     normalized_content = str(soup)
 
                     # Step 2: 提取 pre/code/style 标签为占位符（二级占位符方案）
@@ -121,10 +121,7 @@ class Parser:
 
                     # Step 4: 使用 DomChunker 进行 DOM 级别分块
                     dom_chunker = DomChunker(token_limit=self.limit)
-                    chunks = dom_chunker.chunk(
-                        html=content_after_pre,
-                        is_nav_file=is_nav_file
-                    )
+                    chunks = dom_chunker.chunk(html=content_after_pre, is_nav_file=is_nav_file)
 
                     epub_item = EpubItem(
                         id=relative_path,

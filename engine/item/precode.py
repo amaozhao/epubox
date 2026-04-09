@@ -16,9 +16,9 @@ class PreCodeExtractor:
     """
 
     def __init__(self):
-        self.preserved_pre: List[str] = []   # 原始 pre 标签列表
+        self.preserved_pre: List[str] = []  # 原始 pre 标签列表
         self.preserved_code: List[str] = []  # 原始 code 标签列表
-        self.preserved_style: List[str] = [] # 原始 style 标签列表
+        self.preserved_style: List[str] = []  # 原始 style 标签列表
 
     def extract(self, html: str) -> str:
         """
@@ -29,7 +29,7 @@ class PreCodeExtractor:
         Returns:
             处理后的 HTML
         """
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(html, "html.parser")
         self.preserved_pre = []
         self.preserved_code = []
         self.preserved_style = []
@@ -44,38 +44,38 @@ class PreCodeExtractor:
             - 处理顺序：从外层到内层（深度优先），确保嵌套标签正确处理
             """
             for child in list(node.children):
-                if hasattr(child, 'name'):
-                    if child.name == 'pre':
+                if hasattr(child, "name"):
+                    if child.name == "pre":
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
                         # 递归处理子节点（处理内层嵌套）
-                        if hasattr(child, 'children'):
+                        if hasattr(child, "children"):
                             process_node(child)
                         # 替换当前 pre 标签
                         placeholder = f"[PRE:{len(self.preserved_pre)}]"
                         self.preserved_pre.append(original)
-                        child.replace_with(BeautifulSoup(placeholder, 'html.parser'))
-                    elif child.name == 'code':
+                        child.replace_with(placeholder)
+                    elif child.name == "code":
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
                         # 递归处理子节点（处理内层嵌套）
-                        if hasattr(child, 'children'):
+                        if hasattr(child, "children"):
                             process_node(child)
                         # 替换当前 code 标签
                         placeholder = f"[CODE:{len(self.preserved_code)}]"
                         self.preserved_code.append(original)
-                        child.replace_with(BeautifulSoup(placeholder, 'html.parser'))
-                    elif child.name == 'style':
+                        child.replace_with(placeholder)
+                    elif child.name == "style":
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
                         # 递归处理子节点（处理内层嵌套）
-                        if hasattr(child, 'children'):
+                        if hasattr(child, "children"):
                             process_node(child)
                         # 替换当前 style 标签
                         placeholder = f"[STYLE:{len(self.preserved_style)}]"
                         self.preserved_style.append(original)
-                        child.replace_with(BeautifulSoup(placeholder, 'html.parser'))
-                    elif hasattr(child, 'children'):
+                        child.replace_with(placeholder)
+                    elif hasattr(child, "children"):
                         process_node(child)
 
         # 处理 body 或直接处理 soup（处理 HTML 片段时 body 可能为 None）
@@ -128,9 +128,9 @@ def validate_placeholders(html: str, expected_pre: int, expected_code: int, expe
     Returns:
         True 如果所有占位符都存在且格式正确
     """
-    pre_found = len(re.findall(r'\[PRE:\d+\]', html))
-    code_found = len(re.findall(r'\[CODE:\d+\]', html))
-    style_found = len(re.findall(r'\[STYLE:\d+\]', html))
+    pre_found = len(re.findall(r"\[PRE:\d+\]", html))
+    code_found = len(re.findall(r"\[CODE:\d+\]", html))
+    style_found = len(re.findall(r"\[STYLE:\d+\]", html))
 
     if pre_found != expected_pre:
         logger.error(f"PRE占位符数量不匹配: 期望{expected_pre}, 实际{pre_found}")
@@ -147,7 +147,9 @@ def validate_placeholders(html: str, expected_pre: int, expected_code: int, expe
     return True
 
 
-def attempt_recovery(html: str, preserved_pre: List[str], preserved_code: List[str], preserved_style: List[str] = None) -> str:
+def attempt_recovery(
+    html: str, preserved_pre: List[str], preserved_code: List[str], preserved_style: List[str] = None
+) -> str:
     r"""
     尝试恢复可能被破坏的占位符（仅处理格式变形，不处理缺失）
 
@@ -167,16 +169,16 @@ def attempt_recovery(html: str, preserved_pre: List[str], preserved_code: List[s
     注意：修复后需要重新验证！
     """
     # 先修复多余空格（包括分号后面的空格）
-    html = re.sub(r'\[PRE:\s+(\d+)\]', r'[PRE:\1]', html)
-    html = re.sub(r'\[CODE:\s+(\d+)\]', r'[CODE:\1]', html)
-    html = re.sub(r'\[STYLE:\s+(\d+)\]', r'[STYLE:\1]', html)
-    html = re.sub(r'\[PRE;\s+(\d+)\]', r'[PRE;\1]', html)
-    html = re.sub(r'\[CODE;\s+(\d+)\]', r'[CODE;\1]', html)
-    html = re.sub(r'\[STYLE;\s+(\d+)\]', r'[STYLE;\1]', html)
+    html = re.sub(r"\[PRE:\s+(\d+)\]", r"[PRE:\1]", html)
+    html = re.sub(r"\[CODE:\s+(\d+)\]", r"[CODE:\1]", html)
+    html = re.sub(r"\[STYLE:\s+(\d+)\]", r"[STYLE:\1]", html)
+    html = re.sub(r"\[PRE;\s+(\d+)\]", r"[PRE;\1]", html)
+    html = re.sub(r"\[CODE;\s+(\d+)\]", r"[CODE;\1]", html)
+    html = re.sub(r"\[STYLE;\s+(\d+)\]", r"[STYLE;\1]", html)
 
     # 再修复分号
-    html = re.sub(r'\[PRE;(\d+)\]', r'[PRE:\1]', html)
-    html = re.sub(r'\[CODE;(\d+)\]', r'[CODE:\1]', html)
-    html = re.sub(r'\[STYLE;(\d+)\]', r'[STYLE:\1]', html)
+    html = re.sub(r"\[PRE;(\d+)\]", r"[PRE:\1]", html)
+    html = re.sub(r"\[CODE;(\d+)\]", r"[CODE:\1]", html)
+    html = re.sub(r"\[STYLE;(\d+)\]", r"[STYLE:\1]", html)
 
     return html
