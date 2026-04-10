@@ -183,6 +183,7 @@ class TestValidateTranslatedHtml:
 
     def test_element_count_mismatch(self):
         """测试元素数量不一致"""
+        # 现在用 <div> 包裹后是有效 XML，所以元素数量检查生效
         is_valid, error = validate_translated_html("<p>A</p>", "<p>A</p><p>B</p>")
         assert not is_valid
         assert "元素数量不一致" in error

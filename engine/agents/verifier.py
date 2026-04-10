@@ -115,6 +115,7 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
 
     检查项：
     0. 原始字符串标签完整性（先验证，避免 BeautifulSoup 自动修复掩盖错误）
+    0.5 XML 特殊字符（& 是否转义，跳过 HTML 实体）
     1. 顶层元素数量一致（翻译不应增删元素）
     2. 顶层元素标签名一致（<p> 不应变成 <div>）
     3. PreCodeExtractor 占位符完整保留
@@ -124,6 +125,12 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
     if not is_valid_raw:
         error_detail = errors[0] if errors else "未知标签错误"
         return False, f"HTML标签结构错误: {error_detail}"
+
+    # 0.5 验证 XML 特殊字符（检查 & 是否转义，跳过 HTML 实体如 &nbsp; &amp;）
+    # 用正则检查裸 &: & 后必须有 ; + 数字/字母，否则是未转义的 &
+    # &amp; &lt; &gt; &quot; &apos; &nbsp; 等都是合法实体，LLM 输出的 "A & B" 才是错误
+    if re.search(r"&(?![#][0-9]+|[a-zA-Z][a-zA-Z0-9]*;)", translated):
+        return False, "XML 格式错误: 发现未转义的 & 字符（需使用 &amp;）"
 
     original_soup = BeautifulSoup(original, "html.parser")
     translated_soup = BeautifulSoup(translated, "html.parser")
