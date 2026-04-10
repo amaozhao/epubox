@@ -123,6 +123,30 @@ class TestTranslateStep:
         assert call_count[0] == 3  # MAX_TRANSLATION_RETRIES
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_original_echo_becomes_untranslated(self, mock_get_translator):
+        """translate_step: exact original echo should be treated as untranslated and retried"""
+        chunk = make_chunk(original="<p>Hello World</p>")
+        call_count = [0]
+
+        async def echoed_response(json_input):
+            call_count[0] += 1
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>Hello World</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = echoed_response
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.UNTRANSLATED
+        assert output.content.translated == ""
+        assert call_count[0] == 3
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_content_safety_fallback(self, mock_get_translator):
         """translate_step: content safety error on first call triggers fallback model"""
         chunk = make_chunk(original="<p>Hello</p>")

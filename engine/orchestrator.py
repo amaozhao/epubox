@@ -107,8 +107,7 @@ class Orchestrator:
             return True  # 进入校对流程
 
         if chunk.status == TranslationStatus.UNTRANSLATED:
-            # 翻译失败且未手动编辑 → 跳过，避免重复失败
-            return False
+            return True  # 翻译失败后允许重跑重试
 
         if chunk.status == TranslationStatus.PENDING:
             return True  # 待翻译

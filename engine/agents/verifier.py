@@ -109,6 +109,15 @@ def get_tag_name(tag: str) -> Optional[str]:
     return None
 
 
+def _looks_like_untranslated_echo(original_soup: BeautifulSoup, translated_soup: BeautifulSoup) -> bool:
+    """识别模型原样回显原文的情况，避免把未翻译内容当作成功结果。"""
+    if str(original_soup) != str(translated_soup):
+        return False
+
+    visible_text = re.sub(r"\[(PRE|CODE|STYLE):\d+\]", " ", original_soup.get_text(" ", strip=True))
+    return bool(re.search(r"[A-Za-z]{2,}", visible_text))
+
+
 def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]:
     """
     验证翻译结果的 HTML 结构完整性（chunk 级别）
@@ -141,6 +150,10 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
     # 1. 元素数量
     if len(original_elements) != len(translated_elements):
         return False, f"元素数量不一致: 原始 {len(original_elements)}, 翻译 {len(translated_elements)}"
+
+    # 1.5 识别整块原样回显：结构没变但内容也完全没翻译
+    if _looks_like_untranslated_echo(original_soup, translated_soup):
+        return False, "翻译结果与原文一致，疑似未翻译"
 
     # 2. 标签名一致
     for i, (orig, trans) in enumerate(zip(original_elements, translated_elements)):

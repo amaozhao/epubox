@@ -104,6 +104,32 @@ class TestOrchestrator:
         chunk = Chunk(name="1", original="test content", translated="", tokens=2, status=TranslationStatus.PENDING)
         assert orchestrator._should_translate_chunk(chunk) is True
 
+    def test_should_process_chunk_retries_untranslated_chunks(self, orchestrator):
+        """测试 rerun 时会重试未翻译成功的 chunk。"""
+        chunk = Chunk(
+            name="1",
+            original="<p>Hello</p>",
+            translated="",
+            tokens=2,
+            status=TranslationStatus.UNTRANSLATED,
+        )
+
+        assert orchestrator._should_process_chunk(chunk) is True
+        assert chunk.status == TranslationStatus.UNTRANSLATED
+
+    def test_should_process_chunk_promotes_manual_translations(self, orchestrator):
+        """测试手动翻译后的 chunk 会进入校对流程。"""
+        chunk = Chunk(
+            name="1",
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            tokens=2,
+            status=TranslationStatus.UNTRANSLATED,
+        )
+
+        assert orchestrator._should_process_chunk(chunk) is True
+        assert chunk.status == TranslationStatus.TRANSLATED
+
     # --- 测试 translate_epub 方法 ---
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
@@ -308,6 +334,74 @@ class TestOrchestrator:
             # 确保 _should_translate_chunk 总是返回 True
             with patch.object(orchestrator, "_should_translate_chunk", return_value=True):
                 await orchestrator.translate_epub("mock_epub_path")
+
+    @pytest.mark.asyncio
+    @patch.object(Parser, "parse", new_callable=MagicMock)
+    @patch.object(Parser, "save_json", new_callable=MagicMock)
+    @patch.object(Builder, "build", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", return_value=None)
+    @patch("engine.orchestrator.shutil")
+    @patch("engine.orchestrator.get_translator_workflow")
+    @patch("engine.orchestrator.GlossaryLoader")
+    @patch("engine.orchestrator.GlossaryExtractor")
+    async def test_translate_epub_retries_untranslated_chunks_on_rerun(
+        self,
+        mock_glossary_extractor,
+        mock_glossary_loader,
+        mock_get_translator_workflow,
+        mock_shutil,
+        mock_replacer_restore,
+        mock_builder_build,
+        mock_parser_save_json,
+        mock_parser_parse,
+        orchestrator,
+    ):
+        """测试重跑时会重新处理之前标记为 UNTRANSLATED 的 chunk。"""
+        mock_glossary_loader.return_value.load.return_value = {}
+        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
+
+        untranslated_chunk = Chunk(
+            name="1",
+            original="<p>Hello world.</p>",
+            translated="",
+            tokens=3,
+            status=TranslationStatus.UNTRANSLATED,
+        )
+        mock_parser_parse.return_value = EpubBook(
+            name="test_book",
+            path="/mock/path/test.epub",
+            extract_path="/mock/path/test_epub",
+            items=[
+                EpubItem(
+                    id="item1",
+                    path="/mock/path/test_epub/item1.html",
+                    content="<p>Hello world.</p>",
+                    translated=None,
+                    placeholder=None,
+                    chunks=[untranslated_chunk],
+                )
+            ],
+        )
+
+        mock_workflow = MagicMock()
+        mock_workflow.arun = AsyncMock(
+            return_value=WorkflowRunOutput(
+                status=RunStatus.completed,
+                content=Chunk(
+                    name="1",
+                    original="<p>Hello world.</p>",
+                    translated="<p>你好，世界。</p>",
+                    tokens=3,
+                    status=TranslationStatus.COMPLETED,
+                ),
+                run_id="mock_run_id",
+            )
+        )
+        mock_get_translator_workflow.return_value = mock_workflow
+
+        await orchestrator.translate_epub("mock_epub_path")
+
+        mock_workflow.arun.assert_called_once()
 
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)

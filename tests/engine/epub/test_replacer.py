@@ -111,7 +111,7 @@ class TestDomReplacer:
         assert result == item.content
 
     def test_translated_elements_fewer_than_xpaths(self):
-        """测试翻译后元素数少于 xpath 数时 break（覆盖 line 85）"""
+        """测试翻译后元素数少于 xpath 数时，整块回写应放弃，避免半替换。"""
         item = EpubItem(
             id="ch1.xhtml",
             path="/tmp/ch1.xhtml",
@@ -128,8 +128,32 @@ class TestDomReplacer:
         item.chunks = [chunk]
         replacer = DomReplacer()
         result = replacer.restore(item)
-        assert "甲" in result  # 第一个被替换
-        assert "B" in result  # 第二个保留原文
+        assert "甲" not in result
+        assert "A" in result
+        assert "B" in result
+
+    def test_partial_xpath_failure_keeps_entire_chunk_original(self):
+        """测试部分 xpath 失效时，整块回写应放弃，避免混入原文。"""
+        item = EpubItem(
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><p>A</p><p>B</p></body></html>",
+        )
+        chunk = Chunk(
+            name="test0010b",
+            original="<p>A</p>\n<p>B</p>",
+            translated="<p>甲</p><p>乙</p>",
+            status=TranslationStatus.COMPLETED,
+            tokens=10,
+            xpaths=["/html/body/p[1]", "/html/body/div"],
+        )
+        item.chunks = [chunk]
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        assert "甲" not in result
+        assert "乙" not in result
+        assert "A" in result
+        assert "B" in result
 
     def test_xpath_not_found(self):
         """测试 xpath 未找到时 warning（覆盖 line 90）"""

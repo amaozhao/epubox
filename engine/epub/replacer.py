@@ -1,4 +1,4 @@
-from copy import copy
+from copy import copy, deepcopy
 
 from bs4 import BeautifulSoup
 
@@ -75,15 +75,21 @@ class DomReplacer:
         if len(translated_elements) != len(chunk.xpaths):
             logger.warning(
                 f"Chunk {chunk.name}: 翻译后元素数量 ({len(translated_elements)}) "
-                f"!= xpath 数量 ({len(chunk.xpaths)})，尝试按顺序匹配"
+                f"!= xpath 数量 ({len(chunk.xpaths)})，放弃整块回写"
             )
+            return False
 
-        # 按 xpath 逐个替换
+        trial_soup = deepcopy(soup)
+
+        # 按 xpath 逐个替换；任一步失败都放弃整块回写，避免混入原文
         for i, xpath in enumerate(chunk.xpaths):
-            if i >= len(translated_elements):
-                break
-            original_element = find_by_xpath(soup, xpath)
-            if original_element:
-                original_element.replace_with(copy(translated_elements[i]))
-            else:
-                logger.warning(f"Chunk {chunk.name}: xpath '{xpath}' 未找到对应元素")
+            original_element = find_by_xpath(trial_soup, xpath)
+            if not original_element:
+                logger.warning(f"Chunk {chunk.name}: xpath '{xpath}' 未找到对应元素，放弃整块回写")
+                return False
+            original_element.replace_with(copy(translated_elements[i]))
+
+        soup.clear()
+        for child in list(trial_soup.contents):
+            soup.append(child)
+        return True
