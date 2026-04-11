@@ -626,6 +626,75 @@ class TestOrchestrator:
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
     @patch("engine.orchestrator.GlossaryExtractor")
+    async def test_translate_epub_preserves_writeback_failed_status_when_recovery_rerun_errors(
+        self,
+        mock_glossary_extractor,
+        mock_glossary_loader,
+        mock_get_translator_workflow,
+        mock_shutil,
+        mock_builder_build,
+        mock_parser_save_json,
+        mock_parser_parse,
+        orchestrator,
+    ):
+        """测试 WRITEBACK_FAILED 恢复重跑异常时不会把 checkpoint 乐观写成 translated。"""
+        mock_glossary_loader.return_value.load.return_value = {}
+        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
+
+        recovery_chunk = Chunk(
+            name="1",
+            original="<p>Hello world.</p>",
+            translated="<p>你好，世界。</p>",
+            tokens=3,
+            status=TranslationStatus.WRITEBACK_FAILED,
+            xpaths=["/html/body/p"],
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test.epub",
+            extract_path="/mock/path/test_epub",
+            items=[
+                EpubItem(
+                    id="item1",
+                    path="/mock/path/test_epub/item1.html",
+                    content="<html><body><p>Hello world.</p></body></html>",
+                    chunks=[recovery_chunk],
+                )
+            ],
+        )
+        mock_parser_parse.return_value = book
+
+        saved_snapshots = []
+
+        def capture_checkpoint(saved_book):
+            saved_snapshots.append(saved_book.model_dump(mode="json"))
+
+        mock_parser_save_json.side_effect = capture_checkpoint
+
+        mock_workflow = MagicMock()
+        mock_workflow.arun = AsyncMock(side_effect=RuntimeError("retry failed before writeback"))
+        mock_get_translator_workflow.return_value = mock_workflow
+        mock_shutil.copytree.return_value = None
+        mock_shutil.rmtree.return_value = None
+
+        with patch("engine.orchestrator.os.path.exists", return_value=True), \
+            patch("builtins.open", new_callable=MagicMock), \
+            patch.object(orchestrator, "_save_manual_translation_report") as mock_save_report:
+            output_path = await orchestrator.translate_epub("mock_epub_path")
+
+        assert recovery_chunk.status == TranslationStatus.WRITEBACK_FAILED
+        assert saved_snapshots[-1]["items"][0]["chunks"][0]["status"] == TranslationStatus.WRITEBACK_FAILED.value
+        assert output_path.endswith("test_book-cn-incomplete.epub")
+        mock_save_report.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch.object(Parser, "parse", new_callable=MagicMock)
+    @patch.object(Parser, "save_json", new_callable=MagicMock)
+    @patch.object(Builder, "build", new_callable=MagicMock)
+    @patch("engine.orchestrator.shutil")
+    @patch("engine.orchestrator.get_translator_workflow")
+    @patch("engine.orchestrator.GlossaryLoader")
+    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_persists_writeback_failed_status_to_checkpoint(
         self,
         mock_glossary_extractor,

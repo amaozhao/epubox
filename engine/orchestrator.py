@@ -195,10 +195,17 @@ class Orchestrator:
                 continue
 
             for _, chunk in enumerate(item.chunks):
+                original_status = chunk.status
+
                 # 在开始工作流前，判断该分块是否需要处理
                 if not self._should_process_chunk(chunk):
                     stats.record(chunk.status)
                     continue
+
+                recovering_writeback_failure = (
+                    original_status == TranslationStatus.WRITEBACK_FAILED
+                    and chunk.status == TranslationStatus.TRANSLATED
+                )
 
                 workflow = get_translator_workflow()
                 try:
@@ -214,11 +221,17 @@ class Orchestrator:
                         # 每翻译一个 chunk 立即保存，支持断点续传
                         parser.save_json(book)
                     else:
+                        if recovering_writeback_failure:
+                            chunk.status = TranslationStatus.WRITEBACK_FAILED
                         logger.error(f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}")
-                        stats.record_failure()
+                        if not recovering_writeback_failure:
+                            stats.record_failure()
                 except Exception as e:
+                    if recovering_writeback_failure:
+                        chunk.status = TranslationStatus.WRITEBACK_FAILED
                     logger.error(f"Unexpected error for chunk {chunk.name}: {str(e)}")
-                    stats.record_failure()
+                    if not recovering_writeback_failure:
+                        stats.record_failure()
 
             # 每处理完一个 item，保存进度（断点续传）
             parser.save_json(book)
