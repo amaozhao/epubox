@@ -1,4 +1,3 @@
-import pytest
 
 from engine.agents.verifier import validate_translated_html
 
@@ -47,3 +46,27 @@ class TestValidateTranslatedHtmlTagErrors:
         translated = "<p>汤姆 &amp; 杰瑞</p>"  # &amp; 已转义
         is_valid, error = validate_translated_html(original, translated)
         assert is_valid, f"已转义 &amp; 应通过: {error}"
+
+    def test_validate_rejects_unicode_original_echo(self):
+        """测试 unicode 原样回显也会被识别为未翻译"""
+        original = "<p>你好世界</p>"
+        translated = "<p>你好世界</p>"
+        is_valid, error = validate_translated_html(original, translated)
+        assert not is_valid
+        assert "疑似未翻译" in error
+
+    def test_validate_accepts_symbol_only_noop(self):
+        """测试只有数字和占位符的原样回显会作为合法 no-op 接受"""
+        original = "<p>2024 [PRE:0] !!!</p>"
+        translated = "<p>2024 [PRE:0] !!!</p>"
+        is_valid, error = validate_translated_html(original, translated)
+        assert is_valid
+        assert error == "accepted_as_is"
+
+    def test_validate_accepts_technical_ascii_command_noop(self):
+        """测试技术型 ASCII 命令原样回显会作为合法 no-op 接受"""
+        original = "<p>python main.py translate book.epub --limit 1200 --language Chinese</p>"
+        translated = "<p>python main.py translate book.epub --limit 1200 --language Chinese</p>"
+        is_valid, error = validate_translated_html(original, translated)
+        assert is_valid
+        assert error == "accepted_as_is"

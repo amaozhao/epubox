@@ -1,4 +1,3 @@
-import pytest
 
 from engine.item.precode import (
     PreCodeExtractor,

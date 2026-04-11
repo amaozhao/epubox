@@ -6,8 +6,6 @@ from agno.workflow import Workflow
 
 from engine.agents.schemas import ProofreadingResult, TranslationResponse
 from engine.agents.workflow import (
-    _call_translator,
-    _translate_with_fallback,
     apply_corrections_step,
     filter_glossary_terms,
     get_translator_workflow,
@@ -118,7 +116,7 @@ class TestTranslateStep:
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
 
-        assert output.content.status == TranslationStatus.UNTRANSLATED
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
         assert output.content.translated == ""
         assert call_count[0] == 3  # MAX_TRANSLATION_RETRIES
 
@@ -142,9 +140,77 @@ class TestTranslateStep:
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
 
-        assert output.content.status == TranslationStatus.UNTRANSLATED
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
         assert output.content.translated == ""
         assert call_count[0] == 3
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_unicode_original_echo_becomes_untranslated(self, mock_get_translator):
+        """translate_step: unicode original echo should also be treated as untranslated and retried"""
+        chunk = make_chunk(original="<p>你好世界</p>")
+        call_count = [0]
+
+        async def echoed_response(json_input):
+            call_count[0] += 1
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>你好世界</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = echoed_response
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
+        assert output.content.translated == ""
+        assert call_count[0] == 3
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_symbol_only_noop_becomes_accepted_as_is(self, mock_get_translator):
+        """translate_step: legitimate unchanged symbol-only content is accepted as-is"""
+        chunk = make_chunk(original="<p>2024 [PRE:0] !!!</p>")
+
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>2024 [PRE:0] !!!</p>"),
+            )
+        )
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.ACCEPTED_AS_IS
+        assert output.content.translated == "<p>2024 [PRE:0] !!!</p>"
+        assert mock_translator.arun.await_count == 1
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_technical_ascii_noop_becomes_accepted_as_is(self, mock_get_translator):
+        """translate_step: legitimate unchanged technical ASCII content is accepted as-is"""
+        chunk = make_chunk(original="<p>python -m pytest tests/engine/agents/test_workflow.py -k accepted_as_is</p>")
+
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse(
+                    "<p>python -m pytest tests/engine/agents/test_workflow.py -k accepted_as_is</p>"
+                ),
+            )
+        )
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.ACCEPTED_AS_IS
+        assert output.content.translated == "<p>python -m pytest tests/engine/agents/test_workflow.py -k accepted_as_is</p>"
+        assert mock_translator.arun.await_count == 1
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_content_safety_fallback(self, mock_get_translator):
@@ -285,7 +351,7 @@ class TestApplyCorrectionsStep:
         chunk = make_chunk(
             original="<p>Hello</p>",
             translated="",
-            status=TranslationStatus.UNTRANSLATED,
+            status=TranslationStatus.TRANSLATION_FAILED,
         )
         proofreading_result = MockProofreadingResult({"你好": "您好"})
         step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
@@ -294,7 +360,7 @@ class TestApplyCorrectionsStep:
         output = apply_corrections_step(step_input)
 
         assert output.success is True
-        assert output.content.status == TranslationStatus.UNTRANSLATED
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
 
 
 @pytest.mark.asyncio
@@ -333,6 +399,33 @@ class TestGetTranslatorWorkflow:
         assert isinstance(response.content, Chunk)
         assert response.content.status == TranslationStatus.COMPLETED
         assert "你好世界" in response.content.translated
+
+    @patch("engine.agents.workflow.get_translator")
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_full_workflow_keeps_accepted_as_is_without_proofreading(self, mock_get_proofer, mock_get_translator):
+        """get_translator_workflow: legitimate no-op content stays ACCEPTED_AS_IS and skips later steps"""
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>2024 [PRE:0] !!!</p>"),
+            )
+        )
+        mock_get_translator.return_value = mock_translator
+
+        workflow: Workflow = get_translator_workflow()
+        chunk = make_chunk(original="<p>2024 [PRE:0] !!!</p>")
+
+        response = await workflow.arun(
+            input=chunk,
+            additional_data={"glossary": {}},
+        )
+
+        assert response.status == "COMPLETED"
+        assert isinstance(response.content, Chunk)
+        assert response.content.status == TranslationStatus.ACCEPTED_AS_IS
+        assert response.content.translated == "<p>2024 [PRE:0] !!!</p>"
+        mock_get_proofer.assert_not_called()
 
 
 class TestHelpers:

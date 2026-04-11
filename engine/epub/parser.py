@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 
 from engine.item import DomChunker, PreCodeExtractor
 from engine.schemas import EpubBook, EpubItem
+from engine.schemas.epub import CHECKPOINT_SCHEMA_VERSION
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
 
@@ -38,14 +39,23 @@ class Parser:
             try:
                 with open(self.json_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                book = EpubBook.model_validate(data)
-                return book
             except (IOError, json.JSONDecodeError):
                 return None
+
+            checkpoint_version = data.get("checkpoint_schema_version")
+            if checkpoint_version != CHECKPOINT_SCHEMA_VERSION:
+                raise ValueError(
+                    "Incompatible checkpoint schema version: "
+                    f"expected {CHECKPOINT_SCHEMA_VERSION}, got {checkpoint_version}"
+                )
+
+            book = EpubBook.model_validate(data)
+            return book
         return None
 
     def save_json(self, book: EpubBook):
         """将 EpubBook 对象保存到 JSON 文件。"""
+        book.checkpoint_schema_version = CHECKPOINT_SCHEMA_VERSION
         with open(self.json_path, "w", encoding="utf-8") as f:
             json.dump(book.model_dump(), f, ensure_ascii=False, indent=4)
 

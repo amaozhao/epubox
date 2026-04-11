@@ -32,6 +32,7 @@ dependencies = [
 [tool.ruff]
 line-length = 119
 target-version = "py312"
+extend-exclude = [".claude/worktrees"]
 
 [tool.ruff.format]
 # 可选格式化相关配置（ruff formatter 从 0.4+ 开始支持）

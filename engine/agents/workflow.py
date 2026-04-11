@@ -96,7 +96,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
         except Exception as e:
             error_str = str(e)
             if not used_fallback and is_content_safety_error(error_str):
-                logger.warning(f"主模型翻译失败（内容安全审核），尝试使用备用模型...")
+                logger.warning("主模型翻译失败（内容安全审核），尝试使用备用模型...")
                 used_fallback = True
                 last_error_msg = None
                 continue
@@ -107,16 +107,18 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
         is_valid, error_msg = validate_translated_html(original, translated)
         if is_valid:
             chunk.translated = translated
-            chunk.status = TranslationStatus.TRANSLATED
+            chunk.status = (
+                TranslationStatus.ACCEPTED_AS_IS if error_msg == "accepted_as_is" else TranslationStatus.TRANSLATED
+            )
             return chunk
 
         logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 失败: {error_msg}")
         last_error_msg = error_msg
 
-    # 所有重试都失败 → 标记为 UNTRANSLATED，保留原文保结构
-    logger.warning(f"Chunk '{chunk.name}': 翻译重试全部失败，标记为 UNTRANSLATED")
+    # 所有重试都失败 → 标记为 TRANSLATION_FAILED，保留原文保结构
+    logger.warning(f"Chunk '{chunk.name}': 翻译重试全部失败，标记为 TRANSLATION_FAILED")
     chunk.translated = ""
-    chunk.status = TranslationStatus.UNTRANSLATED
+    chunk.status = TranslationStatus.TRANSLATION_FAILED
     return chunk
 
 
@@ -149,9 +151,9 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
     chunk: Chunk = step_input.previous_step_content  # type: ignore
     translated = getattr(chunk, "translated")
 
-    # 翻译失败，跳过校对
-    if chunk.status == TranslationStatus.UNTRANSLATED:
-        logger.info(f"Chunk '{chunk.name}' 翻译失败，跳过校对步骤")
+    # 翻译失败或接受原文，跳过校对
+    if chunk.status in (TranslationStatus.TRANSLATION_FAILED, TranslationStatus.ACCEPTED_AS_IS):
+        logger.info(f"Chunk '{chunk.name}' 无需校对，跳过校对步骤")
         return StepOutput(content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})})
 
     if not translated or not isinstance(translated, str):
@@ -179,7 +181,7 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
             if response.status == RunStatus.error:
                 error_content = str(response.content) if response.content else ""
                 if not used_fallback and is_content_safety_error(error_content):
-                    logger.warning(f"主模型校对失败（内容安全审核），尝试使用备用模型...")
+                    logger.warning("主模型校对失败（内容安全审核），尝试使用备用模型...")
                     used_fallback = True
                     continue
             logger.warning(f"校对步骤失败：代理返回了意外的响应类型 (attempt {attempt + 1}/{max_attempts})")
@@ -212,9 +214,9 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
     proofreading_result: ProofreadingResult = step_data["proofreading_result"]
     translated_text = chunk.translated
 
-    # 翻译失败，跳过应用校对建议
-    if chunk.status == TranslationStatus.UNTRANSLATED:
-        logger.info(f"Chunk '{chunk.name}' 翻译失败，跳过应用校对建议步骤")
+    # 翻译失败或接受原文，跳过应用校对建议
+    if chunk.status in (TranslationStatus.TRANSLATION_FAILED, TranslationStatus.ACCEPTED_AS_IS):
+        logger.info(f"Chunk '{chunk.name}' 无需应用校对建议，直接返回")
         return StepOutput(content=chunk)
 
     if not translated_text or not isinstance(translated_text, str):

@@ -1,5 +1,4 @@
 import asyncio
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -41,12 +40,11 @@ def translate(
     try:
         # 实例化并运行 Orchestrator
         orchestrator = Orchestrator()
-        asyncio.run(
+        translated_path = asyncio.run(
             orchestrator.translate_epub(str(epub_path), limit=limit or 1200, target_language=language or "Chinese")
         )
 
         # 翻译成功，打印完成信息
-        translated_path = os.path.join(os.path.dirname(epub_path), f"{epub_path.stem}-cn.epub")
         console.print("-" * 50)
         console.print(f"[bold green]翻译完成！[/bold green] 新文件已保存至 [bold]{translated_path}[/bold]")
 

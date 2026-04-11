@@ -1,4 +1,3 @@
-import pytest
 
 from engine.agents.validator import (
     extract_placeholder_indices,

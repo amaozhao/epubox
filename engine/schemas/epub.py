@@ -4,11 +4,14 @@ from pydantic import BaseModel, Field
 
 from .chunk import Chunk
 
+CHECKPOINT_SCHEMA_VERSION = 2
+
 
 class EpubBook(BaseModel):
     name: str
     path: str
     extract_path: str
+    checkpoint_schema_version: int = CHECKPOINT_SCHEMA_VERSION
     items: List["EpubItem"] = Field(default_factory=list)
 
 

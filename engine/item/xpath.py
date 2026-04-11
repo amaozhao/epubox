@@ -1,6 +1,5 @@
 import re
 
-from bs4 import BeautifulSoup
 
 
 def get_xpath(element) -> str:

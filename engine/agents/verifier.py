@@ -4,7 +4,6 @@ from typing import List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
-from engine.core.logger import engine_logger as logger
 
 
 def verify_html_integrity(html: str) -> Tuple[bool, List[str]]:
@@ -109,13 +108,74 @@ def get_tag_name(tag: str) -> Optional[str]:
     return None
 
 
-def _looks_like_untranslated_echo(original_soup: BeautifulSoup, translated_soup: BeautifulSoup) -> bool:
-    """识别模型原样回显原文的情况，避免把未翻译内容当作成功结果。"""
-    if str(original_soup) != str(translated_soup):
+def _looks_like_technical_ascii_noop(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or not stripped.isascii():
         return False
 
-    visible_text = re.sub(r"\[(PRE|CODE|STYLE):\d+\]", " ", original_soup.get_text(" ", strip=True))
-    return bool(re.search(r"[A-Za-z]{2,}", visible_text))
+    command_starters = {
+        "bash",
+        "curl",
+        "docker",
+        "git",
+        "kubectl",
+        "make",
+        "node",
+        "npm",
+        "npx",
+        "pip",
+        "pip3",
+        "pnpm",
+        "poetry",
+        "pytest",
+        "python",
+        "python3",
+        "sh",
+        "uv",
+        "wget",
+        "yarn",
+    }
+    score = 0
+
+    if re.search(r"https?://\S+", stripped):
+        score += 2
+    if re.search(r"(?:^|\s)--?[A-Za-z0-9][A-Za-z0-9_-]*\b", stripped):
+        score += 1
+    if re.search(r"\b[\w./-]+/[\w./-]+\b", stripped):
+        score += 1
+    if re.search(r"\b[\w.-]+\.(?:py|js|ts|tsx|jsx|json|yaml|yml|toml|ini|cfg|md|txt|html|xml|epub|sh)\b", stripped):
+        score += 1
+    if re.search(r"\b[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+\b", stripped):
+        score += 1
+    if re.search(r"\b[a-z]+[A-Z][A-Za-z0-9]*\b", stripped):
+        score += 1
+    if re.search(r"\b[A-Za-z0-9_.-]+::[A-Za-z0-9_.-]+\b", stripped):
+        score += 1
+
+    tokens = stripped.split()
+    if tokens and tokens[0] in command_starters and re.fullmatch(r"[A-Za-z0-9_./:=@+-]+(?:\s+[A-Za-z0-9_./:=@+-]+)*", stripped):
+        score += 2
+
+    if re.fullmatch(r"[A-Za-z0-9_.:/+-]+", stripped):
+        if stripped in command_starters:
+            score += 2
+        elif re.search(r"[._:/+-]|\d", stripped):
+            score += 1
+
+    return score >= 2
+
+
+def _classify_unchanged_translation(original_soup: BeautifulSoup, translated_soup: BeautifulSoup) -> str | None:
+    """区分原样回显是未翻译，还是本就应保持不变的 no-op。"""
+    if str(original_soup) != str(translated_soup):
+        return None
+
+    visible_text = re.sub(r"\[(PRE|CODE|STYLE):\d+\]", " ", original_soup.get_text(" ", strip=True)).strip()
+    if not any(char.isalpha() for char in visible_text):
+        return "accepted_as_is"
+    if _looks_like_technical_ascii_noop(visible_text):
+        return "accepted_as_is"
+    return "echo"
 
 
 def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]:
@@ -151,9 +211,12 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
     if len(original_elements) != len(translated_elements):
         return False, f"元素数量不一致: 原始 {len(original_elements)}, 翻译 {len(translated_elements)}"
 
-    # 1.5 识别整块原样回显：结构没变但内容也完全没翻译
-    if _looks_like_untranslated_echo(original_soup, translated_soup):
+    # 1.5 识别整块原样回显：区分未翻译回显和合法 no-op
+    unchanged_result = _classify_unchanged_translation(original_soup, translated_soup)
+    if unchanged_result == "echo":
         return False, "翻译结果与原文一致，疑似未翻译"
+    if unchanged_result == "accepted_as_is":
+        return True, "accepted_as_is"
 
     # 2. 标签名一致
     for i, (orig, trans) in enumerate(zip(original_elements, translated_elements)):

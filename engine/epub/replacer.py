@@ -39,9 +39,14 @@ class DomReplacer:
 
         # 2. 按 xpath 替换
         for chunk in item.chunks:
-            if not chunk.translated or chunk.status == TranslationStatus.UNTRANSLATED:
+            if not chunk.translated or chunk.status in (
+                TranslationStatus.ACCEPTED_AS_IS,
+                TranslationStatus.TRANSLATION_FAILED,
+                TranslationStatus.WRITEBACK_FAILED,
+            ):
                 continue
-            self._replace_by_xpaths(soup, chunk)
+            if not self._replace_by_xpaths(soup, chunk):
+                chunk.status = TranslationStatus.WRITEBACK_FAILED
 
         # 3. 恢复 PreCodeExtractor 占位符
         result = str(soup)

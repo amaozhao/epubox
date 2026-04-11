@@ -1,8 +1,7 @@
 from unittest.mock import patch
 
-import pytest
 
-from engine.item.chunker import DomChunker, Block, count_tokens
+from engine.item.chunker import DomChunker, count_tokens
 
 
 class TestDomChunker:

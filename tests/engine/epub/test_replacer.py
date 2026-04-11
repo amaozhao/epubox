@@ -1,4 +1,3 @@
-import pytest
 
 from engine.agents.verifier import validate_translated_html, verify_final_html
 from engine.epub.replacer import DomReplacer
@@ -65,7 +64,7 @@ class TestDomReplacer:
             name="test0003",
             original="<p>Hello</p>",
             translated="<p>Hello</p>",
-            status=TranslationStatus.UNTRANSLATED,
+            status=TranslationStatus.TRANSLATION_FAILED,
             tokens=10,
             xpaths=["/html/body/p"],
         )
@@ -132,8 +131,8 @@ class TestDomReplacer:
         assert "A" in result
         assert "B" in result
 
-    def test_partial_xpath_failure_keeps_entire_chunk_original(self):
-        """测试部分 xpath 失效时，整块回写应放弃，避免混入原文。"""
+    def test_partial_xpath_failure_marks_chunk_writeback_failed(self):
+        """测试 xpath 回写失败时会显式标记为 WRITEBACK_FAILED。"""
         item = EpubItem(
             id="ch1.xhtml",
             path="/tmp/ch1.xhtml",
@@ -154,6 +153,7 @@ class TestDomReplacer:
         assert "乙" not in result
         assert "A" in result
         assert "B" in result
+        assert chunk.status == TranslationStatus.WRITEBACK_FAILED
 
     def test_xpath_not_found(self):
         """测试 xpath 未找到时 warning（覆盖 line 90）"""

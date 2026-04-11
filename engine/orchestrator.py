@@ -23,12 +23,18 @@ class TranslationStats:
 
     def record(self, status: TranslationStatus):
         self.total += 1
-        if status in (TranslationStatus.TRANSLATED, TranslationStatus.COMPLETED):
+        if status in (
+            TranslationStatus.TRANSLATED,
+            TranslationStatus.ACCEPTED_AS_IS,
+            TranslationStatus.COMPLETED,
+        ):
             self.translated += 1
-        elif status == TranslationStatus.UNTRANSLATED:
+        elif status == TranslationStatus.TRANSLATION_FAILED:
             self.untranslated += 1
         elif status == TranslationStatus.PENDING:
             self.pending += 1
+        elif status == TranslationStatus.WRITEBACK_FAILED:
+            self.failed += 1
 
     def record_failure(self):
         self.failed += 1
@@ -95,18 +101,26 @@ class Orchestrator:
 
     def _should_process_chunk(self, chunk) -> bool:
         """判断 chunk 是否需要处理"""
-        if chunk.status == TranslationStatus.COMPLETED:
-            return False  # 已完成，跳过
+        if chunk.status == TranslationStatus.WRITEBACK_FAILED and chunk.translated:
+            chunk.status = TranslationStatus.TRANSLATED
+            return True  # 回写失败后保留翻译结果，重跑时直接恢复到校对流程
+
+        if chunk.status in (
+            TranslationStatus.ACCEPTED_AS_IS,
+            TranslationStatus.COMPLETED,
+            TranslationStatus.WRITEBACK_FAILED,
+        ):
+            return False  # 已有最终结果或缺少可恢复翻译结果，跳过
 
         if chunk.status == TranslationStatus.TRANSLATED and chunk.translated:
             return True  # 已翻译但未校对，需要继续校对流程
 
-        if chunk.status == TranslationStatus.UNTRANSLATED and chunk.translated and chunk.translated != chunk.original:
+        if chunk.status == TranslationStatus.TRANSLATION_FAILED and chunk.translated and chunk.translated != chunk.original:
             # 手动翻译后的 chunk：用户编辑了 translated 字段
             chunk.status = TranslationStatus.TRANSLATED
             return True  # 进入校对流程
 
-        if chunk.status == TranslationStatus.UNTRANSLATED:
+        if chunk.status == TranslationStatus.TRANSLATION_FAILED:
             return True  # 翻译失败后允许重跑重试
 
         if chunk.status == TranslationStatus.PENDING:
@@ -119,20 +133,34 @@ class Orchestrator:
         判断一个分块是否需要翻译。
 
         判断逻辑：
-        1. 如果 chunk.status 属性为 COMPLETED，则认为它已经翻译过，返回 False。
-        2. 否则，返回 True，表示需要进行翻译。
-
-        Args:
-            chunk: 待判断的 Chunk 对象。
-
-        Returns:
-            如果需要翻译则返回 True，否则返回 False。
+        1. ACCEPTED_AS_IS / COMPLETED / WRITEBACK_FAILED 视为当前阶段无需再次翻译。
+        2. 其他状态继续进入翻译或后续处理流程。
         """
-        if chunk.status == TranslationStatus.COMPLETED:
+        if chunk.status in (
+            TranslationStatus.ACCEPTED_AS_IS,
+            TranslationStatus.COMPLETED,
+            TranslationStatus.WRITEBACK_FAILED,
+        ):
             return False
         return True
 
-    async def translate_epub(self, epub_path: str, limit: int = 3000, target_language: str = "Chinese") -> None:
+    def _has_incomplete_output(self, book) -> bool:
+        for item in book.items:
+            if not item.chunks:
+                continue
+            for chunk in item.chunks:
+                if chunk.status in (
+                    TranslationStatus.TRANSLATION_FAILED,
+                    TranslationStatus.WRITEBACK_FAILED,
+                ):
+                    return True
+        return False
+
+    def _get_output_path(self, book) -> str:
+        suffix = "-cn-incomplete.epub" if self._has_incomplete_output(book) else "-cn.epub"
+        return os.path.join(os.path.dirname(book.path), f"{book.name}{suffix}")
+
+    async def translate_epub(self, epub_path: str, limit: int = 3000, target_language: str = "Chinese") -> str:
         """
         翻译给定路径的 EPUB 文件。
 
@@ -158,7 +186,6 @@ class Orchestrator:
 
         # 统计翻译结果
         stats = TranslationStats()
-        manual_chunks = []
 
         # 使用 tqdm 显示外部循环进度（按文件）
         for item in tqdm(book.items, desc="翻译 EPUB", unit="文件"):
@@ -186,19 +213,6 @@ class Orchestrator:
 
                         # 每翻译一个 chunk 立即保存，支持断点续传
                         parser.save_json(book)
-
-                        # 记录需要手动翻译的 chunk
-                        if chunk.status == TranslationStatus.UNTRANSLATED:
-                            manual_chunks.append(
-                                {
-                                    "file": item.id,
-                                    "chunk_name": chunk.name,
-                                    "original": chunk.original,
-                                    "path": item.path,
-                                    "placeholder": item.placeholder,
-                                    "status": chunk.status.value,
-                                }
-                            )
                     else:
                         logger.error(f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}")
                         stats.record_failure()
@@ -209,15 +223,9 @@ class Orchestrator:
             # 每处理完一个 item，保存进度（断点续传）
             parser.save_json(book)
 
-        # 打印最终统计
-        logger.info(str(stats))
-
-        # 生成手动翻译报告
-        if manual_chunks:
-            self._save_manual_translation_report(manual_chunks, book.path)
-
         # 将原始解压目录复制到输出目录（保持原始目录不变）
         output_extract_dir = book.extract_path + "_output"
+        writeback_state_changed = False
         if os.path.exists(book.extract_path):
             if os.path.exists(output_extract_dir):
                 shutil.rmtree(output_extract_dir)
@@ -228,7 +236,10 @@ class Orchestrator:
             for item in book.items:
                 if not item.chunks:
                     continue
+                original_statuses = [chunk.status for chunk in item.chunks]
                 translated_content = dom_replacer.restore(item)
+                if [chunk.status for chunk in item.chunks] != original_statuses:
+                    writeback_state_changed = True
                 if translated_content:
                     rel_path = os.path.relpath(item.path, book.extract_path)
                     output_item_path = os.path.join(output_extract_dir, rel_path)
@@ -237,7 +248,43 @@ class Orchestrator:
         else:
             logger.warning(f"原始解压目录不存在，跳过写入: {book.extract_path}")
 
+        if writeback_state_changed:
+            parser.save_json(book)
+
+        manual_chunks = [
+            {
+                "file": item.id,
+                "chunk_name": chunk.name,
+                "original": chunk.original,
+                "path": item.path,
+                "placeholder": item.placeholder,
+                "status": chunk.status.value,
+            }
+            for item in book.items
+            if item.chunks
+            for chunk in item.chunks
+            if chunk.status in (
+                TranslationStatus.TRANSLATION_FAILED,
+                TranslationStatus.WRITEBACK_FAILED,
+            )
+        ]
+        if manual_chunks:
+            self._save_manual_translation_report(manual_chunks, book.path)
+
+        final_failed_count = stats.failed
+        stats = TranslationStats()
+        for item in book.items:
+            if not item.chunks:
+                continue
+            for chunk in item.chunks:
+                stats.record(chunk.status)
+        stats.failed += final_failed_count
+
+        # 打印最终统计
+        logger.info(str(stats))
+
         # 从输出目录构建 EPUB
-        output_path = os.path.join(os.path.dirname(book.path), f"{book.name}-cn.epub")
+        output_path = self._get_output_path(book)
         builder = Builder(output_extract_dir, output_path)
         builder.build()
+        return output_path

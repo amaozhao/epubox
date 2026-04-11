@@ -1,3 +1,4 @@
+import json
 import os
 from unittest.mock import MagicMock, call, mock_open
 
@@ -5,6 +6,7 @@ import pytest
 
 from engine.epub.parser import Parser
 from engine.schemas import EpubBook
+from engine.schemas.epub import CHECKPOINT_SCHEMA_VERSION
 
 
 @pytest.fixture(autouse=True)
@@ -145,3 +147,35 @@ class TestParser:
         book = parser_instance.parse()
 
         assert len(book.items) == 0
+
+    def test_save_json_writes_checkpoint_schema_version(self, tmp_path):
+        """测试保存 checkpoint 时会写入 schema version。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        book = EpubBook(name="my_book", path=str(epub_path), extract_path=str(tmp_path / "temp" / "my_book"))
+
+        parser.save_json(book)
+
+        payload = json.loads((tmp_path / "my_book.json").read_text(encoding="utf-8"))
+        assert payload["checkpoint_schema_version"] == CHECKPOINT_SCHEMA_VERSION
+
+    def test_load_json_rejects_incompatible_checkpoint_schema_version(self, tmp_path):
+        """测试旧版 checkpoint 会快速失败，而不是被静默复用。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        checkpoint_path = tmp_path / "my_book.json"
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION - 1,
+                    "name": "my_book",
+                    "path": str(epub_path),
+                    "extract_path": str(tmp_path / "temp" / "my_book"),
+                    "items": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="checkpoint schema version"):
+            parser.load_json()
