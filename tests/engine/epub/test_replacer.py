@@ -1,6 +1,7 @@
 
 from engine.agents.verifier import validate_translated_html, verify_final_html
 from engine.epub.replacer import DomReplacer
+from engine.item.chunker import DomChunker
 from engine.schemas import Chunk, EpubItem
 from engine.schemas.translator import TranslationStatus
 
@@ -176,7 +177,7 @@ class TestDomReplacer:
         assert "Hello" in result  # 原文保留
 
     def test_verify_failure_logged(self):
-        """测试验证失败时记录错误（覆盖 line 58）"""
+        """测试最终验证失败时阻止写入并标记为 WRITEBACK_FAILED。"""
         item = EpubItem(
             id="ch1.xhtml",
             path="/tmp/ch1.xhtml",
@@ -193,8 +194,67 @@ class TestDomReplacer:
         item.chunks = [chunk]
         replacer = DomReplacer()
         result = replacer.restore(item)
-        # 即使验证失败，也应该返回结果
+        assert result is None
+        assert item.translated is None
+        assert chunk.status == TranslationStatus.WRITEBACK_FAILED
+
+    def test_nav_text_writeback_success(self):
+        """导航文本模式按 marker 精确回写到文本节点。"""
+        html = (
+            "<ncx><navMap><navPoint id='ch1'><navLabel><text>Chapter 1</text></navLabel></navPoint>"
+            "<navPoint id='ch2'><navLabel><text>Chapter 2</text></navLabel></navPoint></navMap></ncx>"
+        )
+        item = EpubItem(id="toc.ncx", path="/tmp/toc.ncx", content=html)
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html, is_nav_file=True)
+        assert len(chunks) == 1
+
+        chunk = chunks[0]
+        chunk.translated = chunk.original.replace("Chapter 1", "第1章").replace("Chapter 2", "第2章")
+        chunk.status = TranslationStatus.COMPLETED
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
         assert result is not None
+        assert "第1章" in result
+        assert "第2章" in result
+
+    def test_nav_text_marker_mismatch_fails_writeback(self):
+        """导航文本模式 marker 不一致时应拒绝回写并标记失败。"""
+        html = "<ncx><navMap><navPoint id='ch1'><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>"
+        item = EpubItem(id="toc.ncx", path="/tmp/toc.ncx", content=html)
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html, is_nav_file=True)
+        chunk = chunks[0]
+        chunk.translated = chunk.original.replace("[NAVTXT:0]", "[NAVTXT:9]").replace("Chapter 1", "第1章")
+        chunk.status = TranslationStatus.COMPLETED
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+        assert result is not None
+        assert "Chapter 1" in result
+        assert chunk.status == TranslationStatus.WRITEBACK_FAILED
+
+    def test_nav_text_writeback_preserves_inline_structure(self):
+        """导航文本模式只替换文本节点，不破坏锚点等内联结构。"""
+        html = "<html><body><nav><ol><li><a href='#c1'><span id='toc-link-1'></span>Chapter 1</a></li></ol></nav></body></html>"
+        item = EpubItem(id="nav.xhtml", path="/tmp/nav.xhtml", content=html)
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html, is_nav_file=True)
+
+        chunk = chunks[0]
+        chunk.translated = chunk.original.replace("Chapter 1", "第1章")
+        chunk.status = TranslationStatus.COMPLETED
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+
+        assert result is not None
+        assert "第1章" in result
+        assert 'id="toc-link-1"' in result
 
 
 class TestValidateTranslatedHtml:
@@ -226,6 +286,12 @@ class TestValidateTranslatedHtml:
     def test_placeholder_missing(self):
         """测试占位符丢失"""
         is_valid, error = validate_translated_html("<p>[PRE:0] text</p>", "<p>文本</p>")
+        assert not is_valid
+        assert "占位符" in error
+
+    def test_placeholder_index_changed(self):
+        """测试占位符索引变化也会被视为无效。"""
+        is_valid, error = validate_translated_html("<p>[PRE:0] text</p>", "<p>[PRE:1] 文本</p>")
         assert not is_valid
         assert "占位符" in error
 

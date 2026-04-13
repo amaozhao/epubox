@@ -223,12 +223,12 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
         if orig.name != trans.name:
             return False, f"第 {i + 1} 个元素标签不一致: 原始 <{orig.name}>, 翻译 <{trans.name}>"
 
-    # 3. PreCodeExtractor 占位符完整
+    # 3. PreCodeExtractor 占位符完整且索引不变
     for pattern in [r"\[PRE:\d+\]", r"\[CODE:\d+\]", r"\[STYLE:\d+\]"]:
-        orig_count = len(re.findall(pattern, original))
-        trans_count = len(re.findall(pattern, translated))
-        if orig_count != trans_count:
-            return False, f"占位符数量不一致: {pattern} 原始 {orig_count}, 翻译 {trans_count}"
+        orig_placeholders = re.findall(pattern, original)
+        trans_placeholders = re.findall(pattern, translated)
+        if orig_placeholders != trans_placeholders:
+            return False, f"占位符集合不一致: {pattern} 原始 {orig_placeholders}, 翻译 {trans_placeholders}"
 
     return True, ""
 

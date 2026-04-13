@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     IFLOW_MODEL: str = "kimi-k2"
     IFLOW_BASE_URL: str = "https://apis.iflow.cn/v1"
 
+    # MiniMax 配置
+    MINIMAX_API_KEY: str = "sk-"
+    MINIMAX_MODEL: str = "MiniMax-M2.7"
+    MINIMAX_BASE_URL: str = "https://api.minimax.com/v1"
+
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_FORMAT: Literal["json", "console"] = "json"

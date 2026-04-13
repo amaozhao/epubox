@@ -1,20 +1,36 @@
 import re
 import uuid
-import tiktoken
-from typing import List, NamedTuple
+from functools import lru_cache
+from typing import Any, List, NamedTuple
 
-from bs4 import BeautifulSoup
+import tiktoken
+
+from bs4 import BeautifulSoup, NavigableString
+from bs4.element import ProcessingInstruction
 
 from engine.item.xpath import get_xpath
-from engine.schemas.chunk import Chunk
+from engine.schemas.chunk import Chunk, NavTextTarget
+
+
+@lru_cache(maxsize=1)
+def _get_tokenizer() -> Any | None:
+    """优先使用 tiktoken；不可用时回退到本地近似估算。"""
+    try:
+        return tiktoken.encoding_for_model("gpt-3.5-turbo")
+    except Exception:
+        try:
+            return tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            return None
 
 
 def count_tokens(text: str) -> int:
-    """计算文本的token数"""
-    try:
-        tokenizer = tiktoken.encoding_for_model("gpt-3.5-turbo")
-    except KeyError:
-        tokenizer = tiktoken.get_encoding("cl100k_base")
+    """计算文本的 token 数。"""
+    tokenizer = _get_tokenizer()
+    if tokenizer is None:
+        # Keep chunk sizing deterministic even when the tokenizer assets
+        # cannot be fetched in sandboxed or offline environments.
+        return max(1, len(re.findall(r"\w+|[^\w\s]", text)))
     return len(tokenizer.encode(text))
 
 
@@ -22,6 +38,13 @@ class Block(NamedTuple):
     html: str  # 元素的 HTML 字符串
     tokens: int  # token 数估算
     xpath: str  # 元素在 DOM 中的路径
+
+
+class NavTextUnit(NamedTuple):
+    marker: str
+    text: str
+    tokens: int
+    target: NavTextTarget
 
 
 class DomChunker:
@@ -37,9 +60,10 @@ class DomChunker:
 
     # 不可翻译的元素（跳过，不进入 chunk）
     SKIP_TAGS = {"img", "svg", "math", "video", "audio", "canvas", "iframe"}
+    SECONDARY_PLACEHOLDER_RE = re.compile(r"\[(PRE|CODE|STYLE):\d+\]")
 
     # 不可拆分的容器（整体作为一个块，不递归拆分子元素）
-    ATOMIC_TAGS = {"table", "ul", "ol", "dl", "figure", "nav"}
+    ATOMIC_TAGS = {"figure", "nav"}
 
     def __init__(self, token_limit: int = 2000):
         self.token_limit = token_limit
@@ -57,24 +81,145 @@ class DomChunker:
         """
         soup = BeautifulSoup(html, "html.parser")
 
-        # 1. 找到内容容器
         if is_nav_file:
-            container = soup.find("navMap") or soup
-        else:
-            container = soup.find("body") or soup
+            nav_chunks = self._chunk_nav_text(soup)
+            if nav_chunks:
+                return nav_chunks
+            return []
+
+        # 1. 找到内容容器
+        container = soup.find("body") or soup
 
         # 2. 收集可翻译的块元素
         blocks = self._collect_blocks(container)
 
         # 对非导航文件，额外收集 <head><title>
-        if not is_nav_file:
-            title_blocks = self._collect_title_block(soup)
-            blocks = title_blocks + blocks
+        title_blocks = self._collect_title_block(soup)
+        blocks = title_blocks + blocks
 
         # 3. 贪心合并
         chunks = self._greedy_merge(blocks)
 
         return chunks
+
+    def _chunk_nav_text(self, soup) -> List[Chunk]:
+        """导航文件走文本节点级分块，避免大块 nav HTML 超限。"""
+        containers = self._nav_containers(soup)
+        units = self._collect_nav_text_units(containers)
+        if not units:
+            return []
+        return self._pack_nav_units(units)
+
+    def _nav_containers(self, soup) -> List[BeautifulSoup]:
+        nav_map = soup.find("navmap") or soup.find("navMap")
+        if nav_map:
+            return [nav_map]
+
+        nav_elements = soup.find_all("nav")
+        if nav_elements:
+            return nav_elements
+
+        body = soup.find("body")
+        return [body or soup]
+
+    def _collect_nav_text_units(self, containers) -> List[NavTextUnit]:
+        units: List[NavTextUnit] = []
+
+        for container in containers:
+            for node in container.descendants:
+                if not isinstance(node, NavigableString):
+                    continue
+                if isinstance(node, ProcessingInstruction):
+                    continue
+
+                text = str(node).strip()
+                if not text:
+                    continue
+
+                parent = node.parent
+                if not getattr(parent, "name", None):
+                    continue
+                if parent.name == "[document]":
+                    continue
+
+                if parent.name in self.SKIP_TAGS or parent.name in {"script", "style"}:
+                    continue
+
+                clean_text = self.SECONDARY_PLACEHOLDER_RE.sub("", text)
+                if not clean_text.strip():
+                    continue
+
+                text_index = self._get_nav_text_index(node)
+                if text_index < 0:
+                    continue
+
+                marker = f"[NAVTXT:{len(units)}]"
+                target = NavTextTarget(
+                    marker=marker,
+                    xpath=get_xpath(parent),
+                    text_index=text_index,
+                    original_text=text,
+                )
+                units.append(
+                    NavTextUnit(
+                        marker=marker,
+                        text=text,
+                        tokens=count_tokens(f"{marker} {text}"),
+                        target=target,
+                    )
+                )
+
+        return units
+
+    def _get_nav_text_index(self, node: NavigableString) -> int:
+        parent = node.parent
+        index = -1
+        for child in parent.contents:
+            if not isinstance(child, NavigableString):
+                continue
+            child_text = str(child).strip()
+            if not child_text:
+                continue
+            clean_text = self.SECONDARY_PLACEHOLDER_RE.sub("", child_text)
+            if not clean_text.strip():
+                continue
+            index += 1
+            if child is node:
+                return index
+        return -1
+
+    def _pack_nav_units(self, units: List[NavTextUnit]) -> List[Chunk]:
+        chunks: List[Chunk] = []
+        buffer_lines: List[str] = []
+        buffer_targets: List[NavTextTarget] = []
+        buffer_tokens = 0
+
+        for unit in units:
+            if buffer_lines and buffer_tokens + unit.tokens > self.token_limit:
+                chunks.append(self._create_nav_chunk(buffer_lines, buffer_targets, buffer_tokens))
+                buffer_lines = []
+                buffer_targets = []
+                buffer_tokens = 0
+
+            buffer_lines.append(f"{unit.marker} {unit.text}")
+            buffer_targets.append(unit.target)
+            buffer_tokens += unit.tokens
+
+        if buffer_lines:
+            chunks.append(self._create_nav_chunk(buffer_lines, buffer_targets, buffer_tokens))
+
+        return chunks
+
+    def _create_nav_chunk(self, lines: List[str], targets: List[NavTextTarget], tokens: int) -> Chunk:
+        return Chunk(
+            name=uuid.uuid4().hex[:8],
+            original="\n".join(lines),
+            translated=None,
+            tokens=tokens,
+            chunk_mode="nav_text",
+            nav_targets=targets,
+            xpaths=[],
+        )
 
     def _collect_title_block(self, soup) -> List[Block]:
         """收集 <head><title> 作为可翻译块"""
@@ -122,15 +267,20 @@ class DomChunker:
                 blocks.append(Block(html=child_html, tokens=child_tokens, xpath=xpath))
             else:
                 # 超限元素：递归到子元素
-                blocks.extend(self._collect_blocks(child))
+                child_blocks = self._collect_blocks(child)
+                if child_blocks:
+                    blocks.extend(child_blocks)
+                else:
+                    # 叶子元素没有可继续细分的子块时，保留原元素，避免内容丢失。
+                    blocks.append(Block(html=child_html, tokens=child_tokens, xpath=xpath))
 
         return blocks
 
     def _greedy_merge(self, blocks: List[Block]) -> List[Chunk]:
         """贪心合并：将多个块打包到一个 chunk，直到接近 token_limit"""
         chunks = []
-        buffer_htmls = []
-        buffer_xpaths = []
+        buffer_htmls: List[str] = []
+        buffer_xpaths: List[str] = []
         buffer_tokens = 0
 
         for block in blocks:
@@ -154,6 +304,7 @@ class DomChunker:
         return Chunk(
             name=uuid.uuid4().hex[:8],
             original="\n".join(htmls),
+            translated=None,
             tokens=tokens,
             xpaths=xpaths,
         )
@@ -169,5 +320,5 @@ class DomChunker:
 
         # 检查元素是否有实际文本内容
         text_content = element.get_text(strip=True)
-        clean_text = re.sub(r"\[(PRE|CODE|STYLE):\d+\]", "", text_content)
+        clean_text = self.SECONDARY_PLACEHOLDER_RE.sub("", text_content)
         return not clean_text.strip()

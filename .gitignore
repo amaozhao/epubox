@@ -216,3 +216,4 @@ __marimo__/
 temp/
 *.epub
 logs/
+.omx/

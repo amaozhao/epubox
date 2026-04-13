@@ -148,7 +148,7 @@ def validate_placeholders(html: str, expected_pre: int, expected_code: int, expe
 
 
 def attempt_recovery(
-    html: str, preserved_pre: List[str], preserved_code: List[str], preserved_style: List[str] = None
+    html: str, preserved_pre: List[str], preserved_code: List[str], preserved_style: List[str] | None = None
 ) -> str:
     r"""
     尝试恢复可能被破坏的占位符（仅处理格式变形，不处理缺失）

@@ -19,6 +19,7 @@ instructions = [
     "   - Maintain the same number and nesting of elements.",
     "   - Only translate text content between tags.",
     "4. **PLACEHOLDERS**: [PRE:N], [CODE:N], [STYLE:N] are code/style placeholders. Copy them VERBATIM.",
+    "4.1 **NAV MARKERS**: [NAVTXT:N] markers delimit nav text units. Keep markers EXACT and keep one marker per unit.",
     "5. **GLOSSARY**: Use the 'glossaries' dictionary for technical term translations.",
 ]
 

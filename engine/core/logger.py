@@ -37,7 +37,7 @@ def _create_logger(name: str, level: Optional[str] = None) -> logging.Logger:
         logger.setLevel(logging.NOTSET)
 
     # 设置日志级别
-    level_str = level or getattr(settings, "LOG_LEVEL", "INFO")
+    level_str = str(level or getattr(settings, "LOG_LEVEL", "INFO") or "INFO")
     try:
         log_level = getattr(logging, level_str.upper())
     except AttributeError:

@@ -33,6 +33,45 @@ class Parser:
         """根据 EPUB 文件名生成对应的 JSON 文件路径。"""
         return os.path.join(os.path.dirname(self.path), f"{self.name}.json")
 
+    @staticmethod
+    def _is_nav_file(relative_path: str) -> bool:
+        lowered = relative_path.lower()
+        return "toc.ncx" in lowered or lowered.endswith(("nav.xhtml", "toc.xhtml"))
+
+    def _rebuild_nav_item_chunks(self, item: EpubItem) -> None:
+        """将旧版导航 chunk 迁移为文本节点模式。"""
+        soup = BeautifulSoup(item.content, "html.parser")
+        normalized_content = str(soup)
+
+        pre_extractor = PreCodeExtractor()
+        content_after_pre = pre_extractor.extract(normalized_content)
+
+        dom_chunker = DomChunker(token_limit=self.limit)
+        item.chunks = dom_chunker.chunk(html=content_after_pre, is_nav_file=True)
+        item.preserved_pre = pre_extractor.preserved_pre
+        item.preserved_code = pre_extractor.preserved_code
+        item.preserved_style = pre_extractor.preserved_style
+
+    def _upgrade_legacy_nav_chunks(self, book: EpubBook) -> bool:
+        upgraded = False
+        for item in book.items:
+            if not self._is_nav_file(item.id):
+                continue
+            if not item.chunks:
+                self._rebuild_nav_item_chunks(item)
+                upgraded = True
+                continue
+
+            if any(chunk.chunk_mode == "nav_text" for chunk in item.chunks):
+                continue
+
+            self._rebuild_nav_item_chunks(item)
+            upgraded = True
+
+        if upgraded:
+            logger.info("检测到旧版导航 checkpoint，已重建导航 chunk 为 nav_text 模式。")
+        return upgraded
+
     def load_json(self) -> Optional[EpubBook]:
         """尝试从 JSON 文件中加载解析数据，如果成功则返回 EpubBook 对象。"""
         if os.path.exists(self.json_path):
@@ -50,6 +89,8 @@ class Parser:
                 )
 
             book = EpubBook.model_validate(data)
+            if self._upgrade_legacy_nav_chunks(book):
+                self.save_json(book)
             return book
         return None
 
@@ -127,7 +168,7 @@ class Parser:
                     content_after_pre = pre_extractor.extract(normalized_content)
 
                     # Step 3: 检测是否是 EPUB 导航文件
-                    is_nav_file = "toc.ncx" in relative_path.lower() or relative_path.lower().endswith("nav.xhtml")
+                    is_nav_file = self._is_nav_file(relative_path)
 
                     # Step 4: 使用 DomChunker 进行 DOM 级别分块
                     dom_chunker = DomChunker(token_limit=self.limit)

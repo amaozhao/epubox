@@ -33,6 +33,8 @@ def make_chunk(
     tokens=10,
     status=TranslationStatus.PENDING,
     xpaths=None,
+    chunk_mode="html_fragment",
+    nav_targets=None,
 ):
     return Chunk(
         name=name,
@@ -40,7 +42,9 @@ def make_chunk(
         translated=translated,
         tokens=tokens,
         status=status,
-        xpaths=xpaths or ["/html/body/p"],
+        xpaths=xpaths if xpaths is not None else ["/html/body/p"],
+        chunk_mode=chunk_mode,
+        nav_targets=nav_targets or [],
     )
 
 
@@ -242,6 +246,50 @@ class TestTranslateStep:
         assert output.content.status == TranslationStatus.TRANSLATED
         assert call_count[0] == 2
 
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_nav_text_success(self, mock_get_translator):
+        """translate_step: nav_text chunks validate NAV markers instead of HTML shape."""
+        chunk = make_chunk(original="[NAVTXT:0] Chapter 1", xpaths=[], chunk_mode="nav_text")
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("[NAVTXT:0] 第1章"),
+            )
+        )
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.success is True
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "[NAVTXT:0] 第1章"
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_nav_text_invalid_marker_fails(self, mock_get_translator):
+        """translate_step: nav_text marker mismatch should fail retries."""
+        chunk = make_chunk(original="[NAVTXT:0] Chapter 1", xpaths=[], chunk_mode="nav_text")
+        call_count = [0]
+
+        async def wrong_marker(json_input):
+            call_count[0] += 1
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("[NAVTXT:1] 第1章"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = wrong_marker
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
+        assert output.content.translated == ""
+        assert call_count[0] == 3
+
 
 @pytest.mark.asyncio
 class TestProofreadStep:
@@ -313,6 +361,24 @@ class TestProofreadStep:
         assert output.success is True
         assert call_count[0] == 2
 
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_nav_text_skipped(self, mock_get_proofer):
+        """proofread_step: nav_text chunks skip proofer to preserve marker contract."""
+        chunk = make_chunk(
+            original="[NAVTXT:0] Chapter 1",
+            translated="[NAVTXT:0] 第1章",
+            status=TranslationStatus.TRANSLATED,
+            xpaths=[],
+            chunk_mode="nav_text",
+        )
+
+        step_input = MagicMock(previous_step_content=chunk)
+        output = await proofread_step(step_input)
+
+        assert output.success is True
+        assert output.content["proofreading_result"].corrections == {}
+        mock_get_proofer.assert_not_called()
+
 
 class TestApplyCorrectionsStep:
     def test_apply_corrections_step_success(self):
@@ -332,6 +398,64 @@ class TestApplyCorrectionsStep:
         assert isinstance(output.content, Chunk)
         # Post-processing replaces 您 -> 你, so 您好 -> 你好
         assert output.content.translated == "<p>你好</p>"
+        assert output.content.status == TranslationStatus.COMPLETED
+
+    def test_apply_corrections_step_invalid_placeholder_correction_filtered(self):
+        """apply_corrections_step: invalid placeholder-polluting correction is filtered out before replacement"""
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofreading_result = MockProofreadingResult({"你好": "你好 [PRE:1]"})
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+
+        output = apply_corrections_step(step_input)
+
+        assert output.success is True
+        assert output.content.translated == "<p>你好</p>"
+        assert output.content.status == TranslationStatus.COMPLETED
+
+    def test_apply_corrections_step_keeps_valid_corrections_while_filtering_bad_ones(self):
+        """apply_corrections_step: valid corrections still apply when a bad placeholder correction is rejected."""
+        chunk = make_chunk(
+            original="<p>Hello world</p>",
+            translated="<p>你好世界</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofreading_result = MockProofreadingResult(
+            {
+                "你好": "您好",
+                "世界": "世界 [PRE:1]",
+            }
+        )
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+
+        output = apply_corrections_step(step_input)
+
+        assert output.success is True
+        assert output.content.translated == "<p>你好世界</p>"
+        assert output.content.status == TranslationStatus.COMPLETED
+
+    def test_apply_corrections_step_nav_text_skips_corrections(self):
+        """apply_corrections_step: nav_text chunk keeps translated text and only flips status."""
+        chunk = make_chunk(
+            original="[NAVTXT:0] Chapter 1",
+            translated="[NAVTXT:0] 第1章",
+            status=TranslationStatus.TRANSLATED,
+            xpaths=[],
+            chunk_mode="nav_text",
+        )
+        proofreading_result = MockProofreadingResult({"第1章": "第一章"})
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+
+        output = apply_corrections_step(step_input)
+
+        assert output.success is True
+        assert output.content.translated == "[NAVTXT:0] 第1章"
         assert output.content.status == TranslationStatus.COMPLETED
 
     def test_apply_corrections_step_no_translated_text(self):

@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Dict
 
 from agno.run import RunStatus
@@ -19,6 +20,8 @@ CONTENT_SAFETY_KEYWORDS = ["相关法律法规", "不予显示", "安全审核",
 
 # 最大重试次数
 MAX_TRANSLATION_RETRIES = 3
+SECONDARY_PLACEHOLDER_PATTERN = re.compile(r"\[(?:PRE|CODE|STYLE):\d+\]")
+NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
 
 
 def is_content_safety_error(error_msg: str = "", status_code: int | None = None) -> bool:
@@ -39,6 +42,50 @@ def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]
         if term.lower() in text.lower():
             found_terms[term] = glossary[term]
     return found_terms
+
+
+def _filter_invalid_corrections(corrections: dict[str, str]) -> tuple[dict[str, str], int]:
+    """丢弃会破坏 PRE/CODE/STYLE 占位符完整性的校对建议。"""
+    valid: dict[str, str] = {}
+    rejected = 0
+
+    for original, corrected in corrections.items():
+        original_matches = SECONDARY_PLACEHOLDER_PATTERN.findall(original)
+        corrected_matches = SECONDARY_PLACEHOLDER_PATTERN.findall(corrected)
+        if original_matches != corrected_matches:
+            rejected += 1
+            continue
+        valid[original] = corrected
+
+    return valid, rejected
+
+
+def _extract_nav_segments(text: str) -> list[tuple[str, str]]:
+    matches = list(NAV_MARKER_PATTERN.finditer(text))
+    segments: list[tuple[str, str]] = []
+    for i, match in enumerate(matches):
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        marker = match.group(0)
+        payload = text[start:end].strip()
+        segments.append((marker, payload))
+    return segments
+
+
+def _validate_nav_translation(original: str, translated: str) -> tuple[bool, str]:
+    original_segments = _extract_nav_segments(original)
+    translated_segments = _extract_nav_segments(translated)
+
+    original_markers = [marker for marker, _ in original_segments]
+    translated_markers = [marker for marker, _ in translated_segments]
+    if translated_markers != original_markers:
+        return False, f"NAV 标记不一致: 原始 {original_markers}, 翻译 {translated_markers}"
+
+    for marker, payload in translated_segments:
+        if not payload:
+            return False, f"NAV 标记 {marker} 译文为空"
+
+    return True, ""
 
 
 async def _call_translator(
@@ -104,12 +151,15 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
             last_error_msg = None
             continue
 
-        is_valid, error_msg = validate_translated_html(original, translated)
+        if chunk.chunk_mode == "nav_text":
+            is_valid, error_msg = _validate_nav_translation(original, translated)
+        else:
+            is_valid, error_msg = validate_translated_html(original, translated)
         if is_valid:
             chunk.translated = translated
-            chunk.status = (
-                TranslationStatus.ACCEPTED_AS_IS if error_msg == "accepted_as_is" else TranslationStatus.TRANSLATED
-            )
+            chunk.status = TranslationStatus.TRANSLATED
+            if chunk.chunk_mode != "nav_text" and error_msg == "accepted_as_is":
+                chunk.status = TranslationStatus.ACCEPTED_AS_IS
             return chunk
 
         logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 失败: {error_msg}")
@@ -150,6 +200,9 @@ async def translate_step(step_input: StepInput) -> StepOutput:
 async def proofread_step(step_input: StepInput) -> StepOutput:
     chunk: Chunk = step_input.previous_step_content  # type: ignore
     translated = getattr(chunk, "translated")
+
+    if chunk.chunk_mode == "nav_text":
+        return StepOutput(content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})})
 
     # 翻译失败或接受原文，跳过校对
     if chunk.status in (TranslationStatus.TRANSLATION_FAILED, TranslationStatus.ACCEPTED_AS_IS):
@@ -224,8 +277,15 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
         logger.error(error_msg)
         return StepOutput(content=chunk, success=False, error=error_msg)
 
+    if chunk.chunk_mode == "nav_text":
+        chunk.status = TranslationStatus.COMPLETED
+        return StepOutput(content=chunk)
+
     corrections = proofreading_result.corrections
     logger.info(f"校对器发现 {len(corrections)} 个潜在的校对建议。")
+    corrections, rejected_corrections = _filter_invalid_corrections(corrections)
+    if rejected_corrections:
+        logger.warning(f"Chunk '{chunk.name}' 丢弃了 {rejected_corrections} 个破坏占位符完整性的校对建议。")
 
     final_text = translated_text
     if corrections:
@@ -249,6 +309,11 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
     # 后处理：统一词汇和标点
     final_text = final_text.replace("您", "你").replace("大型语言模型", "大语言模型")
     final_text = final_text.replace("。。", "。").replace("，，", "，")
+
+    is_valid, error_msg = validate_translated_html(chunk.original, final_text)
+    if not is_valid:
+        logger.warning(f"Chunk '{chunk.name}' 校对后校验失败，回退到校对前译文: {error_msg}")
+        final_text = translated_text
 
     chunk.translated = final_text
     chunk.status = TranslationStatus.COMPLETED

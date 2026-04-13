@@ -54,14 +54,32 @@ class TestDomChunker:
         # [PRE:0] 是裸文本节点，应被跳过
         assert len(chunks) == 1
 
-    def test_atomic_tags_not_split(self):
-        """测试 ATOMIC_TAGS（table/ul/ol）不被拆分"""
-        html = "<html><body><table><tr><td>Cell 1</td><td>Cell 2</td></tr><tr><td>Cell 3</td><td>Cell 4</td></tr></table></body></html>"
-        chunker = DomChunker(token_limit=10)  # 很小的 limit
+    def test_oversized_table_recurses_to_rows(self):
+        """测试超限 table 会递归拆到更细粒度，而不是整表超限保留。"""
+        html = (
+            "<html><body><table>"
+            "<tr><td>Cell 1 text</td><td>Cell 2 text</td></tr>"
+            "<tr><td>Cell 3 text</td><td>Cell 4 text</td></tr>"
+            "</table></body></html>"
+        )
+        chunker = DomChunker(token_limit=10)
         chunks = chunker.chunk(html)
-        # table 应该完整保留在一个 chunk 中
-        assert len(chunks) == 1
-        assert "<table>" in chunks[0].original
+        assert len(chunks) > 1
+        assert max(chunk.tokens for chunk in chunks) <= 10
+
+    def test_oversized_list_recurses_to_items(self):
+        """测试超限 ol/ul 会递归拆到 li，而不是整列表超限保留。"""
+        html = (
+            "<html><body><ol>"
+            "<li><p>First item with enough text</p><p>Extra detail A</p></li>"
+            "<li><p>Second item with enough text</p><p>Extra detail B</p></li>"
+            "<li><p>Third item with enough text</p><p>Extra detail C</p></li>"
+            "</ol></body></html>"
+        )
+        chunker = DomChunker(token_limit=12)
+        chunks = chunker.chunk(html)
+        assert len(chunks) > 1
+        assert max(chunk.tokens for chunk in chunks) <= 12
 
     def test_title_collection(self):
         """测试 <title> 被收集到 chunk 中"""
@@ -77,7 +95,53 @@ class TestDomChunker:
         html = '<ncx><navMap><navPoint id="ch1"><navLabel><text>Chapter 1</text></navLabel><content src="ch1.xhtml"/></navPoint></navMap></ncx>'
         chunker = DomChunker(token_limit=1000)
         chunks = chunker.chunk(html, is_nav_file=True)
-        assert len(chunks) >= 1
+        assert len(chunks) == 1
+        assert chunks[0].chunk_mode == "nav_text"
+        assert "[NAVTXT:0]" in chunks[0].original
+        assert len(chunks[0].nav_targets) == 1
+
+    def test_large_nav_file_respects_token_limit(self):
+        """测试大导航文件会按 token_limit 切分为多个 nav_text chunk。"""
+        nav_points = "".join(
+            f'<navPoint id="ch{i}"><navLabel><text>Very long chapter title number {i} with extra words</text></navLabel></navPoint>'
+            for i in range(40)
+        )
+        html = f"<ncx><navMap>{nav_points}</navMap></ncx>"
+        chunker = DomChunker(token_limit=80)
+        chunks = chunker.chunk(html, is_nav_file=True)
+
+        assert len(chunks) > 1
+        for chunk in chunks:
+            assert chunk.chunk_mode == "nav_text"
+            assert chunk.tokens <= 80
+            assert chunk.nav_targets
+
+    def test_nav_xhtml_collects_multiple_nav_sections(self):
+        """测试 nav.xhtml 中多个 nav 容器的文本都会被纳入导航分块。"""
+        html = """
+        <html><body>
+          <nav epub:type="toc"><ol><li><a href="#c1">Chapter 1</a></li></ol></nav>
+          <nav epub:type="landmarks"><ol><li><a href="#cover">Cover</a></li></ol></nav>
+        </body></html>
+        """
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html, is_nav_file=True)
+
+        assert len(chunks) == 1
+        assert "Chapter 1" in chunks[0].original
+        assert "Cover" in chunks[0].original
+        assert len(chunks[0].nav_targets) == 2
+
+    def test_toc_ncx_skips_xml_declaration_text(self):
+        """测试 toc.ncx 分块时不会把 XML 声明当作可翻译导航文本。"""
+        html = """<?xml version='1.0' encoding='utf-8'?><ncx><navMap><navPoint id='ch1'><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>"""
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html, is_nav_file=True)
+
+        assert len(chunks) == 1
+        assert "xml version" not in chunks[0].original
+        assert "[NAVTXT:0] Chapter 1" in chunks[0].original
+        assert len(chunks[0].nav_targets) == 1
 
     def test_empty_html(self):
         """测试空 HTML"""
@@ -104,6 +168,14 @@ class TestDomChunker:
         # div 超限但非 ATOMIC，应递归到 p 级别
         assert len(chunks) >= 1
 
+    def test_oversized_leaf_element_is_preserved_when_not_splittable(self):
+        """测试无法继续细分的超限叶子元素不会在递归时丢失内容。"""
+        html = "<html><body><p>This paragraph is intentionally long and plain text only.</p></body></html>"
+        chunker = DomChunker(token_limit=3)
+        chunks = chunker.chunk(html)
+        assert len(chunks) == 1
+        assert "intentionally long" in chunks[0].original
+
     def test_skip_no_text_content(self):
         """测试跳过无文本内容的元素"""
         html = "<html><body><div></div><p>Text</p></body></html>"
@@ -121,10 +193,25 @@ class TestDomChunker:
         assert "<title>" not in chunks[0].original
 
     def test_count_tokens_fallback(self):
-        """测试 tiktoken 模型未找到时的 fallback（覆盖 lines 16-17）"""
+        """测试 tiktoken 模型未找到时的 fallback。"""
         with patch("engine.item.chunker.tiktoken.encoding_for_model", side_effect=KeyError):
             tokens = count_tokens("hello world")
             assert tokens > 0
+
+    def test_count_tokens_network_failure_fallback(self):
+        """测试 tiktoken 词表下载失败时会回退到离线估算。"""
+        with patch("engine.item.chunker.tiktoken.encoding_for_model", side_effect=RuntimeError("offline")):
+            with patch("engine.item.chunker.tiktoken.get_encoding", side_effect=RuntimeError("offline")):
+                tokens = count_tokens("hello world")
+                assert tokens == 2
+
+    def test_count_tokens_offline_fallback(self):
+        """测试 tiktoken 资源不可用时仍能进行本地估算。"""
+        with (
+            patch("engine.item.chunker._get_tokenizer", return_value=None),
+        ):
+            tokens = count_tokens("hello world")
+            assert tokens == 2
 
     def test_whitespace_only_children_skipped(self):
         """测试空白文本节点被跳过（覆盖 line 107）"""
