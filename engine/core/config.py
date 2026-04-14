@@ -50,35 +50,15 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = "your-openrouter-api-key-here"
     OPENROUTER_MODEL: str = "deepseek/deepseek-r1-0528:free"
 
-    # Nvidia配置
-    NVIDIA_API_KEY: str = "your-api-key-here"
-    NVIDIA_MODEL: str = "nvidia-3"
-
-    # 讯飞云 mimimax 配置
-    XFYUN_BASE_URL: str = "https://maas-api.cn-huabei-1.xf-yun.com/v2"
-    XFYUN_API_KEY: str = "your-api-key-here"
-    XFYUN_MIMIMAX_MODEL: str = "xfyun-latest"
-
-    # 讯飞云 kimi 配置
-    XFYUN_KIMI_MODEL: str = "xfyun-kimi-latest"
-
-    # 讯飞云 glm 配置
-    XFYUN_GLM_MODEL: str = "xfyun-glm-latest"
-
-    # AIHubMix 配置
-    AIHUBMIX_API_KEY: str = "sk-"
-    AIHUBMIX_MODEL: str = "gemini-3-flash-preview-free"
-    AIHUBMIX_BASE_URL: str = "https://aihubmix.com/v1"
-
     # BAISHAN 配置
     BAISHAN_API_KEY: str = "sk-"
     BAISHAN_MODEL: str = "DeepSeek-R1-0528-Qwen3-8B"
     BAISHAN_BASE_URL: str = "https://api.edgefn.net/v1"
 
-    # iFlow 配置
-    IFLOW_API_KEY: str = "sk-"
-    IFLOW_MODEL: str = "kimi-k2"
-    IFLOW_BASE_URL: str = "https://apis.iflow.cn/v1"
+    # STEPFUN 配置
+    STEPFUN_API_KEY: str = "sk-"
+    STEPFUN_MODEL: str = "step-1v-8k"
+    STEPFUN_BASE_URL: str = "https://api.stepfun.com/v1"
 
     # MiniMax 配置
     MINIMAX_API_KEY: str = "sk-"
