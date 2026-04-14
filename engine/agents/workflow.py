@@ -45,11 +45,16 @@ def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]
 
 
 def _filter_invalid_corrections(corrections: dict[str, str]) -> tuple[dict[str, str], int]:
-    """丢弃会破坏 PRE/CODE/STYLE 占位符完整性的校对建议。"""
+    """丢弃涉及 PRE/CODE/STYLE 占位符的校对建议。"""
     valid: dict[str, str] = {}
     rejected = 0
 
     for original, corrected in corrections.items():
+        # 含占位符的短语是受保护片段，禁止校对阶段重写，避免重排风险。
+        if SECONDARY_PLACEHOLDER_PATTERN.search(original) or SECONDARY_PLACEHOLDER_PATTERN.search(corrected):
+            rejected += 1
+            continue
+
         original_matches = SECONDARY_PLACEHOLDER_PATTERN.findall(original)
         corrected_matches = SECONDARY_PLACEHOLDER_PATTERN.findall(corrected)
         if original_matches != corrected_matches:

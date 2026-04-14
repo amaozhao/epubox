@@ -439,6 +439,27 @@ class TestApplyCorrectionsStep:
         assert output.content.translated == "<p>你好世界</p>"
         assert output.content.status == TranslationStatus.COMPLETED
 
+    def test_apply_corrections_step_rejects_any_correction_touching_placeholders(self):
+        """apply_corrections_step: placeholder-bearing corrections are skipped even if placeholder count/order matches."""
+        chunk = make_chunk(
+            original="<p>你好[CODE:1]世界</p>",
+            translated="<p>你好[CODE:1]世界</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofreading_result = MockProofreadingResult(
+            {
+                "你好[CODE:1]世界": "您好[CODE:1]世界",
+            }
+        )
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+
+        output = apply_corrections_step(step_input)
+
+        assert output.success is True
+        assert output.content.translated == "<p>你好[CODE:1]世界</p>"
+        assert output.content.status == TranslationStatus.COMPLETED
+
     def test_apply_corrections_step_nav_text_skips_corrections(self):
         """apply_corrections_step: nav_text chunk keeps translated text and only flips status."""
         chunk = make_chunk(
