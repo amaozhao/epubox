@@ -24,7 +24,9 @@ class PreCodeExtractor:
         """
         提取 pre/code 标签，替换为占位符
 
-        提取顺序：先 pre，后 code（递归处理）
+        提取策略：
+        - 命中 pre/code/style 后，整体替换为占位符
+        - 不再递归进入这些受保护标签的子树，避免嵌套标签重复记账
 
         Returns:
             处理后的 HTML
@@ -41,16 +43,14 @@ class PreCodeExtractor:
             重要实现细节：
             - list(node.children) 创建子节点的快照列表
             - 这确保在 replace_with() 修改树结构时，迭代不会受影响
-            - 处理顺序：从外层到内层（深度优先），确保嵌套标签正确处理
+            - 普通节点继续深度优先遍历
+            - pre/code/style 视为原子块，命中后直接整体替换
             """
             for child in list(node.children):
                 if hasattr(child, "name"):
                     if child.name == "pre":
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
-                        # 递归处理子节点（处理内层嵌套）
-                        if hasattr(child, "children"):
-                            process_node(child)
                         # 替换当前 pre 标签
                         placeholder = f"[PRE:{len(self.preserved_pre)}]"
                         self.preserved_pre.append(original)
@@ -58,9 +58,6 @@ class PreCodeExtractor:
                     elif child.name == "code":
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
-                        # 递归处理子节点（处理内层嵌套）
-                        if hasattr(child, "children"):
-                            process_node(child)
                         # 替换当前 code 标签
                         placeholder = f"[CODE:{len(self.preserved_code)}]"
                         self.preserved_code.append(original)
@@ -68,9 +65,6 @@ class PreCodeExtractor:
                     elif child.name == "style":
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
-                        # 递归处理子节点（处理内层嵌套）
-                        if hasattr(child, "children"):
-                            process_node(child)
                         # 替换当前 style 标签
                         placeholder = f"[STYLE:{len(self.preserved_style)}]"
                         self.preserved_style.append(original)

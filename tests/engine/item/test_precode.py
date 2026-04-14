@@ -44,6 +44,7 @@ class TestPreCodeExtractor:
 
         assert result == "[PRE:0]"
         assert extractor.preserved_pre == ["<pre><code>nested</code></pre>"]
+        assert extractor.preserved_code == []
 
     def test_extract_multiple(self):
         """测试多个 pre 和 code 提取"""
@@ -97,6 +98,7 @@ class TestPreCodeExtractor:
         # 整体作为字符串保存
         assert "<pre>" in extractor.preserved_pre[0]
         assert "<code>" in extractor.preserved_pre[0]
+        assert extractor.preserved_code == []
 
     def test_extract_nested_style_in_pre(self):
         """测试嵌套的 style 在 pre 中"""
@@ -106,6 +108,7 @@ class TestPreCodeExtractor:
 
         assert result == "[PRE:0]"
         assert "<style>" in extractor.preserved_pre[0]
+        assert extractor.preserved_style == []
 
     def test_extract_multiple_styles(self):
         """测试多个 style 标签提取"""
@@ -357,8 +360,7 @@ class TestReplaceWithSimplified:
 
     def test_nested_tags_pre_contains_code(self):
         """嵌套标签：pre 中含 code，pre 整体以 [PRE:0] 替换。
-        实现先递归处理 pre 的子节点（提取内层 code），再保存 pre 的原始字符串，
-        因此 code 也会被独立保存，但最终输出只有 [PRE:0] 占位符。
+        pre 作为原子块整体保护，内层 code 不再单独记账。
         """
         html = "<div><pre><code>nested code</code></pre></div>"
         extractor = PreCodeExtractor()
@@ -367,10 +369,21 @@ class TestReplaceWithSimplified:
         # 最终输出：整个 pre 被替换为单一占位符
         assert result == "<div>[PRE:0]</div>"
         assert extractor.pre_count == 1
-        # 内层 code 在递归时也被保存（实现细节）
-        assert extractor.code_count == 1
+        # 内层 code 不再重复保存
+        assert extractor.code_count == 0
         # pre 保存的是原始字符串（含嵌套 code）
         assert "<code>nested code</code>" in extractor.preserved_pre[0]
+
+    def test_nested_tags_code_contains_style(self):
+        """嵌套标签：code 命中后整体保护，内层 style 不再单独记账。"""
+        html = "<p>Use <code><style>.x{}</style>const x = 1;</code></p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>Use [CODE:0]</p>"
+        assert extractor.code_count == 1
+        assert extractor.style_count == 0
+        assert "<style>.x{}</style>" in extractor.preserved_code[0]
 
     def test_multiple_tags_all_types(self):
         """多个标签（所有类型）：每个都有独立占位符"""
