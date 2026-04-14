@@ -36,6 +36,7 @@ ruff format .
 
 2. **两级占位符系统**
    - Level 1 (PreCodeExtractor): `<pre>`/`<code>`/`<style>` → `[PRE:N]`/`[CODE:N]`/`[STYLE:N]`
+   - 命中 `pre/code/style` 后按原子块整体保护，不再递归进入其子树；例如 `<pre><code>...</code></pre>` 只会暴露 `[PRE:N]`
    - Level 2 (Translation): LLM 翻译时保留占位符
    - 恢复顺序: DomReplacer → PreCodeExtractor.restore()
 
