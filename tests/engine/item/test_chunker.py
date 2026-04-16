@@ -132,6 +132,28 @@ class TestDomChunker:
         assert "Cover" in chunks[0].original
         assert len(chunks[0].nav_targets) == 2
 
+    def test_embedded_toc_nav_in_regular_document_uses_nav_text_chunks(self):
+        """测试普通章节文件中的目录型 <nav class='toc'> 也走 nav_text 分块。"""
+        html = """
+        <html><body>
+          <h1>Front Matter</h1>
+          <nav class="toc">
+            <div><a href="c1.xhtml"><span class="label">Chapter 1</span></a></div>
+            <div><a href="c2.xhtml"><span class="label">Chapter 2</span></a></div>
+          </nav>
+          <p>Preface text.</p>
+        </body></html>
+        """
+        chunker = DomChunker(token_limit=1000)
+        chunks = chunker.chunk(html, is_nav_file=False)
+
+        assert any(chunk.chunk_mode == "nav_text" for chunk in chunks)
+        nav_chunk = next(chunk for chunk in chunks if chunk.chunk_mode == "nav_text")
+        assert "[NAVTXT:0] Chapter 1" in nav_chunk.original
+        assert "[NAVTXT:1] Chapter 2" in nav_chunk.original
+        assert len(nav_chunk.nav_targets) == 2
+        assert all("<nav" not in chunk.original for chunk in chunks if chunk.chunk_mode == "html_fragment")
+
     def test_toc_ncx_skips_xml_declaration_text(self):
         """测试 toc.ncx 分块时不会把 XML 声明当作可翻译导航文本。"""
         html = """<?xml version='1.0' encoding='utf-8'?><ncx><navMap><navPoint id='ch1'><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>"""

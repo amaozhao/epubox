@@ -90,15 +90,15 @@ class DomChunker:
         # 1. 找到内容容器
         container = soup.find("body") or soup
 
-        # 2. 收集可翻译的块元素
-        blocks = self._collect_blocks(container)
+        # 2. 收集可翻译的块元素 / 内嵌目录导航块
+        units = self._collect_blocks(container)
 
         # 对非导航文件，额外收集 <head><title>
         title_blocks = self._collect_title_block(soup)
-        blocks = title_blocks + blocks
+        units = title_blocks + units
 
         # 3. 贪心合并
-        chunks = self._greedy_merge(blocks)
+        chunks = self._greedy_merge(units)
 
         return chunks
 
@@ -238,7 +238,7 @@ class DomChunker:
             )
         ]
 
-    def _collect_blocks(self, container) -> List[Block]:
+    def _collect_blocks(self, container) -> List[Block | Chunk]:
         """
         收集容器的直接子元素作为块
 
@@ -246,7 +246,7 @@ class DomChunker:
         - 如果是 ATOMIC_TAGS（table/ul/ol），保持完整不拆分
         - 否则递归到子元素级别
         """
-        blocks = []
+        blocks: List[Block | Chunk] = []
 
         for child in container.children:
             child_html = str(child).strip()
@@ -255,6 +255,10 @@ class DomChunker:
 
             # 跳过不可翻译元素
             if self._should_skip(child):
+                continue
+
+            if self._is_embedded_toc_nav(child):
+                blocks.extend(self._chunk_embedded_nav(child))
                 continue
 
             child_tokens = count_tokens(child_html)
@@ -276,26 +280,36 @@ class DomChunker:
 
         return blocks
 
-    def _greedy_merge(self, blocks: List[Block]) -> List[Chunk]:
+    def _greedy_merge(self, blocks: List[Block | Chunk]) -> List[Chunk]:
         """贪心合并：将多个块打包到一个 chunk，直到接近 token_limit"""
         chunks = []
         buffer_htmls: List[str] = []
         buffer_xpaths: List[str] = []
         buffer_tokens = 0
 
+        def flush_buffer() -> None:
+            nonlocal buffer_htmls, buffer_xpaths, buffer_tokens
+            if not buffer_htmls:
+                return
+            chunks.append(self._create_chunk(buffer_htmls, buffer_xpaths, buffer_tokens))
+            buffer_htmls = []
+            buffer_xpaths = []
+            buffer_tokens = 0
+
         for block in blocks:
+            if isinstance(block, Chunk):
+                flush_buffer()
+                chunks.append(block)
+                continue
+
             if buffer_tokens + block.tokens > self.token_limit and buffer_htmls:
-                chunks.append(self._create_chunk(buffer_htmls, buffer_xpaths, buffer_tokens))
-                buffer_htmls = []
-                buffer_xpaths = []
-                buffer_tokens = 0
+                flush_buffer()
 
             buffer_htmls.append(block.html)
             buffer_xpaths.append(block.xpath)
             buffer_tokens += block.tokens
 
-        if buffer_htmls:
-            chunks.append(self._create_chunk(buffer_htmls, buffer_xpaths, buffer_tokens))
+        flush_buffer()
 
         return chunks
 
@@ -322,3 +336,31 @@ class DomChunker:
         text_content = element.get_text(strip=True)
         clean_text = self.SECONDARY_PLACEHOLDER_RE.sub("", text_content)
         return not clean_text.strip()
+
+    def _is_embedded_toc_nav(self, element) -> bool:
+        """识别普通文档中内嵌的目录导航块，走 nav_text 模式。"""
+        if not getattr(element, "name", None) == "nav":
+            return False
+
+        classes = {cls.lower() for cls in element.get("class", []) if isinstance(cls, str)}
+        if "toc" in classes:
+            return True
+
+        for attr in ("epub:type", "type", "role", "id"):
+            value = element.get(attr)
+            if not value:
+                continue
+            if isinstance(value, list):
+                tokens = [str(v).lower() for v in value]
+            else:
+                tokens = [str(value).lower()]
+            if any("toc" in token for token in tokens):
+                return True
+
+        return False
+
+    def _chunk_embedded_nav(self, element) -> List[Chunk]:
+        units = self._collect_nav_text_units([element])
+        if not units:
+            return []
+        return self._pack_nav_units(units)

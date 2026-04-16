@@ -32,7 +32,7 @@ ruff format .
 1. **DOM-Aware Chunking** (`engine/item/chunker.py`)
    - 每个 `Chunk` 存储 `xpaths: List[str]` 追踪原始 DOM 位置
    - 按 token_limit 贪心合并元素，保持标签完整闭合
-   - 原子容器 (table/ul/ol) 不拆分，即使超限
+   - `figure` 和非目录型 `nav` 视为原子容器；导航文件和内嵌目录型 `<nav class="toc">` / `epub:type="toc"` 会走 `nav_text` 分块
 
 2. **两级占位符系统**
    - Level 1 (PreCodeExtractor): `<pre>`/`<code>`/`<style>` → `[PRE:N]`/`[CODE:N]`/`[STYLE:N]`

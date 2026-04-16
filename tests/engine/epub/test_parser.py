@@ -50,6 +50,17 @@ class TestParser:
     def test_is_nav_file(self, relative_path, expected):
         assert Parser._is_nav_file(relative_path) is expected
 
+    @pytest.mark.parametrize(
+        ("html", "expected"),
+        [
+            ('<html><body><nav class="toc"><a href="#c1">Chapter 1</a></nav></body></html>', True),
+            ('<html><body><nav epub:type="toc"><a href="#c1">Chapter 1</a></nav></body></html>', True),
+            ("<html><body><nav><a href=\"#c1\">Chapter 1</a></nav></body></html>", False),
+        ],
+    )
+    def test_has_embedded_toc_nav(self, html, expected):
+        assert Parser._has_embedded_toc_nav(html) is expected
+
     def test_get_output_dir(self, parser_instance):
         """测试 _get_output_dir 方法是否正确生成解压路径。"""
         epub_dir = os.path.dirname(parser_instance.path)
@@ -200,7 +211,7 @@ class TestParser:
         mocker.patch.object(
             parser,
             "_rebuild_nav_item_chunks",
-            side_effect=lambda item: setattr(
+            side_effect=lambda item, *, is_nav_file: setattr(
                 item,
                 "chunks",
                 [
@@ -245,6 +256,75 @@ class TestParser:
                                     "status": "pending",
                                     "tokens": 20,
                                     "xpaths": ["/ncx/navMap/navPoint"],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        save_json = mocker.patch.object(parser, "save_json")
+
+        book = parser.load_json()
+
+        assert book is not None
+        assert book.items[0].chunks[0].chunk_mode == "nav_text"
+        assert book.items[0].chunks[0].nav_targets
+        save_json.assert_called_once()
+
+    def test_load_json_upgrades_embedded_toc_chunks(self, tmp_path, mocker):
+        """测试普通文件中的内嵌目录块 checkpoint 也会被重建为 nav_text 模式。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        mocker.patch.object(
+            parser,
+            "_rebuild_nav_item_chunks",
+            side_effect=lambda item, *, is_nav_file: setattr(
+                item,
+                "chunks",
+                [
+                    Chunk(
+                        name="embedded-nav-text",
+                        original="[NAVTXT:0] Chapter 1",
+                        translated=None,
+                        status="pending",
+                        tokens=10,
+                        chunk_mode="nav_text",
+                        xpaths=[],
+                        nav_targets=[
+                            NavTextTarget(
+                                marker="[NAVTXT:0]",
+                                xpath="/html/body/nav/div/a/span",
+                                text_index=0,
+                                original_text="Chapter 1",
+                            )
+                        ],
+                    )
+                ],
+            ),
+        )
+        checkpoint_path = tmp_path / "my_book.json"
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "name": "my_book",
+                    "path": str(epub_path),
+                    "extract_path": str(tmp_path / "temp" / "my_book"),
+                    "items": [
+                        {
+                            "id": "OEBPS/Text/Title_Pages.xhtml",
+                            "path": str(tmp_path / "temp" / "my_book" / "OEBPS" / "Text" / "Title_Pages.xhtml"),
+                            "content": '<html><body><nav class="toc"><div><a href="#c1"><span class="label">Chapter 1</span></a></div></nav></body></html>',
+                            "chunks": [
+                                {
+                                    "name": "legacy-nav",
+                                    "original": '<nav class="toc"><div><a href="#c1"><span class="label">Chapter 1</span></a></div></nav>',
+                                    "translated": None,
+                                    "status": "pending",
+                                    "tokens": 20,
+                                    "xpaths": ["/html/body/nav"],
                                 }
                             ],
                         }

@@ -38,8 +38,24 @@ class Parser:
         lowered = relative_path.lower()
         return "toc.ncx" in lowered or lowered.endswith(("nav.xhtml", "toc.xhtml"))
 
-    def _rebuild_nav_item_chunks(self, item: EpubItem) -> None:
-        """将旧版导航 chunk 迁移为文本节点模式。"""
+    @staticmethod
+    def _has_embedded_toc_nav(html: str) -> bool:
+        soup = BeautifulSoup(html, "html.parser")
+        for nav in soup.find_all("nav"):
+            classes = {cls.lower() for cls in nav.get("class", []) if isinstance(cls, str)}
+            if "toc" in classes:
+                return True
+            for attr in ("epub:type", "type", "role", "id"):
+                value = nav.get(attr)
+                if not value:
+                    continue
+                values = value if isinstance(value, list) else [value]
+                if any("toc" in str(v).lower() for v in values):
+                    return True
+        return False
+
+    def _rebuild_nav_item_chunks(self, item: EpubItem, *, is_nav_file: bool) -> None:
+        """将导航文件或内嵌目录块重建为文本节点模式。"""
         soup = BeautifulSoup(item.content, "html.parser")
         normalized_content = str(soup)
 
@@ -47,7 +63,7 @@ class Parser:
         content_after_pre = pre_extractor.extract(normalized_content)
 
         dom_chunker = DomChunker(token_limit=self.limit)
-        item.chunks = dom_chunker.chunk(html=content_after_pre, is_nav_file=True)
+        item.chunks = dom_chunker.chunk(html=content_after_pre, is_nav_file=is_nav_file)
         item.preserved_pre = pre_extractor.preserved_pre
         item.preserved_code = pre_extractor.preserved_code
         item.preserved_style = pre_extractor.preserved_style
@@ -55,21 +71,23 @@ class Parser:
     def _upgrade_legacy_nav_chunks(self, book: EpubBook) -> bool:
         upgraded = False
         for item in book.items:
-            if not self._is_nav_file(item.id):
+            is_nav_file = self._is_nav_file(item.id)
+            has_embedded_toc = not is_nav_file and self._has_embedded_toc_nav(item.content)
+            if not is_nav_file and not has_embedded_toc:
                 continue
             if not item.chunks:
-                self._rebuild_nav_item_chunks(item)
+                self._rebuild_nav_item_chunks(item, is_nav_file=is_nav_file)
                 upgraded = True
                 continue
 
             if any(chunk.chunk_mode == "nav_text" for chunk in item.chunks):
                 continue
 
-            self._rebuild_nav_item_chunks(item)
+            self._rebuild_nav_item_chunks(item, is_nav_file=is_nav_file)
             upgraded = True
 
         if upgraded:
-            logger.info("检测到旧版导航 checkpoint，已重建导航 chunk 为 nav_text 模式。")
+            logger.info("检测到旧版导航/目录 checkpoint，已重建相关 chunk 为 nav_text 模式。")
         return upgraded
 
     def load_json(self) -> Optional[EpubBook]:
