@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     # 模型提供商配置
-    MODEL_PROVIDER: Literal["mistral", "openai", "deepseek", "kimi"] = "mistral"
+    MODEL_PROVIDER: Literal["mistral", "openai", "deepseek", "kimi", "cr_proxy"] = "mistral"
 
     # OpenAI 配置
     OPENAI_API_KEY: str = "your-api-key-here"
@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     MINIMAX_API_KEY: str = "sk-"
     MINIMAX_MODEL: str = "MiniMax-M2.7"
     MINIMAX_BASE_URL: str = "https://api.minimax.com/v1"
+
+    # CR proxy OpenAI-compatible 配置（要求 stream=true）
+    CR_PROXY_API_KEY: str = "sk-"
+    CR_PROXY_MODEL: str = "gpt-5.3-codex-spark"
+    CR_PROXY_BASE_URL: str = "http://3.93.42.33:3000/api/v1"
 
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"

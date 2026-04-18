@@ -70,3 +70,25 @@ class TestValidateTranslatedHtmlTagErrors:
         is_valid, error = validate_translated_html(original, translated)
         assert is_valid
         assert error == "accepted_as_is"
+
+    def test_validate_accepts_adjacent_code_swap_within_single_element(self):
+        """测试同一元素内相邻 CODE 互换顺序会被视为可接受。"""
+        original = "<p>Use [CODE:10] [CODE:11] here</p>"
+        translated = "<p>使用 [CODE:11] [CODE:10] 这里</p>"
+        is_valid, error = validate_translated_html(original, translated)
+        assert is_valid, error
+
+    def test_validate_accepts_non_adjacent_code_reorder_within_single_element(self):
+        """测试同一元素内的非相邻 CODE 重排也会被接受。"""
+        original = "<p>Run [CODE:31], [CODE:32], and [CODE:33]</p>"
+        translated = "<p>在 [CODE:33] 所在目录中运行 [CODE:31] 和 [CODE:32]</p>"
+        is_valid, error = validate_translated_html(original, translated)
+        assert is_valid, error
+
+    def test_validate_rejects_code_cross_element_move(self):
+        """测试 CODE 跨顶层元素迁移仍然会被拒绝。"""
+        original = "<p>[CODE:10]</p><p>[CODE:11] [CODE:12]</p>"
+        translated = "<p>[CODE:11]</p><p>[CODE:10] [CODE:12]</p>"
+        is_valid, error = validate_translated_html(original, translated)
+        assert not is_valid
+        assert "CODE 占位符归属/数量不一致" in error

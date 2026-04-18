@@ -297,17 +297,73 @@ class TestValidateTranslatedHtml:
 
     def test_placeholder_order_reports_mismatch_positions(self):
         """测试占位符顺序错误时会报告具体错位位置。"""
-        original = "<p>[CODE:1] [CODE:2] [CODE:3]</p>"
-        translated = "<p>[CODE:1] [CODE:3] [CODE:2]</p>"
+        original = "<p>Alpha [CODE:1]</p><p>Beta [CODE:2] [CODE:3]</p>"
+        translated = "<p>甲 [CODE:2]</p><p>乙 [CODE:1] [CODE:3]</p>"
 
         is_valid, error = validate_translated_html(original, translated)
 
         assert not is_valid
-        assert "CODE 占位符顺序不一致" in error
-        assert "位置2" in error
-        assert "原始 [CODE:2]" in error
-        assert "翻译 [CODE:3]" in error
-        assert "位置3" in error
+        assert "CODE 占位符归属/数量不一致" in error
+        assert "元素1 位置1" in error
+        assert "原始 [CODE:1]" in error
+        assert "翻译 [CODE:2]" in error
+
+    def test_adjacent_code_swap_within_same_element_is_accepted(self):
+        """测试同一顶层元素内的相邻 CODE 换位会被接受。"""
+        original = "<p>[CODE:1] [CODE:2] text</p>"
+        translated = "<p>[CODE:2] [CODE:1] 文本</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
+    def test_multiple_adjacent_code_swaps_within_same_element_are_accepted(self):
+        """测试同一顶层元素内多组不重叠的相邻 CODE 换位会被接受。"""
+        original = "<p>[CODE:1] [CODE:2] [CODE:3] [CODE:4] text</p>"
+        translated = "<p>[CODE:2] [CODE:1] [CODE:4] [CODE:3] 文本</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
+    def test_non_adjacent_code_reorder_within_same_element_is_accepted(self):
+        """测试同一顶层元素内的非相邻重排也会被接受。"""
+        original = "<p>[CODE:31], [CODE:32], and [CODE:33]</p>"
+        translated = "<p>在 [CODE:33] 所在目录中运行 [CODE:31] 和 [CODE:32]</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
+    def test_code_swap_across_top_level_elements_is_rejected(self):
+        """测试跨顶层元素的 CODE 换位仍然会被拒绝。"""
+        original = "<p>[CODE:1]</p><p>[CODE:2]</p>"
+        translated = "<p>[CODE:2]</p><p>[CODE:1]</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert not is_valid
+        assert "CODE 占位符归属/数量不一致" in error
+
+    def test_code_missing_within_same_element_is_rejected(self):
+        """测试同一元素内缺失 CODE 占位符仍然会被拒绝。"""
+        original = "<p>[CODE:1] [CODE:2] text</p>"
+        translated = "<p>[CODE:2] 文本</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert not is_valid
+        assert "CODE 占位符归属/数量不一致" in error
+
+    def test_adjacent_pre_swap_is_still_rejected(self):
+        """测试 PRE 占位符依旧要求严格顺序，不允许相邻换位。"""
+        original = "<p>[PRE:1] [PRE:2] text</p>"
+        translated = "<p>[PRE:2] [PRE:1] 文本</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert not is_valid
+        assert "PRE 占位符顺序不一致" in error
 
 
 class TestVerifyFinalHtml:

@@ -1,3 +1,4 @@
+from collections import Counter
 import re
 import xml.etree.ElementTree as ET
 from typing import List, Optional, Tuple
@@ -229,34 +230,147 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
         ("CODE", r"\[CODE:\d+\]"),
         ("STYLE", r"\[STYLE:\d+\]"),
     ]:
-        orig_placeholders = re.findall(pattern, original)
-        trans_placeholders = re.findall(pattern, translated)
-        if orig_placeholders != trans_placeholders:
-            return False, _format_placeholder_sequence_error(label, orig_placeholders, trans_placeholders)
+        if label == "CODE":
+            mismatch_details = _collect_element_scoped_code_multiset_mismatches(
+                original_elements=original_elements,
+                translated_elements=translated_elements,
+                pattern=pattern,
+            )
+            if mismatch_details:
+                return False, _format_code_placeholder_error(mismatch_details)
+            continue
+
+        mismatch_details = _collect_element_scoped_placeholder_mismatches(
+            original_elements=original_elements,
+            translated_elements=translated_elements,
+            pattern=pattern,
+            allow_adjacent_swaps=False,
+        )
+        if mismatch_details:
+            return False, _format_placeholder_sequence_error(label, mismatch_details)
 
     return True, ""
 
 
-def _format_placeholder_sequence_error(label: str, original: list[str], translated: list[str]) -> str:
-    """输出占位符顺序错误的精确位置，便于日志与重试提示使用。"""
-    details: list[str] = []
-    common_len = min(len(original), len(translated))
+def _collect_element_scoped_placeholder_mismatches(
+    original_elements: list,
+    translated_elements: list,
+    pattern: str,
+    allow_adjacent_swaps: bool = False,
+) -> list[tuple[int, str, str]]:
+    """按顶层元素作用域校验占位符序列，避免跨元素放宽顺序约束。"""
+    all_details: list[tuple[int, str, str]] = []
+    position_base = 0
 
-    for idx, (orig_token, trans_token) in enumerate(zip(original, translated), start=1):
-        if orig_token != trans_token:
-            details.append(f"位置{idx}: 原始 {orig_token}, 翻译 {trans_token}")
+    for orig_element, trans_element in zip(original_elements, translated_elements):
+        orig_placeholders = re.findall(pattern, str(orig_element))
+        trans_placeholders = re.findall(pattern, str(trans_element))
+        element_details = _collect_placeholder_mismatches(
+            orig_placeholders,
+            trans_placeholders,
+            allow_adjacent_swaps=allow_adjacent_swaps,
+        )
+        for position, orig_token, trans_token in element_details:
+            all_details.append((position_base + position, orig_token, trans_token))
+        position_base += len(orig_placeholders)
+
+    return all_details
+
+
+def _collect_element_scoped_code_multiset_mismatches(
+    original_elements: list,
+    translated_elements: list,
+    pattern: str,
+) -> list[tuple[int, str, str]]:
+    """
+    对 CODE 只校验同一顶层元素内的多重集合一致性。
+
+    允许同一元素内部重排，但不允许：
+    - 数量变化
+    - 索引变化
+    - 跨顶层元素迁移
+    """
+    all_details: list[tuple[int, str, str]] = []
+
+    for element_index, (orig_element, trans_element) in enumerate(zip(original_elements, translated_elements), start=1):
+        orig_placeholders = re.findall(pattern, str(orig_element))
+        trans_placeholders = re.findall(pattern, str(trans_element))
+        if Counter(orig_placeholders) == Counter(trans_placeholders):
+            continue
+
+        element_details = _collect_placeholder_mismatches(
+            orig_placeholders,
+            trans_placeholders,
+            allow_adjacent_swaps=False,
+        )
+        for position, orig_token, trans_token in element_details:
+            all_details.append((element_index, position, orig_token, trans_token))
+
+    return all_details
+
+
+def _collect_placeholder_mismatches(
+    original: list[str],
+    translated: list[str],
+    allow_adjacent_swaps: bool = False,
+) -> list[tuple[int, str, str]]:
+    """返回占位符不匹配的位置列表；可选择性允许相邻成对换位。"""
+    details: list[tuple[int, str, str]] = []
+    common_len = min(len(original), len(translated))
+    idx = 0
+
+    while idx < common_len:
+        orig_token = original[idx]
+        trans_token = translated[idx]
+        if orig_token == trans_token:
+            idx += 1
+            continue
+
+        if (
+            allow_adjacent_swaps
+            and idx + 1 < common_len
+            and original[idx] == translated[idx + 1]
+            and original[idx + 1] == translated[idx]
+        ):
+            idx += 2
+            continue
+
+        details.append((idx + 1, orig_token, trans_token))
+        idx += 1
 
     if len(original) > len(translated):
-        for idx in range(common_len + 1, len(original) + 1):
-            details.append(f"位置{idx}: 原始 {original[idx - 1]}, 翻译缺失")
+        for idx in range(common_len, len(original)):
+            details.append((idx + 1, original[idx], "翻译缺失"))
     elif len(translated) > len(original):
-        for idx in range(common_len + 1, len(translated) + 1):
-            details.append(f"位置{idx}: 原始缺失, 翻译 {translated[idx - 1]}")
+        for idx in range(common_len, len(translated)):
+            details.append((idx + 1, "原始缺失", translated[idx]))
 
-    if not details:
-        details.append("位置未知")
+    return details
 
-    return f"{label} 占位符顺序不一致: {'; '.join(details)}"
+
+def _format_placeholder_sequence_error(label: str, details: list[tuple[int, str, str]]) -> str:
+    """输出占位符顺序错误的精确位置，便于日志与重试提示使用。"""
+    rendered: list[str] = []
+
+    for position, orig_token, trans_token in details:
+        rendered.append(f"位置{position}: 原始 {orig_token}, 翻译 {trans_token}")
+
+    if not rendered:
+        rendered.append("位置未知")
+
+    return f"{label} 占位符顺序不一致: {'; '.join(rendered)}"
+
+
+def _format_code_placeholder_error(details: list[tuple[int, str, str, str]]) -> str:
+    rendered: list[str] = []
+
+    for element_index, position, orig_token, trans_token in details:
+        rendered.append(f"元素{element_index} 位置{position}: 原始 {orig_token}, 翻译 {trans_token}")
+
+    if not rendered:
+        rendered.append("位置未知")
+
+    return "CODE 占位符归属/数量不一致（请保持每个 CODE 占位符留在原始顶层元素内）: " + "; ".join(rendered)
 
 
 def verify_final_html(original: str, restored: str) -> Tuple[bool, str]:

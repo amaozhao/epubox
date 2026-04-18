@@ -128,17 +128,17 @@ class TestTranslateStep:
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_retry_includes_placeholder_position_error(self, mock_get_translator):
         """translate_step: retry payload includes precise placeholder order mismatch details."""
-        chunk = make_chunk(original="<p>[CODE:1] [CODE:2] [CODE:3]</p>")
+        chunk = make_chunk(original="<p>Alpha [CODE:1]</p><p>Beta [CODE:2] [CODE:3]</p>")
         seen_inputs = []
         responses = iter(
             [
                 MagicMock(
                     status=RunStatus.completed,
-                    content=MockTranslationResponse("<p>[CODE:1] [CODE:3] [CODE:2]</p>"),
+                    content=MockTranslationResponse("<p>甲 [CODE:2]</p><p>乙 [CODE:1] [CODE:3]</p>"),
                 ),
                 MagicMock(
                     status=RunStatus.completed,
-                    content=MockTranslationResponse("<p>[CODE:1] [CODE:2] [CODE:3]</p>"),
+                    content=MockTranslationResponse("<p>甲 [CODE:1]</p><p>乙 [CODE:2] [CODE:3]</p>"),
                 ),
             ]
         )
@@ -155,12 +155,37 @@ class TestTranslateStep:
         output = await translate_step(step_input)
 
         assert output.success is True
-        assert output.content.status == TranslationStatus.ACCEPTED_AS_IS
+        assert output.content.status == TranslationStatus.TRANSLATED
         assert len(seen_inputs) == 2
         assert "validation_error" not in seen_inputs[0]
-        assert "CODE 占位符顺序不一致" in seen_inputs[1]["validation_error"]
-        assert "位置2" in seen_inputs[1]["validation_error"]
-        assert "原始 [CODE:2]" in seen_inputs[1]["validation_error"]
+        assert "CODE 占位符归属/数量不一致" in seen_inputs[1]["validation_error"]
+        assert "元素1 位置1" in seen_inputs[1]["validation_error"]
+        assert "原始 [CODE:1]" in seen_inputs[1]["validation_error"]
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_accepts_code_reorder_within_same_element_without_retry(self, mock_get_translator):
+        """translate_step: CODE reorder within one element should pass validation without retry."""
+        chunk = make_chunk(original="<p>Run [CODE:31], [CODE:32], and [CODE:33]</p>")
+        call_count = [0]
+
+        async def swapped_response(json_input):
+            call_count[0] += 1
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>在 [CODE:33] 所在目录中运行 [CODE:31] 和 [CODE:32]</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = swapped_response
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.success is True
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "<p>在 [CODE:33] 所在目录中运行 [CODE:31] 和 [CODE:32]</p>"
+        assert call_count[0] == 1
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_original_echo_becomes_untranslated(self, mock_get_translator):
