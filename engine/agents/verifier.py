@@ -224,13 +224,39 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
             return False, f"第 {i + 1} 个元素标签不一致: 原始 <{orig.name}>, 翻译 <{trans.name}>"
 
     # 3. PreCodeExtractor 占位符完整且索引不变
-    for pattern in [r"\[PRE:\d+\]", r"\[CODE:\d+\]", r"\[STYLE:\d+\]"]:
+    for label, pattern in [
+        ("PRE", r"\[PRE:\d+\]"),
+        ("CODE", r"\[CODE:\d+\]"),
+        ("STYLE", r"\[STYLE:\d+\]"),
+    ]:
         orig_placeholders = re.findall(pattern, original)
         trans_placeholders = re.findall(pattern, translated)
         if orig_placeholders != trans_placeholders:
-            return False, f"占位符集合不一致: {pattern} 原始 {orig_placeholders}, 翻译 {trans_placeholders}"
+            return False, _format_placeholder_sequence_error(label, orig_placeholders, trans_placeholders)
 
     return True, ""
+
+
+def _format_placeholder_sequence_error(label: str, original: list[str], translated: list[str]) -> str:
+    """输出占位符顺序错误的精确位置，便于日志与重试提示使用。"""
+    details: list[str] = []
+    common_len = min(len(original), len(translated))
+
+    for idx, (orig_token, trans_token) in enumerate(zip(original, translated), start=1):
+        if orig_token != trans_token:
+            details.append(f"位置{idx}: 原始 {orig_token}, 翻译 {trans_token}")
+
+    if len(original) > len(translated):
+        for idx in range(common_len + 1, len(original) + 1):
+            details.append(f"位置{idx}: 原始 {original[idx - 1]}, 翻译缺失")
+    elif len(translated) > len(original):
+        for idx in range(common_len + 1, len(translated) + 1):
+            details.append(f"位置{idx}: 原始缺失, 翻译 {translated[idx - 1]}")
+
+    if not details:
+        details.append("位置未知")
+
+    return f"{label} 占位符顺序不一致: {'; '.join(details)}"
 
 
 def verify_final_html(original: str, restored: str) -> Tuple[bool, str]:

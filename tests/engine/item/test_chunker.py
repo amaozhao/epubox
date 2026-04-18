@@ -37,6 +37,22 @@ class TestDomChunker:
         for chunk in chunks:
             assert len(chunk.xpaths) >= 1
 
+    def test_split_on_secondary_placeholder_limit(self):
+        """测试在 token 充足时，仍会因二级占位符数量超限而切 chunk。"""
+        html = (
+            "<html><body>"
+            "<p>alpha [CODE:0] [CODE:1] [CODE:2] [CODE:3]</p>"
+            "<p>beta [CODE:4] [CODE:5] [CODE:6] [CODE:7]</p>"
+            "<p>gamma [CODE:8] [CODE:9] [CODE:10] [CODE:11]</p>"
+            "</body></html>"
+        )
+        chunker = DomChunker(token_limit=1000, secondary_placeholder_limit=8)
+        chunks = chunker.chunk(html)
+
+        assert len(chunks) == 2
+        assert chunks[0].original.count("[CODE:") == 8
+        assert chunks[1].original.count("[CODE:") == 4
+
     def test_skip_img(self):
         """测试跳过 img 标签"""
         html = "<html><body><p>Text</p><img src='test.png'/><p>More</p></body></html>"
@@ -190,6 +206,21 @@ class TestDomChunker:
         # div 超限但非 ATOMIC，应递归到 p 级别
         assert len(chunks) >= 1
 
+    def test_recursive_on_secondary_placeholder_limit(self):
+        """测试 token 未超限时，容器也会因占位符超限递归到子元素。"""
+        html = (
+            "<html><body><div>"
+            "<p>alpha [CODE:0] [CODE:1] [CODE:2] [CODE:3]</p>"
+            "<p>beta [CODE:4] [CODE:5] [CODE:6] [CODE:7]</p>"
+            "</div></body></html>"
+        )
+        chunker = DomChunker(token_limit=1000, secondary_placeholder_limit=4)
+        chunks = chunker.chunk(html)
+
+        assert len(chunks) == 2
+        assert all(chunk.original.count("[CODE:") == 4 for chunk in chunks)
+        assert all(chunk.xpaths == [f"/html/body/div/p[{i}]"] for i, chunk in enumerate(chunks, start=1))
+
     def test_oversized_leaf_element_is_preserved_when_not_splittable(self):
         """测试无法继续细分的超限叶子元素不会在递归时丢失内容。"""
         html = "<html><body><p>This paragraph is intentionally long and plain text only.</p></body></html>"
@@ -197,6 +228,59 @@ class TestDomChunker:
         chunks = chunker.chunk(html)
         assert len(chunks) == 1
         assert "intentionally long" in chunks[0].original
+
+    def test_placeholder_heavy_leaf_is_preserved_when_not_splittable(self):
+        """测试无法继续细分的占位符密集叶子元素不会因占位符超限而丢失。"""
+        html = "<html><body><p>alpha [CODE:0] [CODE:1] [CODE:2] [CODE:3]</p></body></html>"
+        chunker = DomChunker(token_limit=1000, secondary_placeholder_limit=2)
+        chunks = chunker.chunk(html)
+
+        assert len(chunks) == 1
+        assert chunks[0].original == "<p>alpha [CODE:0] [CODE:1] [CODE:2] [CODE:3]</p>"
+
+    def test_atomic_container_ignores_secondary_placeholder_limit(self):
+        """测试原子容器即使占位符超限也保持整体不拆分。"""
+        html = (
+            "<html><body>"
+            "<figure>alpha [CODE:0] [CODE:1] [CODE:2] [CODE:3]</figure>"
+            "</body></html>"
+        )
+        chunker = DomChunker(token_limit=1000, secondary_placeholder_limit=2)
+        chunks = chunker.chunk(html)
+
+        assert len(chunks) == 1
+        assert chunks[0].original == "<figure>alpha [CODE:0] [CODE:1] [CODE:2] [CODE:3]</figure>"
+
+    def test_title_block_respects_secondary_placeholder_limit(self):
+        """测试 title block 也参与占位符上限切分。"""
+        html = (
+            "<html><head><title>Title [CODE:0] [CODE:1] [CODE:2]</title></head>"
+            "<body><p>Body [CODE:3]</p></body></html>"
+        )
+        chunker = DomChunker(token_limit=1000, secondary_placeholder_limit=2)
+        chunks = chunker.chunk(html)
+
+        assert len(chunks) == 2
+        assert chunks[0].original == "<title>Title [CODE:0] [CODE:1] [CODE:2]</title>"
+        assert chunks[1].original == "<p>Body [CODE:3]</p>"
+
+    def test_mixed_secondary_placeholders_all_count_toward_limit(self):
+        """测试 PRE/CODE/STYLE 混合时会一起计入占位符上限。"""
+        html = (
+            "<html><body>"
+            "<p>alpha [PRE:0] [CODE:0]</p>"
+            "<p>beta [STYLE:0] [CODE:1]</p>"
+            "<p>gamma [CODE:2]</p>"
+            "</body></html>"
+        )
+        chunker = DomChunker(token_limit=1000, secondary_placeholder_limit=4)
+        chunks = chunker.chunk(html)
+
+        assert len(chunks) == 2
+        assert chunks[0].original.count("[PRE:") == 1
+        assert chunks[0].original.count("[STYLE:") == 1
+        assert chunks[0].original.count("[CODE:") == 2
+        assert chunks[1].original == "<p>gamma [CODE:2]</p>"
 
     def test_skip_no_text_content(self):
         """测试跳过无文本内容的元素"""

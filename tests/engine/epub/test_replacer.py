@@ -295,6 +295,20 @@ class TestValidateTranslatedHtml:
         assert not is_valid
         assert "占位符" in error
 
+    def test_placeholder_order_reports_mismatch_positions(self):
+        """测试占位符顺序错误时会报告具体错位位置。"""
+        original = "<p>[CODE:1] [CODE:2] [CODE:3]</p>"
+        translated = "<p>[CODE:1] [CODE:3] [CODE:2]</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert not is_valid
+        assert "CODE 占位符顺序不一致" in error
+        assert "位置2" in error
+        assert "原始 [CODE:2]" in error
+        assert "翻译 [CODE:3]" in error
+        assert "位置3" in error
+
 
 class TestVerifyFinalHtml:
     """测试最终 HTML 验证"""

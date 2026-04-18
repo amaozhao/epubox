@@ -13,8 +13,9 @@ from engine.core.logger import engine_logger as logger
 
 
 class Parser:
-    def __init__(self, path: str, limit: int = 1500):
+    def __init__(self, path: str, limit: int = 1500, secondary_placeholder_limit: int = 12):
         self.limit = limit
+        self.secondary_placeholder_limit = secondary_placeholder_limit
         self.path = path
         self.output_dir = self._get_output_dir()
 
@@ -62,7 +63,10 @@ class Parser:
         pre_extractor = PreCodeExtractor()
         content_after_pre = pre_extractor.extract(normalized_content)
 
-        dom_chunker = DomChunker(token_limit=self.limit)
+        dom_chunker = DomChunker(
+            token_limit=self.limit,
+            secondary_placeholder_limit=self.secondary_placeholder_limit,
+        )
         item.chunks = dom_chunker.chunk(html=content_after_pre, is_nav_file=is_nav_file)
         item.preserved_pre = pre_extractor.preserved_pre
         item.preserved_code = pre_extractor.preserved_code
@@ -189,7 +193,10 @@ class Parser:
                     is_nav_file = self._is_nav_file(relative_path)
 
                     # Step 4: 使用 DomChunker 进行 DOM 级别分块
-                    dom_chunker = DomChunker(token_limit=self.limit)
+                    dom_chunker = DomChunker(
+                        token_limit=self.limit,
+                        secondary_placeholder_limit=self.secondary_placeholder_limit,
+                    )
                     chunks = dom_chunker.chunk(html=content_after_pre, is_nav_file=is_nav_file)
 
                     epub_item = EpubItem(

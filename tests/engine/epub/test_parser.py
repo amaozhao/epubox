@@ -144,6 +144,23 @@ class TestParser:
 
         assert "container.xml" not in [i.id for i in book.items]
 
+    def test_parse_passes_secondary_placeholder_limit_to_chunker(self, mocker, tmp_path):
+        """测试 Parser 会把 secondary_placeholder_limit 传递给 DomChunker。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path), limit=123, secondary_placeholder_limit=7)
+
+        mocker.patch.object(parser, "extract")
+        mocker.patch.object(parser, "load_json", return_value=None)
+        mocker.patch.object(parser, "save_json")
+        mocker.patch("os.walk", return_value=[(parser.output_dir, (), ["chapter1.xhtml"])])
+        mocker.patch("builtins.open", mock_open(read_data="<html><body><p>Hello</p></body></html>"))
+        dom_chunker_cls = mocker.patch("engine.epub.parser.DomChunker")
+        dom_chunker_cls.return_value.chunk.return_value = []
+
+        parser.parse()
+
+        dom_chunker_cls.assert_called_with(token_limit=123, secondary_placeholder_limit=7)
+
     @pytest.mark.parametrize("file_ext", [".xhtml", ".html", ".xml", ".ncx"])
     def test_parse_processes_translatable_file_types(self, mocker, parser_instance, file_ext):
         """测试 parse 方法能正确解析所有可翻译的文件类型。"""
@@ -272,6 +289,31 @@ class TestParser:
         assert book.items[0].chunks[0].chunk_mode == "nav_text"
         assert book.items[0].chunks[0].nav_targets
         save_json.assert_called_once()
+
+    def test_rebuild_nav_item_chunks_passes_secondary_placeholder_limit(self, tmp_path, mocker):
+        """测试导航 chunk 重建时也会传递 secondary_placeholder_limit。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path), secondary_placeholder_limit=9)
+        item = EpubBook.model_validate(
+            {
+                "name": "my_book",
+                "path": str(epub_path),
+                "extract_path": str(tmp_path / "temp" / "my_book"),
+                "items": [
+                    {
+                        "id": "OEBPS/toc.ncx",
+                        "path": str(tmp_path / "temp" / "my_book" / "OEBPS" / "toc.ncx"),
+                        "content": "<ncx><navMap><navPoint><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>",
+                    }
+                ],
+            }
+        ).items[0]
+        dom_chunker_cls = mocker.patch("engine.epub.parser.DomChunker")
+        dom_chunker_cls.return_value.chunk.return_value = []
+
+        parser._rebuild_nav_item_chunks(item, is_nav_file=True)
+
+        dom_chunker_cls.assert_called_with(token_limit=1500, secondary_placeholder_limit=9)
 
     def test_load_json_upgrades_embedded_toc_chunks(self, tmp_path, mocker):
         """测试普通文件中的内嵌目录块 checkpoint 也会被重建为 nav_text 模式。"""

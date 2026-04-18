@@ -38,6 +38,7 @@ class Block(NamedTuple):
     html: str  # 元素的 HTML 字符串
     tokens: int  # token 数估算
     xpath: str  # 元素在 DOM 中的路径
+    secondary_placeholders: int  # PRE/CODE/STYLE 占位符数量
 
 
 class NavTextUnit(NamedTuple):
@@ -61,12 +62,14 @@ class DomChunker:
     # 不可翻译的元素（跳过，不进入 chunk）
     SKIP_TAGS = {"img", "svg", "math", "video", "audio", "canvas", "iframe"}
     SECONDARY_PLACEHOLDER_RE = re.compile(r"\[(PRE|CODE|STYLE):\d+\]")
+    DEFAULT_SECONDARY_PLACEHOLDER_LIMIT = 12
 
     # 不可拆分的容器（整体作为一个块，不递归拆分子元素）
     ATOMIC_TAGS = {"figure", "nav"}
 
-    def __init__(self, token_limit: int = 2000):
+    def __init__(self, token_limit: int = 2000, secondary_placeholder_limit: int = DEFAULT_SECONDARY_PLACEHOLDER_LIMIT):
         self.token_limit = token_limit
+        self.secondary_placeholder_limit = secondary_placeholder_limit
 
     def chunk(self, html: str, is_nav_file: bool = False) -> List[Chunk]:
         """
@@ -235,6 +238,7 @@ class DomChunker:
                 html=title_html,
                 tokens=count_tokens(title_html),
                 xpath=get_xpath(title),
+                secondary_placeholders=self._count_secondary_placeholders(title_html),
             )
         ]
 
@@ -262,13 +266,28 @@ class DomChunker:
                 continue
 
             child_tokens = count_tokens(child_html)
+            child_placeholder_count = self._count_secondary_placeholders(child_html)
             xpath = get_xpath(child)
 
-            if child_tokens <= self.token_limit:
-                blocks.append(Block(html=child_html, tokens=child_tokens, xpath=xpath))
+            if child_tokens <= self.token_limit and child_placeholder_count <= self.secondary_placeholder_limit:
+                blocks.append(
+                    Block(
+                        html=child_html,
+                        tokens=child_tokens,
+                        xpath=xpath,
+                        secondary_placeholders=child_placeholder_count,
+                    )
+                )
             elif hasattr(child, "name") and child.name in self.ATOMIC_TAGS:
                 # 不可拆分容器：整体作为一个块（可能超限）
-                blocks.append(Block(html=child_html, tokens=child_tokens, xpath=xpath))
+                blocks.append(
+                    Block(
+                        html=child_html,
+                        tokens=child_tokens,
+                        xpath=xpath,
+                        secondary_placeholders=child_placeholder_count,
+                    )
+                )
             else:
                 # 超限元素：递归到子元素
                 child_blocks = self._collect_blocks(child)
@@ -276,7 +295,14 @@ class DomChunker:
                     blocks.extend(child_blocks)
                 else:
                     # 叶子元素没有可继续细分的子块时，保留原元素，避免内容丢失。
-                    blocks.append(Block(html=child_html, tokens=child_tokens, xpath=xpath))
+                    blocks.append(
+                        Block(
+                            html=child_html,
+                            tokens=child_tokens,
+                            xpath=xpath,
+                            secondary_placeholders=child_placeholder_count,
+                        )
+                    )
 
         return blocks
 
@@ -286,15 +312,17 @@ class DomChunker:
         buffer_htmls: List[str] = []
         buffer_xpaths: List[str] = []
         buffer_tokens = 0
+        buffer_placeholders = 0
 
         def flush_buffer() -> None:
-            nonlocal buffer_htmls, buffer_xpaths, buffer_tokens
+            nonlocal buffer_htmls, buffer_xpaths, buffer_tokens, buffer_placeholders
             if not buffer_htmls:
                 return
             chunks.append(self._create_chunk(buffer_htmls, buffer_xpaths, buffer_tokens))
             buffer_htmls = []
             buffer_xpaths = []
             buffer_tokens = 0
+            buffer_placeholders = 0
 
         for block in blocks:
             if isinstance(block, Chunk):
@@ -302,12 +330,17 @@ class DomChunker:
                 chunks.append(block)
                 continue
 
-            if buffer_tokens + block.tokens > self.token_limit and buffer_htmls:
+            exceeds_token_limit = buffer_tokens + block.tokens > self.token_limit
+            exceeds_placeholder_limit = (
+                buffer_placeholders + block.secondary_placeholders > self.secondary_placeholder_limit
+            )
+            if (exceeds_token_limit or exceeds_placeholder_limit) and buffer_htmls:
                 flush_buffer()
 
             buffer_htmls.append(block.html)
             buffer_xpaths.append(block.xpath)
             buffer_tokens += block.tokens
+            buffer_placeholders += block.secondary_placeholders
 
         flush_buffer()
 
@@ -364,3 +397,6 @@ class DomChunker:
         if not units:
             return []
         return self._pack_nav_units(units)
+
+    def _count_secondary_placeholders(self, html: str) -> int:
+        return len(self.SECONDARY_PLACEHOLDER_RE.findall(html))

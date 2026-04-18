@@ -1,3 +1,4 @@
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -123,6 +124,43 @@ class TestTranslateStep:
         assert output.content.status == TranslationStatus.TRANSLATION_FAILED
         assert output.content.translated == ""
         assert call_count[0] == 3  # MAX_TRANSLATION_RETRIES
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_retry_includes_placeholder_position_error(self, mock_get_translator):
+        """translate_step: retry payload includes precise placeholder order mismatch details."""
+        chunk = make_chunk(original="<p>[CODE:1] [CODE:2] [CODE:3]</p>")
+        seen_inputs = []
+        responses = iter(
+            [
+                MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("<p>[CODE:1] [CODE:3] [CODE:2]</p>"),
+                ),
+                MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("<p>[CODE:1] [CODE:2] [CODE:3]</p>"),
+                ),
+            ]
+        )
+
+        async def translator_response(json_input):
+            seen_inputs.append(json.loads(json_input))
+            return next(responses)
+
+        mock_translator = MagicMock()
+        mock_translator.arun = translator_response
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.success is True
+        assert output.content.status == TranslationStatus.ACCEPTED_AS_IS
+        assert len(seen_inputs) == 2
+        assert "validation_error" not in seen_inputs[0]
+        assert "CODE 占位符顺序不一致" in seen_inputs[1]["validation_error"]
+        assert "位置2" in seen_inputs[1]["validation_error"]
+        assert "原始 [CODE:2]" in seen_inputs[1]["validation_error"]
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_original_echo_becomes_untranslated(self, mock_get_translator):
