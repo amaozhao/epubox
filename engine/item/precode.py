@@ -2,6 +2,7 @@ import re
 from typing import List
 
 from bs4 import BeautifulSoup
+from bs4.element import NavigableString
 
 from engine.core.logger import engine_logger as logger
 
@@ -19,6 +20,7 @@ class PreCodeExtractor:
         self.preserved_pre: List[str] = []  # 原始 pre 标签列表
         self.preserved_code: List[str] = []  # 原始 code 标签列表
         self.preserved_style: List[str] = []  # 原始 style 标签列表
+        self._code_run_separator_re = re.compile(r"^[\s/|:+(),.;=\\-]+$")
 
     def extract(self, html: str) -> str:
         """
@@ -46,7 +48,10 @@ class PreCodeExtractor:
             - 普通节点继续深度优先遍历
             - pre/code/style 视为原子块，命中后直接整体替换
             """
-            for child in list(node.children):
+            children = list(node.children)
+            index = 0
+            while index < len(children):
+                child = children[index]
                 if hasattr(child, "name"):
                     if child.name == "pre":
                         # 先保存原始内容（必须在 replace_with 之前！）
@@ -55,13 +60,16 @@ class PreCodeExtractor:
                         placeholder = f"[PRE:{len(self.preserved_pre)}]"
                         self.preserved_pre.append(original)
                         child.replace_with(placeholder)
+                        index += 1
                     elif child.name == "code":
-                        # 先保存原始内容（必须在 replace_with 之前！）
-                        original = str(child)
-                        # 替换当前 code 标签
+                        original, run_end = self._collect_code_run(children, index)
                         placeholder = f"[CODE:{len(self.preserved_code)}]"
                         self.preserved_code.append(original)
                         child.replace_with(placeholder)
+                        for extra in children[index + 1 : run_end]:
+                            if getattr(extra, "parent", None):
+                                extra.extract()
+                        index = run_end
                     elif child.name == "style":
                         # 先保存原始内容（必须在 replace_with 之前！）
                         original = str(child)
@@ -69,14 +77,53 @@ class PreCodeExtractor:
                         placeholder = f"[STYLE:{len(self.preserved_style)}]"
                         self.preserved_style.append(original)
                         child.replace_with(placeholder)
+                        index += 1
                     elif hasattr(child, "children"):
                         process_node(child)
+                        index += 1
+                    else:
+                        index += 1
+                else:
+                    index += 1
 
         # 处理 body 或直接处理 soup（处理 HTML 片段时 body 可能为 None）
         target = soup.body if soup.body else soup
         process_node(target)
 
         return str(soup)
+
+    def _collect_code_run(self, children: list, start_index: int) -> tuple[str, int]:
+        """
+        收集保守版 code-run。
+
+        仅合并以下模式：
+        - <code>...</code>
+        - 中间夹着纯文本分隔符（如 '/', '+', ':', 空格）
+        - 紧接着另一个 <code>...</code>
+        """
+        run_nodes = [children[start_index]]
+        index = start_index + 1
+
+        while index + 1 < len(children):
+            separator = children[index]
+            next_node = children[index + 1]
+            if not self._is_code_run_separator(separator):
+                break
+            if getattr(next_node, "name", None) != "code":
+                break
+            run_nodes.extend([separator, next_node])
+            index += 2
+
+        original = "".join(str(node) for node in run_nodes)
+        return original, start_index + len(run_nodes)
+
+    def _is_code_run_separator(self, node) -> bool:
+        if not isinstance(node, NavigableString):
+            return False
+        text = str(node)
+        if not text:
+            return False
+        return bool(self._code_run_separator_re.fullmatch(text))
 
     def restore(self, html: str) -> str:
         """

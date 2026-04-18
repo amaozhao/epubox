@@ -27,6 +27,85 @@ class TestPreCodeExtractor:
         assert result == "<p>text</p>[CODE:0]"
         assert extractor.preserved_code == ["<code>x=1</code>"]
 
+    def test_extract_adjacent_code_run_with_safe_separator(self):
+        """测试相邻 code + 安全分隔符会合并为一个占位符。"""
+        html = "<p>Use <code>Ctrl</code>/<code>Cmd</code> to continue.</p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>Use [CODE:0] to continue.</p>"
+        assert extractor.preserved_code == ["<code>Ctrl</code>/<code>Cmd</code>"]
+
+    def test_extract_code_run_does_not_merge_across_natural_language(self):
+        """测试 code 之间存在自然语言时不会合并。"""
+        html = "<p><code>kill</code> sends the <code>SIGTERM</code> signal.</p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>[CODE:0] sends the [CODE:1] signal.</p>"
+        assert extractor.preserved_code == ["<code>kill</code>", "<code>SIGTERM</code>"]
+
+    def test_extract_code_run_merges_three_codes(self):
+        """测试三个连续 code 片段会合并为单一占位符。"""
+        html = "<p><code>Ctrl</code>/<code>Alt</code>/<code>Del</code></p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>[CODE:0]</p>"
+        assert extractor.preserved_code == ["<code>Ctrl</code>/<code>Alt</code>/<code>Del</code>"]
+
+    def test_extract_code_run_merges_with_whitespace_and_newlines(self):
+        """测试分隔符包含空白和换行时仍可合并。"""
+        html = "<p><code>user</code> \n : \n <code>group</code></p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>[CODE:0]</p>"
+        assert extractor.preserved_code == ["<code>user</code> \n : \n <code>group</code>"]
+
+    def test_extract_code_run_preserves_attributes(self):
+        """测试合并后的 code-run 会保留各个 code 标签属性。"""
+        html = '<p><code class="k">Ctrl</code>/<code data-key="cmd">Cmd</code></p>'
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>[CODE:0]</p>"
+        assert 'class="k"' in extractor.preserved_code[0]
+        assert 'data-key="cmd"' in extractor.preserved_code[0]
+
+    def test_extract_code_run_does_not_merge_across_inline_html_separator(self):
+        """测试中间插入 HTML 节点时不会合并 code-run。"""
+        html = "<p><code>A</code><span>/</span><code>B</code></p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>[CODE:0]<span>/</span>[CODE:1]</p>"
+        assert extractor.preserved_code == ["<code>A</code>", "<code>B</code>"]
+
+    def test_extract_code_run_keeps_multiple_runs_separate(self):
+        """测试同一父节点中的多个独立 code-run 不会串成一个。"""
+        html = "<p><code>Ctrl</code>/<code>Cmd</code> or <code>Alt</code>/<code>Opt</code></p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>[CODE:0] or [CODE:1]</p>"
+        assert extractor.preserved_code == [
+            "<code>Ctrl</code>/<code>Cmd</code>",
+            "<code>Alt</code>/<code>Opt</code>",
+        ]
+
+    def test_extract_code_run_at_start_and_end_of_parent(self):
+        """测试 code-run 位于父节点起始或结尾位置时仍能正确提取。"""
+        html = "<p><code>Ctrl</code>/<code>Cmd</code> to continue with <code>Esc</code>/<code>Exit</code></p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>[CODE:0] to continue with [CODE:1]</p>"
+        assert extractor.preserved_code == [
+            "<code>Ctrl</code>/<code>Cmd</code>",
+            "<code>Esc</code>/<code>Exit</code>",
+        ]
+
     def test_extract_single_style(self):
         """测试单个 style 标签提取"""
         html = "<style>body { color: red; }</style><p>text</p>"
@@ -190,6 +269,18 @@ class TestRestore:
         result = extractor.restore(html)
 
         assert result == "<code>B</code><p>Hello</p><code>A</code>"
+
+    def test_restore_shuffled_merged_code_runs(self):
+        """测试合并后的 code-run 占位符打乱后也能正确恢复。"""
+        html = "[CODE:1]<p>Hello</p>[CODE:0]"
+        extractor = PreCodeExtractor()
+        extractor.preserved_code = [
+            "<code>Ctrl</code>/<code>Cmd</code>",
+            "<code>Alt</code>/<code>Opt</code>",
+        ]
+        result = extractor.restore(html)
+
+        assert result == "<code>Alt</code>/<code>Opt</code><p>Hello</p><code>Ctrl</code>/<code>Cmd</code>"
 
     def test_restore_style(self):
         """测试恢复 style 标签"""
@@ -418,6 +509,18 @@ class TestReplaceWithSimplified:
         from bs4 import BeautifulSoup
 
         html = "<p>Use <code>print()</code> here.</p>"
+        extractor = PreCodeExtractor()
+        extracted = extractor.extract(html)
+        restored = extractor.restore(extracted)
+
+        original_normalized = str(BeautifulSoup(html, "html.parser"))
+        assert restored == original_normalized
+
+    def test_roundtrip_merged_code_run(self):
+        """往返测试合并后的 code-run：提取后恢复，结果与原始一致。"""
+        from bs4 import BeautifulSoup
+
+        html = "<p>Use <code>Ctrl</code>/<code>Cmd</code> here.</p>"
         extractor = PreCodeExtractor()
         extracted = extractor.extract(html)
         restored = extractor.restore(extracted)
