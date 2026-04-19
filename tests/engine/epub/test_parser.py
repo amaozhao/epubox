@@ -141,8 +141,27 @@ class TestParser:
         assert item.id == "chapter1.xhtml"
         # item.content 应该是原始 HTML，不应该是经过 TagPreserver 处理后的占位符版本
         assert item.content == original_html
+        assert item.source_html_valid is True
+        assert item.source_html_errors == []
 
         assert "container.xml" not in [i.id for i in book.items]
+
+    def test_parse_persists_source_html_integrity_errors(self, mocker, parser_instance):
+        """测试原始 HTML 结构错误会被记录到 EpubItem 中，而不只是打日志。"""
+        mocker.patch.object(parser_instance, "extract")
+        mocker.patch.object(parser_instance, "load_json", return_value=None)
+        mocker.patch.object(parser_instance, "save_json")
+        mocker.patch("os.walk", return_value=[(parser_instance.output_dir, (), ["broken.xhtml"])])
+
+        broken_html = "<html><body><p>Alpha</body></html>"
+        mocker.patch("builtins.open", mock_open(read_data=broken_html))
+
+        book = parser_instance.parse()
+
+        item = book.items[0]
+        assert item.source_html_valid is False
+        assert item.source_html_errors
+        assert any("未闭合" in err or "标签交错" in err for err in item.source_html_errors)
 
     def test_parse_passes_secondary_placeholder_limit_to_chunker(self, mocker, tmp_path):
         """测试 Parser 会把 secondary_placeholder_limit 传递给 DomChunker。"""

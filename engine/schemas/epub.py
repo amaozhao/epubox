@@ -23,6 +23,8 @@ class EpubItem(BaseModel):
     id: str
     path: str
     content: str
+    source_html_valid: Optional[bool] = None
+    source_html_errors: Optional[List[str]] = None
     translated: Optional[str] = None
     placeholder: Optional[Dict[str, str]] = None  # 用于存储占位符信息
     chunks: Optional[List[Chunk]] = None  # 用于存储分块信息

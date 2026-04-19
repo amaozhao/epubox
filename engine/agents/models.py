@@ -6,17 +6,18 @@ from agno.models.mistral import MistralChat
 # from agno.models.openrouter import OpenRouter
 # from agno.models.openai.like import OpenAILike
 from ..core.config import settings
-from .streaming_openai_like import StreamingOpenAILike
+
+# from .streaming_openai_like import StreamingOpenAILike
 
 
 def build_primary_model():
-    if settings.MODEL_PROVIDER == "cr_proxy":
-        return StreamingOpenAILike(
-            id=settings.CR_PROXY_MODEL,
-            api_key=settings.CR_PROXY_API_KEY,
-            base_url=settings.CR_PROXY_BASE_URL,
-            max_completion_tokens=4096,
-        )
+    # if settings.MODEL_PROVIDER == "cr_proxy":
+    #     return StreamingOpenAILike(
+    #         id=settings.CR_PROXY_MODEL,
+    #         api_key=settings.CR_PROXY_API_KEY,
+    #         base_url=settings.CR_PROXY_BASE_URL,
+    #         max_completion_tokens=4096,
+    #     )
 
     # 主模型（直接使用 Mistral 替代失效的模型）
     # model = DeepSeek(base_url=settings.DEEPSEEK_BASE_URL, api_key=settings.DEEPSEEK_API_KEY)

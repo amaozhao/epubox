@@ -203,6 +203,8 @@ class Parser:
                         id=relative_path,
                         path=file_path,
                         content=original_content,
+                        source_html_valid=is_valid,
+                        source_html_errors=errors,
                         chunks=chunks,
                         preserved_pre=pre_extractor.preserved_pre,
                         preserved_code=pre_extractor.preserved_code,

@@ -21,6 +21,20 @@ class PreCodeExtractor:
         self.preserved_code: List[str] = []  # 原始 code 标签列表
         self.preserved_style: List[str] = []  # 原始 style 标签列表
         self._code_run_separator_re = re.compile(r"^[\s/|:+(),.;=\\-]+$")
+        self._code_like_keyword_re = re.compile(
+            r"(code|highlight|listing|programlisting|source|syntax|shell|terminal|console|pygments)",
+            re.IGNORECASE,
+        )
+        self._code_token_keyword_re = re.compile(
+            r"\b(import|from|class|def|return|async|await|function|const|let|var|print|SELECT|INSERT|UPDATE|DELETE)\b",
+            re.IGNORECASE,
+        )
+        self._prose_word_re = re.compile(r"[A-Za-z]{3,}")
+        self._identifier_like_re = re.compile(
+            r"(@?[A-Za-z_][A-Za-z0-9_]*\([^)]*\)|\b[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*\b|"
+            r"\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\b|\b[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+\b)"
+        )
+        self._inline_code_like_tags = {"code", "tt", "kbd", "samp", "var", "span"}
 
     def extract(self, html: str) -> str:
         """
@@ -61,8 +75,14 @@ class PreCodeExtractor:
                         self.preserved_pre.append(original)
                         child.replace_with(placeholder)
                         index += 1
-                    elif child.name == "code":
-                        original, run_end = self._collect_code_run(children, index)
+                    elif self._is_code_like_container(child):
+                        original = str(child)
+                        placeholder = f"[PRE:{len(self.preserved_pre)}]"
+                        self.preserved_pre.append(original)
+                        child.replace_with(placeholder)
+                        index += 1
+                    elif self._is_code_like_node_for_run(child):
+                        original, run_end = self._collect_code_like_run(children, index)
                         placeholder = f"[CODE:{len(self.preserved_code)}]"
                         self.preserved_code.append(original)
                         child.replace_with(placeholder)
@@ -92,14 +112,14 @@ class PreCodeExtractor:
 
         return str(soup)
 
-    def _collect_code_run(self, children: list, start_index: int) -> tuple[str, int]:
+    def _collect_code_like_run(self, children: list, start_index: int) -> tuple[str, int]:
         """
-        收集保守版 code-run。
+        收集保守版 code-like run。
 
         仅合并以下模式：
-        - <code>...</code>
+        - <code>...</code> 或内联 code-like 包装节点
         - 中间夹着纯文本分隔符（如 '/', '+', ':', 空格）
-        - 紧接着另一个 <code>...</code>
+        - 紧接着另一个 code-like 节点
         """
         run_nodes = [children[start_index]]
         index = start_index + 1
@@ -109,13 +129,21 @@ class PreCodeExtractor:
             next_node = children[index + 1]
             if not self._is_code_run_separator(separator):
                 break
-            if getattr(next_node, "name", None) != "code":
+            if not self._is_code_like_node_for_run(next_node):
                 break
             run_nodes.extend([separator, next_node])
             index += 2
 
         original = "".join(str(node) for node in run_nodes)
         return original, start_index + len(run_nodes)
+
+    def _is_code_like_node_for_run(self, node) -> bool:
+        name = getattr(node, "name", None)
+        if not name:
+            return False
+        if name == "code":
+            return True
+        return self._is_inline_code_like_node(node)
 
     def _is_code_run_separator(self, node) -> bool:
         if not isinstance(node, NavigableString):
@@ -124,6 +152,200 @@ class PreCodeExtractor:
         if not text:
             return False
         return bool(self._code_run_separator_re.fullmatch(text))
+
+    def _is_inline_code_like_node(self, element) -> bool:
+        name = getattr(element, "name", None)
+        if not name or name not in self._inline_code_like_tags or name == "code":
+            return False
+
+        if any(getattr(desc, "name", None) in {"pre", "style"} for desc in element.descendants):
+            return False
+
+        score, _ = self._score_inline_code_like_node(element)
+        return score >= 4
+
+    def _score_inline_code_like_node(self, element) -> tuple[int, list[str]]:
+        score = 0
+        reasons: list[str] = []
+
+        metadata_hits = self._count_code_like_metadata_hits(element)
+        if metadata_hits:
+            score += 3
+            reasons.append(f"metadata:{metadata_hits}")
+
+        tt_count = len(element.find_all("tt"))
+        if tt_count >= 1:
+            score += 4
+            reasons.append(f"tt:{tt_count}")
+
+        if getattr(element, "name", None) in {"tt", "kbd", "samp", "var"}:
+            score += 3
+            reasons.append(f"direct-tag:{element.name}")
+
+        semantic_code_tag_count = len(element.find_all(["code", "kbd", "samp", "var"]))
+        if semantic_code_tag_count >= 1:
+            score += 3
+            reasons.append(f"semantic-tags:{semantic_code_tag_count}")
+
+        text_chunks = [chunk.strip() for chunk in element.stripped_strings if chunk.strip()]
+        joined_text = " ".join(text_chunks)
+        if self._is_codeish_text_chunk(joined_text):
+            score += 2
+            reasons.append("codeish-text")
+
+        if 0 < len(joined_text) <= 80 and len(text_chunks) <= 3:
+            score += 1
+            reasons.append("compact")
+
+        prose_runs = sum(1 for chunk in text_chunks if len(self._prose_word_re.findall(chunk)) >= 4)
+        if prose_runs >= 1 and not metadata_hits and tt_count == 0 and semantic_code_tag_count == 0:
+            score -= 3
+            reasons.append(f"prose-penalty:{prose_runs}")
+
+        return score, reasons
+
+    def _is_code_like_container(self, element) -> bool:
+        """
+        识别语义上是代码块、但没有显式使用 pre/code 的容器。
+
+        典型场景：
+        - EPUB/Calibre 导出的 syntax-highlight 代码块：blockquote > span > tt > span
+        - 带 highlight/listing/source 等类名的代码容器
+        """
+        name = getattr(element, "name", None)
+        if not name or name in {"pre", "code", "style"}:
+            return False
+
+        block_like_tags = {
+            "blockquote",
+            "div",
+            "figure",
+            "section",
+            "article",
+            "aside",
+            "table",
+            "tbody",
+            "thead",
+            "tr",
+            "td",
+            "th",
+            "ul",
+            "ol",
+        }
+        if name not in block_like_tags:
+            return False
+
+        score, _ = self._score_code_like_container(element)
+        return score >= 5
+
+    def _score_code_like_container(self, element) -> tuple[int, list[str]]:
+        score = 0
+        reasons: list[str] = []
+
+        metadata_hits = self._count_code_like_metadata_hits(element)
+        if metadata_hits:
+            score += 5
+            reasons.append(f"metadata:{metadata_hits}")
+
+        tt_count = len(element.find_all("tt"))
+        if tt_count >= 3:
+            score += 5
+            reasons.append(f"tt:{tt_count}")
+        elif tt_count >= 1:
+            score += 2
+            reasons.append(f"tt:{tt_count}")
+
+        semantic_code_tag_count = len(element.find_all(["code", "kbd", "samp", "var"]))
+        if semantic_code_tag_count >= 3:
+            score += 4
+            reasons.append(f"semantic-tags:{semantic_code_tag_count}")
+        elif semantic_code_tag_count >= 1:
+            score += 2
+            reasons.append(f"semantic-tags:{semantic_code_tag_count}")
+
+        br_count = len(element.find_all("br"))
+        if br_count >= 2:
+            score += 2
+            reasons.append(f"br:{br_count}")
+
+        text_chunks = [chunk.strip() for chunk in element.stripped_strings if chunk.strip()]
+        short_chunk_count = sum(1 for chunk in text_chunks if len(chunk) <= 24)
+        if short_chunk_count >= 6:
+            score += 1
+            reasons.append(f"short-chunks:{short_chunk_count}")
+
+        joined_text = " ".join(text_chunks)
+        symbol_hits = len(re.findall(r"[{}\[\]();:=<>/$#]", joined_text))
+        if symbol_hits >= 6:
+            score += 2
+            reasons.append(f"symbols:{symbol_hits}")
+        elif symbol_hits >= 3:
+            score += 1
+            reasons.append(f"symbols:{symbol_hits}")
+
+        keyword_hits = len(self._code_token_keyword_re.findall(joined_text))
+        if keyword_hits >= 2:
+            score += 2
+            reasons.append(f"keywords:{keyword_hits}")
+
+        codeish_chunks = sum(1 for chunk in text_chunks if self._is_codeish_text_chunk(chunk))
+        if codeish_chunks >= 4:
+            score += 3
+            reasons.append(f"codeish-chunks:{codeish_chunks}")
+        elif codeish_chunks >= 2:
+            score += 2
+            reasons.append(f"codeish-chunks:{codeish_chunks}")
+        elif codeish_chunks >= 1:
+            score += 1
+            reasons.append(f"codeish-chunks:{codeish_chunks}")
+
+        prose_runs = sum(1 for chunk in text_chunks if len(self._prose_word_re.findall(chunk)) >= 5)
+        if codeish_chunks >= 2 and codeish_chunks >= prose_runs:
+            score += 1
+            reasons.append(f"code-dominance:{codeish_chunks}/{prose_runs}")
+
+        if element.name in {"table", "tbody", "thead", "tr", "td", "th", "ul", "ol"} and codeish_chunks >= 2:
+            score += 2
+            reasons.append(f"structure-bonus:{element.name}")
+
+        if prose_runs >= 2 and not metadata_hits and tt_count == 0 and semantic_code_tag_count == 0:
+            score -= 3
+            reasons.append(f"prose-penalty:{prose_runs}")
+        elif prose_runs >= 4 and codeish_chunks <= 1:
+            score -= 2
+            reasons.append(f"prose-heavy:{prose_runs}")
+
+        return score, reasons
+
+    def _has_code_like_metadata(self, element) -> bool:
+        return self._count_code_like_metadata_hits(element) > 0
+
+    def _count_code_like_metadata_hits(self, element) -> int:
+        candidate_values: List[str] = []
+        for attr in ("class", "id", "role", "epub:type", "title"):
+            value = element.get(attr)
+            if not value:
+                continue
+            if isinstance(value, list):
+                candidate_values.extend(str(v) for v in value)
+            else:
+                candidate_values.append(str(value))
+
+        return sum(1 for value in candidate_values if self._code_like_keyword_re.search(value))
+
+    def _is_codeish_text_chunk(self, text: str) -> bool:
+        chunk = text.strip()
+        if not chunk:
+            return False
+        if self._code_token_keyword_re.search(chunk):
+            return True
+        if self._identifier_like_re.search(chunk):
+            return True
+        if len(re.findall(r"[{}\[\]();:=<>/$#]", chunk)) >= 2 and len(chunk) <= 80:
+            return True
+        if chunk.startswith(("#", "//", "$ ", ">>>", "...")):
+            return True
+        return False
 
     def restore(self, html: str) -> str:
         """

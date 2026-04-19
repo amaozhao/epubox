@@ -1,4 +1,6 @@
 
+from bs4 import BeautifulSoup
+
 from engine.item.precode import (
     PreCodeExtractor,
     attempt_recovery,
@@ -26,6 +28,48 @@ class TestPreCodeExtractor:
 
         assert result == "<p>text</p>[CODE:0]"
         assert extractor.preserved_code == ["<code>x=1</code>"]
+
+    def test_extract_inline_tt_wrapper_as_code(self):
+        """测试段落中的 span>tt 技术片段会按 CODE 保护。"""
+        html = '<p>Use <span class="calibre2"><tt class="calibre4">BaseTool</tt></span> here.</p>'
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>Use [CODE:0] here.</p>"
+        assert extractor.preserved_code == ['<span class="calibre2"><tt class="calibre4">BaseTool</tt></span>']
+
+    def test_extract_inline_code_like_run_merges_adjacent_tt_wrappers(self):
+        """测试相邻内联技术片段会与安全分隔符合并为一个 CODE 占位符。"""
+        html = (
+            '<p>Tools: <span class="calibre2"><tt class="calibre4">ReadFileTool</tt></span> / '
+            '<span class="calibre2"><tt class="calibre4">WriteFileTool</tt></span></p>'
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>Tools: [CODE:0]</p>"
+        assert extractor.preserved_code == [
+            '<span class="calibre2"><tt class="calibre4">ReadFileTool</tt></span> / '
+            '<span class="calibre2"><tt class="calibre4">WriteFileTool</tt></span>'
+        ]
+
+    def test_extract_inline_semantic_code_tags_as_code(self):
+        """测试 kbd/samp/var 这类内联语义标签也会按 CODE 保护。"""
+        html = "<p>Press <kbd>Ctrl</kbd> and inspect <samp>stdout</samp> in <var>PATH</var>.</p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<p>Press [CODE:0] and inspect [CODE:1] in [CODE:2].</p>"
+        assert extractor.preserved_code == ["<kbd>Ctrl</kbd>", "<samp>stdout</samp>", "<var>PATH</var>"]
+
+    def test_extract_plain_prose_span_is_not_protected_as_code(self):
+        """测试普通 prose span 不会被误判为 CODE。"""
+        html = '<p><span class="bold">Important:</span> This is prose content.</p>'
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == html
+        assert extractor.preserved_code == []
 
     def test_extract_adjacent_code_run_with_safe_separator(self):
         """测试相邻 code + 安全分隔符会合并为一个占位符。"""
@@ -114,6 +158,128 @@ class TestPreCodeExtractor:
 
         assert result == "[STYLE:0]<p>text</p>"
         assert extractor.preserved_style == ["<style>body { color: red; }</style>"]
+
+    def test_extract_code_like_blockquote_with_tt_descendants_as_pre(self):
+        """测试 syntax-highlight 风格的 blockquote 代码块会整体按 PRE 保护。"""
+        html = (
+            '<blockquote>'
+            '<span class="calibre5"><tt class="calibre4"><span class="tok">print</span></tt></span>'
+            '<span class="calibre5"><tt class="calibre4"><span class="tok">(</span></tt></span>'
+            '<span class="calibre5"><tt class="calibre4"><span class="tok">x</span></tt></span>'
+            '</blockquote><p>text</p>'
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "[PRE:0]<p>text</p>"
+        assert extractor.preserved_pre[0].startswith("<blockquote>")
+        assert extractor.preserved_code == []
+
+    def test_extract_code_like_container_by_class_keyword_as_pre(self):
+        """测试带 highlight/listing 等类名的代码容器会整体按 PRE 保护。"""
+        html = '<div class="syntax-highlight"><span>const x = 1;</span></div><p>text</p>'
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "[PRE:0]<p>text</p>"
+        assert 'class="syntax-highlight"' in extractor.preserved_pre[0]
+
+    def test_extract_code_like_container_by_scoring_without_metadata(self):
+        """测试无显式 code 类名时，也能通过评分器识别典型代码块。"""
+        html = (
+            '<blockquote>'
+            '<span>async</span><br/>'
+            '<span>def</span><span> main():</span><br/>'
+            '<span>    return 1</span>'
+            '</blockquote><p>text</p>'
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "[PRE:0]<p>text</p>"
+        assert extractor.preserved_pre[0].startswith("<blockquote>")
+
+    def test_extract_code_like_table_by_scoring_as_pre(self):
+        """测试带有高密度代码 token 的表格会整体按 PRE 保护。"""
+        html = (
+            "<table>"
+            "<tr><td><tt>BaseTool</tt></td><td><tt>execute()</tt></td></tr>"
+            "<tr><td><tt>call_tool()</tt></td><td><tt>inputSchema</tt></td></tr>"
+            "</table><p>text</p>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "[PRE:0]<p>text</p>"
+        assert extractor.preserved_pre[0].startswith("<table>")
+
+    def test_extract_code_like_ordered_list_by_scoring_as_pre(self):
+        """测试由代码步骤组成的有序列表会整体按 PRE 保护。"""
+        html = (
+            "<ol>"
+            "<li><tt>import</tt> <tt>BaseTool</tt></li>"
+            "<li><tt>def</tt> <tt>execute()</tt></li>"
+            "<li><tt>return</tt> <tt>result</tt></li>"
+            "</ol><p>text</p>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "[PRE:0]<p>text</p>"
+        assert extractor.preserved_pre[0].startswith("<ol>")
+
+    def test_code_like_scoring_penalizes_prose_heavy_container(self):
+        """测试 prose 主导的容器即使有 span，也不会被误判为代码块。"""
+        html = (
+            "<blockquote>"
+            "<span>This is a long explanatory sentence about agent orchestration.</span>"
+            "<span>Another descriptive sentence continues the prose discussion.</span>"
+            "</blockquote><p>text</p>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == html
+        assert extractor.preserved_pre == []
+
+    def test_extract_regular_blockquote_prose_is_not_protected(self):
+        """测试普通 prose blockquote 不会被误判为代码块。"""
+        html = "<blockquote><p>This is a quote.</p></blockquote><p>text</p>"
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == "<blockquote><p>This is a quote.</p></blockquote><p>text</p>"
+        assert extractor.preserved_pre == []
+        assert extractor.preserved_code == []
+
+    def test_extract_regular_prose_table_is_not_protected(self):
+        """测试普通 prose 表格不会被误判为代码块。"""
+        html = (
+            "<table>"
+            "<tr><th>Term</th><th>Meaning</th></tr>"
+            "<tr><td>Agent</td><td>A software component that performs tasks.</td></tr>"
+            "</table><p>text</p>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == html
+        assert extractor.preserved_pre == []
+
+    def test_score_code_like_container_reports_strong_and_weak_signals(self):
+        """测试评分器会综合 metadata / tt / symbols 等信号。"""
+        html = (
+            '<blockquote class="listing">'
+            '<span><tt>print</tt></span><span><tt>(x)</tt></span><span><tt>;</tt></span>'
+            '</blockquote>'
+        )
+        extractor = PreCodeExtractor()
+        soup = BeautifulSoup(html, "html.parser")
+        score, reasons = extractor._score_code_like_container(soup.blockquote)
+
+        assert score >= 5
+        assert any(reason.startswith("metadata:") for reason in reasons)
+        assert any(reason.startswith("tt:") for reason in reasons)
 
     def test_extract_nested_pre_code(self):
         """测试嵌套的 pre>code 提取"""

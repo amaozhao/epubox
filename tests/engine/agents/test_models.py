@@ -47,7 +47,7 @@ class TestStreamingOpenAILike:
 
 
 class TestBuildPrimaryModel:
-    def test_build_primary_model_returns_proxy_model_when_enabled(self, monkeypatch):
+    def test_build_primary_model_ignores_proxy_provider_and_stays_on_mistral(self, monkeypatch):
         fake_settings = SimpleNamespace(
             MODEL_PROVIDER="cr_proxy",
             CR_PROXY_MODEL="gpt-5.3-codex-spark",
@@ -60,10 +60,8 @@ class TestBuildPrimaryModel:
 
         model = build_primary_model()
 
-        assert isinstance(model, StreamingOpenAILike)
-        assert model.id == "gpt-5.3-codex-spark"
-        assert model.api_key == "proxy-key"
-        assert str(model.base_url) == "http://proxy.example.com/api/v1"
+        assert isinstance(model, MistralChat)
+        assert model.id == "mistral-medium-latest"
 
     def test_build_primary_model_defaults_to_mistral(self, monkeypatch):
         fake_settings = SimpleNamespace(
