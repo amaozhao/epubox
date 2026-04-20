@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
+from engine.core.markup import get_markup_parser
 
 
 def verify_html_integrity(html: str) -> Tuple[bool, List[str]]:
@@ -202,8 +203,8 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
     if re.search(r"&(?![#][0-9]+|[a-zA-Z][a-zA-Z0-9]*;)", translated):
         return False, "XML 格式错误: 发现未转义的 & 字符（需使用 &amp;）"
 
-    original_soup = BeautifulSoup(original, "html.parser")
-    translated_soup = BeautifulSoup(translated, "html.parser")
+    original_soup = BeautifulSoup(original, get_markup_parser(original))
+    translated_soup = BeautifulSoup(translated, get_markup_parser(translated))
 
     original_elements = [e for e in original_soup.children if hasattr(e, "name") and e.name]
     translated_elements = [e for e in translated_soup.children if hasattr(e, "name") and e.name]

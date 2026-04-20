@@ -1,5 +1,8 @@
 
+import warnings
+
 from bs4 import BeautifulSoup
+from bs4 import XMLParsedAsHTMLWarning
 
 from engine.item.precode import (
     PreCodeExtractor,
@@ -28,6 +31,18 @@ class TestPreCodeExtractor:
 
         assert result == "<p>text</p>[CODE:0]"
         assert extractor.preserved_code == ["<code>x=1</code>"]
+
+    def test_extract_ncx_avoids_xml_parsed_as_html_warning(self):
+        """测试提取 NCX/XML 时不会触发 XMLParsedAsHTMLWarning。"""
+        html = """<?xml version='1.0' encoding='utf-8'?><ncx><navMap><navPoint id='ch1'><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>"""
+        extractor = PreCodeExtractor()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = extractor.extract(html)
+
+        assert "Chapter 1" in result
+        assert not any(issubclass(w.category, XMLParsedAsHTMLWarning) for w in caught)
 
     def test_extract_inline_tt_wrapper_as_code(self):
         """测试段落中的 span>tt 技术片段会按 CODE 保护。"""

@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from bs4.element import NavigableString
 
 from engine.core.logger import engine_logger as logger
+from engine.core.markup import get_markup_parser
 
 
 class PreCodeExtractor:
@@ -47,7 +48,7 @@ class PreCodeExtractor:
         Returns:
             处理后的 HTML
         """
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, get_markup_parser(html))
         self.preserved_pre = []
         self.preserved_code = []
         self.preserved_style = []

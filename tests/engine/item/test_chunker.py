@@ -1,5 +1,7 @@
 from unittest.mock import patch
+import warnings
 
+from bs4 import XMLParsedAsHTMLWarning
 
 from engine.item.chunker import DomChunker, count_tokens
 
@@ -210,6 +212,18 @@ class TestDomChunker:
         assert "xml version" not in chunks[0].original
         assert "[NAVTXT:0] Chapter 1" in chunks[0].original
         assert len(chunks[0].nav_targets) == 1
+
+    def test_toc_ncx_chunking_avoids_xml_parsed_as_html_warning(self):
+        """测试 NCX 分块不会触发 BeautifulSoup 的 XMLParsedAsHTMLWarning。"""
+        html = """<?xml version='1.0' encoding='utf-8'?><ncx><navMap><navPoint id='ch1'><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>"""
+        chunker = DomChunker(token_limit=1000)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            chunks = chunker.chunk(html, is_nav_file=True)
+
+        assert chunks
+        assert not any(issubclass(w.category, XMLParsedAsHTMLWarning) for w in caught)
 
     def test_empty_html(self):
         """测试空 HTML"""

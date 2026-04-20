@@ -1,4 +1,8 @@
 
+import warnings
+
+from bs4 import XMLParsedAsHTMLWarning
+
 from engine.agents.verifier import validate_translated_html, verify_final_html
 from engine.epub.replacer import DomReplacer
 from engine.item.chunker import DomChunker
@@ -219,6 +223,24 @@ class TestDomReplacer:
         assert result is not None
         assert "第1章" in result
         assert "第2章" in result
+
+    def test_nav_text_restore_avoids_xml_parsed_as_html_warning(self):
+        """导航文本回写不会触发 XMLParsedAsHTMLWarning。"""
+        html = "<ncx><navMap><navPoint id='ch1'><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>"
+        item = EpubItem(id="toc.ncx", path="/tmp/toc.ncx", content=html)
+        chunker = DomChunker(token_limit=1000)
+        chunk = chunker.chunk(html, is_nav_file=True)[0]
+        chunk.translated = chunk.original.replace("Chapter 1", "第1章")
+        chunk.status = TranslationStatus.COMPLETED
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = replacer.restore(item)
+
+        assert result is not None
+        assert not any(issubclass(w.category, XMLParsedAsHTMLWarning) for w in caught)
 
     def test_nav_text_marker_mismatch_fails_writeback(self):
         """导航文本模式 marker 不一致时应拒绝回写并标记失败。"""

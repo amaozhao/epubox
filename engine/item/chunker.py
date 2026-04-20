@@ -8,6 +8,7 @@ import tiktoken
 from bs4 import BeautifulSoup, NavigableString
 from bs4.element import ProcessingInstruction
 
+from engine.core.markup import get_markup_parser
 from engine.item.xpath import get_xpath
 from engine.schemas.chunk import Chunk, NavTextTarget
 
@@ -89,7 +90,7 @@ class DomChunker:
         Returns:
             chunks 列表
         """
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, get_markup_parser(html))
 
         if is_nav_file:
             nav_chunks = self._chunk_nav_text(soup)

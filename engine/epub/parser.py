@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from bs4 import BeautifulSoup
 
+from engine.core.markup import get_markup_parser
 from engine.item import DomChunker, PreCodeExtractor
 from engine.schemas import EpubBook, EpubItem
 from engine.schemas.epub import CHECKPOINT_SCHEMA_VERSION
@@ -46,7 +47,7 @@ class Parser:
         if cls._is_nav_file(relative_path):
             return True
 
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, get_markup_parser(html))
         if soup.find("navmap") or soup.find("navMap"):
             return True
 
@@ -73,7 +74,7 @@ class Parser:
 
     def _rebuild_nav_item_chunks(self, item: EpubItem, *, is_nav_file: bool) -> None:
         """将导航文件或内嵌目录块重建为文本节点模式。"""
-        soup = BeautifulSoup(item.content, "html.parser")
+        soup = BeautifulSoup(item.content, get_markup_parser(item.content))
         normalized_content = str(soup)
 
         pre_extractor = PreCodeExtractor()
@@ -201,7 +202,7 @@ class Parser:
                         logger.warning(f"原始 HTML/XML 结构不完整: {relative_path}, 错误: {errors}")
 
                     # Step 1: BeautifulSoup 解析（规范化 HTML，确保标签配对）
-                    soup = BeautifulSoup(original_content, "html.parser")
+                    soup = BeautifulSoup(original_content, get_markup_parser(original_content))
                     normalized_content = str(soup)
 
                     # Step 2: 提取 pre/code/style 标签为占位符（二级占位符方案）

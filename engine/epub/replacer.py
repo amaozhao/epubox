@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup, NavigableString
 
 from engine.agents.verifier import verify_final_html
 from engine.core.logger import engine_logger as logger
+from engine.core.markup import get_markup_parser
 from engine.item import PreCodeExtractor
 from engine.item.xpath import find_by_xpath
 from engine.schemas import Chunk, EpubItem, TranslationStatus
@@ -30,10 +31,11 @@ class DomReplacer:
         """
         source = item.content
         if item.preserved_pre or item.preserved_code or item.preserved_style:
-            normalized = str(BeautifulSoup(item.content, "html.parser"))
+            parser = get_markup_parser(item.content)
+            normalized = str(BeautifulSoup(item.content, parser))
             pre_extractor = PreCodeExtractor()
             source = pre_extractor.extract(normalized)
-        return BeautifulSoup(source, "html.parser")
+        return BeautifulSoup(source, get_markup_parser(source))
 
     def restore(self, item: EpubItem) -> str | None:
         """
