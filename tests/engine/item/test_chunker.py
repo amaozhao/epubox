@@ -132,6 +132,21 @@ class TestDomChunker:
             assert chunk.tokens <= 80
             assert chunk.nav_targets
 
+    def test_nav_file_splits_on_unit_limit_even_when_token_limit_is_high(self):
+        """测试导航文件在 token 很充足时也会按单块最大条目数切分，降低模型漏 marker 风险。"""
+        nav_points = "".join(
+            f'<navPoint id="ch{i}"><navLabel><text>Chapter {i}</text></navLabel></navPoint>'
+            for i in range(95)
+        )
+        html = f"<ncx><navMap>{nav_points}</navMap></ncx>"
+        chunker = DomChunker(token_limit=5000)
+
+        chunks = chunker.chunk(html, is_nav_file=True)
+
+        assert len(chunks) > 1
+        assert sum(len(chunk.nav_targets) for chunk in chunks) == 95
+        assert all(len(chunk.nav_targets) <= chunker.nav_unit_limit for chunk in chunks)
+
     def test_nav_xhtml_collects_multiple_nav_sections(self):
         """测试 nav.xhtml 中多个 nav 容器的文本都会被纳入导航分块。"""
         html = """

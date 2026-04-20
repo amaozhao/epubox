@@ -63,13 +63,20 @@ class DomChunker:
     SKIP_TAGS = {"img", "svg", "math", "video", "audio", "canvas", "iframe"}
     SECONDARY_PLACEHOLDER_RE = re.compile(r"\[(PRE|CODE|STYLE):\d+\]")
     DEFAULT_SECONDARY_PLACEHOLDER_LIMIT = 12
+    DEFAULT_NAV_UNIT_LIMIT = 48
 
     # 不可拆分的容器（整体作为一个块，不递归拆分子元素）
     ATOMIC_TAGS = {"figure", "nav"}
 
-    def __init__(self, token_limit: int = 2000, secondary_placeholder_limit: int = DEFAULT_SECONDARY_PLACEHOLDER_LIMIT):
+    def __init__(
+        self,
+        token_limit: int = 2000,
+        secondary_placeholder_limit: int = DEFAULT_SECONDARY_PLACEHOLDER_LIMIT,
+        nav_unit_limit: int = DEFAULT_NAV_UNIT_LIMIT,
+    ):
         self.token_limit = token_limit
         self.secondary_placeholder_limit = secondary_placeholder_limit
+        self.nav_unit_limit = nav_unit_limit
 
     def chunk(self, html: str, is_nav_file: bool = False) -> List[Chunk]:
         """
@@ -198,7 +205,9 @@ class DomChunker:
         buffer_tokens = 0
 
         for unit in units:
-            if buffer_lines and buffer_tokens + unit.tokens > self.token_limit:
+            exceeds_token_limit = buffer_tokens + unit.tokens > self.token_limit
+            exceeds_unit_limit = len(buffer_targets) >= self.nav_unit_limit
+            if buffer_lines and (exceeds_token_limit or exceeds_unit_limit):
                 chunks.append(self._create_nav_chunk(buffer_lines, buffer_targets, buffer_tokens))
                 buffer_lines = []
                 buffer_targets = []
