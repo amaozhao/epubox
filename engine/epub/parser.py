@@ -11,6 +11,8 @@ from engine.schemas.epub import CHECKPOINT_SCHEMA_VERSION
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
 
+NAV_CHUNK_UPGRADE_THRESHOLD = 24
+
 
 class Parser:
     def __init__(self, path: str, limit: int = 1500, secondary_placeholder_limit: int = 12):
@@ -38,6 +40,20 @@ class Parser:
     def _is_nav_file(relative_path: str) -> bool:
         lowered = relative_path.lower()
         return "toc.ncx" in lowered or lowered.endswith(("nav.xhtml", "toc.xhtml"))
+
+    @classmethod
+    def _is_nav_document(cls, relative_path: str, html: str) -> bool:
+        if cls._is_nav_file(relative_path):
+            return True
+
+        soup = BeautifulSoup(html, "html.parser")
+        if soup.find("navmap") or soup.find("navMap"):
+            return True
+
+        if soup.find("ncx") and (soup.find("navpoint") or soup.find("navPoint")):
+            return True
+
+        return cls._has_embedded_toc_nav(html)
 
     @staticmethod
     def _has_embedded_toc_nav(html: str) -> bool:
@@ -75,16 +91,19 @@ class Parser:
     def _upgrade_legacy_nav_chunks(self, book: EpubBook) -> bool:
         upgraded = False
         for item in book.items:
-            is_nav_file = self._is_nav_file(item.id)
-            has_embedded_toc = not is_nav_file and self._has_embedded_toc_nav(item.content)
-            if not is_nav_file and not has_embedded_toc:
+            is_nav_file = self._is_nav_document(item.id, item.content)
+            if not is_nav_file:
                 continue
             if not item.chunks:
                 self._rebuild_nav_item_chunks(item, is_nav_file=is_nav_file)
                 upgraded = True
                 continue
 
-            if any(chunk.chunk_mode == "nav_text" for chunk in item.chunks):
+            has_oversized_nav_chunk = any(
+                chunk.chunk_mode == "nav_text" and len(chunk.nav_targets) >= NAV_CHUNK_UPGRADE_THRESHOLD
+                for chunk in item.chunks
+            )
+            if any(chunk.chunk_mode == "nav_text" for chunk in item.chunks) and not has_oversized_nav_chunk:
                 continue
 
             self._rebuild_nav_item_chunks(item, is_nav_file=is_nav_file)
@@ -190,7 +209,7 @@ class Parser:
                     content_after_pre = pre_extractor.extract(normalized_content)
 
                     # Step 3: 检测是否是 EPUB 导航文件
-                    is_nav_file = self._is_nav_file(relative_path)
+                    is_nav_file = self._is_nav_document(relative_path, original_content)
 
                     # Step 4: 使用 DomChunker 进行 DOM 级别分块
                     dom_chunker = DomChunker(

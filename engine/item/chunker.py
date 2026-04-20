@@ -63,7 +63,7 @@ class DomChunker:
     SKIP_TAGS = {"img", "svg", "math", "video", "audio", "canvas", "iframe"}
     SECONDARY_PLACEHOLDER_RE = re.compile(r"\[(PRE|CODE|STYLE):\d+\]")
     DEFAULT_SECONDARY_PLACEHOLDER_LIMIT = 12
-    DEFAULT_NAV_UNIT_LIMIT = 48
+    DEFAULT_NAV_UNIT_LIMIT = 24
 
     # 不可拆分的容器（整体作为一个块，不递归拆分子元素）
     ATOMIC_TAGS = {"figure", "nav"}

@@ -147,6 +147,21 @@ class TestDomChunker:
         assert sum(len(chunk.nav_targets) for chunk in chunks) == 95
         assert all(len(chunk.nav_targets) <= chunker.nav_unit_limit for chunk in chunks)
 
+    def test_nav_file_splits_short_titles_before_reaching_48_markers(self):
+        """测试即使标题很短，默认导航分块也不会把 48 条 marker 塞进同一个 chunk。"""
+        nav_points = "".join(
+            f'<navPoint id="ch{i}"><navLabel><text>Chapter {i}</text></navLabel></navPoint>'
+            for i in range(48)
+        )
+        html = f"<ncx><navMap>{nav_points}</navMap></ncx>"
+        chunker = DomChunker(token_limit=5000)
+
+        chunks = chunker.chunk(html, is_nav_file=True)
+
+        assert len(chunks) > 1
+        assert sum(len(chunk.nav_targets) for chunk in chunks) == 48
+        assert all(len(chunk.nav_targets) < 48 for chunk in chunks)
+
     def test_nav_xhtml_collects_multiple_nav_sections(self):
         """测试 nav.xhtml 中多个 nav 容器的文本都会被纳入导航分块。"""
         html = """

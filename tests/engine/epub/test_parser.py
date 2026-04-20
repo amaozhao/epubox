@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, call, mock_open
 import pytest
 
 from engine.epub.parser import Parser
+from engine.item.chunker import DomChunker
 from engine.schemas import Chunk, EpubBook
 from engine.schemas.chunk import NavTextTarget
 from engine.schemas.epub import CHECKPOINT_SCHEMA_VERSION
@@ -49,6 +50,29 @@ class TestParser:
     )
     def test_is_nav_file(self, relative_path, expected):
         assert Parser._is_nav_file(relative_path) is expected
+
+    @pytest.mark.parametrize(
+        ("relative_path", "html", "expected"),
+        [
+            (
+                "OEBPS/toc01.xml",
+                "<ncx><navMap><navPoint><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>",
+                True,
+            ),
+            (
+                "OEBPS/content.opf",
+                "<package><metadata><dc:title>Book</dc:title></metadata></package>",
+                False,
+            ),
+            (
+                "OEBPS/Text/ch1.xhtml",
+                '<html><body><nav epub:type="toc"><ol><li><a href="#c1">Chapter 1</a></li></ol></nav></body></html>',
+                True,
+            ),
+        ],
+    )
+    def test_is_nav_document(self, relative_path, html, expected):
+        assert Parser._is_nav_document(relative_path, html) is expected
 
     @pytest.mark.parametrize(
         ("html", "expected"),
@@ -179,6 +203,29 @@ class TestParser:
         parser.parse()
 
         dom_chunker_cls.assert_called_with(token_limit=123, secondary_placeholder_limit=7)
+
+    def test_parse_treats_ncx_content_with_nonstandard_filename_as_nav_file(self, mocker, tmp_path):
+        """测试即使文件名不是 toc.ncx，只要内容是 NCX/navMap 也走 nav_text 模式。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+
+        mocker.patch.object(parser, "extract")
+        mocker.patch.object(parser, "load_json", return_value=None)
+        mocker.patch.object(parser, "save_json")
+        mocker.patch("os.walk", return_value=[(parser.output_dir, (), ["toc01.xml"])])
+        mocker.patch(
+            "builtins.open",
+            mock_open(
+                read_data="<ncx><navMap><navPoint><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>"
+            ),
+        )
+        dom_chunker_cls = mocker.patch("engine.epub.parser.DomChunker")
+        dom_chunker_cls.return_value.chunk.return_value = []
+
+        parser.parse()
+
+        dom_chunker_cls.return_value.chunk.assert_called_once()
+        assert dom_chunker_cls.return_value.chunk.call_args.kwargs["is_nav_file"] is True
 
     @pytest.mark.parametrize("file_ext", [".xhtml", ".html", ".xml", ".ncx"])
     def test_parse_processes_translatable_file_types(self, mocker, parser_instance, file_ext):
@@ -401,4 +448,172 @@ class TestParser:
         assert book is not None
         assert book.items[0].chunks[0].chunk_mode == "nav_text"
         assert book.items[0].chunks[0].nav_targets
+        save_json.assert_called_once()
+
+    def test_load_json_upgrades_nonstandard_ncx_filename_chunks(self, tmp_path, mocker):
+        """测试文件名不标准但内容是 NCX/navMap 的 checkpoint 也会被重建为 nav_text 模式。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        mocker.patch.object(
+            parser,
+            "_rebuild_nav_item_chunks",
+            side_effect=lambda item, *, is_nav_file: setattr(
+                item,
+                "chunks",
+                [
+                    Chunk(
+                        name="nav-text",
+                        original="[NAVTXT:0] Chapter 1",
+                        translated=None,
+                        status="pending",
+                        tokens=10,
+                        chunk_mode="nav_text",
+                        xpaths=[],
+                        nav_targets=[
+                            NavTextTarget(
+                                marker="[NAVTXT:0]",
+                                xpath="/ncx/navMap/navPoint/navLabel/text",
+                                text_index=0,
+                                original_text="Chapter 1",
+                            )
+                        ],
+                    )
+                ],
+            ),
+        )
+        checkpoint_path = tmp_path / "my_book.json"
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "name": "my_book",
+                    "path": str(epub_path),
+                    "extract_path": str(tmp_path / "temp" / "my_book"),
+                    "items": [
+                        {
+                            "id": "OEBPS/toc01.xml",
+                            "path": str(tmp_path / "temp" / "my_book" / "OEBPS" / "toc01.xml"),
+                            "content": "<ncx><navMap><navPoint><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>",
+                            "chunks": [
+                                {
+                                    "name": "legacy-nav",
+                                    "original": "<navPoint><navLabel><text>Chapter 1</text></navLabel></navPoint>",
+                                    "translated": None,
+                                    "status": "pending",
+                                    "tokens": 20,
+                                    "xpaths": ["/ncx/navMap/navPoint"],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        save_json = mocker.patch.object(parser, "save_json")
+
+        book = parser.load_json()
+
+        assert book is not None
+        assert book.items[0].chunks[0].chunk_mode == "nav_text"
+        assert book.items[0].chunks[0].nav_targets
+        save_json.assert_called_once()
+
+    def test_load_json_rebuilds_oversized_nav_text_chunks(self, tmp_path, mocker):
+        """测试已是 nav_text 但单块过大的 checkpoint 也会按新策略重建。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        rebuild = mocker.patch.object(
+            parser,
+            "_rebuild_nav_item_chunks",
+            side_effect=lambda item, *, is_nav_file: setattr(
+                item,
+                "chunks",
+                [
+                    Chunk(
+                        name="nav-a",
+                        original="[NAVTXT:0] Chapter 1",
+                        translated=None,
+                        status="pending",
+                        tokens=10,
+                        chunk_mode="nav_text",
+                        xpaths=[],
+                        nav_targets=[
+                            NavTextTarget(
+                                marker="[NAVTXT:0]",
+                                xpath="/ncx/navMap/navPoint[1]/navLabel/text",
+                                text_index=0,
+                                original_text="Chapter 1",
+                            )
+                        ],
+                    ),
+                    Chunk(
+                        name="nav-b",
+                        original="[NAVTXT:1] Chapter 2",
+                        translated=None,
+                        status="pending",
+                        tokens=10,
+                        chunk_mode="nav_text",
+                        xpaths=[],
+                        nav_targets=[
+                            NavTextTarget(
+                                marker="[NAVTXT:1]",
+                                xpath="/ncx/navMap/navPoint[2]/navLabel/text",
+                                text_index=0,
+                                original_text="Chapter 2",
+                            )
+                        ],
+                    ),
+                ],
+            ),
+        )
+        oversized_targets = [
+            {
+                "marker": f"[NAVTXT:{i}]",
+                "xpath": f"/ncx/navMap/navPoint[{i+1}]/navLabel/text",
+                "text_index": 0,
+                "original_text": f"Chapter {i}",
+            }
+            for i in range(DomChunker.DEFAULT_NAV_UNIT_LIMIT)
+        ]
+        checkpoint_path = tmp_path / "my_book.json"
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "name": "my_book",
+                    "path": str(epub_path),
+                    "extract_path": str(tmp_path / "temp" / "my_book"),
+                    "items": [
+                        {
+                            "id": "OEBPS/toc.ncx",
+                            "path": str(tmp_path / "temp" / "my_book" / "OEBPS" / "toc.ncx"),
+                            "content": "<ncx><navMap><navPoint><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>",
+                            "chunks": [
+                                {
+                                    "name": "oversized-nav",
+                                    "original": "\n".join(
+                                        f"[NAVTXT:{i}] Chapter {i}" for i in range(DomChunker.DEFAULT_NAV_UNIT_LIMIT)
+                                    ),
+                                    "translated": None,
+                                    "status": "pending",
+                                    "tokens": 200,
+                                    "chunk_mode": "nav_text",
+                                    "xpaths": [],
+                                    "nav_targets": oversized_targets,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        save_json = mocker.patch.object(parser, "save_json")
+
+        book = parser.load_json()
+
+        assert book is not None
+        assert len(book.items[0].chunks) == 2
+        rebuild.assert_called_once()
         save_json.assert_called_once()
