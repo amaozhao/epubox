@@ -256,6 +256,40 @@ class TestDomReplacer:
         assert "第1章" in result
         assert 'id="toc-link-1"' in result
 
+    def test_writeback_uses_preprocessed_dom_when_code_placeholders_shift_sibling_indexes(self):
+        """预处理移除 code-like 容器后，回写仍应命中原始目标节点。"""
+        html = (
+            "<html><body><section>"
+            "<div class='highlight'><tt>x</tt></div>"
+            "<div><p>Hello there more text here for chunking split</p></div>"
+            "</section></body></html>"
+        )
+        item = EpubItem(
+            id="ch-shift.xhtml",
+            path="/tmp/ch-shift.xhtml",
+            content=html,
+            preserved_pre=["<div class=\"highlight\"><tt>x</tt></div>"],
+            preserved_code=[],
+            preserved_style=[],
+        )
+        chunk = Chunk(
+            name="shift001",
+            original="<p>Hello there more text here for chunking split</p>",
+            translated="<p>你好，这里是一段会触发递归分块的文本</p>",
+            status=TranslationStatus.COMPLETED,
+            tokens=10,
+            xpaths=["/html/body/section/div/p"],
+        )
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+
+        assert result is not None
+        assert "你好，这里是一段会触发递归分块的文本" in result
+        assert "<tt>x</tt>" in result
+        assert chunk.status == TranslationStatus.COMPLETED
+
 
 class TestValidateTranslatedHtml:
     """测试翻译结果验证"""

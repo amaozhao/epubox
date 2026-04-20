@@ -21,6 +21,20 @@ class DomReplacer:
     NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
     SECONDARY_PLACEHOLDER_PATTERN = re.compile(r"\[(PRE|CODE|STYLE):\d+\]")
 
+    def _build_writeback_soup(self, item: EpubItem) -> BeautifulSoup:
+        """
+        用与分块阶段一致的预处理 DOM 做 xpath 回写。
+
+        PreCodeExtractor 会把部分节点替换成占位符文本；如果直接在原始 DOM 上
+        回写，同名兄弟索引可能漂移，导致 chunk 记录的 xpath 对不上节点。
+        """
+        source = item.content
+        if item.preserved_pre or item.preserved_code or item.preserved_style:
+            normalized = str(BeautifulSoup(item.content, "html.parser"))
+            pre_extractor = PreCodeExtractor()
+            source = pre_extractor.extract(normalized)
+        return BeautifulSoup(source, "html.parser")
+
     def restore(self, item: EpubItem) -> str | None:
         """
         将翻译后的 chunks 恢复到原始 HTML
@@ -38,7 +52,7 @@ class DomReplacer:
             return item.content
 
         # 1. 解析原始 HTML
-        soup = BeautifulSoup(item.content, "html.parser")
+        soup = self._build_writeback_soup(item)
 
         # 2. 按 xpath 替换
         for chunk in item.chunks:
