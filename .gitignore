@@ -217,3 +217,5 @@ temp/
 *.epub
 logs/
 .omx/
+.codex
+mock_epub_path.json

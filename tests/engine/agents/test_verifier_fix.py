@@ -92,3 +92,19 @@ class TestValidateTranslatedHtmlTagErrors:
         is_valid, error = validate_translated_html(original, translated)
         assert not is_valid
         assert "CODE 占位符归属/数量不一致" in error
+
+    def test_validate_rejects_attribute_boundary_corruption(self):
+        """测试模型改坏标签属性边界时会在 chunk 校验阶段被拦截。"""
+        original = (
+            '<figure><img alt="The nine-dots puzzle challenges players to join the nine dots." '
+            'id="Business0001483" src="../images/Page-087_1.jpg"/></figure>'
+        )
+        translated = (
+            '<figure><img alt="九点连线谜题要求玩家连接九个点。” id="Business0001483" '
+            'src="../images/Page-087_1.jpg"/></figure>'
+        )
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert not is_valid
+        assert "属性" in error

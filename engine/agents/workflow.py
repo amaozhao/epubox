@@ -8,6 +8,7 @@ from agno.workflow import Step, StepInput, StepOutput, Workflow
 from engine.core.logger import engine_logger as logger
 from engine.schemas import Chunk, TranslationStatus
 
+from .fallback_runtime import run_fallback_agent
 from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
@@ -120,7 +121,11 @@ async def _call_translator(
 
     try:
         translator = get_translator(fallback_model) if use_fallback else get_translator()
-        response = await translator.arun(json.dumps(translator_input, ensure_ascii=False, indent=2))
+        payload = json.dumps(translator_input, ensure_ascii=False, indent=2)
+        if use_fallback:
+            response = await run_fallback_agent("translate", translator, payload)
+        else:
+            response = await translator.arun(payload)
 
         raw_content = response.content
         if response.status == RunStatus.error:
@@ -142,12 +147,19 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
     used_fallback = False
 
     for attempt in range(MAX_TRANSLATION_RETRIES):
+        use_fallback_this_attempt = used_fallback or (attempt == MAX_TRANSLATION_RETRIES - 1 and last_error_msg is not None)
         try:
-            translated = await _call_translator(original, glossary, None, last_error_msg, use_fallback=used_fallback)
+            translated = await _call_translator(
+                original,
+                glossary,
+                None,
+                last_error_msg,
+                use_fallback=use_fallback_this_attempt,
+            )
             translated = translated.replace("\\n", "\n")
         except Exception as e:
             error_str = str(e)
-            if not used_fallback and is_content_safety_error(error_str):
+            if not use_fallback_this_attempt and not used_fallback and is_content_safety_error(error_str):
                 logger.warning("主模型翻译失败（内容安全审核），尝试使用备用模型...")
                 used_fallback = True
                 last_error_msg = None
@@ -230,21 +242,26 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
     used_fallback = False
 
     for attempt in range(max_attempts):
-        proofer = get_proofer(fallback_model) if used_fallback else get_proofer()
+        use_fallback_this_attempt = used_fallback or attempt == max_attempts - 1
+        proofer = get_proofer(fallback_model) if use_fallback_this_attempt else get_proofer()
         try:
-            response = await proofer.arun(json.dumps(proofer_input, ensure_ascii=False, indent=2))
+            payload = json.dumps(proofer_input, ensure_ascii=False, indent=2)
+            if use_fallback_this_attempt:
+                response = await run_fallback_agent("proofread", proofer, payload)
+            else:
+                response = await proofer.arun(payload)
             if isinstance(response.content, ProofreadingResult):
                 proofreading_result = response.content
                 break
             if response.status == RunStatus.error:
                 error_content = str(response.content) if response.content else ""
-                if not used_fallback and is_content_safety_error(error_content):
+                if not use_fallback_this_attempt and not used_fallback and is_content_safety_error(error_content):
                     logger.warning("主模型校对失败（内容安全审核），尝试使用备用模型...")
                     used_fallback = True
                     continue
             logger.warning(f"校对步骤失败：代理返回了意外的响应类型 (attempt {attempt + 1}/{max_attempts})")
         except Exception as e:
-            if not used_fallback and is_content_safety_error(str(e)):
+            if not use_fallback_this_attempt and not used_fallback and is_content_safety_error(str(e)):
                 logger.warning("主模型校对异常（内容安全审核），尝试使用备用模型...")
                 used_fallback = True
                 continue

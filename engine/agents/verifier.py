@@ -180,6 +180,44 @@ def _classify_unchanged_translation(original_soup: BeautifulSoup, translated_sou
     return "echo"
 
 
+def _normalize_attr_value(value):
+    if isinstance(value, list):
+        return tuple(value)
+    return value
+
+
+def _collect_attribute_mismatches(original_elements: list, translated_elements: list) -> list[str]:
+    """按 DOM 顺序比较所有标签属性，防止模型污染属性边界或改写结构属性。"""
+    mismatches: list[str] = []
+
+    for element_index, (orig_root, trans_root) in enumerate(zip(original_elements, translated_elements), start=1):
+        orig_tags = [orig_root, *orig_root.find_all(True)]
+        trans_tags = [trans_root, *trans_root.find_all(True)]
+
+        if len(orig_tags) != len(trans_tags):
+            mismatches.append(
+                f"元素{element_index} 子标签数量不一致: 原始 {len(orig_tags)}, 翻译 {len(trans_tags)}"
+            )
+            continue
+
+        for tag_index, (orig_tag, trans_tag) in enumerate(zip(orig_tags, trans_tags), start=1):
+            if orig_tag.name != trans_tag.name:
+                mismatches.append(
+                    f"元素{element_index} 子标签{tag_index} 标签名不一致: 原始 <{orig_tag.name}>, 翻译 <{trans_tag.name}>"
+                )
+                continue
+
+            orig_attrs = {key: _normalize_attr_value(value) for key, value in orig_tag.attrs.items()}
+            trans_attrs = {key: _normalize_attr_value(value) for key, value in trans_tag.attrs.items()}
+            if orig_attrs != trans_attrs:
+                mismatches.append(
+                    f"元素{element_index} 子标签{tag_index} <{orig_tag.name}> 属性不一致: "
+                    f"原始 {orig_attrs}, 翻译 {trans_attrs}"
+                )
+
+    return mismatches
+
+
 def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]:
     """
     验证翻译结果的 HTML 结构完整性（chunk 级别）
@@ -224,6 +262,11 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
     for i, (orig, trans) in enumerate(zip(original_elements, translated_elements)):
         if orig.name != trans.name:
             return False, f"第 {i + 1} 个元素标签不一致: 原始 <{orig.name}>, 翻译 <{trans.name}>"
+
+    # 2.5 标签属性一致，避免模型污染属性值或引号边界
+    attribute_mismatches = _collect_attribute_mismatches(original_elements, translated_elements)
+    if attribute_mismatches:
+        return False, f"标签属性不一致: {'; '.join(attribute_mismatches)}"
 
     # 3. PreCodeExtractor 占位符完整且索引不变
     for label, pattern in [

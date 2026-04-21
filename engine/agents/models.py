@@ -6,8 +6,7 @@ from agno.models.mistral import MistralChat
 # from agno.models.openrouter import OpenRouter
 # from agno.models.openai.like import OpenAILike
 from ..core.config import settings
-
-# from .streaming_openai_like import StreamingOpenAILike
+from .streaming_openai_like import StreamingOpenAILike
 
 
 def build_primary_model():
@@ -34,5 +33,14 @@ def build_primary_model():
 
 model = build_primary_model()
 
-# 备用模型（Mistral，用于内容安全审核失败时 fallback）
-fallback_model = MistralChat(id=settings.MISTRAL_MODEL, api_key=settings.MISTRAL_API_KEY)
+
+def build_fallback_model():
+    return StreamingOpenAILike(
+        id=settings.CR_PROXY_MODEL,
+        api_key=settings.CR_PROXY_API_KEY,
+        base_url=settings.CR_PROXY_BASE_URL,
+        max_completion_tokens=4096,
+    )
+
+
+fallback_model = build_fallback_model()

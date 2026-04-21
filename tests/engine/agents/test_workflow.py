@@ -2,6 +2,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 from agno.run import RunStatus
 from agno.workflow import Workflow
 
@@ -25,6 +26,14 @@ class MockTranslationResponse(TranslationResponse):
 class MockProofreadingResult(ProofreadingResult):
     def __init__(self, corrections: dict):
         super().__init__(corrections=corrections)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def reset_fallback_runtime_between_tests(monkeypatch):
+    from engine.agents import fallback_runtime
+
+    await fallback_runtime.reset_fallback_runtime_state()
+    monkeypatch.setattr(fallback_runtime, "FALLBACK_MIN_INTERVAL_SECONDS", 0.0)
 
 
 def make_chunk(
@@ -279,8 +288,9 @@ class TestTranslateStep:
         assert output.content.translated == "<p>python -m pytest tests/engine/agents/test_workflow.py -k accepted_as_is</p>"
         assert mock_translator.arun.await_count == 1
 
+    @patch("engine.agents.workflow.run_fallback_agent")
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_content_safety_fallback(self, mock_get_translator):
+    async def test_translate_step_content_safety_fallback(self, mock_get_translator, mock_run_fallback_agent):
         """translate_step: content safety error on first call triggers fallback model"""
         chunk = make_chunk(original="<p>Hello</p>")
         call_count = [0]
@@ -302,12 +312,47 @@ class TestTranslateStep:
         mock_translator = MagicMock()
         mock_translator.arun = safety_then_success
         mock_get_translator.return_value = mock_translator
+        async def fallback_success(kind, agent, payload):
+            return await safety_then_success(payload)
+
+        mock_run_fallback_agent.side_effect = fallback_success
 
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
 
         assert output.content.status == TranslationStatus.TRANSLATED
         assert call_count[0] == 2
+
+    @patch("engine.agents.workflow.run_fallback_agent")
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_validation_failure_uses_fallback_on_last_attempt(
+        self, mock_get_translator, mock_run_fallback_agent
+    ):
+        """translate_step: final retry switches to fallback agent for non-safety validation failures."""
+        chunk = make_chunk(original="<p>Hello</p>")
+        call_count = [0]
+
+        async def invalid_response(json_input):
+            call_count[0] += 1
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>你好</p><p>额外</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = invalid_response
+        mock_get_translator.return_value = mock_translator
+        mock_run_fallback_agent.return_value = MagicMock(
+            status=RunStatus.completed,
+            content=MockTranslationResponse("<p>你好</p>"),
+        )
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert call_count[0] == 2
+        mock_run_fallback_agent.assert_awaited_once()
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_nav_text_success(self, mock_get_translator):
@@ -392,8 +437,9 @@ class TestProofreadStep:
         assert output.success is False
         assert "没有从上一步收到有效的翻译文本" in output.error
 
+    @patch("engine.agents.workflow.run_fallback_agent")
     @patch("engine.agents.workflow.get_proofer")
-    async def test_proofread_step_content_safety_fallback(self, mock_get_proofer):
+    async def test_proofread_step_content_safety_fallback(self, mock_get_proofer, mock_run_fallback_agent):
         """proofread_step: content safety error on main model triggers fallback"""
         chunk = make_chunk(
             original="<p>Hello</p>",
@@ -417,12 +463,41 @@ class TestProofreadStep:
         mock_proofer = MagicMock()
         mock_proofer.arun = safety_then_success
         mock_get_proofer.return_value = mock_proofer
+        async def fallback_success(kind, agent, payload):
+            return await safety_then_success(payload)
+
+        mock_run_fallback_agent.side_effect = fallback_success
 
         step_input = MagicMock(previous_step_content=chunk)
         output = await proofread_step(step_input)
 
         assert output.success is True
         assert call_count[0] == 2
+
+    @patch("engine.agents.workflow.run_fallback_agent")
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_general_failure_uses_fallback(self, mock_get_proofer, mock_run_fallback_agent):
+        """proofread_step: general main-model failures eventually use the shared fallback channel."""
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+
+        mock_proofer = MagicMock()
+        mock_proofer.arun = AsyncMock(side_effect=RuntimeError("timeout"))
+        mock_get_proofer.return_value = mock_proofer
+        mock_run_fallback_agent.return_value = MagicMock(
+            status=RunStatus.completed,
+            content=MockProofreadingResult({"你好": "您好"}),
+        )
+
+        step_input = MagicMock(previous_step_content=chunk)
+        output = await proofread_step(step_input)
+
+        assert output.success is True
+        assert output.content["proofreading_result"].corrections == {"你好": "您好"}
+        mock_run_fallback_agent.assert_awaited_once()
 
     @patch("engine.agents.workflow.get_proofer")
     async def test_proofread_step_nav_text_skipped(self, mock_get_proofer):
