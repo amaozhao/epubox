@@ -574,7 +574,7 @@ class TestParser:
                 "text_index": 0,
                 "original_text": f"Chapter {i}",
             }
-            for i in range(DomChunker.DEFAULT_NAV_UNIT_LIMIT)
+            for i in range(DomChunker.DEFAULT_NAV_UNIT_LIMIT + 1)
         ]
         checkpoint_path = tmp_path / "my_book.json"
         checkpoint_path.write_text(
@@ -593,7 +593,8 @@ class TestParser:
                                 {
                                     "name": "oversized-nav",
                                     "original": "\n".join(
-                                        f"[NAVTXT:{i}] Chapter {i}" for i in range(DomChunker.DEFAULT_NAV_UNIT_LIMIT)
+                                        f"[NAVTXT:{i}] Chapter {i}"
+                                        for i in range(DomChunker.DEFAULT_NAV_UNIT_LIMIT + 1)
                                     ),
                                     "translated": None,
                                     "status": "pending",
@@ -617,3 +618,61 @@ class TestParser:
         assert len(book.items[0].chunks) == 2
         rebuild.assert_called_once()
         save_json.assert_called_once()
+
+    def test_load_json_keeps_completed_nav_text_chunks_at_current_unit_limit(self, tmp_path, mocker):
+        """测试已经按当前 24 单元策略切好的 nav_text checkpoint 不会在每次加载时被误重建。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        rebuild = mocker.patch.object(parser, "_rebuild_nav_item_chunks")
+        checkpoint_path = tmp_path / "my_book.json"
+        nav_targets = [
+            {
+                "marker": f"[NAVTXT:{i}]",
+                "xpath": f"/ncx/navMap/navPoint[{i+1}]/navLabel/text",
+                "text_index": 0,
+                "original_text": f"Chapter {i}",
+            }
+            for i in range(DomChunker.DEFAULT_NAV_UNIT_LIMIT)
+        ]
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "name": "my_book",
+                    "path": str(epub_path),
+                    "extract_path": str(tmp_path / "temp" / "my_book"),
+                    "items": [
+                        {
+                            "id": "OEBPS/toc.ncx",
+                            "path": str(tmp_path / "temp" / "my_book" / "OEBPS" / "toc.ncx"),
+                            "content": "<ncx><navMap><navPoint><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>",
+                            "chunks": [
+                                {
+                                    "name": "nav-0",
+                                    "original": "\n".join(
+                                        f"[NAVTXT:{i}] Chapter {i}" for i in range(DomChunker.DEFAULT_NAV_UNIT_LIMIT)
+                                    ),
+                                    "translated": "\n".join(
+                                        f"[NAVTXT:{i}] 第{i}章" for i in range(DomChunker.DEFAULT_NAV_UNIT_LIMIT)
+                                    ),
+                                    "status": "completed",
+                                    "tokens": 200,
+                                    "chunk_mode": "nav_text",
+                                    "xpaths": [],
+                                    "nav_targets": nav_targets,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        save_json = mocker.patch.object(parser, "save_json")
+
+        book = parser.load_json()
+
+        assert book is not None
+        assert book.items[0].chunks[0].status == "completed"
+        rebuild.assert_not_called()
+        save_json.assert_not_called()

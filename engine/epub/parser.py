@@ -101,7 +101,7 @@ class Parser:
                 continue
 
             has_oversized_nav_chunk = any(
-                chunk.chunk_mode == "nav_text" and len(chunk.nav_targets) >= NAV_CHUNK_UPGRADE_THRESHOLD
+                chunk.chunk_mode == "nav_text" and len(chunk.nav_targets) > NAV_CHUNK_UPGRADE_THRESHOLD
                 for chunk in item.chunks
             )
             if any(chunk.chunk_mode == "nav_text" for chunk in item.chunks) and not has_oversized_nav_chunk:
