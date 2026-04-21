@@ -25,6 +25,8 @@ CONTENT_SAFETY_KEYWORDS = ["相关法律法规", "不予显示", "安全审核",
 MAX_TRANSLATION_RETRIES = 3
 SECONDARY_PLACEHOLDER_PATTERN = re.compile(r"\[(?:PRE|CODE|STYLE):\d+\]")
 NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
+FROZEN_TAG_PATTERN = re.compile(r"\[TAG:\d+\]")
+FROZEN_TRANSLATION_TAGS = {"img", "br", "hr", "meta", "link"}
 
 
 def is_content_safety_error(error_msg: str = "", status_code: int | None = None) -> bool:
@@ -104,6 +106,31 @@ def _apply_corrections_to_text_nodes(html: str, corrections: dict[str, str]) -> 
     return str(soup), replacement_count
 
 
+def _freeze_translation_tags(html: str) -> tuple[str, list[tuple[str, str]]]:
+    """将高风险空标签整体替换为占位符，避免模型破坏其属性或边界。"""
+    soup = BeautifulSoup(html, get_markup_parser(html))
+    replacements: list[tuple[str, str]] = []
+
+    for tag in list(soup.find_all(FROZEN_TRANSLATION_TAGS)):
+        placeholder = f"[TAG:{len(replacements)}]"
+        replacements.append((placeholder, str(tag)))
+        tag.replace_with(placeholder)
+
+    return str(soup), replacements
+
+
+def _restore_translation_tags(html: str, replacements: list[tuple[str, str]]) -> tuple[str, str | None]:
+    restored = html
+    translated_placeholders = FROZEN_TAG_PATTERN.findall(html)
+    expected_placeholders = [placeholder for placeholder, _ in replacements]
+    if translated_placeholders != expected_placeholders:
+        return restored, f"冻结标签占位符不一致: 原始 {expected_placeholders}, 翻译 {translated_placeholders}"
+
+    for placeholder, original in replacements:
+        restored = restored.replace(placeholder, original)
+    return restored, None
+
+
 def _validate_nav_translation(original: str, translated: str) -> tuple[bool, str]:
     original_segments = _extract_nav_segments(original)
     translated_segments = _extract_nav_segments(translated)
@@ -170,6 +197,10 @@ async def _call_translator(
 async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None) -> Chunk:
     """翻译并用 validate_translated_html 验证 HTML 结构，失败则标记待手动处理"""
     original = chunk.original
+    protected_original = original
+    frozen_tag_replacements: list[tuple[str, str]] = []
+    if chunk.chunk_mode != "nav_text":
+        protected_original, frozen_tag_replacements = _freeze_translation_tags(original)
     last_error_msg = None
     used_fallback = False
 
@@ -177,7 +208,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
         use_fallback_this_attempt = used_fallback or (attempt == MAX_TRANSLATION_RETRIES - 1 and last_error_msg is not None)
         try:
             translated = await _call_translator(
-                original,
+                protected_original,
                 glossary,
                 None,
                 last_error_msg,
@@ -198,7 +229,11 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
         if chunk.chunk_mode == "nav_text":
             is_valid, error_msg = _validate_nav_translation(original, translated)
         else:
-            is_valid, error_msg = validate_translated_html(original, translated)
+            translated, tag_restore_error = _restore_translation_tags(translated, frozen_tag_replacements)
+            if tag_restore_error:
+                is_valid, error_msg = False, tag_restore_error
+            else:
+                is_valid, error_msg = validate_translated_html(original, translated)
         if is_valid:
             chunk.translated = translated
             chunk.status = TranslationStatus.TRANSLATED

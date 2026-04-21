@@ -390,6 +390,61 @@ class TestTranslateStep:
         mock_run_fallback_agent.assert_awaited_once()
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_freezes_high_risk_void_tags_before_translation(self, mock_get_translator):
+        """translate_step: img/br/hr/meta/link should be frozen before sending HTML to the translator."""
+        chunk = make_chunk(
+            original='<p>Hello</p><p><img alt="Publisher logo." src="../images/pub.jpg"/><br/></p>',
+            xpaths=["/html/body/p[1]", "/html/body/p[2]"],
+        )
+        seen_payloads = []
+
+        async def translated_with_placeholders(json_input):
+            payload = json.loads(json_input)
+            seen_payloads.append(payload)
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>你好</p><p>[TAG:0][TAG:1]</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = translated_with_placeholders
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert '[TAG:0]' in seen_payloads[0]["text_to_translate"]
+        assert '[TAG:1]' in seen_payloads[0]["text_to_translate"]
+        assert output.content.translated == '<p>你好</p><p><img alt="Publisher logo." src="../images/pub.jpg"/><br/></p>'
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_fails_when_frozen_tag_placeholder_is_missing(self, mock_get_translator):
+        """translate_step: missing frozen-tag placeholders should fail validation and retry."""
+        chunk = make_chunk(
+            original='<p>Hello</p><p><img alt="Publisher logo." src="../images/pub.jpg"/></p>',
+            xpaths=["/html/body/p[1]", "/html/body/p[2]"],
+        )
+        call_count = [0]
+
+        async def missing_placeholder(json_input):
+            call_count[0] += 1
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>你好</p><p></p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = missing_placeholder
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
+        assert call_count[0] == 3
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_nav_text_success(self, mock_get_translator):
         """translate_step: nav_text chunks validate NAV markers instead of HTML shape."""
         chunk = make_chunk(original="[NAVTXT:0] Chapter 1", xpaths=[], chunk_mode="nav_text")
