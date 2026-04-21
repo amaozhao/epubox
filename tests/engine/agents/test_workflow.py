@@ -598,6 +598,41 @@ class TestApplyCorrectionsStep:
         assert output.content.translated == "<p>你好[CODE:1]世界</p>"
         assert output.content.status == TranslationStatus.COMPLETED
 
+    def test_apply_corrections_step_only_edits_text_nodes_not_attributes(self):
+        """apply_corrections_step: proofreading corrections must not rewrite HTML attribute values such as img alt."""
+        chunk = make_chunk(
+            original='<p>你好</p><img alt="Publisher’s logo." src="../images/pub.jpg"/>',
+            translated='<p>你好</p><img alt="Publisher’s logo." src="../images/pub.jpg"/>',
+            status=TranslationStatus.TRANSLATED,
+            xpaths=["/html/body/p", "/html/body/img"],
+        )
+        proofreading_result = MockProofreadingResult({"Publisher’s logo.": "出版商 Logo。", "你好": "哈喽"})
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+
+        output = apply_corrections_step(step_input)
+
+        assert output.success is True
+        assert output.content.translated == '<p>哈喽</p><img alt="Publisher’s logo." src="../images/pub.jpg"/>'
+        assert output.content.status == TranslationStatus.COMPLETED
+
+    def test_apply_corrections_step_preserves_inline_markup_boundaries(self):
+        """apply_corrections_step: corrections apply inside text nodes without collapsing inline tags."""
+        chunk = make_chunk(
+            original='<p>找到<i>一个</i>客户</p>',
+            translated='<p>找到<i>一个</i>客户</p>',
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofreading_result = MockProofreadingResult({"客户": "用户"})
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+
+        output = apply_corrections_step(step_input)
+
+        assert output.success is True
+        assert output.content.translated == '<p>找到<i>一个</i>用户</p>'
+        assert output.content.status == TranslationStatus.COMPLETED
+
     def test_apply_corrections_step_nav_text_skips_corrections(self):
         """apply_corrections_step: nav_text chunk keeps translated text and only flips status."""
         chunk = make_chunk(

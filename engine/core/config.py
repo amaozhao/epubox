@@ -46,10 +46,6 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = "your-api-key-here"
     GEMINI_MODEL: str = "gemini-2.5-flash"
 
-    # OpenRouter 引擎配置
-    OPENROUTER_API_KEY: str = "your-openrouter-api-key-here"
-    OPENROUTER_MODEL: str = "deepseek/deepseek-r1-0528:free"
-
     # BAISHAN 配置
     BAISHAN_API_KEY: str = "sk-"
     BAISHAN_MODEL: str = "DeepSeek-R1-0528-Qwen3-8B"

@@ -21,11 +21,8 @@ def build_primary_model():
     # 主模型（直接使用 Mistral 替代失效的模型）
     # model = DeepSeek(base_url=settings.DEEPSEEK_BASE_URL, api_key=settings.DEEPSEEK_API_KEY)
     # model = OpenAILike(id=settings.GLM_MODEL, api_key=settings.GLM_API_KEY, base_url=settings.GLM_BASE_URL)
-    # model = OpenAILike(id=settings.STEPFUN_MODEL, api_key=settings.STEPFUN_API_KEY, base_url=settings.STEPFUN_BASE_URL)
-    # model = OpenAILike(id=settings.BAISHAN_MODEL, api_key=settings.BAISHAN_API_KEY, base_url=settings.BAISHAN_BASE_URL)
     # model = OpenRouter(id=settings.OPENROUTER_MODEL, api_key=settings.OPENROUTER_API_KEY)
     # model = Gemini(id=settings.GEMINI_MODEL, api_key=settings.GEMINI_API_KEY)
-    # model = OpenAILike(id=settings.MINIMAX_MODEL, api_key=settings.MINIMAX_API_KEY, base_url=settings.MINIMAX_BASE_URL)
 
     # 直接使用 Mistral 模型
     return MistralChat(id=settings.MISTRAL_MODEL, api_key=settings.MISTRAL_API_KEY)
