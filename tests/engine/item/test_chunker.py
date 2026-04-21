@@ -202,6 +202,22 @@ class TestDomChunker:
         assert len(nav_chunk.nav_targets) == 2
         assert all("<nav" not in chunk.original for chunk in chunks if chunk.chunk_mode == "html_fragment")
 
+    def test_large_index_nav_in_regular_document_is_recursively_split(self):
+        """测试大型 index nav 不会被整块保留，而是递归拆成多个 html_fragment chunk。"""
+        entries = "".join(
+            f'<p class="ix1"><span class="IX-Header">Entry {i}</span><a href="c{i}.xhtml#idx{i}"><span class="IX-Header">{i}</span></a></p>'
+            for i in range(120)
+        )
+        html = f'<html><body><nav epub:type="index" id="index-nav"><section><h1>A</h1>{entries}</section></nav></body></html>'
+        chunker = DomChunker(token_limit=120)
+
+        chunks = chunker.chunk(html, is_nav_file=False)
+
+        assert len(chunks) > 1
+        assert all(chunk.chunk_mode == "html_fragment" for chunk in chunks)
+        assert max(chunk.tokens for chunk in chunks) <= 120
+        assert all("<nav" not in chunk.original for chunk in chunks)
+
     def test_toc_ncx_skips_xml_declaration_text(self):
         """测试 toc.ncx 分块时不会把 XML 声明当作可翻译导航文本。"""
         html = """<?xml version='1.0' encoding='utf-8'?><ncx><navMap><navPoint id='ch1'><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>"""

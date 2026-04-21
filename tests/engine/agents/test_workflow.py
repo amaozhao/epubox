@@ -354,6 +354,41 @@ class TestTranslateStep:
         assert call_count[0] == 2
         mock_run_fallback_agent.assert_awaited_once()
 
+    @patch("engine.agents.workflow.run_fallback_agent")
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_error_status_uses_fallback_and_keeps_provider_error_message(
+        self, mock_get_translator, mock_run_fallback_agent
+    ):
+        """translate_step: non-safety provider errors should preserve the real error text and reach fallback."""
+        chunk = make_chunk(original="<p>Hello</p>")
+        call_count = [0]
+        seen_payloads = []
+
+        async def provider_error(json_input):
+            call_count[0] += 1
+            seen_payloads.append(json.loads(json_input))
+            return MagicMock(
+                status=RunStatus.error,
+                content="Server disconnected without sending a response.",
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = provider_error
+        mock_get_translator.return_value = mock_translator
+        mock_run_fallback_agent.return_value = MagicMock(
+            status=RunStatus.completed,
+            content=MockTranslationResponse("<p>你好</p>"),
+        )
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert call_count[0] == 2
+        assert "validation_error" not in seen_payloads[0]
+        assert seen_payloads[1]["validation_error"] == "Server disconnected without sending a response."
+        mock_run_fallback_agent.assert_awaited_once()
+
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_nav_text_success(self, mock_get_translator):
         """translate_step: nav_text chunks validate NAV markers instead of HTML shape."""

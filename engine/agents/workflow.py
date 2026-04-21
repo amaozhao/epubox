@@ -158,6 +158,7 @@ async def _call_translator(
             error_content = str(raw_content) if raw_content else ""
             if is_content_safety_error(error_content):
                 raise ValueError(f"内容安全审核失败: {error_content[:100]}")
+            raise RuntimeError(error_content or "翻译模型返回错误状态")
         if isinstance(raw_content, TranslationResponse):
             return raw_content.translation
         raise ValueError(f"翻译响应格式错误: {type(raw_content)}")
@@ -191,7 +192,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
                 last_error_msg = None
                 continue
             logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 异常: {e}")
-            last_error_msg = None
+            last_error_msg = error_str
             continue
 
         if chunk.chunk_mode == "nav_text":
