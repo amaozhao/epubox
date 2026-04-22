@@ -25,8 +25,15 @@ CONTENT_SAFETY_KEYWORDS = ["相关法律法规", "不予显示", "安全审核",
 MAX_TRANSLATION_RETRIES = 3
 SECONDARY_PLACEHOLDER_PATTERN = re.compile(r"\[(?:PRE|CODE|STYLE):\d+\]")
 NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
+TEXT_MARKER_PATTERN = re.compile(r"\[TEXT:\d+\]")
 FROZEN_TAG_PATTERN = re.compile(r"\[TAG:\d+\]")
 FROZEN_TRANSLATION_TAGS = {"img", "br", "hr", "meta", "link"}
+STRUCTURE_ERROR_KEYWORDS = (
+    "标签属性不一致",
+    "子标签数量不一致",
+    "HTML标签结构错误",
+    "冻结标签占位符不一致",
+)
 
 
 def is_content_safety_error(error_msg: str = "", status_code: int | None = None) -> bool:
@@ -80,6 +87,100 @@ def _extract_nav_segments(text: str) -> list[tuple[str, str]]:
         payload = text[start:end].strip()
         segments.append((marker, payload))
     return segments
+
+
+def _extract_text_segments(text: str) -> list[tuple[str, str]]:
+    matches = list(TEXT_MARKER_PATTERN.finditer(text))
+    segments: list[tuple[str, str]] = []
+    for i, match in enumerate(matches):
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        marker = match.group(0)
+        payload = text[start:end].rstrip("\n")
+        segments.append((marker, payload))
+    return segments
+
+
+def _is_structure_validation_error(error_msg: str | None) -> bool:
+    if not error_msg:
+        return False
+    return any(keyword in error_msg for keyword in STRUCTURE_ERROR_KEYWORDS)
+
+
+def _collect_translatable_text_nodes(html: str) -> tuple[BeautifulSoup, list[tuple[NavigableString, str, str]]]:
+    soup = BeautifulSoup(html, get_markup_parser(html))
+    nodes: list[tuple[NavigableString, str, str]] = []
+
+    for text_node in list(soup.find_all(string=True)):
+        if not isinstance(text_node, NavigableString):
+            continue
+
+        parent = text_node.parent
+        parent_name = getattr(parent, "name", None)
+        if not parent_name or parent_name == "[document]":
+            continue
+        if str(parent_name).lower() in {"script", "style"}:
+            continue
+
+        text = str(text_node)
+        if not text.strip():
+            continue
+
+        clean_text = SECONDARY_PLACEHOLDER_PATTERN.sub("", text)
+        if not clean_text.strip():
+            continue
+
+        marker = f"[TEXT:{len(nodes)}]"
+        nodes.append((text_node, marker, text))
+
+    return soup, nodes
+
+
+def _validate_text_node_translation(original: str, translated: str) -> tuple[bool, str]:
+    original_segments = _extract_text_segments(original)
+    translated_segments = _extract_text_segments(translated)
+
+    original_markers = [marker for marker, _ in original_segments]
+    translated_markers = [marker for marker, _ in translated_segments]
+    if translated_markers != original_markers:
+        return False, f"TEXT 标记不一致: 原始 {original_markers}, 翻译 {translated_markers}"
+
+    for marker, payload in translated_segments:
+        if not payload.strip():
+            return False, f"TEXT 标记 {marker} 译文为空"
+
+    return True, ""
+
+
+async def _translate_with_text_node_fallback(
+    original: str,
+    glossary: Dict[str, str] | None = None,
+    error_msg: str | None = None,
+) -> tuple[str | None, str | None]:
+    soup, text_nodes = _collect_translatable_text_nodes(original)
+    if not text_nodes:
+        return original, None
+
+    marked_text = "\n".join(f"{marker}{text}" for _, marker, text in text_nodes)
+    translated = await _call_translator(
+        marked_text,
+        glossary,
+        None,
+        error_msg,
+        use_fallback=True,
+    )
+
+    is_valid, validation_error = _validate_text_node_translation(marked_text, translated)
+    if not is_valid:
+        return None, validation_error
+
+    translated_segments = _extract_text_segments(translated)
+    for (text_node, expected_marker, _), (actual_marker, payload) in zip(text_nodes, translated_segments):
+        if actual_marker != expected_marker:
+            return None, f"TEXT 标记不一致: 期望 {expected_marker}, 实际 {actual_marker}"
+        text_node.replace_with(payload)
+
+    return str(soup), None
 
 
 def _apply_corrections_to_text_nodes(html: str, corrections: dict[str, str]) -> tuple[str, int]:
@@ -207,14 +308,31 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
     for attempt in range(MAX_TRANSLATION_RETRIES):
         use_fallback_this_attempt = used_fallback or (attempt == MAX_TRANSLATION_RETRIES - 1 and last_error_msg is not None)
         try:
-            translated = await _call_translator(
-                protected_original,
-                glossary,
-                None,
-                last_error_msg,
-                use_fallback=use_fallback_this_attempt,
+            use_text_node_fallback = (
+                chunk.chunk_mode != "nav_text"
+                and use_fallback_this_attempt
+                and _is_structure_validation_error(last_error_msg)
             )
-            translated = translated.replace("\\n", "\n")
+            if use_text_node_fallback:
+                logger.info("开始执行 text-node fallback translate 调用")
+                translated, text_node_error = await _translate_with_text_node_fallback(
+                    original,
+                    glossary,
+                    last_error_msg,
+                )
+                if text_node_error:
+                    is_valid, error_msg = False, text_node_error
+                else:
+                    is_valid, error_msg = validate_translated_html(original, translated)
+            else:
+                translated = await _call_translator(
+                    protected_original,
+                    glossary,
+                    None,
+                    last_error_msg,
+                    use_fallback=use_fallback_this_attempt,
+                )
+                translated = translated.replace("\\n", "\n")
         except Exception as e:
             error_str = str(e)
             if not use_fallback_this_attempt and not used_fallback and is_content_safety_error(error_str):
@@ -226,14 +344,15 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
             last_error_msg = error_str
             continue
 
-        if chunk.chunk_mode == "nav_text":
-            is_valid, error_msg = _validate_nav_translation(original, translated)
-        else:
-            translated, tag_restore_error = _restore_translation_tags(translated, frozen_tag_replacements)
-            if tag_restore_error:
-                is_valid, error_msg = False, tag_restore_error
+        if not use_text_node_fallback:
+            if chunk.chunk_mode == "nav_text":
+                is_valid, error_msg = _validate_nav_translation(original, translated)
             else:
-                is_valid, error_msg = validate_translated_html(original, translated)
+                translated, tag_restore_error = _restore_translation_tags(translated, frozen_tag_replacements)
+                if tag_restore_error:
+                    is_valid, error_msg = False, tag_restore_error
+                else:
+                    is_valid, error_msg = validate_translated_html(original, translated)
         if is_valid:
             chunk.translated = translated
             chunk.status = TranslationStatus.TRANSLATED

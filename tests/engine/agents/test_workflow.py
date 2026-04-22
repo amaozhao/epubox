@@ -444,6 +444,46 @@ class TestTranslateStep:
         assert output.content.status == TranslationStatus.TRANSLATION_FAILED
         assert call_count[0] == 3
 
+    @patch("engine.agents.workflow.run_fallback_agent")
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_uses_text_node_fallback_after_repeated_structure_failures(
+        self, mock_get_translator, mock_run_fallback_agent
+    ):
+        """translate_step: repeated HTML structure mismatches should fall back to text-node translation on last try."""
+        chunk = make_chunk(original="<p>Hello <em>world</em>.</p>")
+        seen_standard_payloads = []
+        seen_fallback_payloads = []
+
+        async def structurally_broken_response(json_input):
+            seen_standard_payloads.append(json.loads(json_input))
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>你好世界。</p>"),
+            )
+
+        async def text_node_fallback(kind, agent, payload):
+            seen_fallback_payloads.append(json.loads(payload))
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("[TEXT:0]你好\n[TEXT:1]世界\n[TEXT:2]。"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = structurally_broken_response
+        mock_get_translator.return_value = mock_translator
+        mock_run_fallback_agent.side_effect = text_node_fallback
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "<p>你好<em>世界</em>。</p>"
+        assert len(seen_standard_payloads) == 2
+        assert len(seen_fallback_payloads) == 1
+        assert "[TEXT:0]" in seen_fallback_payloads[0]["text_to_translate"]
+        assert "[TEXT:1]" in seen_fallback_payloads[0]["text_to_translate"]
+        assert "[TEXT:2]" in seen_fallback_payloads[0]["text_to_translate"]
+
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_nav_text_success(self, mock_get_translator):
         """translate_step: nav_text chunks validate NAV markers instead of HTML shape."""

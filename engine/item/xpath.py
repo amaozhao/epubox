@@ -1,6 +1,9 @@
 import re
 
 
+def _normalize_name(name: str) -> str:
+    return (name or "").split(":")[-1].lower()
+
 
 def get_xpath(element) -> str:
     """
@@ -45,13 +48,17 @@ def find_by_xpath(soup, xpath: str):
     current = soup
 
     for part in parts:
-        match = re.match(r"^(\w+)(?:\[(\d+)\])?$", part)
+        match = re.match(r"^([\w:.-]+)(?:\[(\d+)\])?$", part)
         if not match:
             return None
-        tag_name = match.group(1)
+        tag_name = _normalize_name(match.group(1))
         index = int(match.group(2)) if match.group(2) else 1
 
-        children = [c for c in current.children if hasattr(c, "name") and c.name == tag_name]
+        children = [
+            c
+            for c in current.children
+            if hasattr(c, "name") and c.name and _normalize_name(c.name) == tag_name
+        ]
         if index > len(children):
             return None
         current = children[index - 1]

@@ -21,6 +21,7 @@ instructions = [
     "4. **PLACEHOLDERS**: [PRE:N], [CODE:N], [STYLE:N] are protected placeholders. Copy them VERBATIM, keep every index unchanged, and keep their left-to-right order EXACTLY the same as the source.",
     "4.1 **NO REORDERING AROUND PLACEHOLDERS**: Do NOT move, swap, merge, split, or regroup any phrase that contains a placeholder. If a sentence contains placeholders, translate only the natural-language text around them while leaving the placeholder-bearing spans in place.",
     "4.2 **NAV MARKERS**: [NAVTXT:N] markers delimit nav text units. Keep markers EXACT, keep one marker per unit, and keep their original order.",
+    "4.3 **TEXT MARKERS**: [TEXT:N] markers delimit HTML text nodes in fallback mode. Keep every marker EXACT, keep their original order, and translate only the payload after each marker.",
     "5. **GLOSSARY**: Use the 'glossaries' dictionary for technical term translations.",
 ]
 

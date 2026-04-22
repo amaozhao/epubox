@@ -259,6 +259,49 @@ class TestDomReplacer:
         assert "Chapter 1" in result
         assert chunk.status == TranslationStatus.WRITEBACK_FAILED
 
+    def test_nav_text_writeback_supports_prefixed_case_insensitive_xpath(self):
+        """导航回写兼容旧 checkpoint 中带 namespace 前缀且大小写不同的 xpath。"""
+        html = (
+            "<?xml version='1.0' encoding='utf-8'?>"
+            "<ncx xmlns='http://www.daisy.org/z3986/2005/ncx/'>"
+            "<docTitle><text>Original Title</text></docTitle>"
+            "<navMap><navPoint id='ch1'><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap>"
+            "</ncx>"
+        )
+        item = EpubItem(id="toc.ncx", path="/tmp/toc.ncx", content=html)
+        chunk = Chunk(
+            name="nav-prefixed",
+            original="[NAVTXT:0] Original Title\n[NAVTXT:1] Chapter 1",
+            translated="[NAVTXT:0] 中文书名\n[NAVTXT:1] 第1章",
+            status=TranslationStatus.COMPLETED,
+            tokens=10,
+            chunk_mode="nav_text",
+            xpaths=[],
+            nav_targets=[
+                {
+                    "marker": "[NAVTXT:0]",
+                    "xpath": "/ncx:ncx/ncx:doctitle/ncx:text",
+                    "text_index": 0,
+                    "original_text": "Original Title",
+                },
+                {
+                    "marker": "[NAVTXT:1]",
+                    "xpath": "/ncx:ncx/ncx:navmap/ncx:navpoint/ncx:navlabel/ncx:text",
+                    "text_index": 0,
+                    "original_text": "Chapter 1",
+                },
+            ],
+        )
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+
+        assert result is not None
+        assert "中文书名" in result
+        assert "第1章" in result
+        assert chunk.status == TranslationStatus.COMPLETED
+
     def test_nav_text_writeback_preserves_inline_structure(self):
         """导航文本模式只替换文本节点，不破坏锚点等内联结构。"""
         html = "<html><body><nav><ol><li><a href='#c1'><span id='toc-link-1'></span>Chapter 1</a></li></ol></nav></body></html>"

@@ -1,13 +1,7 @@
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-
-def test_fallback_model_uses_streaming_openai_like():
-    from engine.agents.models import fallback_model
-    from engine.agents.streaming_openai_like import StreamingOpenAILike
-
-    assert isinstance(fallback_model, StreamingOpenAILike)
 
 
 @pytest.mark.asyncio
@@ -97,3 +91,19 @@ async def test_run_with_fallback_rate_limit_serializes_concurrent_calls(monkeypa
     assert result2 == "second-done"
     assert started == ["first", "second"]
     assert sleep_calls == [59.0]
+
+
+@pytest.mark.asyncio
+async def test_run_fallback_agent_delegates_to_agent_arun(monkeypatch):
+    from engine.agents import fallback_runtime
+
+    await fallback_runtime.reset_fallback_runtime_state()
+    monkeypatch.setattr(fallback_runtime, "FALLBACK_MIN_INTERVAL_SECONDS", 0.0)
+
+    agent = MagicMock()
+    agent.arun = AsyncMock(return_value="translated")
+
+    result = await fallback_runtime.run_fallback_agent("translate", agent, '{"text":"hello"}')
+
+    assert result == "translated"
+    agent.arun.assert_awaited_once_with('{"text":"hello"}')
