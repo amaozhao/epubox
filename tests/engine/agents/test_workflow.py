@@ -172,6 +172,42 @@ class TestTranslateStep:
         assert "原始 [CODE:1]" in seen_inputs[1]["validation_error"]
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_retry_includes_previous_translation(self, mock_get_translator):
+        """translate_step: retry payload includes the previous invalid translation for targeted repair."""
+        chunk = make_chunk(original="<p>Hello World</p>")
+        seen_inputs = []
+        responses = iter(
+            [
+                MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("<p>Hello World</p>"),
+                ),
+                MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("<p>你好世界</p>"),
+                ),
+            ]
+        )
+
+        async def translator_response(json_input):
+            seen_inputs.append(json.loads(json_input))
+            return next(responses)
+
+        mock_translator = MagicMock()
+        mock_translator.arun = translator_response
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.success is True
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert len(seen_inputs) == 2
+        assert "previous_translation" not in seen_inputs[0]
+        assert seen_inputs[1]["previous_translation"] == "<p>Hello World</p>"
+        assert seen_inputs[1]["validation_error"] == "翻译结果与原文一致，疑似未翻译"
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_accepts_code_reorder_within_same_element_without_retry(self, mock_get_translator):
         """translate_step: CODE reorder within one element should pass validation without retry."""
         chunk = make_chunk(original="<p>Run [CODE:31], [CODE:32], and [CODE:33]</p>")
@@ -285,81 +321,98 @@ class TestTranslateStep:
         output = await translate_step(step_input)
 
         assert output.content.status == TranslationStatus.ACCEPTED_AS_IS
-        assert output.content.translated == "<p>python -m pytest tests/engine/agents/test_workflow.py -k accepted_as_is</p>"
+        assert (
+            output.content.translated
+            == "<p>python -m pytest tests/engine/agents/test_workflow.py -k accepted_as_is</p>"
+        )
         assert mock_translator.arun.await_count == 1
 
-    @patch("engine.agents.workflow.run_fallback_agent")
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_content_safety_fallback(self, mock_get_translator, mock_run_fallback_agent):
-        """translate_step: content safety error on first call triggers fallback model"""
+    async def test_translate_step_content_safety_retries_without_fallback(self, mock_get_translator):
+        """translate_step: content safety errors should retry on the primary translator and eventually fail."""
         chunk = make_chunk(original="<p>Hello</p>")
         call_count = [0]
 
-        async def safety_then_success(json_input):
+        async def safety_always_fails(json_input):
             call_count[0] += 1
-            if call_count[0] == 1:
-                # First call: content safety error
-                mock_response = MagicMock()
-                mock_response.status = RunStatus.error
-                mock_response.content = "相关法律法规不予显示"
-                return mock_response
-            # Second call (fallback): success
-            return MagicMock(
-                status=RunStatus.completed,
-                content=MockTranslationResponse("<p>你好</p>"),
-            )
+            mock_response = MagicMock()
+            mock_response.status = RunStatus.error
+            mock_response.content = "相关法律法规不予显示"
+            return mock_response
 
         mock_translator = MagicMock()
-        mock_translator.arun = safety_then_success
+        mock_translator.arun = safety_always_fails
         mock_get_translator.return_value = mock_translator
-        async def fallback_success(kind, agent, payload):
-            return await safety_then_success(payload)
-
-        mock_run_fallback_agent.side_effect = fallback_success
 
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
 
-        assert output.content.status == TranslationStatus.TRANSLATED
-        assert call_count[0] == 2
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
+        assert call_count[0] == 3
 
-    @patch("engine.agents.workflow.run_fallback_agent")
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_validation_failure_uses_fallback_on_last_attempt(
-        self, mock_get_translator, mock_run_fallback_agent
-    ):
-        """translate_step: final retry switches to fallback agent for non-safety validation failures."""
-        chunk = make_chunk(original="<p>Hello</p>")
-        call_count = [0]
+    async def test_translate_step_validation_failure_uses_text_node_retry_on_last_attempt(self, mock_get_translator):
+        """translate_step: final retry switches to text-node mode on the primary translator for structure failures."""
+        chunk = make_chunk(original="<p>Hello <em>world</em>.</p>")
+        seen_payloads = []
 
         async def invalid_response(json_input):
-            call_count[0] += 1
-            return MagicMock(
-                status=RunStatus.completed,
-                content=MockTranslationResponse("<p>你好</p><p>额外</p>"),
-            )
+            payload = json.loads(json_input)
+            seen_payloads.append(payload)
+            if "[TEXT:0]" in payload["text_to_translate"]:
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("[TEXT:0]你好\n[TEXT:1]世界\n[TEXT:2]。"),
+                )
+            return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("<p>你好世界。</p>"))
 
         mock_translator = MagicMock()
         mock_translator.arun = invalid_response
         mock_get_translator.return_value = mock_translator
-        mock_run_fallback_agent.return_value = MagicMock(
-            status=RunStatus.completed,
-            content=MockTranslationResponse("<p>你好</p>"),
-        )
 
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
 
         assert output.content.status == TranslationStatus.TRANSLATED
-        assert call_count[0] == 2
-        mock_run_fallback_agent.assert_awaited_once()
+        assert output.content.translated == "<p>你好<em>世界</em>。</p>"
+        assert len(seen_payloads) == 3
+        assert "[TEXT:0]" in seen_payloads[2]["text_to_translate"]
 
-    @patch("engine.agents.workflow.run_fallback_agent")
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_error_status_uses_fallback_and_keeps_provider_error_message(
-        self, mock_get_translator, mock_run_fallback_agent
+    async def test_translate_step_uses_text_node_translator_mode_on_final_retry(self, mock_get_translator):
+        """translate_step: final structure-repair retry should request the dedicated text-node translator mode."""
+        chunk = make_chunk(original="<p>Hello <em>world</em>.</p>")
+        requested_modes = []
+
+        async def invalid_response(json_input):
+            payload = json.loads(json_input)
+            if "[TEXT:0]" in payload["text_to_translate"]:
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("[TEXT:0]你好\n[TEXT:1]世界\n[TEXT:2]。"),
+                )
+            return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("<p>你好世界。</p>"))
+
+        mock_translator = MagicMock()
+        mock_translator.arun = invalid_response
+
+        def translator_factory(*args, **kwargs):
+            requested_modes.append(kwargs.get("mode"))
+            return mock_translator
+
+        mock_get_translator.side_effect = translator_factory
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert requested_modes == ["html", "html", "text_node"]
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_error_status_retries_without_fallback_and_keeps_provider_error_message(
+        self, mock_get_translator
     ):
-        """translate_step: non-safety provider errors should preserve the real error text and reach fallback."""
+        """translate_step: non-safety provider errors should preserve the real error text across primary retries."""
         chunk = make_chunk(original="<p>Hello</p>")
         call_count = [0]
         seen_payloads = []
@@ -375,19 +428,34 @@ class TestTranslateStep:
         mock_translator = MagicMock()
         mock_translator.arun = provider_error
         mock_get_translator.return_value = mock_translator
-        mock_run_fallback_agent.return_value = MagicMock(
-            status=RunStatus.completed,
-            content=MockTranslationResponse("<p>你好</p>"),
-        )
 
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
 
-        assert output.content.status == TranslationStatus.TRANSLATED
-        assert call_count[0] == 2
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
+        assert call_count[0] == 3
         assert "validation_error" not in seen_payloads[0]
         assert seen_payloads[1]["validation_error"] == "Server disconnected without sending a response."
-        mock_run_fallback_agent.assert_awaited_once()
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_accepts_stringified_json_response_with_trailing_noise(self, mock_get_translator):
+        """translate_step: tolerate provider responses that return JSON as a raw string with trailing noise."""
+        chunk = make_chunk(original="<p>Hello</p>")
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content='{"translation":"<p>你好</p>"}\n\nextra trailing text',
+            )
+        )
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.success is True
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "<p>你好</p>"
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_freezes_high_risk_void_tags_before_translation(self, mock_get_translator):
@@ -414,25 +482,30 @@ class TestTranslateStep:
         output = await translate_step(step_input)
 
         assert output.content.status == TranslationStatus.TRANSLATED
-        assert '[TAG:0]' in seen_payloads[0]["text_to_translate"]
-        assert '[TAG:1]' in seen_payloads[0]["text_to_translate"]
-        assert output.content.translated == '<p>你好</p><p><img alt="Publisher logo." src="../images/pub.jpg"/><br/></p>'
+        assert "[TAG:0]" in seen_payloads[0]["text_to_translate"]
+        assert "[TAG:1]" in seen_payloads[0]["text_to_translate"]
+        assert (
+            output.content.translated == '<p>你好</p><p><img alt="Publisher logo." src="../images/pub.jpg"/><br/></p>'
+        )
 
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_fails_when_frozen_tag_placeholder_is_missing(self, mock_get_translator):
-        """translate_step: missing frozen-tag placeholders should fail validation and retry."""
+    async def test_translate_step_recovers_when_frozen_tag_placeholder_is_missing(self, mock_get_translator):
+        """translate_step: missing frozen-tag placeholders can still recover via text-node mode on the final retry."""
         chunk = make_chunk(
             original='<p>Hello</p><p><img alt="Publisher logo." src="../images/pub.jpg"/></p>',
             xpaths=["/html/body/p[1]", "/html/body/p[2]"],
         )
-        call_count = [0]
+        seen_payloads = []
 
         async def missing_placeholder(json_input):
-            call_count[0] += 1
-            return MagicMock(
-                status=RunStatus.completed,
-                content=MockTranslationResponse("<p>你好</p><p></p>"),
-            )
+            payload = json.loads(json_input)
+            seen_payloads.append(payload)
+            if "[TEXT:0]" in payload["text_to_translate"]:
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("[TEXT:0]你好"),
+                )
+            return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("<p>你好</p><p></p>"))
 
         mock_translator = MagicMock()
         mock_translator.arun = missing_placeholder
@@ -441,37 +514,35 @@ class TestTranslateStep:
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
 
-        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
-        assert call_count[0] == 3
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == '<p>你好</p><p><img alt="Publisher logo." src="../images/pub.jpg"/></p>'
+        assert len(seen_payloads) == 3
+        assert "[TEXT:0]" in seen_payloads[2]["text_to_translate"]
 
-    @patch("engine.agents.workflow.run_fallback_agent")
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_uses_text_node_fallback_after_repeated_structure_failures(
-        self, mock_get_translator, mock_run_fallback_agent
-    ):
+    async def test_translate_step_uses_text_node_fallback_after_repeated_structure_failures(self, mock_get_translator):
         """translate_step: repeated HTML structure mismatches should fall back to text-node translation on last try."""
         chunk = make_chunk(original="<p>Hello <em>world</em>.</p>")
         seen_standard_payloads = []
-        seen_fallback_payloads = []
+        seen_text_payloads = []
 
         async def structurally_broken_response(json_input):
-            seen_standard_payloads.append(json.loads(json_input))
+            payload = json.loads(json_input)
+            if "[TEXT:0]" in payload["text_to_translate"]:
+                seen_text_payloads.append(payload)
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("[TEXT:0]你好\n[TEXT:1]世界\n[TEXT:2]。"),
+                )
+            seen_standard_payloads.append(payload)
             return MagicMock(
                 status=RunStatus.completed,
                 content=MockTranslationResponse("<p>你好世界。</p>"),
             )
 
-        async def text_node_fallback(kind, agent, payload):
-            seen_fallback_payloads.append(json.loads(payload))
-            return MagicMock(
-                status=RunStatus.completed,
-                content=MockTranslationResponse("[TEXT:0]你好\n[TEXT:1]世界\n[TEXT:2]。"),
-            )
-
         mock_translator = MagicMock()
         mock_translator.arun = structurally_broken_response
         mock_get_translator.return_value = mock_translator
-        mock_run_fallback_agent.side_effect = text_node_fallback
 
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
@@ -479,10 +550,140 @@ class TestTranslateStep:
         assert output.content.status == TranslationStatus.TRANSLATED
         assert output.content.translated == "<p>你好<em>世界</em>。</p>"
         assert len(seen_standard_payloads) == 2
-        assert len(seen_fallback_payloads) == 1
-        assert "[TEXT:0]" in seen_fallback_payloads[0]["text_to_translate"]
-        assert "[TEXT:1]" in seen_fallback_payloads[0]["text_to_translate"]
-        assert "[TEXT:2]" in seen_fallback_payloads[0]["text_to_translate"]
+        assert len(seen_text_payloads) == 1
+        assert "[TEXT:0]" in seen_text_payloads[0]["text_to_translate"]
+        assert "[TEXT:1]" in seen_text_payloads[0]["text_to_translate"]
+        assert "[TEXT:2]" in seen_text_payloads[0]["text_to_translate"]
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_batches_text_node_fallback_for_large_html(self, mock_get_translator):
+        """translate_step: large text-node fallback payloads should be split into multiple fallback batches."""
+        original = "<div>" + "".join(f"<span>Paragraph {i}</span>" for i in range(30)) + "</div>"
+        chunk = make_chunk(original=original, xpaths=["/html/body/div"])
+        standard_call_count = [0]
+        text_payloads = []
+
+        async def structurally_broken_response(json_input):
+            payload_json = json.loads(json_input)
+            if "[TEXT:0]" in payload_json["text_to_translate"]:
+                text_payloads.append(payload_json)
+                lines = []
+                for line in payload_json["text_to_translate"].splitlines():
+                    if "]" not in line:
+                        continue
+                    marker, text = line.split("]", 1)
+                    lines.append(f"{marker}]中文{text}")
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("\n".join(lines)),
+                )
+            standard_call_count[0] += 1
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<div>broken</div>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = structurally_broken_response
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert len(text_payloads) == 4
+        assert text_payloads[0]["text_to_translate"].count("[TEXT:") == 8
+        assert text_payloads[1]["text_to_translate"].count("[TEXT:") == 8
+        assert text_payloads[2]["text_to_translate"].count("[TEXT:") == 8
+        assert text_payloads[3]["text_to_translate"].count("[TEXT:") == 6
+        assert "中文Paragraph 0" in output.content.translated
+        assert "中文Paragraph 29" in output.content.translated
+        assert standard_call_count[0] == 2
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_recovers_missing_leading_text_marker(self, mock_get_translator):
+        """translate_step: text-node fallback tolerates the model dropping only the first TEXT marker."""
+        chunk = make_chunk(original="<p>Hello <em>world</em>.</p>")
+        seen_payloads = []
+
+        async def structurally_broken_then_shifted_markers(json_input):
+            payload = json.loads(json_input)
+            seen_payloads.append(payload)
+            if "[TEXT:0]" in payload["text_to_translate"]:
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("你好[TEXT:1]世界\n[TEXT:2]。"),
+                )
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>你好世界。</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = structurally_broken_then_shifted_markers
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "<p>你好<em>世界</em>。</p>"
+        assert len(seen_payloads) == 3
+        assert "[TEXT:0]" in seen_payloads[2]["text_to_translate"]
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_recovers_missing_trailing_text_marker(self, mock_get_translator):
+        """translate_step: text-node fallback tolerates the model dropping only the last TEXT marker line prefix."""
+        chunk = make_chunk(original="<p>Hello <em>world</em>.</p>")
+
+        async def structurally_broken_then_missing_last_marker(json_input):
+            payload = json.loads(json_input)
+            if "[TEXT:0]" in payload["text_to_translate"]:
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("[TEXT:0]你好\n[TEXT:1]世界\n。"),
+                )
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>你好世界。</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = structurally_broken_then_missing_last_marker
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "<p>你好<em>世界</em>。</p>"
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_recovers_wrong_text_marker_numbering_per_line(self, mock_get_translator):
+        """translate_step: text-node fallback normalizes per-line marker numbering when line order is still intact."""
+        chunk = make_chunk(original="<p>Hello <em>world</em>.</p>")
+
+        async def structurally_broken_then_wrong_marker_numbers(json_input):
+            payload = json.loads(json_input)
+            if "[TEXT:0]" in payload["text_to_translate"]:
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("[TEXT:0]你好\n[TEXT:0]世界\n[TEXT:0]。"),
+                )
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>你好世界。</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = structurally_broken_then_wrong_marker_numbers
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "<p>你好<em>世界</em>。</p>"
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_nav_text_success(self, mock_get_translator):
@@ -593,6 +794,7 @@ class TestProofreadStep:
         mock_proofer = MagicMock()
         mock_proofer.arun = safety_then_success
         mock_get_proofer.return_value = mock_proofer
+
         async def fallback_success(kind, agent, payload):
             return await safety_then_success(payload)
 
@@ -749,8 +951,8 @@ class TestApplyCorrectionsStep:
     def test_apply_corrections_step_preserves_inline_markup_boundaries(self):
         """apply_corrections_step: corrections apply inside text nodes without collapsing inline tags."""
         chunk = make_chunk(
-            original='<p>找到<i>一个</i>客户</p>',
-            translated='<p>找到<i>一个</i>客户</p>',
+            original="<p>找到<i>一个</i>客户</p>",
+            translated="<p>找到<i>一个</i>客户</p>",
             status=TranslationStatus.TRANSLATED,
         )
         proofreading_result = MockProofreadingResult({"客户": "用户"})
@@ -760,7 +962,7 @@ class TestApplyCorrectionsStep:
         output = apply_corrections_step(step_input)
 
         assert output.success is True
-        assert output.content.translated == '<p>找到<i>一个</i>用户</p>'
+        assert output.content.translated == "<p>找到<i>一个</i>用户</p>"
         assert output.content.status == TranslationStatus.COMPLETED
 
     def test_apply_corrections_step_nav_text_skips_corrections(self):
@@ -850,7 +1052,9 @@ class TestGetTranslatorWorkflow:
 
     @patch("engine.agents.workflow.get_translator")
     @patch("engine.agents.workflow.get_proofer")
-    async def test_full_workflow_keeps_accepted_as_is_without_proofreading(self, mock_get_proofer, mock_get_translator):
+    async def test_full_workflow_keeps_accepted_as_is_without_proofreading(
+        self, mock_get_proofer, mock_get_translator
+    ):
         """get_translator_workflow: legitimate no-op content stays ACCEPTED_AS_IS and skips later steps"""
         mock_translator = MagicMock()
         mock_translator.arun = AsyncMock(
