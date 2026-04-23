@@ -6,7 +6,7 @@ from agno.models.message import Message
 from agno.models.mistral import MistralChat
 from agno.models.response import ModelResponse
 
-from engine.agents.models import build_primary_model
+from engine.agents.models import build_primary_model, fallback_model
 from engine.agents.streaming_openai_like import StreamingOpenAILike
 
 
@@ -77,3 +77,8 @@ class TestBuildPrimaryModel:
         model = build_primary_model()
 
         assert isinstance(model, MistralChat)
+
+
+class TestFallbackModel:
+    def test_fallback_model_uses_proxy_client(self):
+        assert isinstance(fallback_model, StreamingOpenAILike)

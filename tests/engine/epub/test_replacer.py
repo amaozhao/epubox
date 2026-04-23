@@ -1,4 +1,3 @@
-
 import warnings
 
 from bs4 import XMLParsedAsHTMLWarning
@@ -159,6 +158,63 @@ class TestDomReplacer:
         assert "A" in result
         assert "B" in result
         assert chunk.status == TranslationStatus.WRITEBACK_FAILED
+
+    def test_restore_strips_internal_writeback_tracking_attributes(self):
+        """回写过程中使用的内部跟踪属性不应泄露到最终 HTML。"""
+        item = EpubItem(
+            id="ch1.xhtml",
+            path="/tmp/ch1.xhtml",
+            content="<html><body><p>Hello</p></body></html>",
+        )
+        chunk = Chunk(
+            name="tracked001",
+            original="<p>Hello</p>",
+            translated='<p data-epubox-wb-id="external">你好</p>',
+            status=TranslationStatus.COMPLETED,
+            tokens=10,
+            xpaths=["/html/body/p"],
+        )
+        item.chunks = [chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+
+        assert result is not None
+        assert "data-epubox-wb-id" not in result
+
+    def test_restore_skips_broader_chunk_when_xpaths_overlap_descendants(self):
+        """祖先/后代 xpath 冲突时，优先保留更具体的 chunk，避免后续找不到节点。"""
+        item = EpubItem(
+            id="ch-overlap.xhtml",
+            path="/tmp/ch-overlap.xhtml",
+            content="<html><body><section><p>Alpha</p><p>Beta</p></section></body></html>",
+        )
+        broad_chunk = Chunk(
+            name="broad001",
+            original="<section><p>Alpha</p><p>Beta</p></section>",
+            translated="<section><p>甲</p><p>乙</p></section>",
+            status=TranslationStatus.COMPLETED,
+            tokens=20,
+            xpaths=["/html/body/section"],
+        )
+        narrow_chunk = Chunk(
+            name="narrow001",
+            original="<p>Beta</p>",
+            translated="<p>乙-细化</p>",
+            status=TranslationStatus.COMPLETED,
+            tokens=8,
+            xpaths=["/html/body/section/p[2]"],
+        )
+        item.chunks = [broad_chunk, narrow_chunk]
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+
+        assert result is not None
+        assert "Alpha" in result
+        assert "乙-细化" in result
+        assert broad_chunk.status == TranslationStatus.WRITEBACK_FAILED
+        assert narrow_chunk.status == TranslationStatus.COMPLETED
 
     def test_xpath_not_found(self):
         """测试 xpath 未找到时 warning（覆盖 line 90）"""
@@ -333,7 +389,7 @@ class TestDomReplacer:
             id="ch-shift.xhtml",
             path="/tmp/ch-shift.xhtml",
             content=html,
-            preserved_pre=["<div class=\"highlight\"><tt>x</tt></div>"],
+            preserved_pre=['<div class="highlight"><tt>x</tt></div>'],
             preserved_code=[],
             preserved_style=[],
         )

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import zipfile
 from typing import List, Optional
 
@@ -7,7 +8,7 @@ from bs4 import BeautifulSoup
 
 from engine.core.markup import get_markup_parser
 from engine.item import DomChunker, PreCodeExtractor
-from engine.schemas import EpubBook, EpubItem
+from engine.schemas import EpubBook, EpubItem, TranslationStatus
 from engine.schemas.epub import CHECKPOINT_SCHEMA_VERSION
 from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
@@ -72,22 +73,114 @@ class Parser:
                     return True
         return False
 
-    def _rebuild_nav_item_chunks(self, item: EpubItem, *, is_nav_file: bool) -> None:
-        """将导航文件或内嵌目录块重建为文本节点模式。"""
+    def _rebuild_item_chunks(self, item: EpubItem, *, is_nav_file: bool, strip_title: bool = False) -> None:
+        """使用当前 chunking 策略重建单个文档的 chunks。"""
         soup = BeautifulSoup(item.content, get_markup_parser(item.content))
+        if strip_title:
+            title = soup.find("title")
+            if title:
+                title.decompose()
         normalized_content = str(soup)
 
+        content_for_chunking = normalized_content
+        preserved_pre: list[str] = []
+        preserved_code: list[str] = []
+        preserved_style: list[str] = []
+
         pre_extractor = PreCodeExtractor()
-        content_after_pre = pre_extractor.extract(normalized_content)
+        content_for_chunking = pre_extractor.extract(normalized_content)
+        preserved_pre = pre_extractor.preserved_pre
+        preserved_code = pre_extractor.preserved_code
+        preserved_style = pre_extractor.preserved_style
 
         dom_chunker = DomChunker(
             token_limit=self.limit,
             secondary_placeholder_limit=self.secondary_placeholder_limit,
         )
-        item.chunks = dom_chunker.chunk(html=content_after_pre, is_nav_file=is_nav_file)
-        item.preserved_pre = pre_extractor.preserved_pre
-        item.preserved_code = pre_extractor.preserved_code
-        item.preserved_style = pre_extractor.preserved_style
+        item.chunks = dom_chunker.chunk(html=content_for_chunking, is_nav_file=is_nav_file)
+        item.preserved_pre = preserved_pre
+        item.preserved_code = preserved_code
+        item.preserved_style = preserved_style
+
+    def _rebuild_nav_item_chunks(self, item: EpubItem, *, is_nav_file: bool) -> None:
+        """将导航文件或内嵌目录块重建为文本节点模式。"""
+        self._rebuild_item_chunks(item, is_nav_file=is_nav_file)
+
+    @staticmethod
+    def _collect_preservable_title_chunks(item: EpubItem) -> list:
+        preserved = []
+        for chunk in item.chunks or []:
+            xpaths = chunk.xpaths or []
+            if not xpaths or any(xpath != "/html/head/title" for xpath in xpaths):
+                continue
+            if chunk.translated and chunk.translated.strip():
+                preserved.append(chunk.model_copy(deep=True))
+                continue
+            if chunk.status in {
+                TranslationStatus.TRANSLATED,
+                TranslationStatus.ACCEPTED_AS_IS,
+                TranslationStatus.COMPLETED,
+                TranslationStatus.WRITEBACK_FAILED,
+            }:
+                preserved.append(chunk.model_copy(deep=True))
+        return preserved
+
+    @staticmethod
+    def _has_meaningful_body_text(html: str) -> bool:
+        soup = BeautifulSoup(html, get_markup_parser(html))
+        body = soup.find("body")
+        if not body:
+            return False
+        return len(re.sub(r"\s+", "", body.get_text(" ", strip=True))) >= 40
+
+    def _has_placeholder_inventory_mismatch(self, book: EpubBook) -> bool:
+        for item in book.items:
+            stored = (
+                len(item.preserved_pre or []),
+                len(item.preserved_code or []),
+                len(item.preserved_style or []),
+            )
+            if stored == (0, 0, 0):
+                normalized = str(BeautifulSoup(item.content, get_markup_parser(item.content)))
+                extractor = PreCodeExtractor()
+                extractor.extract(normalized)
+                current = (
+                    len(extractor.preserved_pre),
+                    len(extractor.preserved_code),
+                    len(extractor.preserved_style),
+                )
+                if current == (0, 0, 0):
+                    continue
+            else:
+                normalized = str(BeautifulSoup(item.content, get_markup_parser(item.content)))
+                extractor = PreCodeExtractor()
+                extractor.extract(normalized)
+                current = (
+                    len(extractor.preserved_pre),
+                    len(extractor.preserved_code),
+                    len(extractor.preserved_style),
+                )
+
+            if current != stored:
+                logger.warning(
+                    "检测到 checkpoint 占位符映射与当前提取规则不一致，"
+                    f"将忽略旧 checkpoint 并从原始 EPUB 重建: {item.id}, stored={stored}, current={current}"
+                )
+                return True
+        return False
+
+    @classmethod
+    def _has_title_only_checkpoint(cls, item: EpubItem) -> bool:
+        chunks = item.chunks or []
+        if not chunks:
+            return False
+
+        for chunk in chunks:
+            xpaths = chunk.xpaths or []
+            if not xpaths or any(xpath != "/html/head/title" for xpath in xpaths):
+                return False
+
+        return cls._has_meaningful_body_text(item.content)
 
     def _upgrade_legacy_nav_chunks(self, book: EpubBook) -> bool:
         upgraded = False
@@ -110,6 +203,25 @@ class Parser:
             self._rebuild_nav_item_chunks(item, is_nav_file=is_nav_file)
             upgraded = True
 
+        for item in book.items:
+            is_nav_file = self._is_nav_document(item.id, item.content)
+            if is_nav_file:
+                continue
+            if not item.chunks and self._has_meaningful_body_text(item.content):
+                self._rebuild_item_chunks(item, is_nav_file=False)
+                upgraded = True
+                continue
+            if self._has_title_only_checkpoint(item):
+                preserved_title_chunks = self._collect_preservable_title_chunks(item)
+                self._rebuild_item_chunks(
+                    item,
+                    is_nav_file=False,
+                    strip_title=bool(preserved_title_chunks),
+                )
+                if preserved_title_chunks:
+                    item.chunks = [*preserved_title_chunks, *(item.chunks or [])]
+                upgraded = True
+
         if upgraded:
             logger.info("检测到旧版导航/目录 checkpoint，已重建相关 chunk 为 nav_text 模式。")
         return upgraded
@@ -131,6 +243,8 @@ class Parser:
                 )
 
             book = EpubBook.model_validate(data)
+            if self._has_placeholder_inventory_mismatch(book):
+                return None
             if self._upgrade_legacy_nav_chunks(book):
                 self.save_json(book)
             return book
@@ -205,19 +319,26 @@ class Parser:
                     soup = BeautifulSoup(original_content, get_markup_parser(original_content))
                     normalized_content = str(soup)
 
-                    # Step 2: 提取 pre/code/style 标签为占位符（二级占位符方案）
-                    pre_extractor = PreCodeExtractor()
-                    content_after_pre = pre_extractor.extract(normalized_content)
-
-                    # Step 3: 检测是否是 EPUB 导航文件
+                    # Step 2: 检测是否是 EPUB 导航文件
                     is_nav_file = self._is_nav_document(relative_path, original_content)
+
+                    # Step 3: 提取 PRE/CODE/STYLE，占位保护目录标题中的命令/代码片段。
+                    content_for_chunking = normalized_content
+                    preserved_pre: list[str] = []
+                    preserved_code: list[str] = []
+                    preserved_style: list[str] = []
+                    pre_extractor = PreCodeExtractor()
+                    content_for_chunking = pre_extractor.extract(normalized_content)
+                    preserved_pre = pre_extractor.preserved_pre
+                    preserved_code = pre_extractor.preserved_code
+                    preserved_style = pre_extractor.preserved_style
 
                     # Step 4: 使用 DomChunker 进行 DOM 级别分块
                     dom_chunker = DomChunker(
                         token_limit=self.limit,
                         secondary_placeholder_limit=self.secondary_placeholder_limit,
                     )
-                    chunks = dom_chunker.chunk(html=content_after_pre, is_nav_file=is_nav_file)
+                    chunks = dom_chunker.chunk(html=content_for_chunking, is_nav_file=is_nav_file)
 
                     epub_item = EpubItem(
                         id=relative_path,
@@ -226,9 +347,9 @@ class Parser:
                         source_html_valid=is_valid,
                         source_html_errors=errors,
                         chunks=chunks,
-                        preserved_pre=pre_extractor.preserved_pre,
-                        preserved_code=pre_extractor.preserved_code,
-                        preserved_style=pre_extractor.preserved_style,
+                        preserved_pre=preserved_pre,
+                        preserved_code=preserved_code,
+                        preserved_style=preserved_style,
                     )
                     items.append(epub_item)
 

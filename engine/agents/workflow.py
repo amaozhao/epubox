@@ -24,6 +24,11 @@ CONTENT_SAFETY_KEYWORDS = ["相关法律法规", "不予显示", "安全审核",
 # 最大重试次数
 MAX_TRANSLATION_RETRIES = 3
 SECONDARY_PLACEHOLDER_PATTERN = re.compile(r"\[(?:PRE|CODE|STYLE):\d+\]")
+SECONDARY_PLACEHOLDER_LABEL_PATTERNS = {
+    "PRE": re.compile(r"\[PRE:\d+\]"),
+    "CODE": re.compile(r"\[CODE:\d+\]"),
+    "STYLE": re.compile(r"\[STYLE:\d+\]"),
+}
 NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
 TEXT_MARKER_PATTERN = re.compile(r"\[TEXT:\d+\]")
 FROZEN_TAG_PATTERN = re.compile(r"\[TAG:\d+\]")
@@ -35,6 +40,12 @@ STRUCTURE_ERROR_KEYWORDS = (
     "冻结标签占位符不一致",
 )
 TEXT_NODE_FALLBACK_UNIT_LIMIT = 8
+TEXT_NODE_FALLBACK_RETRIES = 3
+VALIDATION_ERROR_HISTORY_LIMIT = 4
+DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD = 6
+DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD = 12
+DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD = 8
+HIGH_RISK_INLINE_TAGS = {"a", "b", "code", "em", "i", "kbd", "q", "s", "small", "span", "strong", "sub", "sup", "u", "var"}
 
 
 def is_content_safety_error(error_msg: str = "", status_code: int | None = None) -> bool:
@@ -184,6 +195,17 @@ def _collect_translatable_text_nodes(html: str) -> tuple[BeautifulSoup, list[tup
     return soup, nodes
 
 
+def _should_translate_chunk_via_text_nodes_directly(html: str) -> bool:
+    """Direct text-node translation when inline markup density makes HTML regeneration fragile."""
+    soup, text_nodes = _collect_translatable_text_nodes(html)
+    if len(text_nodes) < DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD:
+        return False
+
+    tags = list(soup.find_all(True))
+    inline_tag_count = sum(1 for tag in tags if str(tag.name).lower() in HIGH_RISK_INLINE_TAGS)
+    return inline_tag_count >= DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD or len(tags) >= DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD
+
+
 def _validate_text_node_translation(original: str, translated: str) -> tuple[bool, str]:
     translated = _normalize_missing_leading_text_marker(original, translated)
     original_segments = _extract_text_segments(original)
@@ -198,13 +220,50 @@ def _validate_text_node_translation(original: str, translated: str) -> tuple[boo
         if not payload.strip():
             return False, f"TEXT 标记 {marker} 译文为空"
 
+    translated_payloads = {marker: payload for marker, payload in translated_segments}
+    for marker, original_payload in original_segments:
+        translated_payload = translated_payloads.get(marker, "")
+        for label, pattern in SECONDARY_PLACEHOLDER_LABEL_PATTERNS.items():
+            original_placeholders = pattern.findall(original_payload)
+            translated_placeholders = pattern.findall(translated_payload)
+            if original_placeholders != translated_placeholders:
+                return (
+                    False,
+                    f"TEXT 标记 {marker} 内 {label} 占位符不一致: 原始 {original_placeholders}, 翻译 {translated_placeholders}",
+                )
+
     return True, ""
+
+
+def _append_error_history(history: list[str], error_msg: str | None) -> list[str]:
+    if not error_msg:
+        return history
+    if history and history[-1] == error_msg:
+        return history
+
+    updated = [*history, error_msg]
+    if len(updated) > VALIDATION_ERROR_HISTORY_LIMIT:
+        updated = updated[-VALIDATION_ERROR_HISTORY_LIMIT:]
+    return updated
+
+
+def _build_validation_feedback(history: list[str]) -> str | None:
+    if not history:
+        return None
+    if len(history) == 1:
+        return history[0]
+
+    bullets = "\n".join(f"- {item}" for item in history)
+    return (
+        "修复以下历史错误，优先解决最后一条，同时保持已正确的结构、标签和标记不变：\n"
+        f"{bullets}"
+    )
 
 
 async def _translate_with_text_node_fallback(
     original: str,
     glossary: Dict[str, str] | None = None,
-    error_msg: str | None = None,
+    error_history: list[str] | None = None,
 ) -> tuple[str | None, str | None]:
     soup, text_nodes = _collect_translatable_text_nodes(original)
     if not text_nodes:
@@ -216,26 +275,42 @@ async def _translate_with_text_node_fallback(
             (text_node, f"[TEXT:{index}]", text) for index, (text_node, _, text) in enumerate(batch)
         ]
         marked_text = "\n".join(f"{marker}{text}" for _, marker, text in batch_with_local_markers)
-        translated = await _call_translator(
-            marked_text,
-            glossary,
-            None,
-            error_msg,
-            mode="text_node",
-        )
-        translated = _normalize_missing_leading_text_marker(marked_text, translated)
+        batch_error_history = list(error_history or [])
+        batch_previous_translation = None
+        batch_error_msg = None
 
-        is_valid, validation_error = _validate_text_node_translation(marked_text, translated)
-        if not is_valid:
-            return None, validation_error
+        for _ in range(TEXT_NODE_FALLBACK_RETRIES):
+            translated = await _call_translator(
+                marked_text,
+                glossary,
+                batch_previous_translation,
+                _build_validation_feedback(batch_error_history),
+                mode="text_node",
+            )
+            translated = _normalize_missing_leading_text_marker(marked_text, translated)
 
-        translated_segments = _extract_text_segments(translated)
-        for (text_node, expected_marker, _), (actual_marker, payload) in zip(
-            batch_with_local_markers, translated_segments
-        ):
-            if actual_marker != expected_marker:
-                return None, f"TEXT 标记不一致: 期望 {expected_marker}, 实际 {actual_marker}"
-            text_node.replace_with(payload)
+            is_valid, validation_error = _validate_text_node_translation(marked_text, translated)
+            if is_valid:
+                translated_segments = _extract_text_segments(translated)
+                for (text_node, expected_marker, _), (actual_marker, payload) in zip(
+                    batch_with_local_markers, translated_segments
+                ):
+                    if actual_marker != expected_marker:
+                        batch_error_msg = f"TEXT 标记不一致: 期望 {expected_marker}, 实际 {actual_marker}"
+                        batch_error_history = _append_error_history(batch_error_history, batch_error_msg)
+                        batch_previous_translation = translated
+                        break
+                    text_node.replace_with(payload)
+                else:
+                    batch_error_msg = None
+                    break
+            else:
+                batch_error_msg = validation_error
+                batch_error_history = _append_error_history(batch_error_history, validation_error)
+                batch_previous_translation = translated
+
+        if batch_error_msg:
+            return None, batch_error_msg
 
     return str(soup), None
 
@@ -384,20 +459,30 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
         protected_original, frozen_tag_replacements = _freeze_translation_tags(original)
     last_error_msg = None
     last_translation = None
+    error_history: list[str] = []
+    prefer_text_node_directly = (
+        chunk.chunk_mode != "nav_text" and _should_translate_chunk_via_text_nodes_directly(original)
+    )
 
     for attempt in range(MAX_TRANSLATION_RETRIES):
         try:
             use_text_node_fallback = (
-                chunk.chunk_mode != "nav_text"
-                and attempt == MAX_TRANSLATION_RETRIES - 1
-                and _is_structure_validation_error(last_error_msg)
+                prefer_text_node_directly
+                or (
+                    chunk.chunk_mode != "nav_text"
+                    and attempt == MAX_TRANSLATION_RETRIES - 1
+                    and _is_structure_validation_error(last_error_msg)
+                )
             )
             if use_text_node_fallback:
-                logger.info("开始执行 text-node fallback translate 调用")
+                if prefer_text_node_directly and attempt == 0:
+                    logger.info("检测到高风险复杂 chunk，直接执行 text-node translate 调用")
+                else:
+                    logger.info("开始执行 text-node fallback translate 调用")
                 translated, text_node_error = await _translate_with_text_node_fallback(
                     original,
                     glossary,
-                    last_error_msg,
+                    error_history,
                 )
                 if text_node_error:
                     is_valid, error_msg = False, text_node_error
@@ -408,7 +493,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
                     protected_original,
                     glossary,
                     last_translation,
-                    last_error_msg,
+                    _build_validation_feedback(error_history),
                     mode="nav_text" if chunk.chunk_mode == "nav_text" else "html",
                 )
                 translated = translated.replace("\\n", "\n")
@@ -416,6 +501,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
             error_str = str(e)
             logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 异常: {e}")
             last_error_msg = error_str
+            error_history = _append_error_history(error_history, error_str)
             continue
 
         if not use_text_node_fallback:
@@ -437,6 +523,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
 
         logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 失败: {error_msg}")
         last_error_msg = error_msg
+        error_history = _append_error_history(error_history, error_msg)
 
     # 所有重试都失败 → 标记为 TRANSLATION_FAILED，保留原文保结构
     logger.warning(f"Chunk '{chunk.name}': 翻译重试全部失败，标记为 TRANSLATION_FAILED")

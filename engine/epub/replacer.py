@@ -7,7 +7,7 @@ from engine.agents.verifier import verify_final_html
 from engine.core.logger import engine_logger as logger
 from engine.core.markup import get_markup_parser
 from engine.item import PreCodeExtractor
-from engine.item.xpath import find_by_xpath
+from engine.item.xpath import find_by_xpath, get_xpath
 from engine.schemas import Chunk, EpubItem, TranslationStatus
 
 
@@ -19,8 +19,20 @@ class DomReplacer:
     - 旧方案：字符串拼接 + 占位符替换
     - 新方案：在原始 DOM 上精确替换翻译后的元素
     """
+
     NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
     SECONDARY_PLACEHOLDER_PATTERN = re.compile(r"\[(PRE|CODE|STYLE):\d+\]")
+    WRITEBACK_TRACK_ATTR = "data-epubox-wb-id"
+
+    @staticmethod
+    def _xpath_depth(xpath: str) -> int:
+        return len([part for part in (xpath or "").split("/") if part])
+
+    @staticmethod
+    def _is_xpath_ancestor(ancestor: str, descendant: str) -> bool:
+        if not ancestor or not descendant or ancestor == descendant:
+            return False
+        return descendant.startswith(f"{ancestor}/")
 
     def _build_writeback_soup(self, item: EpubItem) -> BeautifulSoup:
         """
@@ -36,6 +48,28 @@ class DomReplacer:
             pre_extractor = PreCodeExtractor()
             source = pre_extractor.extract(normalized)
         return BeautifulSoup(source, get_markup_parser(source))
+
+    def _build_writeback_locator_map(self, soup) -> dict[str, str]:
+        locator_map: dict[str, str] = {}
+        counter = 0
+        for element in soup.find_all(True):
+            marker = f"wb-{counter}"
+            counter += 1
+            element.attrs[self.WRITEBACK_TRACK_ATTR] = marker
+            locator_map[get_xpath(element)] = marker
+        return locator_map
+
+    def _find_writeback_target(self, soup, xpath: str, locator_map: dict[str, str]):
+        marker = locator_map.get(xpath)
+        if marker:
+            tracked = soup.find(attrs={self.WRITEBACK_TRACK_ATTR: marker})
+            if tracked is not None:
+                return tracked
+        return find_by_xpath(soup, xpath)
+
+    def _strip_writeback_tracking_attrs(self, soup) -> None:
+        for element in soup.find_all(True):
+            element.attrs.pop(self.WRITEBACK_TRACK_ATTR, None)
 
     def restore(self, item: EpubItem) -> str | None:
         """
@@ -53,8 +87,11 @@ class DomReplacer:
         if not item.chunks:
             return item.content
 
+        self._mark_overlapping_chunks(item)
+
         # 1. 解析原始 HTML
         soup = self._build_writeback_soup(item)
+        locator_map = self._build_writeback_locator_map(soup)
 
         # 2. 按 xpath 替换
         for chunk in item.chunks:
@@ -67,11 +104,12 @@ class DomReplacer:
             if chunk.chunk_mode == "nav_text":
                 writeback_ok = self._replace_nav_text(soup, chunk)
             else:
-                writeback_ok = self._replace_by_xpaths(soup, chunk)
+                writeback_ok = self._replace_by_xpaths(soup, chunk, locator_map)
             if not writeback_ok:
                 chunk.status = TranslationStatus.WRITEBACK_FAILED
 
         # 3. 恢复 PreCodeExtractor 占位符
+        self._strip_writeback_tracking_attrs(soup)
         result = str(soup)
         if item.preserved_pre or item.preserved_code or item.preserved_style:
             pre_extractor = PreCodeExtractor()
@@ -92,6 +130,52 @@ class DomReplacer:
         item.translated = result
 
         return result
+
+    def _mark_overlapping_chunks(self, item: EpubItem) -> None:
+        active_chunks = [
+            chunk
+            for chunk in (item.chunks or [])
+            if chunk.chunk_mode != "nav_text"
+            and chunk.translated
+            and chunk.status
+            not in (
+                TranslationStatus.ACCEPTED_AS_IS,
+                TranslationStatus.TRANSLATION_FAILED,
+                TranslationStatus.WRITEBACK_FAILED,
+            )
+        ]
+
+        if len(active_chunks) < 2:
+            return
+
+        for index, chunk in enumerate(active_chunks):
+            chunk_paths = chunk.xpaths or []
+            if not chunk_paths:
+                continue
+            chunk_depth = min(self._xpath_depth(xpath) for xpath in chunk_paths)
+
+            for other_index, other_chunk in enumerate(active_chunks):
+                if index == other_index:
+                    continue
+                other_paths = other_chunk.xpaths or []
+                if not other_paths:
+                    continue
+                other_depth = min(self._xpath_depth(xpath) for xpath in other_paths)
+
+                overlaps_descendant = any(
+                    self._is_xpath_ancestor(xpath, other_xpath)
+                    for xpath in chunk_paths
+                    for other_xpath in other_paths
+                )
+                if not overlaps_descendant:
+                    continue
+
+                if chunk_depth < other_depth:
+                    logger.warning(
+                        f"Chunk {chunk.name}: 检测到与更具体 xpath 重叠，跳过整块回写以保留更细粒度分块"
+                    )
+                    chunk.status = TranslationStatus.WRITEBACK_FAILED
+                    break
 
     def _mark_writeback_failed_chunks(self, item: EpubItem, error: str) -> None:
         """将导致最终文件校验失败的分块回退为 WRITEBACK_FAILED，便于进入人工处理报告。"""
@@ -115,7 +199,7 @@ class DomReplacer:
             if chunk.translated:
                 chunk.status = TranslationStatus.WRITEBACK_FAILED
 
-    def _replace_by_xpaths(self, soup, chunk: Chunk):
+    def _replace_by_xpaths(self, soup, chunk: Chunk, locator_map: dict[str, str]):
         """
         解析 chunk 的翻译结果，按 xpath 逐个替换原始 DOM 中的元素
 
@@ -136,11 +220,13 @@ class DomReplacer:
 
         # 按 xpath 逐个替换；任一步失败都放弃整块回写，避免混入原文
         for i, xpath in enumerate(chunk.xpaths):
-            original_element = find_by_xpath(trial_soup, xpath)
+            original_element = self._find_writeback_target(trial_soup, xpath, locator_map)
             if not original_element:
                 logger.warning(f"Chunk {chunk.name}: xpath '{xpath}' 未找到对应元素，放弃整块回写")
                 return False
-            original_element.replace_with(copy(translated_elements[i]))
+            translated_copy = copy(translated_elements[i])
+            translated_copy.attrs.pop(self.WRITEBACK_TRACK_ATTR, None)
+            original_element.replace_with(translated_copy)
 
         soup.clear()
         for child in list(trial_soup.contents):

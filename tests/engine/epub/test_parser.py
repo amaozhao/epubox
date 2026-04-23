@@ -79,7 +79,7 @@ class TestParser:
         [
             ('<html><body><nav class="toc"><a href="#c1">Chapter 1</a></nav></body></html>', True),
             ('<html><body><nav epub:type="toc"><a href="#c1">Chapter 1</a></nav></body></html>', True),
-            ("<html><body><nav><a href=\"#c1\">Chapter 1</a></nav></body></html>", False),
+            ('<html><body><nav><a href="#c1">Chapter 1</a></nav></body></html>', False),
         ],
     )
     def test_has_embedded_toc_nav(self, html, expected):
@@ -169,6 +169,116 @@ class TestParser:
         assert item.source_html_errors == []
 
         assert "container.xml" not in [i.id for i in book.items]
+
+    def test_parse_navigation_xhtml_produces_nav_chunks(self, mocker, parser_instance):
+        """测试 navigation.xhtml 会被真正解析为 nav_text chunks，而不是空 chunks。"""
+        mocker.patch.object(parser_instance, "extract")
+        mocker.patch.object(parser_instance, "load_json", return_value=None)
+        mocker.patch.object(parser_instance, "save_json")
+        mocker.patch("engine.epub.parser.DomChunker", DomChunker)
+        mocker.patch("os.walk", return_value=[(parser_instance.output_dir, (), ["navigation.xhtml"])])
+
+        original_html = """
+        <html><body>
+          <section aria-label="chapter opening">
+            <nav class="tocList" epub:type="toc" id="toc" role="doc-toc">
+              <h1>Table of Contents</h1>
+              <ol>
+                <li><a href="c01.xhtml">1 Linear Modeling for Two-Dimensional Data</a></li>
+                <li><a href="c02.xhtml">2 Multidimensional Data Analysis</a></li>
+                <li><a href="c03.xhtml">3 Introduction to Automatic Classification</a></li>
+                <li><a href="c04.xhtml">4 Linear Programming</a></li>
+                <li><a href="c05.xhtml">5 Elements of Graph Theory</a></li>
+                <li><a href="c06.xhtml">6 Path Optimization</a></li>
+              </ol>
+            </nav>
+          </section>
+        </body></html>
+        """
+        mocker.patch("builtins.open", mock_open(read_data=original_html))
+
+        book = parser_instance.parse()
+
+        item = book.items[0]
+        assert item.id == "navigation.xhtml"
+        assert item.chunks
+        assert item.chunks[0].chunk_mode == "nav_text"
+        assert item.chunks[0].nav_targets
+
+    def test_parse_navigation_xhtml_preserves_inline_code_placeholders(self, mocker, parser_instance):
+        """测试导航文档中的 code 文本会被占位符保护，避免目录标题里的命令被翻译。"""
+        mocker.patch.object(parser_instance, "extract")
+        mocker.patch.object(parser_instance, "load_json", return_value=None)
+        mocker.patch.object(parser_instance, "save_json")
+        mocker.patch("engine.epub.parser.DomChunker", DomChunker)
+        mocker.patch("os.walk", return_value=[(parser_instance.output_dir, (), ["navigation.xhtml"])])
+
+        original_html = """
+        <html><body>
+          <nav class="tocList" epub:type="toc" id="toc" role="doc-toc">
+            <ol>
+              <li><a href="c01.xhtml"><code>pip install epubox</code> quick start</a></li>
+            </ol>
+          </nav>
+        </body></html>
+        """
+        mocker.patch("builtins.open", mock_open(read_data=original_html))
+
+        book = parser_instance.parse()
+
+        item = book.items[0]
+        assert item.preserved_code == ["<code>pip install epubox</code>"]
+        assert item.chunks
+        assert "[CODE:0]" in item.chunks[0].original
+
+    def test_parse_prose_chapter_does_not_collapse_to_title_only_chunk(self, mocker, parser_instance):
+        """测试带公式图片的正文页不会被 PRE 提取误伤到只剩 title chunk。"""
+        mocker.patch.object(parser_instance, "extract")
+        mocker.patch.object(parser_instance, "load_json", return_value=None)
+        mocker.patch.object(parser_instance, "save_json")
+        mocker.patch("engine.epub.parser.DomChunker", DomChunker)
+        mocker.patch("os.walk", return_value=[(parser_instance.output_dir, (), ["c04.xhtml"])])
+
+        original_html = """
+        <html><body>
+          <section aria-labelledby="c04" epub:type="chapter" role="doc-chapter">
+            <header><h1 id="c04">4 Linear Programming</h1></header>
+            <aside>
+              <section class="feature2">
+                <h2>CONCEPTS COVERED IN THIS CHAPTER.–</h2>
+                <p>Linear programming is a fundamental tool for optimizing functions subject to constraints.</p>
+                <p>This chapter provides a detailed exploration of this technique, beginning with an introductory example.</p>
+                <p>References: [BRO 82], [DES 76], [FAU 74].</p>
+              </section>
+            </aside>
+            <section aria-labelledby="sec4-1">
+              <h2 id="sec4-1">4.1. An introductory example</h2>
+              <p>The mathematical formulation of the problem is described as follows:</p>
+              <ol class="decimal">
+                <li>Objective function:
+                  <div class="informalEquation"><img alt="image" src="images/eqpg111-1.png"/></div>
+                </li>
+                <li>Constraints:
+                  <ul class="hyphen">
+                    <li>Machine A: takes <img alt="image" src="images/i111-1.png"/> hours.</li>
+                    <li>Machine B: requires <img alt="image" src="images/i111-2.png"/> hours.</li>
+                  </ul>
+                </li>
+              </ol>
+              <p>The problem can be solved graphically because both the objective function and the constraints are linear.</p>
+            </section>
+          </section>
+        </body></html>
+        """
+        mocker.patch("builtins.open", mock_open(read_data=original_html))
+
+        book = parser_instance.parse()
+
+        item = book.items[0]
+        assert item.id == "c04.xhtml"
+        assert item.chunks
+        assert any("/html/body/section" in xpath for chunk in item.chunks for xpath in (chunk.xpaths or []))
+        assert not all((chunk.xpaths or []) == ["/html/head/title"] for chunk in item.chunks)
 
     def test_parse_persists_source_html_integrity_errors(self, mocker, parser_instance):
         """测试原始 HTML 结构错误会被记录到 EpubItem 中，而不只是打日志。"""
@@ -381,6 +491,55 @@ class TestParser:
 
         dom_chunker_cls.assert_called_with(token_limit=1500, secondary_placeholder_limit=9)
 
+    def test_rebuild_nav_item_chunks_does_not_pre_extract_navigation_xhtml(self, tmp_path, mocker):
+        """测试 navigation.xhtml 这类导航文档重建时不会先被 PRE 提取吃空。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        html = """
+        <html><body>
+          <section aria-label="chapter opening">
+            <nav class="tocList" epub:type="toc" id="toc" role="doc-toc">
+              <h1>Table of Contents</h1>
+              <ol>
+                <li><a href="c01.xhtml">1 Linear Programming</a></li>
+                <li><a href="c02.xhtml">2 Graph Theory</a></li>
+              </ol>
+            </nav>
+          </section>
+        </body></html>
+        """
+        item = EpubBook.model_validate(
+            {
+                "name": "my_book",
+                "path": str(epub_path),
+                "extract_path": str(tmp_path / "temp" / "my_book"),
+                "items": [
+                    {
+                        "id": "OPS/navigation.xhtml",
+                        "path": str(tmp_path / "temp" / "my_book" / "OPS" / "navigation.xhtml"),
+                        "content": html,
+                        "chunks": [
+                            {
+                                "name": "legacy-nav",
+                                "original": "<title>Table of Contents</title>",
+                                "translated": None,
+                                "status": "pending",
+                                "tokens": 20,
+                                "xpaths": ["/html/head/title"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ).items[0]
+        mocker.patch("engine.epub.parser.DomChunker", DomChunker)
+
+        parser._rebuild_nav_item_chunks(item, is_nav_file=True)
+
+        assert item.chunks
+        assert item.chunks[0].chunk_mode == "nav_text"
+        assert item.chunks[0].nav_targets
+
     def test_load_json_upgrades_embedded_toc_chunks(self, tmp_path, mocker):
         """测试普通文件中的内嵌目录块 checkpoint 也会被重建为 nav_text 模式。"""
         epub_path = tmp_path / "my_book.epub"
@@ -570,7 +729,7 @@ class TestParser:
         oversized_targets = [
             {
                 "marker": f"[NAVTXT:{i}]",
-                "xpath": f"/ncx/navMap/navPoint[{i+1}]/navLabel/text",
+                "xpath": f"/ncx/navMap/navPoint[{i + 1}]/navLabel/text",
                 "text_index": 0,
                 "original_text": f"Chapter {i}",
             }
@@ -619,6 +778,173 @@ class TestParser:
         rebuild.assert_called_once()
         save_json.assert_called_once()
 
+    def test_load_json_upgrades_title_only_broken_chunks(self, tmp_path, mocker):
+        """测试正文页只剩 title chunk 的坏 checkpoint 会被自动重建。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        rebuild = mocker.patch.object(
+            parser,
+            "_rebuild_item_chunks",
+            side_effect=lambda item, *, is_nav_file, strip_title=False: setattr(
+                item,
+                "chunks",
+                [
+                    Chunk(
+                        name="body-text",
+                        original="<title>4 Linear Programming</title>\n<section><p>Hello</p></section>",
+                        translated=None,
+                        status="pending",
+                        tokens=20,
+                        xpaths=["/html/head/title", "/html/body/section"],
+                    )
+                ],
+            ),
+        )
+        checkpoint_path = tmp_path / "my_book.json"
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "name": "my_book",
+                    "path": str(epub_path),
+                    "extract_path": str(tmp_path / "temp" / "my_book"),
+                    "items": [
+                        {
+                            "id": "OPS/c04.xhtml",
+                            "path": str(tmp_path / "temp" / "my_book" / "OPS" / "c04.xhtml"),
+                            "content": (
+                                "<html><head><title>4 Linear Programming</title></head><body><section>"
+                                "<p>Hello world in body with enough prose to require rechunking for this checkpoint upgrade test.</p>"
+                                "</section></body></html>"
+                            ),
+                            "chunks": [
+                                {
+                                    "name": "title-only",
+                                    "original": "<title>4 Linear Programming</title>",
+                                    "translated": None,
+                                    "status": "pending",
+                                    "tokens": 8,
+                                    "xpaths": ["/html/head/title"],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        save_json = mocker.patch.object(parser, "save_json")
+
+        book = parser.load_json()
+
+        assert book is not None
+        assert len(book.items[0].chunks) == 1
+        assert "/html/body/section" in book.items[0].chunks[0].xpaths
+        rebuild.assert_called_once_with(book.items[0], is_nav_file=False, strip_title=False)
+        save_json.assert_called_once()
+
+    def test_load_json_upgrades_title_only_broken_chunks_keeps_completed_title_translation(self, tmp_path, mocker):
+        """测试 title-only checkpoint 升级时会保留已完成的标题译文。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        rebuild = mocker.patch.object(
+            parser,
+            "_rebuild_item_chunks",
+            side_effect=lambda item, *, is_nav_file, strip_title=False: setattr(
+                item,
+                "chunks",
+                [
+                    Chunk(
+                        name="body-text",
+                        original="<section><p>Hello</p></section>",
+                        translated=None,
+                        status="pending",
+                        tokens=12,
+                        xpaths=["/html/body/section"],
+                    )
+                ],
+            ),
+        )
+        checkpoint_path = tmp_path / "my_book.json"
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "name": "my_book",
+                    "path": str(epub_path),
+                    "extract_path": str(tmp_path / "temp" / "my_book"),
+                    "items": [
+                        {
+                            "id": "OPS/c04.xhtml",
+                            "path": str(tmp_path / "temp" / "my_book" / "OPS" / "c04.xhtml"),
+                            "content": (
+                                "<html><head><title>4 Linear Programming</title></head><body><section>"
+                                "<p>Hello world in body with enough prose to require rechunking for this checkpoint upgrade test.</p>"
+                                "</section></body></html>"
+                            ),
+                            "chunks": [
+                                {
+                                    "name": "title-only",
+                                    "original": "<title>4 Linear Programming</title>",
+                                    "translated": "<title>4 线性规划</title>",
+                                    "status": "completed",
+                                    "tokens": 8,
+                                    "xpaths": ["/html/head/title"],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        save_json = mocker.patch.object(parser, "save_json")
+
+        book = parser.load_json()
+
+        assert book is not None
+        assert len(book.items[0].chunks) == 2
+        assert book.items[0].chunks[0].translated == "<title>4 线性规划</title>"
+        assert book.items[0].chunks[0].status == "completed"
+        assert book.items[0].chunks[0].xpaths == ["/html/head/title"]
+        assert book.items[0].chunks[1].xpaths == ["/html/body/section"]
+        rebuild.assert_called_once_with(book.items[0], is_nav_file=False, strip_title=True)
+        save_json.assert_called_once()
+
+    def test_load_json_ignores_checkpoint_when_placeholder_inventory_mismatches(self, tmp_path, mocker):
+        """旧 checkpoint 的占位符映射与当前提取结果不一致时，应放弃加载并走全量重建。"""
+        epub_path = tmp_path / "my_book.epub"
+        parser = Parser(path=str(epub_path))
+        checkpoint_path = tmp_path / "my_book.json"
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "name": "my_book",
+                    "path": str(epub_path),
+                    "extract_path": str(tmp_path / "temp" / "my_book"),
+                    "items": [
+                        {
+                            "id": "OPS/c06.xhtml",
+                            "path": str(tmp_path / "temp" / "my_book" / "OPS" / "c06.xhtml"),
+                            "content": "<html><body><h3><code>Algorithm</code></h3><p>Body</p></body></html>",
+                            "chunks": [],
+                            "preserved_pre": [],
+                            "preserved_code": [],
+                            "preserved_style": [],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        save_json = mocker.patch.object(parser, "save_json")
+
+        book = parser.load_json()
+
+        assert book is None
+        save_json.assert_not_called()
+
     def test_load_json_keeps_completed_nav_text_chunks_at_current_unit_limit(self, tmp_path, mocker):
         """测试已经按当前 24 单元策略切好的 nav_text checkpoint 不会在每次加载时被误重建。"""
         epub_path = tmp_path / "my_book.epub"
@@ -628,7 +954,7 @@ class TestParser:
         nav_targets = [
             {
                 "marker": f"[NAVTXT:{i}]",
-                "xpath": f"/ncx/navMap/navPoint[{i+1}]/navLabel/text",
+                "xpath": f"/ncx/navMap/navPoint[{i + 1}]/navLabel/text",
                 "text_index": 0,
                 "original_text": f"Chapter {i}",
             }
