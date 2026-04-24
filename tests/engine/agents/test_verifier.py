@@ -1,4 +1,3 @@
-
 from engine.agents.verifier import get_tag_name, is_self_closing, verify_final_html, verify_html_integrity
 
 

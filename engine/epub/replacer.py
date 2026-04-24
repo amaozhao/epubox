@@ -122,6 +122,10 @@ class DomReplacer:
         is_valid, error = verify_final_html(item.content, result)
         if not is_valid:
             logger.error(f"HTML 结构验证失败: {item.id}, 错误: {error}")
+            recovered = self._recover_valid_writeback(item)
+            if recovered is not None:
+                item.translated = recovered
+                return recovered
             self._mark_writeback_failed_chunks(item, error)
             item.translated = None
             return None
@@ -130,6 +134,59 @@ class DomReplacer:
         item.translated = result
 
         return result
+
+    def _render_soup_with_restored_placeholders(self, soup, item: EpubItem) -> str:
+        self._strip_writeback_tracking_attrs(soup)
+        result = str(soup)
+        if item.preserved_pre or item.preserved_code or item.preserved_style:
+            pre_extractor = PreCodeExtractor()
+            pre_extractor.preserved_pre = item.preserved_pre or []
+            pre_extractor.preserved_code = item.preserved_code or []
+            pre_extractor.preserved_style = item.preserved_style or []
+            result = pre_extractor.restore(result)
+        return result
+
+    def _recover_valid_writeback(self, item: EpubItem) -> str | None:
+        """Fallback path: replay chunks one by one and keep only writes that preserve item-level validity."""
+        soup = self._build_writeback_soup(item)
+        locator_map = self._build_writeback_locator_map(soup)
+        recovered_any = False
+
+        for chunk in item.chunks or []:
+            if not chunk.translated or chunk.status in (
+                TranslationStatus.ACCEPTED_AS_IS,
+                TranslationStatus.TRANSLATION_FAILED,
+                TranslationStatus.WRITEBACK_FAILED,
+            ):
+                continue
+
+            trial_soup = deepcopy(soup)
+            if chunk.chunk_mode == "nav_text":
+                writeback_ok = self._replace_nav_text(trial_soup, chunk)
+            else:
+                writeback_ok = self._replace_by_xpaths(trial_soup, chunk, locator_map)
+            if not writeback_ok:
+                chunk.status = TranslationStatus.WRITEBACK_FAILED
+                continue
+
+            candidate = self._render_soup_with_restored_placeholders(trial_soup, item)
+            is_valid, error = verify_final_html(item.content, candidate)
+            if not is_valid:
+                logger.warning(f"Chunk {chunk.name}: 单块回写后仍导致 item 校验失败，已跳过: {error}")
+                chunk.status = TranslationStatus.WRITEBACK_FAILED
+                continue
+
+            soup = trial_soup
+            locator_map = self._build_writeback_locator_map(soup)
+            recovered_any = True
+
+        final_result = self._render_soup_with_restored_placeholders(soup, item)
+        is_valid, error = verify_final_html(item.content, final_result)
+        if is_valid:
+            return final_result
+        if recovered_any:
+            logger.error(f"HTML 结构验证失败: {item.id}, 分块级恢复后仍无有效结果: {error}")
+        return None
 
     def _mark_overlapping_chunks(self, item: EpubItem) -> None:
         active_chunks = [

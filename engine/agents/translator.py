@@ -13,7 +13,7 @@ description = (
 BASE_INSTRUCTIONS = [
     '1. **JSON OUTPUT ONLY**: Return ONLY {"translation": "..."} with no extra keys or commentary.',
     "2. **GLOSSARY**: Use the 'glossaries' dictionary for technical term translations.",
-    "3. **RETRY INPUTS**: The input may include 'validation_error' and 'previous_translation'. When present, repair the previous translation to satisfy the validation error instead of restarting from scratch.",
+    "3. **RETRY INPUTS**: The input may include 'validation_error' and 'previous_translation'. 'validation_error' may summarize multiple previous failures. When present, repair the previous translation to satisfy those constraints instead of restarting from scratch.",
     "4. **MINIMAL REPAIR ON RETRY**: If 'previous_translation' is provided, keep all already-correct content unchanged and make only the smallest edit needed to fix the reported problem.",
 ]
 
@@ -36,7 +36,8 @@ TEXT_NODE_MODE_INSTRUCTIONS = [
     "   - Each output line must start with the exact same [TEXT:N] marker as its corresponding input line.",
     "   - Do not add, remove, duplicate, merge, split, or renumber markers.",
     "7. **PAYLOAD ONLY**: Translate only the payload after each marker. Keep the marker untouched.",
-    "8. **NO EXTRA TEXT**: Do not add explanations, headings, code fences, blank lines, or any text before the first marker or after the last marker.",
+    "8. **RETRY REPAIR RULE**: If 'previous_translation' is provided, copy its marker skeleton exactly and only repair the missing or incorrect marker lines/payloads.",
+    "9. **NO EXTRA TEXT**: Do not add explanations, headings, code fences, blank lines, or any text before the first marker or after the last marker.",
 ]
 
 

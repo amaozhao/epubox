@@ -15,7 +15,7 @@ from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
 from .translator import get_translator
-from engine.agents.verifier import validate_translated_html
+from engine.agents.verifier import find_untranslated_english_texts, validate_translated_html
 
 # 需要内容安全审核 fallback 的错误码
 CONTENT_SAFETY_ERROR_CODES = {10014, 500, 400}
@@ -33,6 +33,10 @@ NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
 TEXT_MARKER_PATTERN = re.compile(r"\[TEXT:\d+\]")
 FROZEN_TAG_PATTERN = re.compile(r"\[TAG:\d+\]")
 FROZEN_TRANSLATION_TAGS = {"img", "br", "hr", "meta", "link"}
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+MODEL_FORMAT_NEWLINE_ESCAPE_RE = re.compile(
+    r"(?:(?<=>)\\n|\\n(?=\s*(?:\[(?:TEXT|NAVTXT):\d+\]|</?[A-Za-z][A-Za-z0-9:_-]*\b|<!--)))"
+)
 STRUCTURE_ERROR_KEYWORDS = (
     "标签属性不一致",
     "子标签数量不一致",
@@ -45,7 +49,10 @@ VALIDATION_ERROR_HISTORY_LIMIT = 4
 DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD = 6
 DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD = 12
 DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD = 8
+DIRECT_TEXT_NODE_PLACEHOLDER_RISK_THRESHOLD = 1
+DIRECT_TEXT_NODE_MATH_TAG_THRESHOLD = 4
 HIGH_RISK_INLINE_TAGS = {"a", "b", "code", "em", "i", "kbd", "q", "s", "small", "span", "strong", "sub", "sup", "u", "var"}
+MATHY_INLINE_TAGS = {"sub", "sup"}
 
 
 def is_content_safety_error(error_msg: str = "", status_code: int | None = None) -> bool:
@@ -160,6 +167,27 @@ def _normalize_missing_leading_text_marker(original: str, translated: str) -> st
     return f"{original_markers[0]}{translated}"
 
 
+def _visible_text_for_language_check(text: str) -> str:
+    text = SECONDARY_PLACEHOLDER_PATTERN.sub(" ", text)
+    text = NAV_MARKER_PATTERN.sub(" ", text)
+    text = TEXT_MARKER_PATTERN.sub(" ", text)
+    return BeautifulSoup(text, get_markup_parser(text)).get_text(" ", strip=True)
+
+
+def _looks_like_already_simplified_chinese(text: str) -> bool:
+    visible_text = _visible_text_for_language_check(text)
+    if not visible_text:
+        return False
+
+    cjk_count = sum(1 for ch in visible_text if "\u4e00" <= ch <= "\u9fff")
+    latin_count = sum(1 for ch in visible_text if ("a" <= ch.lower() <= "z"))
+    if cjk_count < 2:
+        return False
+    if latin_count == 0:
+        return True
+    return cjk_count >= max(4, latin_count * 0.5)
+
+
 def _is_structure_validation_error(error_msg: str | None) -> bool:
     if not error_msg:
         return False
@@ -198,11 +226,20 @@ def _collect_translatable_text_nodes(html: str) -> tuple[BeautifulSoup, list[tup
 def _should_translate_chunk_via_text_nodes_directly(html: str) -> bool:
     """Direct text-node translation when inline markup density makes HTML regeneration fragile."""
     soup, text_nodes = _collect_translatable_text_nodes(html)
+    tags = list(soup.find_all(True))
+    inline_tag_count = sum(1 for tag in tags if str(tag.name).lower() in HIGH_RISK_INLINE_TAGS)
+    math_tag_count = sum(1 for tag in tags if str(tag.name).lower() in MATHY_INLINE_TAGS)
+    placeholder_count = len(SECONDARY_PLACEHOLDER_PATTERN.findall(html))
+
+    if (
+        placeholder_count >= DIRECT_TEXT_NODE_PLACEHOLDER_RISK_THRESHOLD
+        and (inline_tag_count >= 4 or math_tag_count >= DIRECT_TEXT_NODE_MATH_TAG_THRESHOLD)
+    ):
+        return True
+
     if len(text_nodes) < DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD:
         return False
 
-    tags = list(soup.find_all(True))
-    inline_tag_count = sum(1 for tag in tags if str(tag.name).lower() in HIGH_RISK_INLINE_TAGS)
     return inline_tag_count >= DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD or len(tags) >= DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD
 
 
@@ -315,10 +352,11 @@ async def _translate_with_text_node_fallback(
     return str(soup), None
 
 
-def _apply_corrections_to_text_nodes(html: str, corrections: dict[str, str]) -> tuple[str, int]:
+def _apply_corrections_to_text_nodes(html: str, corrections: dict[str, str]) -> tuple[str, int, int]:
     """只在文本节点中应用校对建议，避免误改 HTML 属性或标签结构。"""
     soup = BeautifulSoup(html, get_markup_parser(html))
     replacement_count = 0
+    matched_corrections: set[str] = set()
 
     for text_node in list(soup.find_all(string=True)):
         if not isinstance(text_node, NavigableString):
@@ -331,12 +369,13 @@ def _apply_corrections_to_text_nodes(html: str, corrections: dict[str, str]) -> 
             if occurrences:
                 updated = updated.replace(original, corrected)
                 local_count += occurrences
+                matched_corrections.add(original)
 
         if local_count:
             text_node.replace_with(updated)
             replacement_count += local_count
 
-    return str(soup), replacement_count
+    return str(soup), replacement_count, len(matched_corrections)
 
 
 def _freeze_translation_tags(html: str) -> tuple[str, list[tuple[str, str]]]:
@@ -376,6 +415,9 @@ def _validate_nav_translation(original: str, translated: str) -> tuple[bool, str
     for marker, payload in translated_segments:
         if not payload:
             return False, f"NAV 标记 {marker} 译文为空"
+        untranslated_hits = find_untranslated_english_texts(payload)
+        if untranslated_hits:
+            return False, f"NAV 标记 {marker} 疑似残留未翻译英文: {untranslated_hits[0][:160]}"
 
     return True, ""
 
@@ -400,6 +442,12 @@ def _extract_translation_from_raw_content(raw_content: str) -> str | None:
     if isinstance(parsed, str):
         return parsed
     return cleaned
+
+
+def _sanitize_model_text(text: str) -> str:
+    cleaned = ANSI_ESCAPE_RE.sub("", text)
+    cleaned = "".join(ch for ch in cleaned if ch in ("\n", "\r", "\t") or ord(ch) >= 32)
+    return MODEL_FORMAT_NEWLINE_ESCAPE_RE.sub("\n", cleaned)
 
 
 async def _call_translator(
@@ -439,11 +487,11 @@ async def _call_translator(
                 raise ValueError(f"内容安全审核失败: {error_content[:100]}")
             raise RuntimeError(error_content or "翻译模型返回错误状态")
         if isinstance(raw_content, TranslationResponse):
-            return raw_content.translation
+            return _sanitize_model_text(raw_content.translation)
         if isinstance(raw_content, str):
             parsed_translation = _extract_translation_from_raw_content(raw_content)
             if isinstance(parsed_translation, str) and parsed_translation.strip():
-                return parsed_translation
+                return _sanitize_model_text(parsed_translation)
         raise ValueError(f"翻译响应格式错误: {type(raw_content)}")
     except Exception as e:
         logger.error(f"翻译模型调用异常: {type(e).__name__}: {e}")
@@ -496,7 +544,6 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
                     _build_validation_feedback(error_history),
                     mode="nav_text" if chunk.chunk_mode == "nav_text" else "html",
                 )
-                translated = translated.replace("\\n", "\n")
         except Exception as e:
             error_str = str(e)
             logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 异常: {e}")
@@ -546,6 +593,15 @@ async def translate_step(step_input: StepInput) -> StepOutput:
         chunk.translated = chunk.original
         chunk.status = TranslationStatus.TRANSLATED
         return StepOutput(content=chunk)
+
+    untranslated_hits = find_untranslated_english_texts(chunk.original)
+    if _looks_like_already_simplified_chinese(chunk.original) and not untranslated_hits:
+        logger.info(f"Chunk '{chunk.name}' 检测到原文已是目标语言，直接接受原文。")
+        chunk.translated = chunk.original
+        chunk.status = TranslationStatus.ACCEPTED_AS_IS
+        return StepOutput(content=chunk)
+    if untranslated_hits:
+        logger.info(f"Chunk '{chunk.name}' 检测到疑似残留未翻译英文，将继续调用翻译器。")
 
     try:
         chunk = await _translate_with_fallback(chunk, glossary)
@@ -646,16 +702,29 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
         chunk.status = TranslationStatus.COMPLETED
         return StepOutput(content=chunk)
 
-    corrections = proofreading_result.corrections
-    logger.info(f"校对器发现 {len(corrections)} 个潜在的校对建议。")
-    corrections, rejected_corrections = _filter_invalid_corrections(corrections)
+    raw_corrections = proofreading_result.corrections
+    total_corrections = len(raw_corrections)
+    logger.info(f"校对器发现 {total_corrections} 个潜在的校对建议。")
+    corrections, rejected_corrections = _filter_invalid_corrections(raw_corrections)
+    eligible_corrections = len(corrections)
     if rejected_corrections:
         logger.warning(f"Chunk '{chunk.name}' 丢弃了 {rejected_corrections} 个破坏占位符完整性的校对建议。")
 
     final_text = translated_text
+    replacement_count = 0
+    matched_correction_count = 0
     if corrections:
-        final_text, replacement_count = _apply_corrections_to_text_nodes(final_text, corrections)
-        logger.info(f"成功应用 {replacement_count} 个校对建议。")
+        final_text, replacement_count, matched_correction_count = _apply_corrections_to_text_nodes(final_text, corrections)
+    unmatched_corrections = eligible_corrections - matched_correction_count
+    logger.info(
+        "校对建议统计："
+        f"总计 {total_corrections}，"
+        f"过滤 {rejected_corrections}，"
+        f"进入替换 {eligible_corrections}，"
+        f"文本命中 {matched_correction_count}，"
+        f"未命中 {unmatched_corrections}，"
+        f"实际替换 {replacement_count} 处。"
+    )
 
     # 后处理：统一词汇和标点
     final_text = final_text.replace("您", "你").replace("大型语言模型", "大语言模型")
@@ -663,7 +732,10 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
 
     is_valid, error_msg = validate_translated_html(chunk.original, final_text)
     if not is_valid:
-        logger.warning(f"Chunk '{chunk.name}' 校对后校验失败，回退到校对前译文: {error_msg}")
+        logger.warning(
+            f"Chunk '{chunk.name}' 校对后校验失败，回退到校对前译文: {error_msg}；"
+            f"已撤销 {replacement_count} 处替换（命中 {matched_correction_count} 条建议）。"
+        )
         final_text = translated_text
 
     chunk.translated = final_text

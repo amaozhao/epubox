@@ -236,8 +236,61 @@ class PreCodeExtractor:
         if name not in block_like_tags:
             return False
 
+        if name in {"section", "article"} and self._is_epub_prose_container(element):
+            return False
+
         score, _ = self._score_code_like_container(element)
-        return score >= 5
+        if score < 5:
+            return False
+
+        metadata_hits = self._count_code_like_metadata_hits(element)
+        tt_count = len(element.find_all("tt"))
+        semantic_code_tag_count = len(element.find_all(["code", "kbd", "samp", "var"]))
+        text_chunks = [chunk.strip() for chunk in element.stripped_strings if chunk.strip()]
+        codeish_chunks = sum(1 for chunk in text_chunks if self._is_codeish_text_chunk(chunk))
+        prose_runs = sum(1 for chunk in text_chunks if len(self._prose_word_re.findall(chunk)) >= 5)
+
+        if name in {"section", "article", "aside"}:
+            structural_anchor = metadata_hits > 0 or tt_count > 0
+            return structural_anchor and codeish_chunks >= max(2, prose_runs)
+
+        strong_anchor = metadata_hits > 0 or tt_count > 0 or semantic_code_tag_count > 0
+        if strong_anchor:
+            return True
+
+        return codeish_chunks >= 2 and codeish_chunks >= prose_runs
+
+    @staticmethod
+    def _is_epub_prose_container(element) -> bool:
+        role = str(element.get("role") or "").lower()
+        epub_type = str(element.get("epub:type") or "").lower()
+        classes = element.get("class") or []
+        if isinstance(classes, str):
+            classes = [classes]
+        class_text = " ".join(str(value).lower() for value in classes)
+
+        prose_markers = {
+            "doc-chapter",
+            "doc-part",
+            "doc-preface",
+            "doc-appendix",
+            "doc-conclusion",
+        }
+        epub_markers = {
+            "chapter",
+            "bodymatter",
+            "frontmatter",
+            "backmatter",
+            "appendix",
+            "preface",
+            "conclusion",
+        }
+
+        if role in prose_markers:
+            return True
+        if any(marker in epub_type.split() for marker in epub_markers):
+            return True
+        return any(marker in class_text for marker in ("chapter", "bodymatter", "frontmatter", "backmatter"))
 
     def _score_code_like_container(self, element) -> tuple[int, list[str]]:
         score = 0

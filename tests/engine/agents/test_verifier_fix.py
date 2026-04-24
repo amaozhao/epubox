@@ -1,4 +1,3 @@
-
 from engine.agents.verifier import validate_translated_html
 
 
@@ -70,6 +69,49 @@ class TestValidateTranslatedHtmlTagErrors:
         is_valid, error = validate_translated_html(original, translated)
         assert is_valid
         assert error == "accepted_as_is"
+
+    def test_validate_rejects_residual_untranslated_english_sentence(self):
+        """测试译文中残留自然英文句子时会被 chunk 校验拦截。"""
+        original = "<p>This source paragraph should be translated.</p>"
+        translated = "<p>这是中文说明。This sentence remains untranslated and should fail validation.</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert not is_valid
+        assert "疑似残留未翻译英文" in error
+
+    def test_validate_allows_common_technical_english_terms(self):
+        """测试常见技术名词保留英文不会被误判为漏译。"""
+        original = "<p>Use AWS CodePipeline with GitHub Actions and Docker for DevOps workflows.</p>"
+        translated = "<p>我们将使用 AWS CodePipeline、GitHub Actions 和 Docker 构建 DevOps 工作流。</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
+    def test_validate_allows_code_url_and_file_names(self):
+        """测试代码、URL 和文件名中的英文不会被漏译扫描误杀。"""
+        original = (
+            "<p>Run <code>terraform apply</code> and see https://docs.aws.amazon.com "
+            "for <code>main.tf</code> and <code>terraform.tfvars</code>.</p>"
+        )
+        translated = (
+            "<p>运行 <code>terraform apply</code>，参考 https://docs.aws.amazon.com，"
+            "并保留 <code>main.tf</code> 和 <code>terraform.tfvars</code> 文件名。</p>"
+        )
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
+    def test_validate_allows_english_inside_pre_blocks(self):
+        """测试 pre/code 代码块中的英文命令不会被漏译扫描误杀。"""
+        original = "<pre><code>terraform apply\naws s3 ls</code></pre><p>Then verify the result.</p>"
+        translated = "<pre><code>terraform apply\naws s3 ls</code></pre><p>然后验证结果。</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
 
     def test_validate_accepts_adjacent_code_swap_within_single_element(self):
         """测试同一元素内相邻 CODE 互换顺序会被视为可接受。"""

@@ -14,6 +14,11 @@ from engine.agents.verifier import verify_html_integrity
 from engine.core.logger import engine_logger as logger
 
 NAV_CHUNK_UPGRADE_THRESHOLD = 24
+COMPLEX_ITEM_FIGURE_THRESHOLD = 1
+COMPLEX_ITEM_SECTION_THRESHOLD = 3
+COMPLEX_ITEM_ASIDE_THRESHOLD = 1
+COMPLEX_ITEM_PAGEBREAK_THRESHOLD = 1
+COMPLEX_ITEM_TOKEN_LIMIT_FACTOR = 0.6
 
 
 class Parser:
@@ -94,7 +99,7 @@ class Parser:
         preserved_style = pre_extractor.preserved_style
 
         dom_chunker = DomChunker(
-            token_limit=self.limit,
+            token_limit=self._effective_chunk_token_limit(normalized_content, is_nav_file=is_nav_file),
             secondary_placeholder_limit=self.secondary_placeholder_limit,
         )
         item.chunks = dom_chunker.chunk(html=content_for_chunking, is_nav_file=is_nav_file)
@@ -132,6 +137,27 @@ class Parser:
         if not body:
             return False
         return len(re.sub(r"\s+", "", body.get_text(" ", strip=True))) >= 40
+
+    def _effective_chunk_token_limit(self, html: str, *, is_nav_file: bool) -> int:
+        if is_nav_file:
+            return self.limit
+
+        soup = BeautifulSoup(html, get_markup_parser(html))
+        body = soup.find("body") or soup
+        figure_count = len(body.find_all("figure"))
+        section_count = len(body.find_all("section"))
+        aside_count = len(body.find_all("aside"))
+        pagebreak_count = len(body.find_all(attrs={"epub:type": "pagebreak"}))
+
+        if (
+            figure_count >= COMPLEX_ITEM_FIGURE_THRESHOLD
+            or section_count >= COMPLEX_ITEM_SECTION_THRESHOLD
+            or aside_count >= COMPLEX_ITEM_ASIDE_THRESHOLD
+            or pagebreak_count >= COMPLEX_ITEM_PAGEBREAK_THRESHOLD
+        ):
+            return max(300, int(self.limit * COMPLEX_ITEM_TOKEN_LIMIT_FACTOR))
+
+        return self.limit
 
     def _has_placeholder_inventory_mismatch(self, book: EpubBook) -> bool:
         for item in book.items:
@@ -335,7 +361,7 @@ class Parser:
 
                     # Step 4: 使用 DomChunker 进行 DOM 级别分块
                     dom_chunker = DomChunker(
-                        token_limit=self.limit,
+                        token_limit=self._effective_chunk_token_limit(normalized_content, is_nav_file=is_nav_file),
                         secondary_placeholder_limit=self.secondary_placeholder_limit,
                     )
                     chunks = dom_chunker.chunk(html=content_for_chunking, is_nav_file=is_nav_file)

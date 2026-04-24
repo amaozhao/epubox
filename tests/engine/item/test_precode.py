@@ -1,4 +1,3 @@
-
 import warnings
 
 from bs4 import BeautifulSoup
@@ -177,11 +176,11 @@ class TestPreCodeExtractor:
     def test_extract_code_like_blockquote_with_tt_descendants_as_pre(self):
         """测试 syntax-highlight 风格的 blockquote 代码块会整体按 PRE 保护。"""
         html = (
-            '<blockquote>'
+            "<blockquote>"
             '<span class="calibre5"><tt class="calibre4"><span class="tok">print</span></tt></span>'
             '<span class="calibre5"><tt class="calibre4"><span class="tok">(</span></tt></span>'
             '<span class="calibre5"><tt class="calibre4"><span class="tok">x</span></tt></span>'
-            '</blockquote><p>text</p>'
+            "</blockquote><p>text</p>"
         )
         extractor = PreCodeExtractor()
         result = extractor.extract(html)
@@ -202,11 +201,11 @@ class TestPreCodeExtractor:
     def test_extract_code_like_container_by_scoring_without_metadata(self):
         """测试无显式 code 类名时，也能通过评分器识别典型代码块。"""
         html = (
-            '<blockquote>'
-            '<span>async</span><br/>'
-            '<span>def</span><span> main():</span><br/>'
-            '<span>    return 1</span>'
-            '</blockquote><p>text</p>'
+            "<blockquote>"
+            "<span>async</span><br/>"
+            "<span>def</span><span> main():</span><br/>"
+            "<span>    return 1</span>"
+            "</blockquote><p>text</p>"
         )
         extractor = PreCodeExtractor()
         result = extractor.extract(html)
@@ -254,7 +253,7 @@ class TestPreCodeExtractor:
         extractor = PreCodeExtractor()
         result = extractor.extract(html)
 
-        assert result == html
+        assert "[PRE:" not in result
         assert extractor.preserved_pre == []
 
     def test_extract_regular_blockquote_prose_is_not_protected(self):
@@ -278,15 +277,100 @@ class TestPreCodeExtractor:
         extractor = PreCodeExtractor()
         result = extractor.extract(html)
 
-        assert result == html
+        assert "[PRE:" not in result
         assert extractor.preserved_pre == []
+
+    def test_extract_navigation_section_is_not_protected_as_pre(self):
+        """测试目录型 section/nav 不会被误判为整块 PRE。"""
+        html = (
+            "<section>"
+            '<nav class="tocList" epub:type="toc" id="toc" role="doc-toc">'
+            "<h1>Table of Contents</h1>"
+            "<ol>"
+            '<li><a href="c01.xhtml">1 Linear Programming</a></li>'
+            '<li><a href="c02.xhtml">2 Graph Theory</a></li>'
+            "</ol>"
+            "</nav>"
+            "</section>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:" not in result
+        assert extractor.preserved_pre == []
+
+    def test_extract_prose_chapter_section_with_command_box_is_not_protected_as_pre(self):
+        """正文章节即使夹带命令说明框，也不应整章误判为 PRE。"""
+        html = (
+            "<section aria-labelledby='ch1' epub:type='chapter' role='doc-chapter'>"
+            "<h1>GETTING STARTED</h1>"
+            "<p>Let's start your Rust journey. There is a lot to learn.</p>"
+            "<aside class='box'>"
+            "<p>COMMAND LINE NOTATION</p>"
+            "<p>Commands start with <span>$</span> and you can use <span>cargo</span>.</p>"
+            "</aside>"
+            "<p>The following steps install Rust.</p>"
+            "</section>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:" not in result
+        assert extractor.preserved_pre == []
+
+    def test_extract_prose_chapter_with_many_inline_code_tags_is_not_protected_as_pre(self):
+        """正文章节即使有大量内联代码标签，也不能整章按 PRE 保护。"""
+        html = (
+            "<section aria-labelledby='ch12' epub:type='chapter' role='doc-chapter'>"
+            "<h1>AN I/O PROJECT</h1>"
+            "<p>This chapter is a recap of many skills you have learned so far.</p>"
+            "<p>We will build a command line tool using <code>std::env</code>, "
+            "<code>String</code>, <code>Vec&lt;T&gt;</code>, and <var>query</var>.</p>"
+            "<p>The goal is to practice ownership, error handling, modules, and tests.</p>"
+            "<p>The implementation mentions <code>Config::build</code>, <code>run()</code>, "
+            "<code>fs::read_to_string</code>, <code>Result&lt;T, E&gt;</code>, "
+            "<code>Box&lt;dyn Error&gt;</code>, and <code>unwrap_or_else</code>.</p>"
+            "<p>Later examples refer to <code>minigrep</code>, <code>CASE_INSENSITIVE</code>, "
+            "<code>env::var</code>, <code>search</code>, <code>search_case_insensitive</code>, "
+            "and <code>cargo test</code>.</p>"
+            "<p>Although these inline identifiers are code, the surrounding chapter is prose.</p>"
+            "</section>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:" not in result
+        assert "This chapter is a recap" in result
+        assert extractor.preserved_pre == []
+
+    def test_extract_prose_division_with_code_listing_is_not_protected_as_pre(self):
+        """正文小节夹带代码清单时，只保护内部 pre，不保护整个 section。"""
+        html = (
+            "<section aria-labelledby='sec10' epub:type='division'>"
+            "<h3>Rust Program Basics</h3>"
+            "<p>Next, make a new source file and call it <i>main.rs</i>.</p>"
+            "<p>Now open the file and enter the code in the listing.</p>"
+            "<pre><code>fn main() { println!(\"Hello\"); }</code></pre>"
+            "<p>Save the file and go back to your terminal window.</p>"
+            "<pre><code>$ rustc main.rs\n$ ./main</code></pre>"
+            "<p>Regardless of your operating system, the string should print.</p>"
+            "</section>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result.startswith("<section")
+        assert "Next, make a new source file" in result
+        assert "Save the file" in result
+        assert result.count("[PRE:") == 2
+        assert len(extractor.preserved_pre) == 2
 
     def test_score_code_like_container_reports_strong_and_weak_signals(self):
         """测试评分器会综合 metadata / tt / symbols 等信号。"""
         html = (
             '<blockquote class="listing">'
-            '<span><tt>print</tt></span><span><tt>(x)</tt></span><span><tt>;</tt></span>'
-            '</blockquote>'
+            "<span><tt>print</tt></span><span><tt>(x)</tt></span><span><tt>;</tt></span>"
+            "</blockquote>"
         )
         extractor = PreCodeExtractor()
         soup = BeautifulSoup(html, "html.parser")

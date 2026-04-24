@@ -257,28 +257,86 @@ class TestTranslateStep:
         assert call_count[0] == 3
 
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_unicode_original_echo_becomes_untranslated(self, mock_get_translator):
-        """translate_step: unicode original echo should also be treated as untranslated and retried"""
+    async def test_translate_step_unicode_original_is_now_accepted_as_is(self, mock_get_translator):
+        """translate_step: Chinese source text should now be accepted up front instead of being retried as untranslated."""
         chunk = make_chunk(original="<p>你好世界</p>")
-        call_count = [0]
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
 
-        async def echoed_response(json_input):
-            call_count[0] += 1
-            return MagicMock(
-                status=RunStatus.completed,
-                content=MockTranslationResponse("<p>你好世界</p>"),
-            )
+        assert output.content.status == TranslationStatus.ACCEPTED_AS_IS
+        assert output.content.translated == "<p>你好世界</p>"
+        mock_get_translator.assert_not_called()
 
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_already_chinese_chunk_is_accepted_without_calling_translator(self, mock_get_translator):
+        """translate_step: already-Chinese content should bypass translation and be accepted as-is."""
+        chunk = make_chunk(original="<p>你好世界，这是一段已经翻译完成的内容。</p>")
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+
+        output = await translate_step(step_input)
+
+        assert output.success is True
+        assert output.content.status == TranslationStatus.ACCEPTED_AS_IS
+        assert output.content.translated == "<p>你好世界，这是一段已经翻译完成的内容。</p>"
+        mock_get_translator.assert_not_called()
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_short_chinese_title_is_accepted_without_calling_translator(self, mock_get_translator):
+        """translate_step: short Chinese-only titles such as 索引 should also bypass translation."""
+        chunk = make_chunk(original="<title>索引</title>")
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+
+        output = await translate_step(step_input)
+
+        assert output.success is True
+        assert output.content.status == TranslationStatus.ACCEPTED_AS_IS
+        assert output.content.translated == "<title>索引</title>"
+        mock_get_translator.assert_not_called()
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_chinese_dominant_mixed_content_is_accepted_without_calling_translator(
+        self, mock_get_translator
+    ):
+        """translate_step: Chinese-dominant content with light English terminology should still bypass translation."""
+        chunk = make_chunk(original="<p>我们将使用 Rust crate 与 Cargo 工作流来完成这个示例。</p>")
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+
+        output = await translate_step(step_input)
+
+        assert output.success is True
+        assert output.content.status == TranslationStatus.ACCEPTED_AS_IS
+        assert output.content.translated == "<p>我们将使用 Rust crate 与 Cargo 工作流来完成这个示例。</p>"
+        mock_get_translator.assert_not_called()
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_chinese_dominant_with_untranslated_sentence_is_not_accepted_as_is(
+        self, mock_get_translator
+    ):
+        """translate_step: Chinese-heavy chunks with an English sentence must still go through translation."""
+        original = (
+            "<p>这是一段已经翻译的中文内容，用来说明部署流程和安全检查的背景，"
+            "并描述团队如何配置流水线、审查权限、验证发布结果、记录运行风险，"
+            "确保读者能够理解上下文。This sentence remains untranslated and should be sent back through the translator.</p>"
+        )
+        chunk = make_chunk(original=original)
         mock_translator = MagicMock()
-        mock_translator.arun = echoed_response
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse(
+                    "<p>这是一段已经翻译的中文内容，用来说明部署流程和安全检查的背景，"
+                    "并描述团队如何配置流水线、审查权限、验证发布结果、记录运行风险，"
+                    "确保读者能够理解上下文。这句话仍未翻译，必须重新交给翻译器处理。</p>"
+                ),
+            )
+        )
         mock_get_translator.return_value = mock_translator
 
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
 
-        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
-        assert output.content.translated == ""
-        assert call_count[0] == 3
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert mock_translator.arun.await_count == 1
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_symbol_only_noop_becomes_accepted_as_is(self, mock_get_translator):
@@ -529,6 +587,58 @@ class TestTranslateStep:
         assert all(mode == "text_node" for mode in requested_modes)
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_text_node_output_decodes_literal_newline_escapes(self, mock_get_translator):
+        """translate_step: model output containing literal \\n is normalized before text-node parsing."""
+        chunk = make_chunk(
+            original=(
+                "<p>"
+                "One <i>two</i> three <b>four</b> five <em>six</em> seven <span>eight</span> "
+                "nine <strong>ten</strong> eleven <a href='#'>twelve</a> thirteen <code>fourteen</code>."
+                "</p>"
+            )
+        )
+
+        async def translator_response(json_input):
+            payload = json.loads(json_input)
+            lines = []
+            for line in payload["text_to_translate"].splitlines():
+                marker, text = line.split("]", 1)
+                lines.append(f"{marker}]中文{text}")
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("\\n".join(lines)),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = translator_response
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert "\\n" not in output.content.translated
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_preserves_literal_newline_escape_in_content(self, mock_get_translator):
+        """translate_step: literal \\n used as content is not converted into a real newline."""
+        chunk = make_chunk(original="<p>Use newline escapes.</p>")
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>使用 \\n 表示换行。</p>"),
+            )
+        )
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "<p>使用 \\n 表示换行。</p>"
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_keeps_simple_chunk_on_html_mode(self, mock_get_translator):
         """translate_step: simple low-risk chunks should still prefer HTML mode for naturalness."""
         chunk = make_chunk(original="<p>Hello <em>world</em>.</p>")
@@ -553,6 +663,50 @@ class TestTranslateStep:
 
         assert output.content.status == TranslationStatus.TRANSLATED
         assert requested_modes == ["html"]
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_routes_code_and_math_heavy_chunk_directly_to_text_node_mode(
+        self, mock_get_translator
+    ):
+        """translate_step: code-placeholder headings with dense mathy inline markup should bypass HTML mode directly."""
+        chunk = make_chunk(
+            original=(
+                "<section><h3>[CODE:0]</h3>"
+                "<p>Let <i>x</i><sub>1</sub> and <i>y</i><sup>2</sup> define the series.</p>"
+                "<p>Then <i>z</i><sub>3</sub> = <i>x</i><sub>1</sub> + <i>y</i><sup>2</sup>.</p>"
+                "</section>"
+            )
+        )
+        requested_modes = []
+
+        async def translator_response(json_input):
+            payload = json.loads(json_input)
+            if "[TEXT:0]" in payload["text_to_translate"]:
+                lines = []
+                for line in payload["text_to_translate"].splitlines():
+                    marker, text = line.split("]", 1)
+                    lines.append(f"{marker}]中文{text}")
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse("\n".join(lines)),
+                )
+            return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("<section>不应走到这里</section>"))
+
+        mock_translator = MagicMock()
+        mock_translator.arun = translator_response
+
+        def translator_factory(*args, **kwargs):
+            requested_modes.append(kwargs.get("mode"))
+            return mock_translator
+
+        mock_get_translator.side_effect = translator_factory
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert requested_modes
+        assert all(mode == "text_node" for mode in requested_modes)
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_error_status_retries_without_fallback_and_keeps_provider_error_message(
@@ -872,6 +1026,30 @@ class TestTranslateStep:
         assert output.content.translated == ""
         assert call_count[0] == 3
 
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_nav_text_untranslated_payload_fails(self, mock_get_translator):
+        """translate_step: nav_text payload cannot remain as an untranslated English title."""
+        chunk = make_chunk(original="[NAVTXT:0] Chapter 1 Advanced Security", xpaths=[], chunk_mode="nav_text")
+        call_count = [0]
+
+        async def untranslated_payload(json_input):
+            call_count[0] += 1
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("[NAVTXT:0] Chapter 1 Advanced Security"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = untranslated_payload
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
+        assert output.content.translated == ""
+        assert call_count[0] == 3
+
 
 @pytest.mark.asyncio
 class TestProofreadStep:
@@ -1154,6 +1332,45 @@ class TestApplyCorrectionsStep:
 
         assert output.success is True
         assert output.content.status == TranslationStatus.TRANSLATION_FAILED
+
+    @patch("engine.agents.workflow.logger")
+    def test_apply_corrections_step_logs_unmatched_corrections(self, mock_logger):
+        """apply_corrections_step: logs when proofreading suggestions survive filtering but hit no text nodes."""
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofreading_result = MockProofreadingResult({"您好": "你好"})
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+
+        output = apply_corrections_step(step_input)
+
+        assert output.success is True
+        mock_logger.info.assert_any_call("校对器发现 1 个潜在的校对建议。")
+        mock_logger.info.assert_any_call("校对建议统计：总计 1，过滤 0，进入替换 1，文本命中 0，未命中 1，实际替换 0 处。")
+
+    @patch("engine.agents.workflow.validate_translated_html", return_value=(False, "mock validation failure"))
+    @patch("engine.agents.workflow.logger")
+    def test_apply_corrections_step_logs_rollback_after_validation_failure(self, mock_logger, _mock_validate):
+        """apply_corrections_step: logs how many applied corrections were rolled back after structural validation fails."""
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofreading_result = MockProofreadingResult({"你好": "您好"})
+        step_data = {"chunk": chunk, "proofreading_result": proofreading_result}
+        step_input = MagicMock(previous_step_content=step_data)
+
+        output = apply_corrections_step(step_input)
+
+        assert output.success is True
+        assert output.content.translated == "<p>你好</p>"
+        mock_logger.warning.assert_any_call(
+            "Chunk 'test_chunk' 校对后校验失败，回退到校对前译文: mock validation failure；已撤销 1 处替换（命中 1 条建议）。"
+        )
 
 
 @pytest.mark.asyncio

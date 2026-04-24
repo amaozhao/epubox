@@ -3,7 +3,7 @@ import re
 import xml.etree.ElementTree as ET
 from typing import List, Optional, Tuple
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 from engine.core.markup import get_markup_parser
 
@@ -155,7 +155,11 @@ def _looks_like_technical_ascii_noop(text: str) -> bool:
         score += 1
 
     tokens = stripped.split()
-    if tokens and tokens[0] in command_starters and re.fullmatch(r"[A-Za-z0-9_./:=@+-]+(?:\s+[A-Za-z0-9_./:=@+-]+)*", stripped):
+    if (
+        tokens
+        and tokens[0] in command_starters
+        and re.fullmatch(r"[A-Za-z0-9_./:=@+-]+(?:\s+[A-Za-z0-9_./:=@+-]+)*", stripped)
+    ):
         score += 2
 
     if re.fullmatch(r"[A-Za-z0-9_.:/+-]+", stripped):
@@ -165,6 +169,177 @@ def _looks_like_technical_ascii_noop(text: str) -> bool:
             score += 1
 
     return score >= 2
+
+
+UNTRANSLATED_SKIP_TAGS = {"pre", "code", "script", "style"}
+UNTRANSLATED_CODE_CLASS_MARKERS = ("Code", "pre", "mono", "TheSansMono", "NSAnnotations")
+UNTRANSLATED_ALLOWED_WORDS = {
+    "alb",
+    "api",
+    "arn",
+    "aws",
+    "azure",
+    "bucket",
+    "cargo",
+    "cli",
+    "cloudformation",
+    "codeartifact",
+    "codebuild",
+    "codedeploy",
+    "codepipeline",
+    "container",
+    "devops",
+    "docker",
+    "ebs",
+    "ec2",
+    "ecs",
+    "elb",
+    "eks",
+    "github",
+    "gitlab",
+    "google",
+    "grafana",
+    "helm",
+    "http",
+    "https",
+    "iam",
+    "json",
+    "kibana",
+    "kubernetes",
+    "linux",
+    "mfa",
+    "minikube",
+    "multi",
+    "mysql",
+    "node",
+    "npm",
+    "postgresql",
+    "python",
+    "rds",
+    "rust",
+    "s3",
+    "sast",
+    "saas",
+    "scp",
+    "snyk",
+    "sonarqube",
+    "terraform",
+    "typescript",
+    "ubuntu",
+    "vpc",
+    "yaml",
+}
+UNTRANSLATED_ENGLISH_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "have",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "was",
+    "when",
+    "while",
+    "with",
+    "you",
+    "your",
+}
+UNTRANSLATED_HEADING_WORDS = {"appendix", "chapter", "index", "part", "preface", "section"}
+
+
+def _ancestor_classes(node: NavigableString) -> str:
+    values: list[str] = []
+    parent = node.parent
+    while isinstance(parent, Tag):
+        classes = parent.get("class", [])
+        if isinstance(classes, str):
+            values.append(classes)
+        else:
+            values.extend(str(item) for item in classes)
+        parent = parent.parent
+    return " ".join(values)
+
+
+def _should_skip_untranslated_scan(node: NavigableString) -> bool:
+    parent = node.parent
+    while isinstance(parent, Tag):
+        if str(parent.name).lower() in UNTRANSLATED_SKIP_TAGS:
+            return True
+        parent = parent.parent
+    return any(marker in _ancestor_classes(node) for marker in UNTRANSLATED_CODE_CLASS_MARKERS)
+
+
+def _is_allowed_english_term(word: str) -> bool:
+    normalized = word.strip("'").lower()
+    if not normalized:
+        return True
+    if normalized in UNTRANSLATED_ALLOWED_WORDS:
+        return True
+    if len(word) <= 5 and word.isupper():
+        return True
+    if any(ch.isdigit() for ch in word):
+        return True
+    if re.search(r"[a-z][A-Z]", word):
+        return True
+    return False
+
+
+def _english_words_for_untranslated_scan(text: str) -> list[str]:
+    text = re.sub(r"\[(?:PRE|CODE|STYLE|TEXT|NAVTXT):\d+\]", " ", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
+    return [word for word in words if not _is_allowed_english_term(word)]
+
+
+def find_untranslated_english_texts(html: str) -> list[str]:
+    """Find visible text nodes that look like untranslated natural English."""
+    soup = BeautifulSoup(html or "", get_markup_parser(html or ""))
+    hits: list[str] = []
+
+    for node in soup.find_all(string=True):
+        if not isinstance(node, NavigableString) or _should_skip_untranslated_scan(node):
+            continue
+
+        text = re.sub(r"\s+", " ", str(node)).strip()
+        if len(text) < 20 or _looks_like_technical_ascii_noop(text):
+            continue
+
+        words = _english_words_for_untranslated_scan(text)
+        if not words:
+            continue
+
+        latin_count = sum(1 for ch in text if "a" <= ch.lower() <= "z")
+        cjk_count = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+        stopword_count = sum(1 for word in words if word.lower().strip("'") in UNTRANSLATED_ENGLISH_STOPWORDS)
+        has_heading_word = any(word.lower().strip("'") in UNTRANSLATED_HEADING_WORDS for word in words)
+
+        if cjk_count == 0 and has_heading_word:
+            hits.append(text)
+            continue
+        if cjk_count == 0 and latin_count >= 16 and len(words) >= 3:
+            hits.append(text)
+            continue
+        if len(words) >= 7 or (len(words) >= 5 and stopword_count >= 1):
+            hits.append(text)
+            continue
+        if cjk_count == 0 and latin_count >= 24 and len(words) >= 4 and stopword_count >= 1:
+            hits.append(text)
+
+    return hits
 
 
 def _classify_unchanged_translation(original_soup: BeautifulSoup, translated_soup: BeautifulSoup) -> str | None:
@@ -195,9 +370,7 @@ def _collect_attribute_mismatches(original_elements: list, translated_elements: 
         trans_tags = [trans_root, *trans_root.find_all(True)]
 
         if len(orig_tags) != len(trans_tags):
-            mismatches.append(
-                f"元素{element_index} 子标签数量不一致: 原始 {len(orig_tags)}, 翻译 {len(trans_tags)}"
-            )
+            mismatches.append(f"元素{element_index} 子标签数量不一致: 原始 {len(orig_tags)}, 翻译 {len(trans_tags)}")
             continue
 
         for tag_index, (orig_tag, trans_tag) in enumerate(zip(orig_tags, trans_tags), start=1):
@@ -293,6 +466,11 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
         if mismatch_details:
             return False, _format_placeholder_sequence_error(label, mismatch_details)
 
+    untranslated_hits = find_untranslated_english_texts(translated)
+    if untranslated_hits:
+        sample = untranslated_hits[0][:160]
+        return False, f"疑似残留未翻译英文: {sample}"
+
     return True, ""
 
 
@@ -336,7 +514,9 @@ def _collect_element_scoped_code_multiset_mismatches(
     """
     all_details: list[tuple[int, str, str]] = []
 
-    for element_index, (orig_element, trans_element) in enumerate(zip(original_elements, translated_elements), start=1):
+    for element_index, (orig_element, trans_element) in enumerate(
+        zip(original_elements, translated_elements), start=1
+    ):
         orig_placeholders = re.findall(pattern, str(orig_element))
         trans_placeholders = re.findall(pattern, str(trans_element))
         if Counter(orig_placeholders) == Counter(trans_placeholders):

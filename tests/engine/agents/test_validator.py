@@ -1,4 +1,3 @@
-
 from engine.agents.validator import (
     extract_placeholder_indices,
     validate_placeholder_positions,

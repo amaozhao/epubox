@@ -137,8 +137,7 @@ class TestDomChunker:
     def test_nav_file_splits_on_unit_limit_even_when_token_limit_is_high(self):
         """测试导航文件在 token 很充足时也会按单块最大条目数切分，降低模型漏 marker 风险。"""
         nav_points = "".join(
-            f'<navPoint id="ch{i}"><navLabel><text>Chapter {i}</text></navLabel></navPoint>'
-            for i in range(95)
+            f'<navPoint id="ch{i}"><navLabel><text>Chapter {i}</text></navLabel></navPoint>' for i in range(95)
         )
         html = f"<ncx><navMap>{nav_points}</navMap></ncx>"
         chunker = DomChunker(token_limit=5000)
@@ -152,8 +151,7 @@ class TestDomChunker:
     def test_nav_file_splits_short_titles_before_reaching_48_markers(self):
         """测试即使标题很短，默认导航分块也不会把 48 条 marker 塞进同一个 chunk。"""
         nav_points = "".join(
-            f'<navPoint id="ch{i}"><navLabel><text>Chapter {i}</text></navLabel></navPoint>'
-            for i in range(48)
+            f'<navPoint id="ch{i}"><navLabel><text>Chapter {i}</text></navLabel></navPoint>' for i in range(48)
         )
         html = f"<ncx><navMap>{nav_points}</navMap></ncx>"
         chunker = DomChunker(token_limit=5000)
@@ -300,11 +298,7 @@ class TestDomChunker:
 
     def test_atomic_container_ignores_secondary_placeholder_limit(self):
         """测试原子容器即使占位符超限也保持整体不拆分。"""
-        html = (
-            "<html><body>"
-            "<figure>alpha [CODE:0] [CODE:1] [CODE:2] [CODE:3]</figure>"
-            "</body></html>"
-        )
+        html = "<html><body><figure>alpha [CODE:0] [CODE:1] [CODE:2] [CODE:3]</figure></body></html>"
         chunker = DomChunker(token_limit=1000, secondary_placeholder_limit=2)
         chunks = chunker.chunk(html)
 

@@ -1,4 +1,5 @@
 import warnings
+from unittest.mock import patch
 
 from bs4 import XMLParsedAsHTMLWarning
 
@@ -216,6 +217,48 @@ class TestDomReplacer:
         assert broad_chunk.status == TranslationStatus.WRITEBACK_FAILED
         assert narrow_chunk.status == TranslationStatus.COMPLETED
 
+    @patch("engine.epub.replacer.verify_final_html")
+    def test_restore_keeps_valid_chunks_when_one_chunk_breaks_final_xml(self, mock_verify_final_html):
+        """整章级 XML 校验失败时，应定位到坏 chunk，而不是让整章所有 chunk 都失败。"""
+        item = EpubItem(
+            id="ch-localize.xhtml",
+            path="/tmp/ch-localize.xhtml",
+            content="<html><body><p>Alpha</p><p>Beta</p></body></html>",
+        )
+        valid_chunk = Chunk(
+            name="good001",
+            original="<p>Alpha</p>",
+            translated="<p>阿尔法</p>",
+            status=TranslationStatus.COMPLETED,
+            tokens=8,
+            xpaths=["/html/body/p[1]"],
+        )
+        invalid_chunk = Chunk(
+            name="bad001",
+            original="<p>Beta</p>",
+            translated="<p>A & B</p>",
+            status=TranslationStatus.COMPLETED,
+            tokens=8,
+            xpaths=["/html/body/p[2]"],
+        )
+        item.chunks = [valid_chunk, invalid_chunk]
+
+        def fake_verify(_original, restored):
+            if "A &amp; B" in restored:
+                return False, "mock invalid xml"
+            return True, ""
+
+        mock_verify_final_html.side_effect = fake_verify
+
+        replacer = DomReplacer()
+        result = replacer.restore(item)
+
+        assert result is not None
+        assert "<p>阿尔法</p>" in result
+        assert "<p>Beta</p>" in result
+        assert valid_chunk.status == TranslationStatus.COMPLETED
+        assert invalid_chunk.status == TranslationStatus.WRITEBACK_FAILED
+
     def test_xpath_not_found(self):
         """测试 xpath 未找到时 warning（覆盖 line 90）"""
         item = EpubItem(
@@ -237,7 +280,7 @@ class TestDomReplacer:
         assert "Hello" in result  # 原文保留
 
     def test_verify_failure_logged(self):
-        """测试最终验证失败时阻止写入并标记为 WRITEBACK_FAILED。"""
+        """测试最终验证失败时会跳过坏 chunk，并保留其余可用内容。"""
         item = EpubItem(
             id="ch1.xhtml",
             path="/tmp/ch1.xhtml",
@@ -254,8 +297,8 @@ class TestDomReplacer:
         item.chunks = [chunk]
         replacer = DomReplacer()
         result = replacer.restore(item)
-        assert result is None
-        assert item.translated is None
+        assert result == "<html><body><p>Hello</p></body></html>"
+        assert item.translated == "<html><body><p>Hello</p></body></html>"
         assert chunk.status == TranslationStatus.WRITEBACK_FAILED
 
     def test_nav_text_writeback_success(self):

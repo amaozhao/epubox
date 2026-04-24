@@ -280,6 +280,28 @@ class TestParser:
         assert any("/html/body/section" in xpath for chunk in item.chunks for xpath in (chunk.xpaths or []))
         assert not all((chunk.xpaths or []) == ["/html/head/title"] for chunk in item.chunks)
 
+    def test_parse_complex_chapter_uses_conservative_chunk_limit(self, mocker, parser_instance):
+        """复杂章节应使用更保守的 chunk limit，降低多 section/figure 混合块的尺寸。"""
+        mocker.patch.object(parser_instance, "extract")
+        mocker.patch.object(parser_instance, "load_json", return_value=None)
+        mocker.patch.object(parser_instance, "save_json")
+        dom_chunker_cls = mocker.patch("engine.epub.parser.DomChunker")
+        dom_chunker_cls.return_value.chunk.return_value = []
+        mocker.patch("os.walk", return_value=[(parser_instance.output_dir, (), ["c07.xhtml"])])
+
+        original_html = """
+        <html><body>
+          <section><header><h1>Title</h1></header><aside><section><p>Alpha</p></section></aside></section>
+          <section><figure><img alt="fig" src="a.jpg"/><figcaption><p>Cap</p></figcaption></figure><p>Body text.</p></section>
+          <section><span aria-label="220" epub:type="pagebreak" id="Page_220" role="doc-pagebreak"></span><p>More text.</p></section>
+        </body></html>
+        """
+        mocker.patch("builtins.open", mock_open(read_data=original_html))
+
+        parser_instance.parse()
+
+        dom_chunker_cls.assert_called_with(token_limit=900, secondary_placeholder_limit=12)
+
     def test_parse_persists_source_html_integrity_errors(self, mocker, parser_instance):
         """测试原始 HTML 结构错误会被记录到 EpubItem 中，而不只是打日志。"""
         mocker.patch.object(parser_instance, "extract")

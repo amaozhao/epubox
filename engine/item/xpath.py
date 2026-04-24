@@ -21,7 +21,7 @@ def get_xpath(element) -> str:
         if hasattr(current, "name") and current.name:
             siblings = [s for s in current.parent.children if hasattr(s, "name") and s.name == current.name]
             if len(siblings) > 1:
-                index = siblings.index(current) + 1
+                index = next(i for i, sibling in enumerate(siblings) if sibling is current) + 1
                 parts.append(f"{current.name}[{index}]")
             else:
                 parts.append(current.name)
@@ -55,9 +55,7 @@ def find_by_xpath(soup, xpath: str):
         index = int(match.group(2)) if match.group(2) else 1
 
         children = [
-            c
-            for c in current.children
-            if hasattr(c, "name") and c.name and _normalize_name(c.name) == tag_name
+            c for c in current.children if hasattr(c, "name") and c.name and _normalize_name(c.name) == tag_name
         ]
         if index > len(children):
             return None

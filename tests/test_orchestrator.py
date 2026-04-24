@@ -156,7 +156,7 @@ class TestOrchestrator:
         assert chunk.status == TranslationStatus.TRANSLATED
 
     def test_get_output_path_marks_incomplete_artifacts(self, orchestrator):
-        """测试存在失败 chunk 时输出文件名会标记为 incomplete。"""
+        """测试存在失败 chunk 时内部输出路径仍会标记为 incomplete。"""
         book = EpubBook(
             name="test_book",
             path="/mock/path/test_book.epub",
@@ -232,6 +232,37 @@ class TestOrchestrator:
         )
 
         assert orchestrator._get_output_path(book).endswith("test_book-cn.epub")
+
+    def test_final_untranslated_gate_allows_technical_terms_code_and_urls(self, orchestrator):
+        """测试最终整书扫描不会误杀技术术语、代码和 URL。"""
+        chunk = Chunk(
+            name="1",
+            original="<p>Use AWS CodePipeline and terraform apply.</p>",
+            translated=(
+                "<p>使用 AWS CodePipeline、GitHub Actions 和 Docker 构建 DevOps 工作流，"
+                "运行 <code>terraform apply</code>，并参考 https://docs.aws.amazon.com。</p>"
+            ),
+            tokens=3,
+            status=TranslationStatus.COMPLETED,
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[
+                EpubItem(
+                    id="item1",
+                    path="/mock/path/test_book/item1.html",
+                    content="<p>Use AWS CodePipeline and terraform apply.</p>",
+                    chunks=[chunk],
+                )
+            ],
+        )
+
+        failed_count = orchestrator._apply_final_untranslated_gate(book)
+
+        assert failed_count == 0
+        assert chunk.status == TranslationStatus.COMPLETED
 
     # --- 测试 translate_epub 方法 ---
     @pytest.mark.asyncio
@@ -558,6 +589,7 @@ class TestOrchestrator:
         # 使用真实的 _should_translate_chunk
         await orchestrator.translate_epub("mock_epub_path")
         # mock_workflow.arun.assert_called_once_with(input=mock_book.items[0].chunks[0])
+
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
@@ -567,7 +599,7 @@ class TestOrchestrator:
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
     @patch("engine.orchestrator.GlossaryExtractor")
-    async def test_translate_epub_returns_incomplete_output_path_for_failed_chunks(
+    async def test_translate_epub_skips_epub_build_for_failed_chunks(
         self,
         mock_glossary_extractor,
         mock_glossary_loader,
@@ -579,7 +611,7 @@ class TestOrchestrator:
         mock_parser_parse,
         orchestrator,
     ):
-        """测试失败 chunk 会生成带 incomplete 标记的输出文件。"""
+        """测试存在失败 chunk 时不会生成 EPUB 文件。"""
         mock_glossary_loader.return_value.load.return_value = {}
         mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
@@ -616,8 +648,74 @@ class TestOrchestrator:
         with patch.object(orchestrator, "_save_manual_translation_report"):
             output_path = await orchestrator.translate_epub("mock_epub_path")
 
-        assert output_path.endswith("test_book-cn-incomplete.epub")
-        mock_builder_build.assert_called_once()
+        assert output_path is None
+        mock_builder_build.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch.object(Parser, "parse", new_callable=MagicMock)
+    @patch.object(Parser, "save_json", new_callable=MagicMock)
+    @patch.object(Builder, "build", new_callable=MagicMock)
+    @patch.object(DomReplacer, "restore", return_value="<html><body><p>restored</p></body></html>")
+    @patch("engine.orchestrator.shutil")
+    @patch("engine.orchestrator.get_translator_workflow")
+    @patch("engine.orchestrator.GlossaryLoader")
+    @patch("engine.orchestrator.GlossaryExtractor")
+    async def test_translate_epub_final_gate_blocks_residual_untranslated_english(
+        self,
+        mock_glossary_extractor,
+        mock_glossary_loader,
+        mock_get_translator_workflow,
+        mock_shutil,
+        mock_replacer_restore,
+        mock_builder_build,
+        mock_parser_save_json,
+        mock_parser_parse,
+        orchestrator,
+    ):
+        """测试最终整书扫描会阻止残留英文进入正常 EPUB 输出。"""
+        mock_glossary_loader.return_value.load.return_value = {}
+        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
+
+        leaked_chunk = Chunk(
+            name="1",
+            original="<p>This paragraph should be translated.</p>",
+            translated="<p>这是中文说明。This sentence remains untranslated and should fail the final gate.</p>",
+            tokens=3,
+            status=TranslationStatus.COMPLETED,
+            xpaths=["/html/body/p"],
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test.epub",
+            extract_path="/mock/path/test_epub",
+            items=[
+                EpubItem(
+                    id="item1",
+                    path="/mock/path/test_epub/item1.html",
+                    content="<html><body><p>This paragraph should be translated.</p></body></html>",
+                    chunks=[leaked_chunk],
+                )
+            ],
+        )
+        mock_parser_parse.return_value = book
+        mock_shutil.copytree.return_value = None
+        mock_shutil.rmtree.return_value = None
+
+        with (
+            patch("engine.orchestrator.os.path.exists", return_value=True),
+            patch("builtins.open", new_callable=MagicMock),
+            patch.object(orchestrator, "_save_manual_translation_report") as mock_save_report,
+        ):
+            output_path = await orchestrator.translate_epub("mock_epub_path")
+
+        assert output_path is None
+        assert leaked_chunk.status == TranslationStatus.TRANSLATION_FAILED
+        mock_parser_save_json.assert_called()
+        mock_save_report.assert_called_once()
+        mock_builder_build.assert_not_called()
+        report_chunks = mock_save_report.call_args.args[0]
+        assert report_chunks[0]["status"] == TranslationStatus.TRANSLATION_FAILED.value
+
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
@@ -677,14 +775,16 @@ class TestOrchestrator:
         mock_shutil.copytree.return_value = None
         mock_shutil.rmtree.return_value = None
 
-        with patch("engine.orchestrator.os.path.exists", return_value=True), \
-            patch("builtins.open", new_callable=MagicMock), \
-            patch.object(orchestrator, "_save_manual_translation_report") as mock_save_report:
+        with (
+            patch("engine.orchestrator.os.path.exists", return_value=True),
+            patch("builtins.open", new_callable=MagicMock),
+            patch.object(orchestrator, "_save_manual_translation_report") as mock_save_report,
+        ):
             output_path = await orchestrator.translate_epub("mock_epub_path")
 
         assert recovery_chunk.status == TranslationStatus.WRITEBACK_FAILED
         assert saved_snapshots[-1]["items"][0]["chunks"][0]["status"] == TranslationStatus.WRITEBACK_FAILED.value
-        assert output_path.endswith("test_book-cn-incomplete.epub")
+        assert output_path is None
         mock_save_report.assert_called_once()
 
     @pytest.mark.asyncio
@@ -752,9 +852,11 @@ class TestOrchestrator:
         mock_shutil.copytree.return_value = None
         mock_shutil.rmtree.return_value = None
 
-        with patch("engine.orchestrator.os.path.exists", return_value=True), \
-            patch("builtins.open", new_callable=MagicMock), \
-            patch.object(orchestrator, "_save_manual_translation_report"):
+        with (
+            patch("engine.orchestrator.os.path.exists", return_value=True),
+            patch("builtins.open", new_callable=MagicMock),
+            patch.object(orchestrator, "_save_manual_translation_report"),
+        ):
             await orchestrator.translate_epub("mock_epub_path")
 
         assert saved_snapshots[-1]["items"][0]["chunks"][0]["status"] == TranslationStatus.WRITEBACK_FAILED.value
@@ -817,13 +919,15 @@ class TestOrchestrator:
         mock_shutil.copytree.return_value = None
         mock_shutil.rmtree.return_value = None
 
-        with patch("engine.orchestrator.os.path.exists", return_value=True), \
-            patch("builtins.open", new_callable=MagicMock), \
-            patch.object(orchestrator, "_save_manual_translation_report") as mock_save_report:
+        with (
+            patch("engine.orchestrator.os.path.exists", return_value=True),
+            patch("builtins.open", new_callable=MagicMock),
+            patch.object(orchestrator, "_save_manual_translation_report") as mock_save_report,
+        ):
             output_path = await orchestrator.translate_epub("mock_epub_path")
 
         assert translated_chunk.status == TranslationStatus.WRITEBACK_FAILED
-        assert output_path.endswith("test_book-cn-incomplete.epub")
+        assert output_path is None
         mock_save_report.assert_called_once()
         report_chunks = mock_save_report.call_args.args[0]
         assert report_chunks == [
@@ -836,6 +940,7 @@ class TestOrchestrator:
                 "status": TranslationStatus.WRITEBACK_FAILED.value,
             }
         ]
+
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
     @patch.object(Parser, "save_json", new_callable=MagicMock)
@@ -894,10 +999,12 @@ class TestOrchestrator:
         mock_shutil.copytree.return_value = None
         mock_shutil.rmtree.return_value = None
 
-        with patch("engine.orchestrator.os.path.exists", return_value=True), \
-            patch("builtins.open", new_callable=MagicMock), \
-            patch.object(orchestrator, "_save_manual_translation_report"), \
-            patch("engine.orchestrator.logger.info") as mock_logger_info:
+        with (
+            patch("engine.orchestrator.os.path.exists", return_value=True),
+            patch("builtins.open", new_callable=MagicMock),
+            patch.object(orchestrator, "_save_manual_translation_report"),
+            patch("engine.orchestrator.logger.info") as mock_logger_info,
+        ):
             await orchestrator.translate_epub("mock_epub_path")
 
         stats_messages = [call.args[0] for call in mock_logger_info.call_args_list if "翻译统计:" in call.args[0]]
@@ -952,3 +1059,35 @@ class TestManualTranslationReport:
         orchestrator = Orchestrator()
         result = orchestrator._load_manual_translations("/nonexistent/path/report.json")
         assert result == {}
+
+    def test_apply_manual_translations_to_book(self):
+        """测试手动翻译报告中的译文会回填到 book chunk 并标记为 TRANSLATED。"""
+        orchestrator = Orchestrator()
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test.epub",
+            extract_path="/mock/path/test_epub",
+            items=[
+                EpubItem(
+                    id="item1",
+                    path="/mock/path/test_epub/item1.html",
+                    content="<p>Hello</p>",
+                    chunks=[
+                        Chunk(
+                            name="c1",
+                            original="<p>Hello</p>",
+                            translated="",
+                            tokens=2,
+                            status=TranslationStatus.TRANSLATION_FAILED,
+                        )
+                    ],
+                )
+            ],
+        )
+
+        with patch.object(orchestrator, "_load_manual_translations", return_value={"c1": "<p>你好</p>"}):
+            applied = orchestrator._apply_manual_translations_to_book(book, "/tmp/manual_report.json")
+
+        assert applied == 1
+        assert book.items[0].chunks[0].translated == "<p>你好</p>"
+        assert book.items[0].chunks[0].status == TranslationStatus.TRANSLATED
