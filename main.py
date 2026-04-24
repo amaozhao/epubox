@@ -3,15 +3,13 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.console import Console
 
 from engine.core.logger import engine_logger as logger
 from engine.orchestrator import Orchestrator
 from engine.services.glossary import GlossaryExtractor
 
-# 初始化 Typer 应用和 Rich 控制台
+# 初始化 Typer 应用
 app = typer.Typer()
-console = Console()
 
 
 @app.command("translate", help="翻译指定的 EPUB 文件")
@@ -32,10 +30,10 @@ def translate(
     翻译指定的 EPUB 文件。
     """
     # 打印开始信息
-    console.print(f"[bold green]开始翻译 EPUB 文件: {epub_path.name}[/bold green]")
-    console.print(f"[bold]目标语言:[/bold] {language}")
-    console.print(f"[bold]分块大小:[/bold] {limit} tokens")
-    console.print("-" * 50)
+    typer.echo(f"开始翻译 EPUB 文件: {epub_path.name}")
+    typer.echo(f"目标语言: {language}")
+    typer.echo(f"分块大小: {limit} tokens")
+    typer.echo("-" * 50)
 
     try:
         # 实例化并运行 Orchestrator
@@ -45,14 +43,14 @@ def translate(
         )
 
         # 翻译成功，打印完成信息
-        console.print("-" * 50)
-        console.print(f"[bold green]翻译完成！[/bold green] 新文件已保存至 [bold]{translated_path}[/bold]")
+        typer.echo("-" * 50)
+        typer.echo(f"翻译完成！新文件已保存至 {translated_path}")
 
     except Exception as e:
         # 捕获并打印错误
         logger.error(f"翻译过程中发生错误: {e}")
-        console.print("-" * 50)
-        console.print("[bold red]翻译失败！[/bold red] 详情请查看日志。")
+        typer.echo("-" * 50)
+        typer.echo("翻译失败！详情请查看日志。", err=True)
         typer.Exit(1)
 
 
@@ -75,9 +73,9 @@ def generate_glossary(
     ),
 ):
     """为指定的 EPUB 文件生成【多词术语】的 JSON 文件。"""
-    console.print("-" * 50)
+    typer.echo("-" * 50)
     if output_path:
-        console.print(f"[bold]指定输出路径:[bold] {output_path}")
+        typer.echo(f"指定输出路径: {output_path}")
 
     extractor = GlossaryExtractor()
     extractor.run(
