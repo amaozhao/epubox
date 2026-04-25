@@ -4,9 +4,8 @@ from functools import lru_cache
 from typing import Any, List, NamedTuple
 
 import tiktoken
-
-from bs4 import BeautifulSoup, NavigableString
-from bs4.element import ProcessingInstruction
+from bs4 import BeautifulSoup
+from bs4.element import NavigableString, ProcessingInstruction
 
 from engine.core.markup import get_markup_parser
 from engine.item.xpath import get_xpath
@@ -148,7 +147,7 @@ class DomChunker:
                     continue
 
                 parent = node.parent
-                if not getattr(parent, "name", None):
+                if parent is None or not getattr(parent, "name", None):
                     continue
                 if parent.name == "[document]":
                     continue
@@ -184,6 +183,9 @@ class DomChunker:
 
     def _get_nav_text_index(self, node: NavigableString) -> int:
         parent = node.parent
+        if parent is None:
+            return -1
+
         index = -1
         for child in parent.contents:
             if not isinstance(child, NavigableString):
@@ -363,6 +365,7 @@ class DomChunker:
             original="\n".join(htmls),
             translated=None,
             tokens=tokens,
+            chunk_mode="html_fragment",
             xpaths=xpaths,
         )
 

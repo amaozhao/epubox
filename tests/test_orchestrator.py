@@ -1217,5 +1217,7 @@ class TestManualTranslationReport:
             applied = orchestrator._apply_manual_translations_to_book(book, "/tmp/manual_report.json")
 
         assert applied == 1
-        assert book.items[0].chunks[0].translated == "<p>你好</p>"
-        assert book.items[0].chunks[0].status == TranslationStatus.TRANSLATED
+        chunks = book.items[0].chunks
+        assert chunks is not None
+        assert chunks[0].translated == "<p>你好</p>"
+        assert chunks[0].status == TranslationStatus.TRANSLATED

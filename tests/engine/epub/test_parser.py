@@ -6,7 +6,7 @@ import pytest
 
 from engine.epub.parser import Parser
 from engine.item.chunker import DomChunker
-from engine.schemas import Chunk, EpubBook
+from engine.schemas import Chunk, EpubBook, EpubItem, TranslationStatus
 from engine.schemas.chunk import NavTextTarget
 from engine.schemas.epub import CHECKPOINT_SCHEMA_VERSION
 
@@ -28,6 +28,11 @@ def parser_instance():
     """创建一个 Parser 实例供测试使用。"""
     epub_path = "/path/to/my_book.epub"
     return Parser(path=epub_path)
+
+
+def require_chunks(item: EpubItem) -> list[Chunk]:
+    assert item.chunks is not None
+    return item.chunks
 
 
 class TestParser:
@@ -434,7 +439,7 @@ class TestParser:
                         name="nav-text",
                         original="[NAVTXT:0] Chapter 1",
                         translated=None,
-                        status="pending",
+                        status=TranslationStatus.PENDING,
                         tokens=10,
                         chunk_mode="nav_text",
                         xpaths=[],
@@ -484,8 +489,8 @@ class TestParser:
         book = parser.load_json()
 
         assert book is not None
-        assert book.items[0].chunks[0].chunk_mode == "nav_text"
-        assert book.items[0].chunks[0].nav_targets
+        assert require_chunks(book.items[0])[0].chunk_mode == "nav_text"
+        assert require_chunks(book.items[0])[0].nav_targets
         save_json.assert_called_once()
 
     def test_rebuild_nav_item_chunks_passes_secondary_placeholder_limit(self, tmp_path, mocker):
@@ -577,7 +582,7 @@ class TestParser:
                         name="embedded-nav-text",
                         original="[NAVTXT:0] Chapter 1",
                         translated=None,
-                        status="pending",
+                        status=TranslationStatus.PENDING,
                         tokens=10,
                         chunk_mode="nav_text",
                         xpaths=[],
@@ -627,8 +632,8 @@ class TestParser:
         book = parser.load_json()
 
         assert book is not None
-        assert book.items[0].chunks[0].chunk_mode == "nav_text"
-        assert book.items[0].chunks[0].nav_targets
+        assert require_chunks(book.items[0])[0].chunk_mode == "nav_text"
+        assert require_chunks(book.items[0])[0].nav_targets
         save_json.assert_called_once()
 
     def test_load_json_upgrades_nonstandard_ncx_filename_chunks(self, tmp_path, mocker):
@@ -646,7 +651,7 @@ class TestParser:
                         name="nav-text",
                         original="[NAVTXT:0] Chapter 1",
                         translated=None,
-                        status="pending",
+                        status=TranslationStatus.PENDING,
                         tokens=10,
                         chunk_mode="nav_text",
                         xpaths=[],
@@ -696,8 +701,8 @@ class TestParser:
         book = parser.load_json()
 
         assert book is not None
-        assert book.items[0].chunks[0].chunk_mode == "nav_text"
-        assert book.items[0].chunks[0].nav_targets
+        assert require_chunks(book.items[0])[0].chunk_mode == "nav_text"
+        assert require_chunks(book.items[0])[0].nav_targets
         save_json.assert_called_once()
 
     def test_load_json_rebuilds_oversized_nav_text_chunks(self, tmp_path, mocker):
@@ -715,7 +720,7 @@ class TestParser:
                         name="nav-a",
                         original="[NAVTXT:0] Chapter 1",
                         translated=None,
-                        status="pending",
+                        status=TranslationStatus.PENDING,
                         tokens=10,
                         chunk_mode="nav_text",
                         xpaths=[],
@@ -732,7 +737,7 @@ class TestParser:
                         name="nav-b",
                         original="[NAVTXT:1] Chapter 2",
                         translated=None,
-                        status="pending",
+                        status=TranslationStatus.PENDING,
                         tokens=10,
                         chunk_mode="nav_text",
                         xpaths=[],
@@ -796,7 +801,7 @@ class TestParser:
         book = parser.load_json()
 
         assert book is not None
-        assert len(book.items[0].chunks) == 2
+        assert len(require_chunks(book.items[0])) == 2
         rebuild.assert_called_once()
         save_json.assert_called_once()
 
@@ -815,7 +820,7 @@ class TestParser:
                         name="body-text",
                         original="<title>4 Linear Programming</title>\n<section><p>Hello</p></section>",
                         translated=None,
-                        status="pending",
+                        status=TranslationStatus.PENDING,
                         tokens=20,
                         xpaths=["/html/head/title", "/html/body/section"],
                     )
@@ -860,8 +865,8 @@ class TestParser:
         book = parser.load_json()
 
         assert book is not None
-        assert len(book.items[0].chunks) == 1
-        assert "/html/body/section" in book.items[0].chunks[0].xpaths
+        assert len(require_chunks(book.items[0])) == 1
+        assert "/html/body/section" in require_chunks(book.items[0])[0].xpaths
         rebuild.assert_called_once_with(book.items[0], is_nav_file=False, strip_title=False)
         save_json.assert_called_once()
 
@@ -880,7 +885,7 @@ class TestParser:
                         name="body-text",
                         original="<section><p>Hello</p></section>",
                         translated=None,
-                        status="pending",
+                        status=TranslationStatus.PENDING,
                         tokens=12,
                         xpaths=["/html/body/section"],
                     )
@@ -925,11 +930,11 @@ class TestParser:
         book = parser.load_json()
 
         assert book is not None
-        assert len(book.items[0].chunks) == 2
-        assert book.items[0].chunks[0].translated == "<title>4 线性规划</title>"
-        assert book.items[0].chunks[0].status == "completed"
-        assert book.items[0].chunks[0].xpaths == ["/html/head/title"]
-        assert book.items[0].chunks[1].xpaths == ["/html/body/section"]
+        assert len(require_chunks(book.items[0])) == 2
+        assert require_chunks(book.items[0])[0].translated == "<title>4 线性规划</title>"
+        assert require_chunks(book.items[0])[0].status == "completed"
+        assert require_chunks(book.items[0])[0].xpaths == ["/html/head/title"]
+        assert require_chunks(book.items[0])[1].xpaths == ["/html/body/section"]
         rebuild.assert_called_once_with(book.items[0], is_nav_file=False, strip_title=True)
         save_json.assert_called_once()
 
@@ -1021,6 +1026,6 @@ class TestParser:
         book = parser.load_json()
 
         assert book is not None
-        assert book.items[0].chunks[0].status == "completed"
+        assert require_chunks(book.items[0])[0].status == "completed"
         rebuild.assert_not_called()
         save_json.assert_not_called()

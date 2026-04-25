@@ -13,12 +13,12 @@ class Placeholder:
     # 修改点 1: 只保留大写字母和数字
     characters = string.ascii_uppercase + string.digits  # 36种字符 (A-Z, 0-9)
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.placer_map: Dict[str, str] = {}
         self.value_to_key_map: Dict[str, str] = {}
-        self.generated = set()
+        self.generated: Set[str] = set()
 
-    def generate(self):
+    def generate(self) -> str:
         while True:
             # 生成全大写的占位符
             _placeholder = "".join(secrets.choice(self.characters) for _ in range(ID_LENGTH))
@@ -26,7 +26,7 @@ class Placeholder:
                 break
         return _placeholder
 
-    def placeholder(self, original):
+    def placeholder(self, original: object) -> str:
         original_str = str(original)
         if original_str in self.value_to_key_map:
             return self.value_to_key_map[original_str]
@@ -65,7 +65,7 @@ class Replacer:
         ("code", "language-none"),
     }
 
-    def __init__(self, parser: str = "html.parser"):
+    def __init__(self, parser: str = "html.parser") -> None:
         self.parser = parser
         self.placeholder = Placeholder()
 
@@ -91,11 +91,11 @@ class Replacer:
         return self._replace(soup)
 
     def restore(self, content: str, placeholders: Optional[Dict[str, str]] = None) -> str:
-        placeholders = placeholders or self.placeholder.placer_map
+        effective_placeholders = self.placeholder.placer_map if placeholders is None else placeholders
 
         # 修改点 2: 提高还原的容错率
         # 如果 LLM 把 ##ABC## 变成了 ##abc##，我们可以通过 re.sub 忽略大小写进行替换
-        for placeholder, original in placeholders.items():
+        for placeholder, original in effective_placeholders.items():
             # 使用 re.escape 处理分隔符可能是特殊字符的情况
             # flags=re.IGNORECASE 确保即使 LLM 输出了小写也能匹配回我们的大写原始 key
             pattern = re.compile(re.escape(placeholder), re.IGNORECASE)

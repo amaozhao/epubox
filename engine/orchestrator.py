@@ -8,7 +8,7 @@ from tqdm import tqdm
 from engine.agents.verifier import EnglishResidualDecision, classify_untranslated_english_texts
 from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
-from engine.epub import Builder, Parser, DomReplacer
+from engine.epub import Builder, DomReplacer, Parser
 from engine.schemas import Chunk, TranslationStatus
 from engine.services.glossary import GlossaryExtractor, GlossaryLoader
 
@@ -22,7 +22,9 @@ class TranslationStats:
         self.pending = 0
         self.failed = 0
 
-    def record(self, status: TranslationStatus):
+    def record(self, status: TranslationStatus | None):
+        if status is None:
+            return
         self.total += 1
         if status in (
             TranslationStatus.TRANSLATED,
@@ -214,25 +216,20 @@ class Orchestrator:
                     chunk.translated,
                     split_nav_payloads=chunk.chunk_mode == "nav_text",
                 )
-                fail_findings = [
-                    finding for finding in findings if finding.decision == EnglishResidualDecision.FAIL
-                ]
+                fail_findings = [finding for finding in findings if finding.decision == EnglishResidualDecision.FAIL]
                 review_findings = [
                     finding for finding in findings if finding.decision == EnglishResidualDecision.REVIEW
                 ]
                 for finding in review_findings:
-                    self.final_untranslated_review_findings.append(
-                        {
-                            "file": item.id,
-                            "chunk_name": chunk.name,
-                            "path": item.path,
-                            "text": finding.text[:240],
-                            "reason": finding.reason,
-                        }
-                    )
+                    self.final_untranslated_review_findings.append({
+                        "file": item.id,
+                        "chunk_name": chunk.name,
+                        "path": item.path,
+                        "text": finding.text[:240],
+                        "reason": finding.reason,
+                    })
                     logger.info(
-                        f"Chunk '{chunk.name}' 最终整书扫描发现需人工复核的英文片段，不阻断输出: "
-                        f"{finding.text[:160]}"
+                        f"Chunk '{chunk.name}' 最终整书扫描发现需人工复核的英文片段，不阻断输出: {finding.text[:160]}"
                     )
                 if not fail_findings:
                     continue
@@ -302,7 +299,8 @@ class Orchestrator:
                         chunk_index = item.chunks.index(chunk)
                         item.chunks[chunk_index] = response.content
                         chunk = response.content
-                        stats.record(chunk.status)
+                        if chunk.status is not None:
+                            stats.record(chunk.status)
 
                         # 每翻译一个 chunk 立即保存，支持断点续传
                         parser.save_json(book)
@@ -362,7 +360,7 @@ class Orchestrator:
                 "original": chunk.original,
                 "path": item.path,
                 "placeholder": item.placeholder,
-                "status": chunk.status.value,
+                "status": chunk.status.value if chunk.status else None,
             }
             for item in book.items
             if item.chunks

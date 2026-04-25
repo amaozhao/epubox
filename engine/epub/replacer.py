@@ -1,7 +1,8 @@
 import re
 from copy import copy, deepcopy
 
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup, Tag
+from bs4.element import NavigableString
 
 from engine.agents.verifier import verify_final_html
 from engine.core.logger import engine_logger as logger
@@ -262,8 +263,12 @@ class DomReplacer:
 
         关键假设：翻译后的 HTML 与原始 chunk 有相同数量、相同顺序的顶层元素
         """
+        if chunk.translated is None:
+            logger.warning(f"Chunk {chunk.name}: 缺少译文，放弃整块回写")
+            return False
+
         translated_soup = BeautifulSoup(chunk.translated, "html.parser")
-        translated_elements = [e for e in translated_soup.children if hasattr(e, "name") and e.name]
+        translated_elements = [e for e in translated_soup.children if isinstance(e, Tag)]
 
         # 校验：翻译后元素数量应与 xpath 数量一致
         if len(translated_elements) != len(chunk.xpaths):
@@ -316,6 +321,10 @@ class DomReplacer:
         return nodes
 
     def _replace_nav_text(self, soup, chunk: Chunk) -> bool:
+        if chunk.translated is None:
+            logger.warning(f"Chunk {chunk.name}: 缺少导航译文，放弃整块回写")
+            return False
+
         segments = self._extract_nav_segments(chunk.translated)
         expected_markers = [target.marker for target in chunk.nav_targets]
         translated_markers = [marker for marker, _ in segments]

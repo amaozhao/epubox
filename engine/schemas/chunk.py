@@ -25,7 +25,7 @@ class Chunk(BaseModel):
     status: Optional[TranslationStatus] = TranslationStatus.PENDING
     tokens: int = Field(0, description="当前chunk估算的token数")
     chunk_mode: Literal["html_fragment", "nav_text"] = Field(
-        "html_fragment",
+        default="html_fragment",
         description="chunk 载荷模式：常规 HTML 片段 或 导航文本模式",
     )
     # chunk 内各元素在原始 DOM 中的 xpath 路径，用于追踪翻译结果回写位置

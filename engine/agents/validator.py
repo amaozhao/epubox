@@ -14,7 +14,7 @@ def validate_placeholders(text: str, tag_map: Dict[str, str]) -> Tuple[bool, str
     pattern = re.escape(prefix) + r"(\d+)" + re.escape(suffix)
     found = re.findall(pattern, text)
     found_indices = sorted([int(x) for x in found])
-    expected_indices = sorted([int(re.search(r"\d+", k).group()) for k in tag_map.keys()])
+    expected_indices = sorted([int(x) for k in tag_map.keys() for x in re.findall(r"\d+", k)])
 
     missing = set(expected_indices) - set(found_indices)
     extra = set(found_indices) - set(expected_indices)

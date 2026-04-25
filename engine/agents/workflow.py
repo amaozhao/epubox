@@ -1,11 +1,13 @@
 import json
 import re
-from typing import Dict
+from typing import Dict, TypedDict
 
 from agno.run import RunStatus
 from agno.workflow import Step, StepInput, StepOutput, Workflow
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup
+from bs4.element import NavigableString
 
+from engine.agents.verifier import find_untranslated_english_texts, validate_translated_html
 from engine.core.logger import engine_logger as logger
 from engine.core.markup import get_markup_parser
 from engine.schemas import Chunk, TranslationStatus
@@ -15,7 +17,20 @@ from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
 from .translator import get_translator
-from engine.agents.verifier import find_untranslated_english_texts, validate_translated_html
+
+
+class ProofreadStepContent(TypedDict):
+    chunk: Chunk
+    proofreading_result: ProofreadingResult
+
+
+class ChunkStepOutput(StepOutput):
+    content: Chunk
+
+
+class ProofreadStepOutput(StepOutput):
+    content: ProofreadStepContent
+
 
 # 需要内容安全审核 fallback 的错误码
 CONTENT_SAFETY_ERROR_CODES = {10014, 500, 400}
@@ -51,7 +66,23 @@ DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD = 12
 DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD = 8
 DIRECT_TEXT_NODE_PLACEHOLDER_RISK_THRESHOLD = 1
 DIRECT_TEXT_NODE_MATH_TAG_THRESHOLD = 4
-HIGH_RISK_INLINE_TAGS = {"a", "b", "code", "em", "i", "kbd", "q", "s", "small", "span", "strong", "sub", "sup", "u", "var"}
+HIGH_RISK_INLINE_TAGS = {
+    "a",
+    "b",
+    "code",
+    "em",
+    "i",
+    "kbd",
+    "q",
+    "s",
+    "small",
+    "span",
+    "strong",
+    "sub",
+    "sup",
+    "u",
+    "var",
+}
 MATHY_INLINE_TAGS = {"sub", "sup"}
 
 
@@ -231,16 +262,17 @@ def _should_translate_chunk_via_text_nodes_directly(html: str) -> bool:
     math_tag_count = sum(1 for tag in tags if str(tag.name).lower() in MATHY_INLINE_TAGS)
     placeholder_count = len(SECONDARY_PLACEHOLDER_PATTERN.findall(html))
 
-    if (
-        placeholder_count >= DIRECT_TEXT_NODE_PLACEHOLDER_RISK_THRESHOLD
-        and (inline_tag_count >= 4 or math_tag_count >= DIRECT_TEXT_NODE_MATH_TAG_THRESHOLD)
+    if placeholder_count >= DIRECT_TEXT_NODE_PLACEHOLDER_RISK_THRESHOLD and (
+        inline_tag_count >= 4 or math_tag_count >= DIRECT_TEXT_NODE_MATH_TAG_THRESHOLD
     ):
         return True
 
     if len(text_nodes) < DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD:
         return False
 
-    return inline_tag_count >= DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD or len(tags) >= DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD
+    return (
+        inline_tag_count >= DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD or len(tags) >= DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD
+    )
 
 
 def _validate_text_node_translation(original: str, translated: str) -> tuple[bool, str]:
@@ -291,10 +323,7 @@ def _build_validation_feedback(history: list[str]) -> str | None:
         return history[0]
 
     bullets = "\n".join(f"- {item}" for item in history)
-    return (
-        "修复以下历史错误，优先解决最后一条，同时保持已正确的结构、标签和标记不变：\n"
-        f"{bullets}"
-    )
+    return f"修复以下历史错误，优先解决最后一条，同时保持已正确的结构、标签和标记不变：\n{bullets}"
 
 
 async def _translate_with_text_node_fallback(
@@ -452,7 +481,7 @@ def _sanitize_model_text(text: str) -> str:
 
 async def _call_translator(
     text: str,
-    glossary: Dict[str, str] = None,
+    glossary: Dict[str, str] | None = None,
     previous_translation: str | None = None,
     error_msg: str | None = None,
     mode: str = "html",
@@ -498,7 +527,7 @@ async def _call_translator(
         raise
 
 
-async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None) -> Chunk:
+async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None = None) -> Chunk:
     """翻译并用 validate_translated_html 验证 HTML 结构，失败则标记待手动处理"""
     original = chunk.original
     protected_original = original
@@ -508,19 +537,19 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
     last_error_msg = None
     last_translation = None
     error_history: list[str] = []
-    prefer_text_node_directly = (
-        chunk.chunk_mode != "nav_text" and _should_translate_chunk_via_text_nodes_directly(original)
+    prefer_text_node_directly = chunk.chunk_mode != "nav_text" and _should_translate_chunk_via_text_nodes_directly(
+        original
     )
 
     for attempt in range(MAX_TRANSLATION_RETRIES):
+        translated: str | None = None
+        is_valid = False
+        error_msg = "翻译未执行"
         try:
-            use_text_node_fallback = (
-                prefer_text_node_directly
-                or (
-                    chunk.chunk_mode != "nav_text"
-                    and attempt == MAX_TRANSLATION_RETRIES - 1
-                    and _is_structure_validation_error(last_error_msg)
-                )
+            use_text_node_fallback = prefer_text_node_directly or (
+                chunk.chunk_mode != "nav_text"
+                and attempt == MAX_TRANSLATION_RETRIES - 1
+                and _is_structure_validation_error(last_error_msg)
             )
             if use_text_node_fallback:
                 if prefer_text_node_directly and attempt == 0:
@@ -535,7 +564,10 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
                 if text_node_error:
                     is_valid, error_msg = False, text_node_error
                 else:
-                    is_valid, error_msg = validate_translated_html(original, translated)
+                    if translated is not None:
+                        is_valid, error_msg = validate_translated_html(original, translated)
+                    else:
+                        is_valid, error_msg = False, "Translation failed: translated is None"
             else:
                 translated = await _call_translator(
                     protected_original,
@@ -553,20 +585,31 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
 
         if not use_text_node_fallback:
             if chunk.chunk_mode == "nav_text":
-                is_valid, error_msg = _validate_nav_translation(original, translated)
-            else:
-                translated, tag_restore_error = _restore_translation_tags(translated, frozen_tag_replacements)
-                if tag_restore_error:
-                    is_valid, error_msg = False, tag_restore_error
+                if translated is not None:
+                    is_valid, error_msg = _validate_nav_translation(original, translated)
                 else:
-                    is_valid, error_msg = validate_translated_html(original, translated)
+                    is_valid, error_msg = False, "translated is None"
+            else:
+                if translated is not None:
+                    translated, tag_restore_error = _restore_translation_tags(translated, frozen_tag_replacements)
+                    if tag_restore_error:
+                        is_valid, error_msg = False, tag_restore_error
+                    else:
+                        if translated is not None:
+                            is_valid, error_msg = validate_translated_html(original, translated)
+                        else:
+                            is_valid, error_msg = False, "translated is None"
+                else:
+                    is_valid, error_msg = False, "translated is None"
         last_translation = translated
-        if is_valid:
+        if is_valid and translated is not None:
             chunk.translated = translated
             chunk.status = TranslationStatus.TRANSLATED
             if chunk.chunk_mode != "nav_text" and error_msg == "accepted_as_is":
                 chunk.status = TranslationStatus.ACCEPTED_AS_IS
             return chunk
+        if is_valid:
+            error_msg = "translated is None"
 
         logger.warning(f"翻译重试 {attempt + 1}/{MAX_TRANSLATION_RETRIES} 失败: {error_msg}")
         last_error_msg = error_msg
@@ -580,55 +623,55 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] = None
 
 
 # Step 1: Translate
-async def translate_step(step_input: StepInput) -> StepOutput:
+async def translate_step(step_input: StepInput) -> ChunkStepOutput:
     chunk: Chunk = step_input.input  # type: ignore
     additional_data = step_input.additional_data or {}
     glossary = additional_data.get("glossary", {})
 
     if chunk.status == TranslationStatus.TRANSLATED and chunk.translated:
-        return StepOutput(content=chunk)
+        return ChunkStepOutput(content=chunk)
 
     if not chunk.original or not chunk.original.strip():
         logger.info(f"Chunk '{chunk.name}' 无可翻译内容，直接返回原文")
         chunk.translated = chunk.original
         chunk.status = TranslationStatus.TRANSLATED
-        return StepOutput(content=chunk)
+        return ChunkStepOutput(content=chunk)
 
     untranslated_hits = find_untranslated_english_texts(chunk.original)
     if _looks_like_already_simplified_chinese(chunk.original) and not untranslated_hits:
         logger.info(f"Chunk '{chunk.name}' 检测到原文已是目标语言，直接接受原文。")
         chunk.translated = chunk.original
         chunk.status = TranslationStatus.ACCEPTED_AS_IS
-        return StepOutput(content=chunk)
+        return ChunkStepOutput(content=chunk)
     if untranslated_hits:
         logger.info(f"Chunk '{chunk.name}' 检测到疑似残留未翻译英文，将继续调用翻译器。")
 
     try:
         chunk = await _translate_with_fallback(chunk, glossary)
-        return StepOutput(content=chunk)
+        return ChunkStepOutput(content=chunk)
     except Exception as e:
         error_msg = f"翻译步骤失败：{e}"
         logger.error(error_msg)
-        return StepOutput(content=chunk, success=False, error=error_msg)
+        return ChunkStepOutput(content=chunk, success=False, error=error_msg)
 
 
 # Step 2: Proofread
-async def proofread_step(step_input: StepInput) -> StepOutput:
+async def proofread_step(step_input: StepInput) -> ProofreadStepOutput:
     chunk: Chunk = step_input.previous_step_content  # type: ignore
     translated = getattr(chunk, "translated")
 
     if chunk.chunk_mode == "nav_text":
-        return StepOutput(content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})})
+        return ProofreadStepOutput(content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})})
 
     # 翻译失败或接受原文，跳过校对
     if chunk.status in (TranslationStatus.TRANSLATION_FAILED, TranslationStatus.ACCEPTED_AS_IS):
         logger.info(f"Chunk '{chunk.name}' 无需校对，跳过校对步骤")
-        return StepOutput(content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})})
+        return ProofreadStepOutput(content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})})
 
     if not translated or not isinstance(translated, str):
         error_msg = "校对步骤失败：没有从上一步收到有效的翻译文本。"
         logger.error(error_msg)
-        return StepOutput(
+        return ProofreadStepOutput(
             content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})},
             success=False,
             error=error_msg,
@@ -672,17 +715,17 @@ async def proofread_step(step_input: StepInput) -> StepOutput:
     if proofreading_result is None:
         error_msg = f"校对步骤失败：经过 {max_attempts} 次尝试后仍未成功。"
         logger.error(error_msg)
-        return StepOutput(
+        return ProofreadStepOutput(
             content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})},
             success=False,
             error=error_msg,
         )
 
-    return StepOutput(content={"chunk": chunk, "proofreading_result": proofreading_result})
+    return ProofreadStepOutput(content={"chunk": chunk, "proofreading_result": proofreading_result})
 
 
 # Step 3: Apply Corrections
-def apply_corrections_step(step_input: StepInput) -> StepOutput:
+def apply_corrections_step(step_input: StepInput) -> ChunkStepOutput:
     step_data: dict = step_input.previous_step_content  # type: ignore
     chunk: Chunk = step_data["chunk"]
     proofreading_result: ProofreadingResult = step_data["proofreading_result"]
@@ -691,16 +734,16 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
     # 翻译失败或接受原文，跳过应用校对建议
     if chunk.status in (TranslationStatus.TRANSLATION_FAILED, TranslationStatus.ACCEPTED_AS_IS):
         logger.info(f"Chunk '{chunk.name}' 无需应用校对建议，直接返回")
-        return StepOutput(content=chunk)
+        return ChunkStepOutput(content=chunk)
 
     if not translated_text or not isinstance(translated_text, str):
         error_msg = "应用校对建议步骤失败：缺少翻译文本。"
         logger.error(error_msg)
-        return StepOutput(content=chunk, success=False, error=error_msg)
+        return ChunkStepOutput(content=chunk, success=False, error=error_msg)
 
     if chunk.chunk_mode == "nav_text":
         chunk.status = TranslationStatus.COMPLETED
-        return StepOutput(content=chunk)
+        return ChunkStepOutput(content=chunk)
 
     raw_corrections = proofreading_result.corrections
     total_corrections = len(raw_corrections)
@@ -714,7 +757,9 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
     replacement_count = 0
     matched_correction_count = 0
     if corrections:
-        final_text, replacement_count, matched_correction_count = _apply_corrections_to_text_nodes(final_text, corrections)
+        final_text, replacement_count, matched_correction_count = _apply_corrections_to_text_nodes(
+            final_text, corrections
+        )
     unmatched_corrections = eligible_corrections - matched_correction_count
     logger.info(
         "校对建议统计："
@@ -741,7 +786,7 @@ def apply_corrections_step(step_input: StepInput) -> StepOutput:
     chunk.translated = final_text
     chunk.status = TranslationStatus.COMPLETED
 
-    return StepOutput(content=chunk)
+    return ChunkStepOutput(content=chunk)
 
 
 def get_translator_workflow() -> Workflow:

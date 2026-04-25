@@ -1,11 +1,12 @@
+import re
+import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
-import re
-import xml.etree.ElementTree as ET
 from typing import List, Optional, Tuple
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, Tag
+from bs4.element import NavigableString
 
 from engine.core.markup import get_markup_parser
 
@@ -326,9 +327,7 @@ UNTRANSLATED_CODEISH_TEXT_PATTERN = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 UNTRANSLATED_CITATION_PATTERN = re.compile(r"\[[^\[\]]*\b(?:18|19|20)\d{2}\b[^\[\]]*\]")
-UNTRANSLATED_ENGLISH_RUN_PATTERN = re.compile(
-    r"[A-Za-z][A-Za-z0-9'.+-]*(?:\s+[A-Za-z][A-Za-z0-9'.+-]*)*"
-)
+UNTRANSLATED_ENGLISH_RUN_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'.+-]*(?:\s+[A-Za-z][A-Za-z0-9'.+-]*)*")
 _NLTK_TREEBANK_TOKENIZER = None
 
 
@@ -366,10 +365,10 @@ def _ancestor_classes(node: NavigableString) -> str:
     values: list[str] = []
     parent = node.parent
     while isinstance(parent, Tag):
-        classes = parent.get("class", [])
+        classes = parent.get("class")
         if isinstance(classes, str):
             values.append(classes)
-        else:
+        elif classes is not None:
             values.extend(str(item) for item in classes)
         parent = parent.parent
     return " ".join(values)
@@ -655,8 +654,8 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
     original_soup = BeautifulSoup(original, get_markup_parser(original))
     translated_soup = BeautifulSoup(translated, get_markup_parser(translated))
 
-    original_elements = [e for e in original_soup.children if hasattr(e, "name") and e.name]
-    translated_elements = [e for e in translated_soup.children if hasattr(e, "name") and e.name]
+    original_elements = [e for e in original_soup.children if isinstance(e, Tag)]
+    translated_elements = [e for e in translated_soup.children if isinstance(e, Tag)]
 
     # 1. 元素数量
     if len(original_elements) != len(translated_elements):
@@ -741,7 +740,7 @@ def _collect_element_scoped_code_multiset_mismatches(
     original_elements: list,
     translated_elements: list,
     pattern: str,
-) -> list[tuple[int, str, str]]:
+) -> list[tuple[int, int, str, str]]:
     """
     对 CODE 只校验同一顶层元素内的多重集合一致性。
 
@@ -750,11 +749,9 @@ def _collect_element_scoped_code_multiset_mismatches(
     - 索引变化
     - 跨顶层元素迁移
     """
-    all_details: list[tuple[int, str, str]] = []
+    all_details: list[tuple[int, int, str, str]] = []
 
-    for element_index, (orig_element, trans_element) in enumerate(
-        zip(original_elements, translated_elements), start=1
-    ):
+    for element_index, (orig_element, trans_element) in enumerate(zip(original_elements, translated_elements), start=1):
         orig_placeholders = re.findall(pattern, str(orig_element))
         trans_placeholders = re.findall(pattern, str(trans_element))
         if Counter(orig_placeholders) == Counter(trans_placeholders):
@@ -823,7 +820,7 @@ def _format_placeholder_sequence_error(label: str, details: list[tuple[int, str,
     return f"{label} 占位符顺序不一致: {'; '.join(rendered)}"
 
 
-def _format_code_placeholder_error(details: list[tuple[int, str, str, str]]) -> str:
+def _format_code_placeholder_error(details: list[tuple[int, int, str, str]]) -> str:
     rendered: list[str] = []
 
     for element_index, position, orig_token, trans_token in details:

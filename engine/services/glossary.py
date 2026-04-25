@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import sys
-from typing import Dict
+from typing import Any, Dict, cast
 
 import ebooklib
 import nltk
@@ -108,7 +108,7 @@ class GlossaryExtractor:
             try:
                 tokens = word_tokenize(sentence)
                 pos_tags = pos_tag(tokens)
-                chunked = self.chunker.parse(pos_tags)
+                chunked = cast(Any, self.chunker.parse(pos_tags))
                 for subtree in chunked.subtrees(filter=lambda t: t.label() == "NP"):
                     phrase = " ".join(word for word, tag in subtree.leaves()).lower()
                     if self._is_valid_term(phrase):
@@ -122,10 +122,10 @@ class GlossaryExtractor:
         logging.info("🔍 [阶段3/3] 正在为高质量候选计算TF-IDF权重并排序...")
         vectorizer = TfidfVectorizer(vocabulary=list(candidate_phrases), stop_words="english")
         try:
-            tfidf_matrix = vectorizer.fit_transform(sentences)
+            tfidf_matrix = cast(Any, vectorizer.fit_transform(sentences))
         except ValueError:
             return []
-        scores = tfidf_matrix.mean(axis=0).A1
+        scores = cast(Any, tfidf_matrix.mean(axis=0)).A1
         scored_phrases = {phrase: score for phrase, score in zip(vectorizer.get_feature_names_out(), scores)}
         sorted_phrases = sorted(scored_phrases.items(), key=lambda x: x[1], reverse=True)
         final_terms = [term.title() for term, score in sorted_phrases[:top_n]]

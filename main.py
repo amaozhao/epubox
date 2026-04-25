@@ -80,7 +80,7 @@ def generate_glossary(
     extractor = GlossaryExtractor()
     extractor.run(
         epub_path=str(epub_path),
-        output_path=output_path,
+        output_path=str(output_path) if output_path else None,
     )
 
 

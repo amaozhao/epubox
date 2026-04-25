@@ -66,7 +66,8 @@ class Parser:
     def _has_embedded_toc_nav(html: str) -> bool:
         soup = BeautifulSoup(html, "html.parser")
         for nav in soup.find_all("nav"):
-            classes = {cls.lower() for cls in nav.get("class", []) if isinstance(cls, str)}
+            class_values = nav.get("class")
+            classes = {cls.lower() for cls in class_values if isinstance(cls, str)} if class_values else set()
             if "toc" in classes:
                 return True
             for attr in ("epub:type", "type", "role", "id"):

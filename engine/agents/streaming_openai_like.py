@@ -58,8 +58,12 @@ class StreamingOpenAILike(OpenAILike):
             aggregated.provider_data.update(delta.provider_data)
 
         if delta.tool_calls:
+            if aggregated.tool_calls is None:
+                aggregated.tool_calls = []
             aggregated.tool_calls.extend(delta.tool_calls)
         if delta.tool_executions:
+            if aggregated.tool_executions is None:
+                aggregated.tool_executions = []
             aggregated.tool_executions.extend(delta.tool_executions)
 
     def invoke(

@@ -7,7 +7,13 @@ from engine.agents.verifier import validate_translated_html, verify_final_html
 from engine.epub.replacer import DomReplacer
 from engine.item.chunker import DomChunker
 from engine.schemas import Chunk, EpubItem
+from engine.schemas.chunk import NavTextTarget
 from engine.schemas.translator import TranslationStatus
+
+
+def require_restore(result: str | None) -> str:
+    assert result is not None
+    return result
 
 
 class TestDomReplacer:
@@ -31,7 +37,7 @@ class TestDomReplacer:
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert "<p>你好</p>" in result
         assert "<p>Hello</p>" not in result
 
@@ -53,7 +59,7 @@ class TestDomReplacer:
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert "标题" in result
         assert "第一" in result
         assert "第二" in result
@@ -76,7 +82,7 @@ class TestDomReplacer:
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         # UNTRANSLATED 应被跳过，保留原文
         assert "<p>Hello</p>" in result
 
@@ -99,7 +105,7 @@ class TestDomReplacer:
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert "文本" in result
 
     def test_no_chunks(self):
@@ -111,7 +117,7 @@ class TestDomReplacer:
             chunks=[],
         )
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert result == item.content
 
     def test_translated_elements_fewer_than_xpaths(self):
@@ -131,7 +137,7 @@ class TestDomReplacer:
         )
         item.chunks = [chunk]
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert "甲" not in result
         assert "A" in result
         assert "B" in result
@@ -153,7 +159,7 @@ class TestDomReplacer:
         )
         item.chunks = [chunk]
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert "甲" not in result
         assert "乙" not in result
         assert "A" in result
@@ -178,7 +184,7 @@ class TestDomReplacer:
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
 
         assert result is not None
         assert "data-epubox-wb-id" not in result
@@ -209,7 +215,7 @@ class TestDomReplacer:
         item.chunks = [broad_chunk, narrow_chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
 
         assert result is not None
         assert "Alpha" in result
@@ -251,7 +257,7 @@ class TestDomReplacer:
         mock_verify_final_html.side_effect = fake_verify
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
 
         assert result is not None
         assert "<p>阿尔法</p>" in result
@@ -276,7 +282,7 @@ class TestDomReplacer:
         )
         item.chunks = [chunk]
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert "Hello" in result  # 原文保留
 
     def test_verify_failure_logged(self):
@@ -296,7 +302,7 @@ class TestDomReplacer:
         )
         item.chunks = [chunk]
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert result == "<html><body><p>Hello</p></body></html>"
         assert item.translated == "<html><body><p>Hello</p></body></html>"
         assert chunk.status == TranslationStatus.WRITEBACK_FAILED
@@ -318,7 +324,7 @@ class TestDomReplacer:
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert result is not None
         assert "第1章" in result
         assert "第2章" in result
@@ -336,7 +342,7 @@ class TestDomReplacer:
         replacer = DomReplacer()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            result = replacer.restore(item)
+            result = require_restore(replacer.restore(item))
 
         assert result is not None
         assert not any(issubclass(w.category, XMLParsedAsHTMLWarning) for w in caught)
@@ -353,7 +359,7 @@ class TestDomReplacer:
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
         assert result is not None
         assert "Chapter 1" in result
         assert chunk.status == TranslationStatus.WRITEBACK_FAILED
@@ -377,24 +383,24 @@ class TestDomReplacer:
             chunk_mode="nav_text",
             xpaths=[],
             nav_targets=[
-                {
-                    "marker": "[NAVTXT:0]",
-                    "xpath": "/ncx:ncx/ncx:doctitle/ncx:text",
-                    "text_index": 0,
-                    "original_text": "Original Title",
-                },
-                {
-                    "marker": "[NAVTXT:1]",
-                    "xpath": "/ncx:ncx/ncx:navmap/ncx:navpoint/ncx:navlabel/ncx:text",
-                    "text_index": 0,
-                    "original_text": "Chapter 1",
-                },
+                NavTextTarget(
+                    marker="[NAVTXT:0]",
+                    xpath="/ncx:ncx/ncx:doctitle/ncx:text",
+                    text_index=0,
+                    original_text="Original Title",
+                ),
+                NavTextTarget(
+                    marker="[NAVTXT:1]",
+                    xpath="/ncx:ncx/ncx:navmap/ncx:navpoint/ncx:navlabel/ncx:text",
+                    text_index=0,
+                    original_text="Chapter 1",
+                ),
             ],
         )
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
 
         assert result is not None
         assert "中文书名" in result
@@ -414,7 +420,7 @@ class TestDomReplacer:
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
 
         assert result is not None
         assert "第1章" in result
@@ -447,7 +453,7 @@ class TestDomReplacer:
         item.chunks = [chunk]
 
         replacer = DomReplacer()
-        result = replacer.restore(item)
+        result = require_restore(replacer.restore(item))
 
         assert result is not None
         assert "你好，这里是一段会触发递归分块的文本" in result

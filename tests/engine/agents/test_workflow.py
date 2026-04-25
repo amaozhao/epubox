@@ -1,4 +1,5 @@
 import json
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,6 +17,7 @@ from engine.agents.workflow import (
     translate_step,
 )
 from engine.schemas import Chunk, TranslationStatus
+from engine.schemas.chunk import NavTextTarget
 
 
 class MockTranslationResponse(TranslationResponse):
@@ -37,15 +39,15 @@ async def reset_fallback_runtime_between_tests(monkeypatch):
 
 
 def make_chunk(
-    name="test_chunk",
-    original="<p>Hello World</p>",
-    translated=None,
-    tokens=10,
-    status=TranslationStatus.PENDING,
-    xpaths=None,
-    chunk_mode="html_fragment",
-    nav_targets=None,
-):
+    name: str = "test_chunk",
+    original: str = "<p>Hello World</p>",
+    translated: str | None = None,
+    tokens: int = 10,
+    status: TranslationStatus = TranslationStatus.PENDING,
+    xpaths: list[str] | None = None,
+    chunk_mode: Literal["html_fragment", "nav_text"] = "html_fragment",
+    nav_targets: list[NavTextTarget] | None = None,
+) -> Chunk:
     return Chunk(
         name=name,
         original=original,
@@ -56,6 +58,16 @@ def make_chunk(
         chunk_mode=chunk_mode,
         nav_targets=nav_targets or [],
     )
+
+
+def require_text(value: str | None) -> str:
+    assert value is not None
+    return value
+
+
+def require_error(value: str | None) -> str:
+    assert value is not None
+    return value
 
 
 @pytest.mark.asyncio
@@ -617,7 +629,7 @@ class TestTranslateStep:
         output = await translate_step(step_input)
 
         assert output.content.status == TranslationStatus.TRANSLATED
-        assert "\\n" not in output.content.translated
+        assert "\\n" not in require_text(output.content.translated)
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_preserves_literal_newline_escape_in_content(self, mock_get_translator):
@@ -894,8 +906,9 @@ class TestTranslateStep:
         assert text_payloads[1]["text_to_translate"].count("[TEXT:") == 8
         assert text_payloads[2]["text_to_translate"].count("[TEXT:") == 8
         assert text_payloads[3]["text_to_translate"].count("[TEXT:") == 6
-        assert "中文Paragraph 0" in output.content.translated
-        assert "中文Paragraph 29" in output.content.translated
+        translated = require_text(output.content.translated)
+        assert "中文Paragraph 0" in translated
+        assert "中文Paragraph 29" in translated
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_recovers_missing_leading_text_marker(self, mock_get_translator):
@@ -1087,7 +1100,7 @@ class TestProofreadStep:
         output = await proofread_step(step_input)
 
         assert output.success is False
-        assert "没有从上一步收到有效的翻译文本" in output.error
+        assert "没有从上一步收到有效的翻译文本" in require_error(output.error)
 
     @patch("engine.agents.workflow.run_fallback_agent")
     @patch("engine.agents.workflow.get_proofer")
@@ -1315,7 +1328,7 @@ class TestApplyCorrectionsStep:
         output = apply_corrections_step(step_input)
 
         assert output.success is False
-        assert "缺少翻译文本" in output.error
+        assert "缺少翻译文本" in require_error(output.error)
 
     def test_apply_corrections_step_untranslated_skipped(self):
         """apply_corrections_step: UNTRANSLATED chunk skips corrections"""
@@ -1408,7 +1421,7 @@ class TestGetTranslatorWorkflow:
         assert response.status == "COMPLETED"
         assert isinstance(response.content, Chunk)
         assert response.content.status == TranslationStatus.COMPLETED
-        assert "你好世界" in response.content.translated
+        assert "你好世界" in require_text(response.content.translated)
 
     @patch("engine.agents.workflow.get_translator")
     @patch("engine.agents.workflow.get_proofer")
