@@ -6,12 +6,12 @@ from typing import List, Optional
 
 from bs4 import BeautifulSoup
 
+from engine.agents.verifier import verify_html_integrity
+from engine.core.logger import engine_logger as logger
 from engine.core.markup import get_markup_parser
 from engine.item import DomChunker, PreCodeExtractor
 from engine.schemas import EpubBook, EpubItem, TranslationStatus
 from engine.schemas.epub import CHECKPOINT_SCHEMA_VERSION
-from engine.agents.verifier import verify_html_integrity
-from engine.core.logger import engine_logger as logger
 
 NAV_CHUNK_UPGRADE_THRESHOLD = 24
 COMPLEX_ITEM_FIGURE_THRESHOLD = 1

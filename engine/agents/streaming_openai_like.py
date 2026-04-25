@@ -1,10 +1,9 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type, Union
 
-from pydantic import BaseModel
-
 from agno.models.openai.like import OpenAILike
 from agno.models.response import ModelResponse
+from pydantic import BaseModel
 
 
 @dataclass

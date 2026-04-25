@@ -221,17 +221,13 @@ class DomReplacer:
                 other_depth = min(self._xpath_depth(xpath) for xpath in other_paths)
 
                 overlaps_descendant = any(
-                    self._is_xpath_ancestor(xpath, other_xpath)
-                    for xpath in chunk_paths
-                    for other_xpath in other_paths
+                    self._is_xpath_ancestor(xpath, other_xpath) for xpath in chunk_paths for other_xpath in other_paths
                 )
                 if not overlaps_descendant:
                     continue
 
                 if chunk_depth < other_depth:
-                    logger.warning(
-                        f"Chunk {chunk.name}: 检测到与更具体 xpath 重叠，跳过整块回写以保留更细粒度分块"
-                    )
+                    logger.warning(f"Chunk {chunk.name}: 检测到与更具体 xpath 重叠，跳过整块回写以保留更细粒度分块")
                     chunk.status = TranslationStatus.WRITEBACK_FAILED
                     break
 

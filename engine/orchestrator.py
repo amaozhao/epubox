@@ -221,13 +221,15 @@ class Orchestrator:
                     finding for finding in findings if finding.decision == EnglishResidualDecision.REVIEW
                 ]
                 for finding in review_findings:
-                    self.final_untranslated_review_findings.append({
-                        "file": item.id,
-                        "chunk_name": chunk.name,
-                        "path": item.path,
-                        "text": finding.text[:240],
-                        "reason": finding.reason,
-                    })
+                    self.final_untranslated_review_findings.append(
+                        {
+                            "file": item.id,
+                            "chunk_name": chunk.name,
+                            "path": item.path,
+                            "text": finding.text[:240],
+                            "reason": finding.reason,
+                        }
+                    )
                     logger.info(
                         f"Chunk '{chunk.name}' 最终整书扫描发现需人工复核的英文片段，不阻断输出: {finding.text[:160]}"
                     )

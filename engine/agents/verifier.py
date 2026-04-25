@@ -751,7 +751,9 @@ def _collect_element_scoped_code_multiset_mismatches(
     """
     all_details: list[tuple[int, int, str, str]] = []
 
-    for element_index, (orig_element, trans_element) in enumerate(zip(original_elements, translated_elements), start=1):
+    for element_index, (orig_element, trans_element) in enumerate(
+        zip(original_elements, translated_elements), start=1
+    ):
         orig_placeholders = re.findall(pattern, str(orig_element))
         trans_placeholders = re.findall(pattern, str(trans_element))
         if Counter(orig_placeholders) == Counter(trans_placeholders):

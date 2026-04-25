@@ -166,8 +166,7 @@ class TestValidateTranslatedHtmlTagErrors:
         """测试中文上下文中的完整英文句子仍会被拦截。"""
         original = "<p>The RAN uses a <b>disaggregated architecture</b> for open interfaces.</p>"
         translated = (
-            "<p>RAN 采用 <b>This sentence remains untranslated and should fail validation.</b> "
-            "以支持开放接口。</p>"
+            "<p>RAN 采用 <b>This sentence remains untranslated and should fail validation.</b> 以支持开放接口。</p>"
         )
 
         is_valid, error = validate_translated_html(original, translated)

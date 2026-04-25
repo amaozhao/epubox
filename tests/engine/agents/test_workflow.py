@@ -280,7 +280,9 @@ class TestTranslateStep:
         mock_get_translator.assert_not_called()
 
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_already_chinese_chunk_is_accepted_without_calling_translator(self, mock_get_translator):
+    async def test_translate_step_already_chinese_chunk_is_accepted_without_calling_translator(
+        self, mock_get_translator
+    ):
         """translate_step: already-Chinese content should bypass translation and be accepted as-is."""
         chunk = make_chunk(original="<p>你好世界，这是一段已经翻译完成的内容。</p>")
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
@@ -293,7 +295,9 @@ class TestTranslateStep:
         mock_get_translator.assert_not_called()
 
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_short_chinese_title_is_accepted_without_calling_translator(self, mock_get_translator):
+    async def test_translate_step_short_chinese_title_is_accepted_without_calling_translator(
+        self, mock_get_translator
+    ):
         """translate_step: short Chinese-only titles such as 索引 should also bypass translation."""
         chunk = make_chunk(original="<title>索引</title>")
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
@@ -702,7 +706,9 @@ class TestTranslateStep:
                     status=RunStatus.completed,
                     content=MockTranslationResponse("\n".join(lines)),
                 )
-            return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("<section>不应走到这里</section>"))
+            return MagicMock(
+                status=RunStatus.completed, content=MockTranslationResponse("<section>不应走到这里</section>")
+            )
 
         mock_translator = MagicMock()
         mock_translator.arun = translator_response
@@ -1362,7 +1368,9 @@ class TestApplyCorrectionsStep:
 
         assert output.success is True
         mock_logger.info.assert_any_call("校对器发现 1 个潜在的校对建议。")
-        mock_logger.info.assert_any_call("校对建议统计：总计 1，过滤 0，进入替换 1，文本命中 0，未命中 1，实际替换 0 处。")
+        mock_logger.info.assert_any_call(
+            "校对建议统计：总计 1，过滤 0，进入替换 1，文本命中 0，未命中 1，实际替换 0 处。"
+        )
 
     @patch("engine.agents.workflow.validate_translated_html", return_value=(False, "mock validation failure"))
     @patch("engine.agents.workflow.logger")

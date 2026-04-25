@@ -1,7 +1,6 @@
 import warnings
 
-from bs4 import BeautifulSoup
-from bs4 import XMLParsedAsHTMLWarning
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
 from engine.item.precode import (
     PreCodeExtractor,
@@ -350,7 +349,7 @@ class TestPreCodeExtractor:
             "<h3>Rust Program Basics</h3>"
             "<p>Next, make a new source file and call it <i>main.rs</i>.</p>"
             "<p>Now open the file and enter the code in the listing.</p>"
-            "<pre><code>fn main() { println!(\"Hello\"); }</code></pre>"
+            '<pre><code>fn main() { println!("Hello"); }</code></pre>'
             "<p>Save the file and go back to your terminal window.</p>"
             "<pre><code>$ rustc main.rs\n$ ./main</code></pre>"
             "<p>Regardless of your operating system, the string should print.</p>"

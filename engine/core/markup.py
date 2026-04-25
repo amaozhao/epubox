@@ -1,6 +1,5 @@
 import re
 
-
 XMLISH_ROOT_RE = re.compile(r"^\s*(?:<\?xml\b[^>]*>\s*)?<([A-Za-z_][\w:.-]*)")
 
 
