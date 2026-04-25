@@ -264,6 +264,110 @@ class TestOrchestrator:
         assert failed_count == 0
         assert chunk.status == TranslationStatus.COMPLETED
 
+    def test_final_untranslated_gate_validates_nav_text_payloads_individually(self, orchestrator):
+        """测试最终整书扫描不会把 NAV 批量产品名累积误判为漏译。"""
+        chunk = Chunk(
+            name="nav",
+            original="[NAVTXT:0] Chapter 1 [NAVTXT:1] Chapter 2",
+            translated=(
+                "[NAVTXT:0] 克劳德代码核心概念 "
+                "[NAVTXT:1] 使用 Claude Code 配置 GitHub 工作流 "
+                "[NAVTXT:2] 使用 Playwright MCP 启动浏览器 "
+                "[NAVTXT:3] 搭建 Next.js 项目 "
+                "[NAVTXT:4] 修改脚本以使用 Claude CLI "
+                "[NAVTXT:5] 在 Claude Code 中添加 MCP 服务器"
+            ),
+            tokens=20,
+            chunk_mode="nav_text",
+            status=TranslationStatus.COMPLETED,
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[
+                EpubItem(
+                    id="nav",
+                    path="/mock/path/test_book/nav.xhtml",
+                    content="",
+                    chunks=[chunk],
+                )
+            ],
+        )
+
+        failed_count = orchestrator._apply_final_untranslated_gate(book)
+
+        assert failed_count == 0
+        assert chunk.status == TranslationStatus.COMPLETED
+
+    def test_final_untranslated_gate_rejects_untranslated_nav_text_payload(self, orchestrator):
+        """测试最终整书扫描仍会拦截未翻译的 NAV payload。"""
+        chunk = Chunk(
+            name="nav",
+            original="[NAVTXT:0] Chapter 1",
+            translated="[NAVTXT:0] This chapter explains how to configure memory [NAVTXT:1] 总结",
+            tokens=12,
+            chunk_mode="nav_text",
+            status=TranslationStatus.COMPLETED,
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[
+                EpubItem(
+                    id="nav",
+                    path="/mock/path/test_book/nav.xhtml",
+                    content="",
+                    chunks=[chunk],
+                )
+            ],
+        )
+
+        failed_count = orchestrator._apply_final_untranslated_gate(book)
+
+        assert failed_count == 1
+        assert chunk.status == TranslationStatus.TRANSLATION_FAILED
+
+    def test_final_untranslated_gate_records_review_findings_without_failing_chunk(self, orchestrator):
+        """测试 REVIEW 级英文片段只记录复核，不阻断最终输出。"""
+        chunk = Chunk(
+            name="1",
+            original="<p>Application Layer</p>",
+            translated="<p>Application Layer</p>",
+            tokens=2,
+            status=TranslationStatus.COMPLETED,
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[
+                EpubItem(
+                    id="item1",
+                    path="/mock/path/test_book/item1.html",
+                    content="<p>Application Layer</p>",
+                    chunks=[chunk],
+                )
+            ],
+        )
+
+        with patch("engine.orchestrator.logger.warning") as mock_warning:
+            failed_count = orchestrator._apply_final_untranslated_gate(book)
+
+        assert failed_count == 0
+        assert chunk.status == TranslationStatus.COMPLETED
+        mock_warning.assert_not_called()
+        assert orchestrator.final_untranslated_review_findings == [
+            {
+                "file": "item1",
+                "chunk_name": "1",
+                "path": "/mock/path/test_book/item1.html",
+                "text": "Application Layer",
+                "reason": "english_phrase_review",
+            }
+        ]
+
     # --- 测试 translate_epub 方法 ---
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)
@@ -1034,7 +1138,31 @@ class TestManualTranslationReport:
         with open(report_path, "r", encoding="utf-8") as f:
             report = json.load(f)
         assert report["total"] == 1
+        assert report["suspect_total"] == 0
+        assert report["suspect_english_terms"] == []
         assert report["chunks"][0]["chunk_name"] == "abc123"
+
+    def test_save_manual_translation_report_includes_review_only_findings(self, tmp_path):
+        """测试手动报告会包含不阻断输出的英文复核项。"""
+        orchestrator = Orchestrator()
+        output_path = str(tmp_path / "test.epub")
+        suspect_terms = [
+            {
+                "file": "chapter.xhtml",
+                "chunk_name": "abc123",
+                "path": "/tmp/chapter.xhtml",
+                "text": "Application Layer",
+                "reason": "english_phrase_review",
+            }
+        ]
+
+        report_path = orchestrator._save_manual_translation_report([], output_path, suspect_terms)
+
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+        assert report["total"] == 0
+        assert report["suspect_total"] == 1
+        assert report["suspect_english_terms"] == suspect_terms
 
     def test_load_manual_translations(self, tmp_path):
         """测试加载手动翻译报告"""

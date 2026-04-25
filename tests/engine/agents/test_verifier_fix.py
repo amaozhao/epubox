@@ -1,4 +1,9 @@
-from engine.agents.verifier import validate_translated_html
+from engine.agents.verifier import (
+    EnglishResidualDecision,
+    classify_untranslated_english_texts,
+    find_untranslated_english_texts,
+    validate_translated_html,
+)
 
 
 class TestValidateTranslatedHtmlTagErrors:
@@ -80,6 +85,48 @@ class TestValidateTranslatedHtmlTagErrors:
         assert not is_valid
         assert "疑似残留未翻译英文" in error
 
+    def test_classifier_marks_short_english_title_as_review_not_failure(self):
+        """测试短英文标题进入人工复核区，不直接阻断。"""
+        findings = classify_untranslated_english_texts("<p>Application Layer</p>")
+
+        assert len(findings) == 1
+        assert findings[0].decision == EnglishResidualDecision.REVIEW
+        assert findings[0].text == "Application Layer"
+        assert find_untranslated_english_texts("<p>Application Layer</p>") == []
+
+    def test_classifier_marks_complete_english_sentence_as_failure(self):
+        """测试完整英文句子进入失败区，兼容旧接口返回命中文本。"""
+        html = "<p>The client software will automatically retrieve the new URL.</p>"
+
+        findings = classify_untranslated_english_texts(html)
+
+        assert len(findings) == 1
+        assert findings[0].decision == EnglishResidualDecision.FAIL
+        assert find_untranslated_english_texts(html) == [
+            "The client software will automatically retrieve the new URL."
+        ]
+
+    def test_classifier_ignores_bibliographic_citations_in_chinese_text(self):
+        """测试中文段落中的作者年份引用不会进入复核区。"""
+        html = (
+            "<p>实现时，控制器语义必须被纳入考量 [Panda 2013; Ferguson 2021]。"
+            "相关方案可参考 [Lamport 1989, Lampson 1996]。"
+            "现代控制器（如 ONOS [ONOS 2025] 和 ORION [Ferguson 2021]）"
+            "强调构建逻辑集中式但物理分布式的平台。</p>"
+        )
+
+        assert classify_untranslated_english_texts(html) == []
+
+    def test_classifier_ignores_angle_bracket_protocol_message_names(self):
+        """测试中文段落中的协议消息名不会进入复核区。"""
+        html = (
+            "<p>管理服务器与受管设备交换 &lt;hello&gt; 消息，随后使用 "
+            "&lt;rpc&gt; 和 &lt;rpc-response&gt; 消息进行交互，"
+            "并通过 NETCONF &lt;notification&gt; 与 &lt;session-close&gt; 完成通知和关闭。</p>"
+        )
+
+        assert classify_untranslated_english_texts(html) == []
+
     def test_validate_allows_common_technical_english_terms(self):
         """测试常见技术名词保留英文不会被误判为漏译。"""
         original = "<p>Use AWS CodePipeline with GitHub Actions and Docker for DevOps workflows.</p>"
@@ -88,6 +135,45 @@ class TestValidateTranslatedHtmlTagErrors:
         is_valid, error = validate_translated_html(original, translated)
 
         assert is_valid, error
+
+    def test_validate_allows_repeated_fast_open_cookie_terms(self):
+        """测试重复保留协议术语 Fast Open Cookie 不会被误判为英文漏译。"""
+        original = (
+            "<p>TCP Fast Open lets clients send a Fast-Open Cookie with application data "
+            "when reconnecting to the server.</p>"
+        )
+        translated = (
+            "<p>在传统的三次握手过程中，客户端还可以请求服务器提供一个快速打开"
+            "（Fast-Open）Cookie，该 Cookie 会编码未来连接所需的信息。"
+            "下次客户端建立连接时，它会在首个消息中携带该 Fast Open Cookie "
+            "及应用层数据。服务器检查 Fast Open Cookie 后继续处理请求。</p>"
+        )
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
+    def test_validate_allows_inline_english_term_with_chinese_parent_context(self):
+        """测试中文上下文中的短英文术语节点不会被当作整句漏译。"""
+        original = "<p>The RAN uses a <b>disaggregated architecture</b> for open interfaces.</p>"
+        translated = "<p>RAN 采用 <b>disaggregated architecture</b> 架构，以支持开放接口。</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
+    def test_validate_rejects_inline_english_sentence_with_chinese_parent_context(self):
+        """测试中文上下文中的完整英文句子仍会被拦截。"""
+        original = "<p>The RAN uses a <b>disaggregated architecture</b> for open interfaces.</p>"
+        translated = (
+            "<p>RAN 采用 <b>This sentence remains untranslated and should fail validation.</b> "
+            "以支持开放接口。</p>"
+        )
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert not is_valid
+        assert "疑似残留未翻译英文" in error
 
     def test_validate_allows_code_url_and_file_names(self):
         """测试代码、URL 和文件名中的英文不会被漏译扫描误杀。"""

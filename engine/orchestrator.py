@@ -5,7 +5,7 @@ from datetime import datetime
 
 from tqdm import tqdm
 
-from engine.agents.verifier import find_untranslated_english_texts
+from engine.agents.verifier import EnglishResidualDecision, classify_untranslated_english_texts
 from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
 from engine.epub import Builder, Parser, DomReplacer
@@ -61,12 +61,21 @@ class Orchestrator:
         """
         super().__init__(*args, **kwargs)
         self.replacer = DomReplacer()
+        self.final_untranslated_review_findings: list[dict] = []
 
-    def _save_manual_translation_report(self, manual_chunks: list, output_path: str):
+    def _save_manual_translation_report(
+        self,
+        manual_chunks: list,
+        output_path: str,
+        suspect_english_terms: list[dict] | None = None,
+    ):
         """保存手动翻译报告到 JSON 文件"""
+        suspect_english_terms = suspect_english_terms or []
         report = {
             "generated_at": datetime.now().isoformat(),
             "total": len(manual_chunks),
+            "suspect_total": len(suspect_english_terms),
+            "suspect_english_terms": suspect_english_terms,
             "chunks": [
                 {
                     "file": chunk["file"],
@@ -192,6 +201,7 @@ class Orchestrator:
     def _apply_final_untranslated_gate(self, book) -> int:
         """Scan all final chunk translations and fail chunks with residual natural English."""
         failed_count = 0
+        self.final_untranslated_review_findings = []
         for item in book.items:
             if not item.chunks:
                 continue
@@ -200,14 +210,37 @@ class Orchestrator:
                     continue
                 if not chunk.translated:
                     continue
-                hits = find_untranslated_english_texts(chunk.translated)
-                if not hits:
+                findings = classify_untranslated_english_texts(
+                    chunk.translated,
+                    split_nav_payloads=chunk.chunk_mode == "nav_text",
+                )
+                fail_findings = [
+                    finding for finding in findings if finding.decision == EnglishResidualDecision.FAIL
+                ]
+                review_findings = [
+                    finding for finding in findings if finding.decision == EnglishResidualDecision.REVIEW
+                ]
+                for finding in review_findings:
+                    self.final_untranslated_review_findings.append(
+                        {
+                            "file": item.id,
+                            "chunk_name": chunk.name,
+                            "path": item.path,
+                            "text": finding.text[:240],
+                            "reason": finding.reason,
+                        }
+                    )
+                    logger.info(
+                        f"Chunk '{chunk.name}' 最终整书扫描发现需人工复核的英文片段，不阻断输出: "
+                        f"{finding.text[:160]}"
+                    )
+                if not fail_findings:
                     continue
                 chunk.status = TranslationStatus.TRANSLATION_FAILED
                 failed_count += 1
                 logger.warning(
                     f"Chunk '{chunk.name}' 最终整书扫描发现疑似残留未翻译英文，已标记为 TRANSLATION_FAILED: "
-                    f"{hits[0][:160]}"
+                    f"{fail_findings[0].text[:160]}"
                 )
         return failed_count
 
@@ -340,8 +373,12 @@ class Orchestrator:
                 TranslationStatus.WRITEBACK_FAILED,
             )
         ]
-        if manual_chunks:
-            self._save_manual_translation_report(manual_chunks, book.path)
+        if manual_chunks or self.final_untranslated_review_findings:
+            self._save_manual_translation_report(
+                manual_chunks,
+                book.path,
+                self.final_untranslated_review_findings,
+            )
 
         final_failed_count = stats.failed
         stats = TranslationStats()

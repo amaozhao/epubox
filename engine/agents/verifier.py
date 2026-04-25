@@ -1,4 +1,6 @@
 from collections import Counter
+from dataclasses import dataclass
+from enum import Enum
 import re
 import xml.etree.ElementTree as ET
 from typing import List, Optional, Tuple
@@ -173,6 +175,7 @@ def _looks_like_technical_ascii_noop(text: str) -> bool:
 
 UNTRANSLATED_SKIP_TAGS = {"pre", "code", "script", "style"}
 UNTRANSLATED_CODE_CLASS_MARKERS = ("Code", "pre", "mono", "TheSansMono", "NSAnnotations")
+UNTRANSLATED_NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
 UNTRANSLATED_ALLOWED_WORDS = {
     "alb",
     "api",
@@ -211,6 +214,7 @@ UNTRANSLATED_ALLOWED_WORDS = {
     "minikube",
     "multi",
     "mysql",
+    "netconf",
     "node",
     "npm",
     "postgresql",
@@ -259,6 +263,103 @@ UNTRANSLATED_ENGLISH_STOPWORDS = {
     "your",
 }
 UNTRANSLATED_HEADING_WORDS = {"appendix", "chapter", "index", "part", "preface", "section"}
+UNTRANSLATED_SENTENCE_VERBS = {
+    "are",
+    "be",
+    "been",
+    "being",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "explain",
+    "explains",
+    "fail",
+    "fails",
+    "has",
+    "have",
+    "is",
+    "may",
+    "might",
+    "must",
+    "provide",
+    "provides",
+    "receive",
+    "receives",
+    "remain",
+    "remains",
+    "retrieve",
+    "retrieves",
+    "send",
+    "sends",
+    "shall",
+    "should",
+    "was",
+    "were",
+    "will",
+    "would",
+}
+UNTRANSLATED_ALLOWED_PHRASE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bTCP\s+Fast[-\s]+Open(?:\s+Cookie)?\b",
+        r"\bFast[-\s]+Open(?:\s+Cookie)?\b",
+        r"\bClaude\s+Code\b",
+        r"\bClaude\s+CLI\b",
+        r"\bClaude\s+GitHub\s+App\b",
+        r"\bPlaywright\s+MCP\b",
+        r"\bNext\.js\b",
+        r"\bGitHub(?:\s+Actions|\s+App|\s+Workflow)?\b",
+        r"\bHookHub\b",
+    )
+)
+UNTRANSLATED_CODEISH_TEXT_PATTERN = re.compile(
+    r"""
+    `[^`]+`
+    | https?://\S+
+    | \b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b
+    | </?[A-Za-z][A-Za-z0-9_-]*>
+    | \b[\w./-]+/[\w./-]+\b
+    | \b[\w.-]+\.(?:py|js|ts|tsx|jsx|json|yaml|yml|toml|ini|cfg|md|txt|html|xml|epub|sh|css|tf)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+UNTRANSLATED_CITATION_PATTERN = re.compile(r"\[[^\[\]]*\b(?:18|19|20)\d{2}\b[^\[\]]*\]")
+UNTRANSLATED_ENGLISH_RUN_PATTERN = re.compile(
+    r"[A-Za-z][A-Za-z0-9'.+-]*(?:\s+[A-Za-z][A-Za-z0-9'.+-]*)*"
+)
+_NLTK_TREEBANK_TOKENIZER = None
+
+
+class EnglishResidualDecision(str, Enum):
+    ALLOW = "allow"
+    REVIEW = "review"
+    FAIL = "fail"
+
+
+@dataclass(frozen=True)
+class UntranslatedEnglishAnalysis:
+    decision: EnglishResidualDecision
+    reason: str
+    words: tuple[str, ...]
+    stopword_count: int
+    max_run_word_count: int
+    max_run_stopword_count: int
+    cjk_count: int
+    latin_count: int
+
+    @property
+    def is_suspicious(self) -> bool:
+        return self.decision == EnglishResidualDecision.FAIL
+
+
+@dataclass(frozen=True)
+class EnglishResidualFinding:
+    text: str
+    decision: EnglishResidualDecision
+    reason: str
+    words: tuple[str, ...]
 
 
 def _ancestor_classes(node: NavigableString) -> str:
@@ -283,6 +384,16 @@ def _should_skip_untranslated_scan(node: NavigableString) -> bool:
     return any(marker in _ancestor_classes(node) for marker in UNTRANSLATED_CODE_CLASS_MARKERS)
 
 
+def _has_cjk_parent_context(node: NavigableString, text: str) -> bool:
+    parent = node.parent
+    while isinstance(parent, Tag):
+        parent_text = re.sub(r"\s+", " ", parent.get_text(" ", strip=True)).strip()
+        if parent_text and parent_text != text and any("\u4e00" <= ch <= "\u9fff" for ch in parent_text):
+            return True
+        parent = parent.parent
+    return False
+
+
 def _is_allowed_english_term(word: str) -> bool:
     normalized = word.strip("'").lower()
     if not normalized:
@@ -298,48 +409,175 @@ def _is_allowed_english_term(word: str) -> bool:
     return False
 
 
-def _english_words_for_untranslated_scan(text: str) -> list[str]:
+def _get_nltk_treebank_tokenizer():
+    global _NLTK_TREEBANK_TOKENIZER
+    if _NLTK_TREEBANK_TOKENIZER is not None:
+        return _NLTK_TREEBANK_TOKENIZER
+    try:
+        from nltk.tokenize import TreebankWordTokenizer
+    except Exception:
+        return None
+    _NLTK_TREEBANK_TOKENIZER = TreebankWordTokenizer()
+    return _NLTK_TREEBANK_TOKENIZER
+
+
+def _strip_low_risk_english_fragments(text: str) -> str:
     text = re.sub(r"\[(?:PRE|CODE|STYLE|TEXT|NAVTXT):\d+\]", " ", text)
-    text = re.sub(r"https?://\S+", " ", text)
-    words = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
+    text = UNTRANSLATED_CITATION_PATTERN.sub(" ", text)
+    text = UNTRANSLATED_CODEISH_TEXT_PATTERN.sub(" ", text)
+    for phrase_pattern in UNTRANSLATED_ALLOWED_PHRASE_PATTERNS:
+        text = phrase_pattern.sub(" ", text)
+    return text
+
+
+def _tokenize_english_words(text: str) -> list[str]:
+    tokenizer = _get_nltk_treebank_tokenizer()
+    if tokenizer is None:
+        tokens = re.findall(r"[A-Za-z][A-Za-z'-]*", text)
+    else:
+        tokens = tokenizer.tokenize(text)
+
+    words: list[str] = []
+    for token in tokens:
+        stripped = token.strip("\"'“”‘’()[]{}<>.,;:!?，。！？；：、")
+        if re.fullmatch(r"[A-Za-z][A-Za-z'-]*", stripped):
+            words.append(stripped)
+    return words
+
+
+def _english_words_for_untranslated_scan(text: str) -> list[str]:
+    text = _strip_low_risk_english_fragments(text)
+    words = _tokenize_english_words(text)
     return [word for word in words if not _is_allowed_english_term(word)]
 
 
-def find_untranslated_english_texts(html: str) -> list[str]:
-    """Find visible text nodes that look like untranslated natural English."""
+def _english_runs_for_untranslated_scan(text: str) -> list[tuple[list[str], int]]:
+    cleaned = _strip_low_risk_english_fragments(text)
+    runs: list[tuple[list[str], int]] = []
+    for match in UNTRANSLATED_ENGLISH_RUN_PATTERN.finditer(cleaned):
+        words = [word for word in _tokenize_english_words(match.group(0)) if not _is_allowed_english_term(word)]
+        if not words:
+            continue
+        stopword_count = sum(1 for word in words if word.lower().strip("'") in UNTRANSLATED_ENGLISH_STOPWORDS)
+        runs.append((words, stopword_count))
+    return runs
+
+
+def _has_sentence_verb(words: list[str]) -> bool:
+    return any(word.lower().strip("'") in UNTRANSLATED_SENTENCE_VERBS for word in words)
+
+
+def _analyze_untranslated_english_text(
+    text: str,
+    *,
+    has_cjk_context: bool = False,
+) -> UntranslatedEnglishAnalysis:
+    words = _english_words_for_untranslated_scan(text)
+    latin_count = sum(1 for ch in text if "a" <= ch.lower() <= "z")
+    cjk_count = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    effective_cjk_count = cjk_count or (1 if has_cjk_context else 0)
+    stopword_count = sum(1 for word in words if word.lower().strip("'") in UNTRANSLATED_ENGLISH_STOPWORDS)
+    has_heading_word = any(word.lower().strip("'") in UNTRANSLATED_HEADING_WORDS for word in words)
+    runs = _english_runs_for_untranslated_scan(text)
+    max_run_word_count = max((len(run_words) for run_words, _ in runs), default=0)
+    max_run_stopword_count = max((run_stopwords for _, run_stopwords in runs), default=0)
+    has_sentence_verb = _has_sentence_verb(words)
+
+    decision = EnglishResidualDecision.ALLOW
+    reason = ""
+    if words:
+        unique_words = {word.lower().strip("'") for word in words}
+        sentence_like = (
+            (max_run_word_count >= 6 and max_run_stopword_count >= 2)
+            or (max_run_word_count >= 6 and max_run_stopword_count >= 1 and has_sentence_verb)
+            or (len(words) >= 6 and stopword_count >= 3)
+        )
+        if effective_cjk_count == 0 and has_heading_word:
+            decision = EnglishResidualDecision.FAIL
+            reason = "english_heading"
+        elif sentence_like:
+            decision = EnglishResidualDecision.FAIL
+            reason = "mixed_text_english_run"
+        elif effective_cjk_count == 0 and latin_count >= 8 and len(words) >= 2:
+            decision = EnglishResidualDecision.REVIEW
+            reason = "english_phrase_review"
+        elif effective_cjk_count > 0 and len(words) >= 5 and len(unique_words) >= 4:
+            decision = EnglishResidualDecision.REVIEW
+            reason = "mixed_text_long_english_phrase_review"
+
+    return UntranslatedEnglishAnalysis(
+        decision=decision,
+        reason=reason,
+        words=tuple(words),
+        stopword_count=stopword_count,
+        max_run_word_count=max_run_word_count,
+        max_run_stopword_count=max_run_stopword_count,
+        cjk_count=effective_cjk_count,
+        latin_count=latin_count,
+    )
+
+
+def _extract_nav_payloads(text: str) -> list[str]:
+    matches = list(UNTRANSLATED_NAV_MARKER_PATTERN.finditer(text))
+    payloads: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        payload = text[start:end].strip()
+        if payload:
+            payloads.append(payload)
+    return payloads
+
+
+def classify_untranslated_english_texts(
+    html: str,
+    *,
+    split_nav_payloads: bool = False,
+) -> list[EnglishResidualFinding]:
+    """Classify visible English residuals as review-only or hard failures."""
+    if split_nav_payloads:
+        payloads = _extract_nav_payloads(html or "")
+        if payloads:
+            findings: list[EnglishResidualFinding] = []
+            for payload in payloads:
+                findings.extend(classify_untranslated_english_texts(payload))
+            return findings
+
     soup = BeautifulSoup(html or "", get_markup_parser(html or ""))
-    hits: list[str] = []
+    findings: list[EnglishResidualFinding] = []
 
     for node in soup.find_all(string=True):
         if not isinstance(node, NavigableString) or _should_skip_untranslated_scan(node):
             continue
 
         text = re.sub(r"\s+", " ", str(node)).strip()
-        if len(text) < 20 or _looks_like_technical_ascii_noop(text):
+        if len(text) < 4 or _looks_like_technical_ascii_noop(text):
             continue
 
-        words = _english_words_for_untranslated_scan(text)
-        if not words:
-            continue
+        analysis = _analyze_untranslated_english_text(
+            text,
+            has_cjk_context=_has_cjk_parent_context(node, text),
+        )
+        if analysis.decision != EnglishResidualDecision.ALLOW:
+            findings.append(
+                EnglishResidualFinding(
+                    text=text,
+                    decision=analysis.decision,
+                    reason=analysis.reason,
+                    words=analysis.words,
+                )
+            )
 
-        latin_count = sum(1 for ch in text if "a" <= ch.lower() <= "z")
-        cjk_count = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
-        stopword_count = sum(1 for word in words if word.lower().strip("'") in UNTRANSLATED_ENGLISH_STOPWORDS)
-        has_heading_word = any(word.lower().strip("'") in UNTRANSLATED_HEADING_WORDS for word in words)
+    return findings
 
-        if cjk_count == 0 and has_heading_word:
-            hits.append(text)
-            continue
-        if cjk_count == 0 and latin_count >= 16 and len(words) >= 3:
-            hits.append(text)
-            continue
-        if len(words) >= 7 or (len(words) >= 5 and stopword_count >= 1):
-            hits.append(text)
-            continue
-        if cjk_count == 0 and latin_count >= 24 and len(words) >= 4 and stopword_count >= 1:
-            hits.append(text)
 
-    return hits
+def find_untranslated_english_texts(html: str, *, split_nav_payloads: bool = False) -> list[str]:
+    """Find visible text nodes that look like untranslated natural English."""
+    return [
+        finding.text
+        for finding in classify_untranslated_english_texts(html, split_nav_payloads=split_nav_payloads)
+        if finding.decision == EnglishResidualDecision.FAIL
+    ]
 
 
 def _classify_unchanged_translation(original_soup: BeautifulSoup, translated_soup: BeautifulSoup) -> str | None:
