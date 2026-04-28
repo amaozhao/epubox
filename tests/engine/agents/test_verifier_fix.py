@@ -117,6 +117,39 @@ class TestValidateTranslatedHtmlTagErrors:
 
         assert classify_untranslated_english_texts(html) == []
 
+    def test_classifier_ignores_bibliographic_reference_entries(self):
+        """测试完整参考文献条目不会被论文题名误判为残留英文句子。"""
+        html = (
+            "<p>Aminzadegan, S., Shahriari, M., Mehranfar, F., &amp; Abramović, B. (2022). "
+            "Factors affecting the emission of pollutants in different types of transportation: "
+            "A literature review.</p>"
+        )
+
+        assert classify_untranslated_english_texts(html) == []
+        assert find_untranslated_english_texts(html) == []
+
+    def test_validate_accepts_unchanged_bibliographic_reference_entry(self):
+        """测试参考文献条目原样保留时会作为合法 no-op 接受。"""
+        reference = (
+            "<p>Aminzadegan, S., Shahriari, M., Mehranfar, F., &amp; Abramović, B. (2022). "
+            "Factors affecting the emission of pollutants in different types of transportation: "
+            "A literature review.</p>"
+        )
+
+        is_valid, error = validate_translated_html(reference, reference)
+
+        assert is_valid, error
+        assert error == "accepted_as_is"
+
+    def test_classifier_ignores_bibliographic_reference_with_translated_title(self):
+        """测试作者年份保留、题名已翻译的参考文献不会进入复核区。"""
+        html = (
+            "<p>Abbas, A. H., Habelalmateen, M. I., Jurdi, S., Audah, L., &amp; Alduais, N. A. M. "
+            "(2019). 基于 GPS 的定位监控系统及其地理围栏功能。</p>"
+        )
+
+        assert classify_untranslated_english_texts(html) == []
+
     def test_classifier_ignores_angle_bracket_protocol_message_names(self):
         """测试中文段落中的协议消息名不会进入复核区。"""
         html = (

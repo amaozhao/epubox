@@ -174,6 +174,27 @@ def _looks_like_technical_ascii_noop(text: str) -> bool:
     return score >= 2
 
 
+def _looks_like_bibliographic_reference(text: str) -> bool:
+    stripped = re.sub(r"\s+", " ", text).strip()
+    if len(stripped) < 40:
+        return False
+
+    year_match = re.search(r"(?:\((?:18|19|20)\d{2}[a-z]?\)|\b(?:18|19|20)\d{2}[a-z]?\.)", stripped)
+    if not year_match or year_match.start() > 220:
+        return False
+
+    author_segment = stripped[: year_match.start()]
+    if not author_segment:
+        return False
+
+    initials = re.findall(r"\b[A-Z]\.", author_segment)
+    has_author_joiner = bool(re.search(r"(?:&|\band\b|\bet\s+al\.)", author_segment, re.IGNORECASE))
+    has_surname_initial = bool(re.search(r"(?<!\w)[^\W\d_][\w'’.-]*,\s+[A-Z]\.", author_segment))
+    comma_count = author_segment.count(",")
+
+    return has_surname_initial and (len(initials) >= 1 or has_author_joiner or comma_count >= 2)
+
+
 UNTRANSLATED_SKIP_TAGS = {"pre", "code", "script", "style"}
 UNTRANSLATED_CODE_CLASS_MARKERS = ("Code", "pre", "mono", "TheSansMono", "NSAnnotations")
 UNTRANSLATED_NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
@@ -550,7 +571,7 @@ def classify_untranslated_english_texts(
             continue
 
         text = re.sub(r"\s+", " ", str(node)).strip()
-        if len(text) < 4 or _looks_like_technical_ascii_noop(text):
+        if len(text) < 4 or _looks_like_technical_ascii_noop(text) or _looks_like_bibliographic_reference(text):
             continue
 
         analysis = _analyze_untranslated_english_text(
@@ -588,6 +609,8 @@ def _classify_unchanged_translation(original_soup: BeautifulSoup, translated_sou
     if not any(char.isalpha() for char in visible_text):
         return "accepted_as_is"
     if _looks_like_technical_ascii_noop(visible_text):
+        return "accepted_as_is"
+    if _looks_like_bibliographic_reference(visible_text):
         return "accepted_as_is"
     return "echo"
 
