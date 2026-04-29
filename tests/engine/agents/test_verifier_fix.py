@@ -141,6 +141,32 @@ class TestValidateTranslatedHtmlTagErrors:
         assert is_valid, error
         assert error == "accepted_as_is"
 
+    def test_classifier_ignores_non_year_bibliographic_reference_entries(self):
+        """测试无年份的书目条目不会因英文书名和出版社被误判为漏译。"""
+        html = (
+            "<p>Kalbach, Jim: The Jobs to Be Done Playbook: Align Your Markets, "
+            "Organizations, and Strategy Around Customer Needs. Two Waves Books.</p>"
+        )
+
+        assert classify_untranslated_english_texts(html) == []
+        assert find_untranslated_english_texts(html) == []
+
+    def test_validate_allows_translated_reference_with_original_english_title(self):
+        """测试已翻译参考文献可保留原文书名和出版社信息。"""
+        original = (
+            "<p>Kalbach, Jim: The Jobs to Be Done Playbook: Align Your Markets, "
+            "Organizations, and Strategy Around Customer Needs. Two Waves Books.</p>"
+        )
+        translated = (
+            "<p>卡尔巴赫（Jim Kalbach）：《客户之需：Jobs to Be Done 实战指南》"
+            "（The Jobs to Be Done Playbook: Align Your Markets, Organizations, "
+            "and Strategy Around Customer Needs）。Two Waves Books。</p>"
+        )
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
     def test_classifier_ignores_bibliographic_reference_with_translated_title(self):
         """测试作者年份保留、题名已翻译的参考文献不会进入复核区。"""
         html = (

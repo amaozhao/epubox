@@ -61,29 +61,6 @@ STRUCTURE_ERROR_KEYWORDS = (
 TEXT_NODE_FALLBACK_UNIT_LIMIT = 8
 TEXT_NODE_FALLBACK_RETRIES = 3
 VALIDATION_ERROR_HISTORY_LIMIT = 4
-DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD = 6
-DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD = 12
-DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD = 8
-DIRECT_TEXT_NODE_PLACEHOLDER_RISK_THRESHOLD = 1
-DIRECT_TEXT_NODE_MATH_TAG_THRESHOLD = 4
-HIGH_RISK_INLINE_TAGS = {
-    "a",
-    "b",
-    "code",
-    "em",
-    "i",
-    "kbd",
-    "q",
-    "s",
-    "small",
-    "span",
-    "strong",
-    "sub",
-    "sup",
-    "u",
-    "var",
-}
-MATHY_INLINE_TAGS = {"sub", "sup"}
 
 
 def is_content_safety_error(error_msg: str = "", status_code: int | None = None) -> bool:
@@ -252,27 +229,6 @@ def _collect_translatable_text_nodes(html: str) -> tuple[BeautifulSoup, list[tup
         nodes.append((text_node, marker, text))
 
     return soup, nodes
-
-
-def _should_translate_chunk_via_text_nodes_directly(html: str) -> bool:
-    """Direct text-node translation when inline markup density makes HTML regeneration fragile."""
-    soup, text_nodes = _collect_translatable_text_nodes(html)
-    tags = list(soup.find_all(True))
-    inline_tag_count = sum(1 for tag in tags if str(tag.name).lower() in HIGH_RISK_INLINE_TAGS)
-    math_tag_count = sum(1 for tag in tags if str(tag.name).lower() in MATHY_INLINE_TAGS)
-    placeholder_count = len(SECONDARY_PLACEHOLDER_PATTERN.findall(html))
-
-    if placeholder_count >= DIRECT_TEXT_NODE_PLACEHOLDER_RISK_THRESHOLD and (
-        inline_tag_count >= 4 or math_tag_count >= DIRECT_TEXT_NODE_MATH_TAG_THRESHOLD
-    ):
-        return True
-
-    if len(text_nodes) < DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD:
-        return False
-
-    return (
-        inline_tag_count >= DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD or len(tags) >= DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD
-    )
 
 
 def _validate_text_node_translation(original: str, translated: str) -> tuple[bool, str]:
@@ -537,25 +493,19 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
     last_error_msg = None
     last_translation = None
     error_history: list[str] = []
-    prefer_text_node_directly = chunk.chunk_mode != "nav_text" and _should_translate_chunk_via_text_nodes_directly(
-        original
-    )
 
     for attempt in range(MAX_TRANSLATION_RETRIES):
         translated: str | None = None
         is_valid = False
         error_msg = "翻译未执行"
         try:
-            use_text_node_fallback = prefer_text_node_directly or (
+            use_text_node_fallback = (
                 chunk.chunk_mode != "nav_text"
                 and attempt == MAX_TRANSLATION_RETRIES - 1
                 and _is_structure_validation_error(last_error_msg)
             )
             if use_text_node_fallback:
-                if prefer_text_node_directly and attempt == 0:
-                    logger.info("检测到高风险复杂 chunk，直接执行 text-node translate 调用")
-                else:
-                    logger.info("开始执行 text-node fallback translate 调用")
+                logger.info("开始执行 text-node fallback translate 调用")
                 translated, text_node_error = await _translate_with_text_node_fallback(
                     original,
                     glossary,

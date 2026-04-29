@@ -179,20 +179,55 @@ def _looks_like_bibliographic_reference(text: str) -> bool:
     if len(stripped) < 40:
         return False
 
+    def has_publisher_hint(value: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:Books?|Press|Publishing|Publishers?|Publications|University\s+Press)\b",
+                value,
+                re.IGNORECASE,
+            )
+        )
+
+    def english_word_count(value: str) -> int:
+        return len(re.findall(r"[A-Za-z][A-Za-z'’.-]*", value))
+
     year_match = re.search(r"(?:\((?:18|19|20)\d{2}[a-z]?\)|\b(?:18|19|20)\d{2}[a-z]?\.)", stripped)
-    if not year_match or year_match.start() > 220:
-        return False
+    if year_match and year_match.start() <= 220:
+        author_segment = stripped[: year_match.start()]
+        if not author_segment:
+            return False
 
-    author_segment = stripped[: year_match.start()]
-    if not author_segment:
-        return False
+        initials = re.findall(r"\b[A-Z]\.", author_segment)
+        has_author_joiner = bool(re.search(r"(?:&|\band\b|\bet\s+al\.)", author_segment, re.IGNORECASE))
+        has_surname_initial = bool(re.search(r"(?<!\w)[^\W\d_][\w'’.-]*,\s+[A-Z]\.", author_segment))
+        comma_count = author_segment.count(",")
 
-    initials = re.findall(r"\b[A-Z]\.", author_segment)
-    has_author_joiner = bool(re.search(r"(?:&|\band\b|\bet\s+al\.)", author_segment, re.IGNORECASE))
-    has_surname_initial = bool(re.search(r"(?<!\w)[^\W\d_][\w'’.-]*,\s+[A-Z]\.", author_segment))
-    comma_count = author_segment.count(",")
+        if has_surname_initial and (len(initials) >= 1 or has_author_joiner or comma_count >= 2):
+            return True
 
-    return has_surname_initial and (len(initials) >= 1 or has_author_joiner or comma_count >= 2)
+    author_title_match = re.match(
+        r"^[A-Z][A-Za-z'’.-]{1,60},\s+"
+        r"[A-Z](?:[A-Za-z'’.-]{1,60}|\.)(?:\s+[A-Z][A-Za-z'’.-]{1,60})?\s*[:：]\s+(.+)$",
+        stripped,
+    )
+    if author_title_match:
+        title_and_publisher = author_title_match.group(1)
+        if english_word_count(title_and_publisher) >= 6 and has_publisher_hint(title_and_publisher):
+            return True
+
+    if any("\u4e00" <= char <= "\u9fff" for char in stripped):
+        translated_reference_head = re.match(r"^[^。！？.!?]{2,120}[:：]\s*《", stripped)
+        has_original_title_parenthetical = bool(
+            re.search(r"[（(][^（）()]*[A-Za-z][^（）()]*[）)]", stripped)
+        )
+        if (
+            translated_reference_head
+            and english_word_count(stripped) >= 6
+            and (has_original_title_parenthetical or has_publisher_hint(stripped))
+        ):
+            return True
+
+    return False
 
 
 UNTRANSLATED_SKIP_TAGS = {"pre", "code", "script", "style"}
