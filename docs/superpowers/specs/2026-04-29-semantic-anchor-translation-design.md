@@ -365,6 +365,95 @@ Each fixture should assert:
 - stable technical terms
 - expected fluent Chinese sample snippets
 
+### Comprehensive Edge-Case Test Matrix
+
+This matrix is mandatory before anchor mode can be considered production-ready. Each row must become at least one executable test unless the row is explicitly marked as a manual review fixture.
+
+| Area | Edge Case | Expected Handling |
+| --- | --- | --- |
+| Source integrity | Source item has unclosed or crossed tags | Anchor mode refuses the item; existing source-integrity warning/report remains visible; no translated output is accepted without final XML validation. |
+| Source integrity | Source item is valid XHTML with namespaces and EPUB attributes | Namespace declarations, `epub:type`, `role`, `aria-*`, IDs, and links survive extraction/render unchanged. |
+| Source integrity | Source contains comments, processing instructions, or DOCTYPE-like nodes | Non-translatable nodes are preserved by DOM rendering or make the block ineligible if preservation cannot be proven. |
+| Source integrity | Source visible text includes literal `<`, `>`, `&`, anchor delimiters, or `|` | IR escaping round-trips visible characters; model output with unescaped raw markup is rejected. |
+| Chunk closure | Normal body with multiple sibling paragraphs | Chunk contains complete top-level elements and each fragment passes tag-integrity validation. |
+| Chunk closure | Oversized parent container with child paragraphs | Chunker recurses to complete child elements, never raw string slices. |
+| Chunk closure | Oversized leaf element | Element remains a complete fragment or falls back; it is never split into malformed partial HTML. |
+| Chunk closure | Title block plus body blocks in one chunk | Each top-level translated element remains independently closed and mapped to its xpath. |
+| Chunk closure | Navigation file or embedded TOC | Uses nav/text-target mode or a dedicated safe path; no model-authored navigation HTML is accepted. |
+| Anchor extraction | Plain prose with no inline markup | Anchor IR has zero anchors and renders through the same DOM renderer. |
+| Anchor extraction | Single inline term link | Link becomes one translatable anchor; translated payload renders inside the cloned link. |
+| Anchor extraction | Adjacent inline anchors with punctuation between them | Anchors stay distinct; punctuation remains plain text and may be repositioned only as text in the same block. |
+| Anchor extraction | Nested `a > span > b` term markup | Prefer one outermost non-overlapping anchor; preserve nested structure and attributes during render. |
+| Anchor extraction | Nested markup where outer and inner nodes both want independent movement | Block is ineligible unless a non-overlapping representation is provably safe. |
+| Anchor extraction | Inline tag with empty visible payload | Treat as protected/structural or block-ineligible; never create an empty required translatable anchor that the model must guess. |
+| Anchor extraction | Link wrapping image with no text | Protected atomic anchor or existing HTML fallback; no translated payload expected. |
+| Anchor extraction | Inline code-like `code`, `kbd`, `var`, `samp`, or identifier run | Protected according to code policy; no natural-language rewrite inside protected payload. |
+| Anchor extraction | `sub`/`sup` in formula-like context | Protected or block-ineligible; do not allow semantic movement that changes formula meaning. |
+| Anchor extraction | `sub`/`sup` in prose context such as ordinal or footnote marker | Supported only if renderer can preserve meaning; otherwise protected or fallback. |
+| Anchor extraction | Unsupported descendant tag inside an otherwise simple paragraph | Anchor mode refuses the block; no tag is silently flattened or dropped. |
+| Anchor extraction | Duplicate visible text in multiple anchors | Anchor IDs, not payload text, drive recovery; duplicate payloads are accepted if IDs are unique. |
+| Anchor extraction | Whitespace-only or punctuation-only inline wrappers | Preserve as structural/protected or reject anchor mode; do not create meaningless translatable anchors. |
+| Anchor parsing | Missing required anchor in model output | Reject, retry with precise validation feedback, then fallback/manual report. |
+| Anchor parsing | Duplicated anchor ID | Reject before render. |
+| Anchor parsing | Renamed anchor ID or malformed delimiter | Reject before render. |
+| Anchor parsing | Anchor moved to another block | Reject before render. |
+| Anchor parsing | Extra unknown anchor appears | Reject before render. |
+| Anchor parsing | Anchor payload contains raw `<tag>` | Reject unless escaped as literal text by the IR parser. |
+| Anchor parsing | Translated text contains the delimiter sequence as natural prose | Require escaped delimiter representation; unescaped delimiter is rejected. |
+| Model schema | Invalid JSON, extra keys, missing block IDs, or block count mismatch | Reject before render and retry/fallback according to policy. |
+| Model schema | Model changes block order | Accept only if every `block_id` is present exactly once and renderer writes by `block_id`; otherwise reject. |
+| Model schema | Empty translated block | Reject unless the source block is non-translatable and policy allows empty payload. |
+| Model schema | Raw HTML appears outside anchors | Reject before render. |
+| Model schema | English residual hard-fail remains in prose | Reject, retry, or send to manual report; allowed names/code/reference patterns remain review-only. |
+| Rendering | Translatable anchor has one text node | Replace visible payload text and preserve attributes. |
+| Rendering | Translatable anchor has multiple descendant text nodes | Use a deterministic payload replacement policy; if ambiguous, make the block ineligible. |
+| Rendering | Anchor subtree has nested inline tags | Preserve nested tag names, attributes, and order. |
+| Rendering | Protected anchor moved inside same block | Render original protected subtree unchanged at the translated position only if policy allows movement; otherwise reject. |
+| Rendering | Attribute contains entities or quotes | Preserve original attribute values exactly as DOM-equivalent output. |
+| Rendering | Text contains `&`, `<`, `>` after translation | Escape on serialization so final XML parses. |
+| Rendering | CJK punctuation around anchors | Allow natural punctuation placement while preserving anchor count and XML validity. |
+| Rendering | Whitespace around inline anchors | Normalize only through documented renderer rules; avoid accidental word concatenation in Latin/CJK mixed text. |
+| Rendering | Renderer serializes self-closing tags differently | Accept DOM/XML-equivalent serialization only if final XML parse and structural checks pass. |
+| Rendering | Namespace-qualified attributes | Preserve namespace-qualified attributes and required namespace declarations. |
+| Polish | Polish pass drops or duplicates an anchor | Reject with same model-output gate as translation. |
+| Polish | Polish pass improves Chinese by moving anchors within block | Accept if anchor constraints and render gates pass. |
+| Polish | Polish pass changes protected code/formula payload | Reject. |
+| Polish | Polish pass introduces raw HTML | Reject. |
+| Fallback | One block in a chunk is unsupported | Use block-local fallback or split at block boundary; do not degrade the entire file to text-node mode. |
+| Fallback | Anchor mode fails all retries | Existing HTML mode, text-node repair mode, or manual report handles the block without writing partial invalid DOM. |
+| Fallback | Existing checkpoint has old schema | Detect schema version and safely ignore/migrate; never interpret stale anchor metadata as current. |
+| File output | Any chunk remains failed or writeback-failed | EPUB packaging is skipped. |
+| File output | Rendered item has residual `[PRE:N]`, `[CODE:N]`, `[STYLE:N]`, `[TAG:N]`, or anchor delimiters | Reject item before packaging. |
+| File output | Rendered item fails XML parse | Reject item, recover valid chunks when possible, otherwise mark writeback failure. |
+| EPUB packaging | OPF/NCX/nav files include namespaces and XML declarations | Preserve required metadata and pass archive-level smoke checks. |
+| Quality | Long English sentence with multiple inline links | Chinese may split/reorder naturally while anchors stay in the same block. |
+| Quality | Technical glossary term inside link | Glossary translation appears inside the anchor payload and link target remains unchanged. |
+| Quality | Proper names and product names | Names remain untranslated or transliterated according to glossary/style policy and do not trigger hard-fail residual checks. |
+| Quality | Bibliography/reference entries | Reference patterns remain allowed/review-only according to verifier policy; no false hard failure. |
+| Quality | Alt descriptions and figure/table summaries | Stay on existing mode until dedicated fixtures prove anchor mode can preserve structure and improve readability. |
+| Quality | Mixed Chinese/English/code text | Code-like tokens are preserved; surrounding Chinese remains fluent. |
+| Determinism | Same source block extracted twice | Anchor IDs and IR are deterministic for stable checkpoints. |
+| Determinism | Retry after validation failure | Retry uses the same anchor IDs and validation feedback, not a new incompatible skeleton. |
+
+### Required Test Levels
+
+- Unit tests must cover extractor, parser, validator, renderer, escaping, and schema-version behavior.
+- Integration tests must run full chunk translation with stubbed model outputs so both successful and failing model responses are deterministic.
+- End-to-end tests must build at least one small EPUB fixture and verify every XHTML/XML member parses.
+- Regression tests must include real fragments from previously failed books and from known stiff-translation examples.
+- Property-style fuzz tests should generate random safe inline nesting, delimiter text, and anchor reorderings to prove the parser/renderer either renders valid XML or rejects before writeback.
+
+### Completion Bar for Implementation
+
+Implementation is not complete until:
+
+- every edge case in the matrix has an executable test or a documented reason why it remains manual-only
+- all positive cases prove the rendered XML parses
+- all negative cases prove invalid output is rejected before writeback
+- fallback tests prove failed anchor-mode blocks do not corrupt neighboring blocks
+- quality fixtures show at least one anchor-moving Chinese translation accepted by the renderer
+- the final EPUB smoke test verifies archive readability and XML parse success for all XML/XHTML/NCX/nav members
+
 ## Migration Plan
 
 ### Phase 1: Documentation and Test Fixtures
@@ -441,9 +530,10 @@ Each fixture should assert:
 Review performed against the stated goal: translated output must be recoverable, must not introduce missing closing tags, and must still allow fluent Chinese.
 
 - Completeness: the design covers extraction, IR, validation, rendering, fallback, polish, tests, migration, and acceptance criteria.
+- Test completeness: the edge-case matrix now enumerates source integrity, chunk closure, extraction, parsing, model schema, rendering, polish, fallback, file output, quality, and determinism cases, with required handling for each.
 - Structural safety: the design removes model-authored final HTML from anchor mode and requires deterministic DOM rendering plus final XML parsing.
 - Chunk safety: the design keeps complete-DOM-fragment chunking as a precondition and adds tests to prove it stays true.
 - Fluency: the design allows same-block anchor movement and sentence-level rephrasing while keeping cross-block structure fixed.
 - Omission check: unsupported or ambiguous descendant markup must make a block ineligible for anchor mode instead of being dropped.
 - Risk check: delimiter escaping, nested anchors, namespace preservation, and fallback tracking are explicitly covered.
-- Remaining deliberate limitation: the first implementation does not support unrestricted table/figure/alt-description rewriting; those structures stay on existing safe modes until fixture coverage is strong.
+- Remaining deliberate limitation: the first implementation does not support unrestricted table/figure/alt-description rewriting; those structures stay on existing safe modes until fixture coverage is strong and the matrix rows for those structures have executable tests.
