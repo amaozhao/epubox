@@ -382,6 +382,16 @@ UNTRANSLATED_CODEISH_TEXT_PATTERN = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+UNTRANSLATED_PARENTHETICAL_NAMED_ENTITY_PATTERN = re.compile(
+    r"""
+    [（(]
+    [^（）()]*[A-Za-z][^（）()]*
+    \b(?:Center|Centre|College|Department|Hospital|Institute|Laboratory|Ltd|Press|School|Technology|University|Vidyapeeth)\b
+    [^（）()]*
+    [）)]
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 UNTRANSLATED_CITATION_PATTERN = re.compile(r"\[[^\[\]]*\b(?:18|19|20)\d{2}\b[^\[\]]*\]")
 UNTRANSLATED_ENGLISH_RUN_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'.+-]*(?:\s+[A-Za-z][A-Za-z0-9'.+-]*)*")
 LOCALIZABLE_HTML_ATTRIBUTES = {"alt", "aria-label", "title"}
@@ -482,6 +492,7 @@ def _strip_low_risk_english_fragments(text: str) -> str:
     text = re.sub(r"\[(?:PRE|CODE|STYLE|TEXT|NAVTXT):\d+\]", " ", text)
     text = UNTRANSLATED_CITATION_PATTERN.sub(" ", text)
     text = UNTRANSLATED_CODEISH_TEXT_PATTERN.sub(" ", text)
+    text = UNTRANSLATED_PARENTHETICAL_NAMED_ENTITY_PATTERN.sub(" ", text)
     for phrase_pattern in UNTRANSLATED_ALLOWED_PHRASE_PATTERNS:
         text = phrase_pattern.sub(" ", text)
     return text

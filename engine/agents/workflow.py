@@ -60,6 +60,8 @@ MODEL_FORMAT_NEWLINE_ESCAPE_RE = re.compile(
 )
 STRUCTURE_ERROR_KEYWORDS = (
     "标签属性不一致",
+    "标签结构不一致",
+    "标签名不一致",
     "子标签数量不一致",
     "HTML标签结构错误",
     "冻结标签占位符不一致",
@@ -338,7 +340,35 @@ async def _translate_with_text_node_fallback(
                 batch_previous_translation = translated
 
         if batch_error_msg:
-            return None, batch_error_msg
+            single_error_msg = None
+            for text_node, _, text in batch:
+                single_marked_text = f"[TEXT:0]{text}"
+                single_error_history = _append_error_history(list(error_history or []), batch_error_msg)
+                single_previous_translation = None
+                single_payload = None
+
+                for _ in range(TEXT_NODE_FALLBACK_RETRIES):
+                    translated = await _call_translator(
+                        single_marked_text,
+                        glossary,
+                        single_previous_translation,
+                        _build_validation_feedback(single_error_history),
+                        mode="text_node",
+                    )
+                    translated = _normalize_missing_leading_text_marker(single_marked_text, translated)
+                    is_valid, validation_error = _validate_text_node_translation(single_marked_text, translated)
+                    if is_valid:
+                        translated_segments = _extract_text_segments(translated)
+                        single_payload = translated_segments[0][1]
+                        single_error_msg = None
+                        break
+                    single_error_msg = validation_error
+                    single_error_history = _append_error_history(single_error_history, validation_error)
+                    single_previous_translation = translated
+
+                if single_payload is None:
+                    return None, single_error_msg or batch_error_msg
+                text_node.replace_with(single_payload)
 
     return str(soup), None
 

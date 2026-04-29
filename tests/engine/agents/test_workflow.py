@@ -981,6 +981,49 @@ class TestTranslateStep:
         assert "[TEXT:2]" in seen_text_payloads[0]["text_to_translate"]
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_recovers_text_node_batch_marker_mismatch_with_single_node_retry(
+        self, mock_get_translator
+    ):
+        """translate_step: a batch-level extra TEXT marker should fall back to one-node translation, not fail the chunk."""
+        chunk = make_chunk(original="<p>Alpha <em>Beta</em> Gamma <strong>Delta</strong>.</p>")
+        text_payloads = []
+
+        async def extra_marker_for_batch_then_valid_single_nodes(json_input):
+            payload = json.loads(json_input)
+            text = payload["text_to_translate"]
+            if "[TEXT:0]" in text:
+                text_payloads.append(payload)
+                if text.count("[TEXT:") > 1:
+                    return MagicMock(
+                        status=RunStatus.completed,
+                        content=MockTranslationResponse(
+                            "[TEXT:0]阿尔法\n[TEXT:1]贝塔\n[TEXT:2]伽马\n"
+                            "[TEXT:3]德尔塔\n[TEXT:4]。\n[TEXT:5]额外"
+                        ),
+                    )
+                original_payload = text.split("]", 1)[1]
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse(f"[TEXT:0]译{original_payload}"),
+                )
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>阿尔法贝塔伽马德尔塔。</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = extra_marker_for_batch_then_valid_single_nodes
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert require_text(output.content.translated).startswith("<p>译Alpha <em>译Beta</em>")
+        assert any(payload["text_to_translate"].count("[TEXT:") > 1 for payload in text_payloads)
+        assert sum(1 for payload in text_payloads if payload["text_to_translate"].count("[TEXT:") == 1) == 5
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_batches_text_node_fallback_for_large_html(self, mock_get_translator):
         """translate_step: large HTML should be split into text-node batches only after structure failures."""
         original = "<div>" + "".join(f"<span>Paragraph {i}</span>" for i in range(30)) + "</div>"

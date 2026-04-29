@@ -177,6 +177,23 @@ class TestValidateTranslatedHtmlTagErrors:
 
         assert classify_untranslated_english_texts(html) == []
 
+    def test_validate_allows_institution_original_names_in_parentheses(self):
+        """测试中文译名后的英文机构原名括注不会被误判为漏译整句。"""
+        original = (
+            "<p>The authors thank Dr. D.Y. Patil School of Science and Technology and "
+            "Dr. D.Y. Patil Vidyapeeth for seed funding support.</p>"
+        )
+        translated = (
+            "<p>作者谨对印度浦那市 D.Y. 帕提尔科学技术学院"
+            "（Dr. D.Y. Patil School of Science and Technology）及 D.Y. 帕提尔维迪亚佩特大学"
+            "（Dr. D.Y. Patil Vidyapeeth）通过种子资金项目所提供的资助表示衷心感谢。</p>"
+        )
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+        assert find_untranslated_english_texts(translated) == []
+
     def test_classifier_ignores_angle_bracket_protocol_message_names(self):
         """测试中文段落中的协议消息名不会进入复核区。"""
         html = (
