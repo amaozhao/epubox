@@ -691,6 +691,45 @@ class TestTranslateStep:
         assert requested_modes == ["html"]
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_normalizes_model_changed_structural_attributes(self, mock_get_translator):
+        """translate_step: model-translated accessibility text is allowed, but structural attrs are restored."""
+        chunk = make_chunk(
+            original=(
+                '<p>See <a id="doi-link" class="xref" aria-label="D.O.I. link to this document." '
+                'href="https://dx.doi.org/10.1201/9781003773504-91">DOI</a>.</p>'
+            )
+        )
+        requested_modes = []
+
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse(
+                    '<p>参见 <a id="doi-cn" class="changed" aria-label="D.O.I. 链接到本文档。" '
+                    'href="https://example.com/bad">DOI</a>。</p>'
+                ),
+            )
+        )
+
+        def translator_factory(*args, **kwargs):
+            requested_modes.append(kwargs.get("mode"))
+            return mock_translator
+
+        mock_get_translator.side_effect = translator_factory
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        translated = require_text(output.content.translated)
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert requested_modes == ["html"]
+        assert 'id="doi-link"' in translated
+        assert 'class="xref"' in translated
+        assert 'href="https://dx.doi.org/10.1201/9781003773504-91"' in translated
+        assert 'aria-label="D.O.I. 链接到本文档。"' in translated
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_keeps_code_and_math_heavy_chunk_on_html_mode_when_html_translation_valid(
         self, mock_get_translator
     ):

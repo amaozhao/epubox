@@ -7,7 +7,11 @@ from agno.workflow import Step, StepInput, StepOutput, Workflow
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString
 
-from engine.agents.verifier import find_untranslated_english_texts, validate_translated_html
+from engine.agents.verifier import (
+    find_untranslated_english_texts,
+    normalize_translated_html_attributes,
+    validate_translated_html,
+)
 from engine.core.logger import engine_logger as logger
 from engine.core.markup import get_markup_parser
 from engine.schemas import Chunk, TranslationStatus
@@ -515,6 +519,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
                     is_valid, error_msg = False, text_node_error
                 else:
                     if translated is not None:
+                        translated = normalize_translated_html_attributes(original, translated)
                         is_valid, error_msg = validate_translated_html(original, translated)
                     else:
                         is_valid, error_msg = False, "Translation failed: translated is None"
@@ -546,6 +551,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
                         is_valid, error_msg = False, tag_restore_error
                     else:
                         if translated is not None:
+                            translated = normalize_translated_html_attributes(original, translated)
                             is_valid, error_msg = validate_translated_html(original, translated)
                         else:
                             is_valid, error_msg = False, "translated is None"
@@ -724,6 +730,7 @@ def apply_corrections_step(step_input: StepInput) -> ChunkStepOutput:
     # 后处理：统一词汇和标点
     final_text = final_text.replace("您", "你").replace("大型语言模型", "大语言模型")
     final_text = final_text.replace("。。", "。").replace("，，", "，")
+    final_text = normalize_translated_html_attributes(chunk.original, final_text)
 
     is_valid, error_msg = validate_translated_html(chunk.original, final_text)
     if not is_valid:

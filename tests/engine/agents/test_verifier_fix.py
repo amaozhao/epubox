@@ -2,6 +2,7 @@ from engine.agents.verifier import (
     EnglishResidualDecision,
     classify_untranslated_english_texts,
     find_untranslated_english_texts,
+    normalize_translated_html_attributes,
     validate_translated_html,
 )
 
@@ -294,3 +295,88 @@ class TestValidateTranslatedHtmlTagErrors:
 
         assert not is_valid
         assert "属性" in error
+
+    def test_validate_accepts_safe_translated_aria_label(self):
+        """测试 aria-label 这类可本地化辅助文本属性被翻译时不会误判为结构损坏。"""
+        original = (
+            '<p>See <a aria-label="D.O.I. link to this document." '
+            'href="https://dx.doi.org/10.1201/9781003773504-91">DOI</a>.</p>'
+        )
+        translated = (
+            '<p>参见 <a aria-label="D.O.I. 链接到本文档。" '
+            'href="https://dx.doi.org/10.1201/9781003773504-91">DOI</a>。</p>'
+        )
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
+    def test_validate_accepts_safe_translated_alt_and_title_attributes(self):
+        """测试 alt/title 辅助文本属性可安全本地化。"""
+        cases = [
+            (
+                '<figure><img alt="Publisher logo." src="../images/pub.jpg"/></figure>',
+                '<figure><img alt="出版商标志。" src="../images/pub.jpg"/></figure>',
+            ),
+            (
+                '<p><abbr title="Application Programming Interface">API</abbr></p>',
+                '<p><abbr title="应用程序编程接口">API</abbr></p>',
+            ),
+        ]
+
+        for original, translated in cases:
+            is_valid, error = validate_translated_html(original, translated)
+            assert is_valid, error
+
+    def test_validate_rejects_unsafe_translated_localizable_attribute(self):
+        """测试可本地化属性含危险标记或占位符时仍然拒绝。"""
+        original = '<p><a aria-label="D.O.I. link to this document." href="https://example.com">DOI</a></p>'
+        translated = '<p><a aria-label="D.O.I. 链接 [CODE:0]" href="https://example.com">DOI</a></p>'
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert not is_valid
+        assert "属性" in error
+
+    def test_normalize_translated_html_attributes_restores_structural_attributes(self):
+        """测试结构属性被模型翻译或改写时会按原文恢复。"""
+        original = (
+            '<p><a id="doi-link" class="xref" href="https://example.com/original" '
+            'aria-label="D.O.I. link to this document.">DOI</a></p>'
+        )
+        translated = (
+            '<p><a id="doi-cn" class="changed" href="https://example.com/translated" '
+            'aria-label="D.O.I. 链接到本文档。">DOI</a></p>'
+        )
+
+        normalized = normalize_translated_html_attributes(original, translated)
+        is_valid, error = validate_translated_html(original, normalized)
+
+        assert is_valid, error
+        assert 'id="doi-link"' in normalized
+        assert 'class="xref"' in normalized
+        assert 'href="https://example.com/original"' in normalized
+        assert 'aria-label="D.O.I. 链接到本文档。"' in normalized
+
+    def test_normalize_translated_html_attributes_removes_model_added_attributes(self):
+        """测试模型新增的属性会被移除，避免把未知属性写入 EPUB。"""
+        original = '<p><a href="https://example.com">DOI</a></p>'
+        translated = '<p><a href="https://example.com" onclick="alert(1)" data-extra="x">数字对象标识</a></p>'
+
+        normalized = normalize_translated_html_attributes(original, translated)
+        is_valid, error = validate_translated_html(original, normalized)
+
+        assert is_valid, error
+        assert "onclick" not in normalized
+        assert "data-extra" not in normalized
+
+    def test_attribute_normalization_does_not_mask_missing_tags(self):
+        """测试属性规范化不能掩盖标签缺失、子标签数量变化等真实结构错误。"""
+        original = '<p><span>Alpha</span><a href="https://example.com">Beta</a></p>'
+        translated = '<p><a href="https://example.com">贝塔</a></p>'
+
+        normalized = normalize_translated_html_attributes(original, translated)
+        is_valid, error = validate_translated_html(original, normalized)
+
+        assert not is_valid
+        assert "子标签数量不一致" in error
