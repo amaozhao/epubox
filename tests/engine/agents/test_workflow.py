@@ -520,7 +520,7 @@ class TestTranslateStep:
         assert len(text_payloads) == 2
         assert "previous_translation" not in text_payloads[0]
         assert text_payloads[1]["previous_translation"] == "[TEXT:0]你好\n[TEXT:1]世界"
-        assert "标签属性不一致" in text_payloads[1]["validation_error"]
+        assert "标签结构不一致" in text_payloads[1]["validation_error"]
         assert "TEXT 标记不一致" in text_payloads[1]["validation_error"]
 
     @patch("engine.agents.workflow.get_translator")
@@ -857,6 +857,60 @@ class TestTranslateStep:
         assert "[TAG:1]" in seen_payloads[0]["text_to_translate"]
         assert (
             output.content.translated == '<p>你好</p><p><img alt="Publisher logo." src="../images/pub.jpg"/><br/></p>'
+        )
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_freezes_empty_structural_tags_before_translation(self, mock_get_translator):
+        """translate_step: empty index/pagebreak tags should be frozen so the model cannot drop them."""
+        chunk = make_chunk(
+            original=(
+                '<p>Intro</p><p>Focus <a id="_idIndexMarker465"></a><a id="_idIndexMarker466"></a>'
+                'minimum viable products <span class="No-Break">recommendation.</span></p>'
+            ),
+            xpaths=["/html/body/p[1]", "/html/body/p[2]"],
+        )
+        requested_modes = []
+        seen_payloads = []
+
+        async def translated_with_or_without_frozen_empty_tags(json_input):
+            payload = json.loads(json_input)
+            seen_payloads.append(payload)
+            text = payload["text_to_translate"]
+            if "[TEXT:0]" in text:
+                return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("[TEXT:0]坏"))
+            if "[TAG:0]" in text and "[TAG:1]" in text:
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse(
+                        '<p>引言</p><p>聚焦 [TAG:0][TAG:1]最小可行产品'
+                        '<span class="No-Break">建议。</span></p>'
+                    ),
+                )
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse(
+                    '<p>引言</p><p>聚焦最小可行产品<span class="No-Break">建议。</span></p>'
+                ),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = translated_with_or_without_frozen_empty_tags
+
+        def translator_factory(*args, **kwargs):
+            requested_modes.append(kwargs.get("mode"))
+            return mock_translator
+
+        mock_get_translator.side_effect = translator_factory
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert requested_modes == ["html"]
+        assert "[TAG:0]" in seen_payloads[0]["text_to_translate"]
+        assert "[TAG:1]" in seen_payloads[0]["text_to_translate"]
+        assert '<a id="_idIndexMarker465"></a><a id="_idIndexMarker466"></a>' in require_text(
+            output.content.translated
         )
 
     @patch("engine.agents.workflow.get_translator")

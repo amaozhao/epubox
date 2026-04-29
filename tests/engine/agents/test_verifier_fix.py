@@ -380,3 +380,15 @@ class TestValidateTranslatedHtmlTagErrors:
 
         assert not is_valid
         assert "子标签数量不一致" in error
+
+    def test_validate_reports_child_count_mismatch_as_structure_error(self):
+        """测试子标签数量变化应报告为结构错误，而不是伪装成属性错误。"""
+        original = '<p>Alpha</p><p><span>One</span><a id="idx"></a><a id="idx2"></a>Two</p>'
+        translated = "<p>甲</p><p><span>一</span>二</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert not is_valid
+        assert "标签结构不一致" in error
+        assert "子标签数量不一致" in error
+        assert "标签属性不一致" not in error

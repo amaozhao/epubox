@@ -752,8 +752,8 @@ def _attribute_mismatch_reason(orig_attrs: dict, trans_attrs: dict) -> str | Non
     return None
 
 
-def _collect_attribute_mismatches(original_elements: list, translated_elements: list) -> list[str]:
-    """按 DOM 顺序比较所有标签属性，防止模型污染属性边界或改写结构属性。"""
+def _collect_tag_structure_mismatches(original_elements: list, translated_elements: list) -> list[str]:
+    """按 DOM 顺序比较子标签拓扑，避免将结构损坏误报为属性问题。"""
     mismatches: list[str] = []
 
     for element_index, (orig_root, trans_root) in enumerate(zip(original_elements, translated_elements), start=1):
@@ -769,6 +769,23 @@ def _collect_attribute_mismatches(original_elements: list, translated_elements: 
                 mismatches.append(
                     f"元素{element_index} 子标签{tag_index} 标签名不一致: 原始 <{orig_tag.name}>, 翻译 <{trans_tag.name}>"
                 )
+
+    return mismatches
+
+
+def _collect_attribute_mismatches(original_elements: list, translated_elements: list) -> list[str]:
+    """按 DOM 顺序比较所有标签属性，防止模型污染属性边界或改写结构属性。"""
+    mismatches: list[str] = []
+
+    for element_index, (orig_root, trans_root) in enumerate(zip(original_elements, translated_elements), start=1):
+        orig_tags = [orig_root, *orig_root.find_all(True)]
+        trans_tags = [trans_root, *trans_root.find_all(True)]
+
+        if len(orig_tags) != len(trans_tags):
+            continue
+
+        for tag_index, (orig_tag, trans_tag) in enumerate(zip(orig_tags, trans_tags), start=1):
+            if orig_tag.name != trans_tag.name:
                 continue
 
             orig_attrs = {key: _normalize_attr_value(value) for key, value in orig_tag.attrs.items()}
@@ -828,7 +845,12 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
         if orig.name != trans.name:
             return False, f"第 {i + 1} 个元素标签不一致: 原始 <{orig.name}>, 翻译 <{trans.name}>"
 
-    # 2.5 标签属性一致，避免模型污染属性值或引号边界
+    # 2.5 子标签拓扑一致，避免模型删除空锚点、页码标记或合并内联标签。
+    tag_structure_mismatches = _collect_tag_structure_mismatches(original_elements, translated_elements)
+    if tag_structure_mismatches:
+        return False, f"标签结构不一致: {'; '.join(tag_structure_mismatches)}"
+
+    # 2.6 标签属性一致，避免模型污染属性值或引号边界
     attribute_mismatches = _collect_attribute_mismatches(original_elements, translated_elements)
     if attribute_mismatches:
         return False, f"标签属性不一致: {'; '.join(attribute_mismatches)}"

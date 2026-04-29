@@ -52,6 +52,8 @@ NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
 TEXT_MARKER_PATTERN = re.compile(r"\[TEXT:\d+\]")
 FROZEN_TAG_PATTERN = re.compile(r"\[TAG:\d+\]")
 FROZEN_TRANSLATION_TAGS = {"img", "br", "hr", "meta", "link"}
+FROZEN_EMPTY_STRUCTURAL_TAGS = {"a", "div", "span"}
+FROZEN_EMPTY_STRUCTURAL_ATTRS = {"aria-label", "class", "epub:type", "id", "name", "role"}
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 MODEL_FORMAT_NEWLINE_ESCAPE_RE = re.compile(
     r"(?:(?<=>)\\n|\\n(?=\s*(?:\[(?:TEXT|NAVTXT):\d+\]|</?[A-Za-z][A-Za-z0-9:_-]*\b|<!--)))"
@@ -367,12 +369,28 @@ def _apply_corrections_to_text_nodes(html: str, corrections: dict[str, str]) -> 
     return str(soup), replacement_count, len(matched_corrections)
 
 
+def _should_freeze_translation_tag(tag) -> bool:
+    name = str(getattr(tag, "name", "")).lower()
+    if name in FROZEN_TRANSLATION_TAGS:
+        return True
+
+    if name not in FROZEN_EMPTY_STRUCTURAL_TAGS:
+        return False
+    if tag.find(True) is not None:
+        return False
+    if tag.get_text(strip=True):
+        return False
+    return any(attr in tag.attrs for attr in FROZEN_EMPTY_STRUCTURAL_ATTRS)
+
+
 def _freeze_translation_tags(html: str) -> tuple[str, list[tuple[str, str]]]:
     """将高风险空标签整体替换为占位符，避免模型破坏其属性或边界。"""
     soup = BeautifulSoup(html, get_markup_parser(html))
     replacements: list[tuple[str, str]] = []
 
-    for tag in list(soup.find_all(FROZEN_TRANSLATION_TAGS)):
+    for tag in list(soup.find_all(True)):
+        if not _should_freeze_translation_tag(tag):
+            continue
         placeholder = f"[TAG:{len(replacements)}]"
         replacements.append((placeholder, str(tag)))
         tag.replace_with(placeholder)
