@@ -24,7 +24,7 @@ HTML_MODE_INSTRUCTIONS = [
     "   - Keep tag attributes unchanged (class, id, href, src, etc.).",
     "   - Maintain the same number and nesting of elements.",
     "   - Only translate text content between tags.",
-    "7. **PLACEHOLDERS**: [PRE:N], [CODE:N], [STYLE:N] are protected placeholders. Copy them VERBATIM, keep every index unchanged, and keep their left-to-right order EXACTLY the same as the source.",
+    "7. **PLACEHOLDERS**: [PRE:N], [CODE:N], [STYLE:N], and [TAG:N] are protected placeholders. Copy them VERBATIM, keep every index unchanged, and keep their left-to-right order EXACTLY the same as the source.",
     "7.1 **NO REORDERING AROUND PLACEHOLDERS**: Do NOT move, swap, merge, split, or regroup any phrase that contains a placeholder. If a sentence contains placeholders, translate only the natural-language text around them while leaving the placeholder-bearing spans in place.",
     "7.2 **NAV MARKERS**: [NAVTXT:N] markers delimit nav text units. Keep markers EXACT, keep one marker per unit, and keep their original order.",
 ]

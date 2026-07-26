@@ -179,20 +179,55 @@ def _looks_like_bibliographic_reference(text: str) -> bool:
     if len(stripped) < 40:
         return False
 
+    def has_publisher_hint(value: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:Books?|Press|Publishing|Publishers?|Publications|University\s+Press)\b",
+                value,
+                re.IGNORECASE,
+            )
+        )
+
+    def english_word_count(value: str) -> int:
+        return len(re.findall(r"[A-Za-z][A-Za-z'’.-]*", value))
+
     year_match = re.search(r"(?:\((?:18|19|20)\d{2}[a-z]?\)|\b(?:18|19|20)\d{2}[a-z]?\.)", stripped)
-    if not year_match or year_match.start() > 220:
-        return False
+    if year_match and year_match.start() <= 220:
+        author_segment = stripped[: year_match.start()]
+        if not author_segment:
+            return False
 
-    author_segment = stripped[: year_match.start()]
-    if not author_segment:
-        return False
+        initials = re.findall(r"\b[A-Z]\.", author_segment)
+        has_author_joiner = bool(re.search(r"(?:&|\band\b|\bet\s+al\.)", author_segment, re.IGNORECASE))
+        has_surname_initial = bool(re.search(r"(?<!\w)[^\W\d_][\w'’.-]*,\s+[A-Z]\.", author_segment))
+        comma_count = author_segment.count(",")
 
-    initials = re.findall(r"\b[A-Z]\.", author_segment)
-    has_author_joiner = bool(re.search(r"(?:&|\band\b|\bet\s+al\.)", author_segment, re.IGNORECASE))
-    has_surname_initial = bool(re.search(r"(?<!\w)[^\W\d_][\w'’.-]*,\s+[A-Z]\.", author_segment))
-    comma_count = author_segment.count(",")
+        if has_surname_initial and (len(initials) >= 1 or has_author_joiner or comma_count >= 2):
+            return True
 
-    return has_surname_initial and (len(initials) >= 1 or has_author_joiner or comma_count >= 2)
+    author_title_match = re.match(
+        r"^[A-Z][A-Za-z'’.-]{1,60},\s+"
+        r"[A-Z](?:[A-Za-z'’.-]{1,60}|\.)(?:\s+[A-Z][A-Za-z'’.-]{1,60})?\s*[:：]\s+(.+)$",
+        stripped,
+    )
+    if author_title_match:
+        title_and_publisher = author_title_match.group(1)
+        if english_word_count(title_and_publisher) >= 6 and has_publisher_hint(title_and_publisher):
+            return True
+
+    if any("\u4e00" <= char <= "\u9fff" for char in stripped):
+        translated_reference_head = re.match(r"^[^。！？.!?]{2,120}[:：]\s*《", stripped)
+        has_original_title_parenthetical = bool(
+            re.search(r"[（(][^（）()]*[A-Za-z][^（）()]*[）)]", stripped)
+        )
+        if (
+            translated_reference_head
+            and english_word_count(stripped) >= 6
+            and (has_original_title_parenthetical or has_publisher_hint(stripped))
+        ):
+            return True
+
+    return False
 
 
 UNTRANSLATED_SKIP_TAGS = {"pre", "code", "math", "script", "style"}
@@ -347,8 +382,20 @@ UNTRANSLATED_CODEISH_TEXT_PATTERN = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+UNTRANSLATED_PARENTHETICAL_NAMED_ENTITY_PATTERN = re.compile(
+    r"""
+    [（(]
+    [^（）()]*[A-Za-z][^（）()]*
+    \b(?:Center|Centre|College|Department|Hospital|Institute|Laboratory|Ltd|Press|School|Technology|University|Vidyapeeth)\b
+    [^（）()]*
+    [）)]
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 UNTRANSLATED_CITATION_PATTERN = re.compile(r"\[[^\[\]]*\b(?:18|19|20)\d{2}\b[^\[\]]*\]")
 UNTRANSLATED_ENGLISH_RUN_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9'.+-]*(?:\s+[A-Za-z][A-Za-z0-9'.+-]*)*")
+LOCALIZABLE_HTML_ATTRIBUTES = {"alt", "aria-label", "title"}
+PROTECTED_ATTRIBUTE_PLACEHOLDER_PATTERN = re.compile(r"\[(?:PRE|CODE|STYLE|TAG|TEXT|NAVTXT):\d+\]")
 _NLTK_TREEBANK_TOKENIZER = None
 
 
@@ -447,6 +494,7 @@ def _strip_low_risk_english_fragments(text: str) -> str:
     text = re.sub(r"\[(?:PRE|CODE|STYLE|TEXT|NAVTXT):\d+\]", " ", text)
     text = UNTRANSLATED_CITATION_PATTERN.sub(" ", text)
     text = UNTRANSLATED_CODEISH_TEXT_PATTERN.sub(" ", text)
+    text = UNTRANSLATED_PARENTHETICAL_NAMED_ENTITY_PATTERN.sub(" ", text)
     for phrase_pattern in UNTRANSLATED_ALLOWED_PHRASE_PATTERNS:
         text = phrase_pattern.sub(" ", text)
     return text
@@ -623,8 +671,102 @@ def _normalize_attr_value(value):
     return value
 
 
-def _collect_attribute_mismatches(original_elements: list, translated_elements: list) -> list[str]:
-    """按 DOM 顺序比较所有标签属性，防止模型污染属性边界或改写结构属性。"""
+def _is_localizable_html_attribute(name: str) -> bool:
+    return name.lower() in LOCALIZABLE_HTML_ATTRIBUTES
+
+
+def _is_safe_localizable_attribute_value(value) -> bool:
+    if isinstance(value, list):
+        return False
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if "<" in text or ">" in text:
+        return False
+    return not PROTECTED_ATTRIBUTE_PLACEHOLDER_PATTERN.search(text)
+
+
+def _tags_match_for_attribute_normalization(original_elements: list, translated_elements: list) -> bool:
+    if len(original_elements) != len(translated_elements):
+        return False
+
+    for orig_root, trans_root in zip(original_elements, translated_elements):
+        orig_tags = [orig_root, *orig_root.find_all(True)]
+        trans_tags = [trans_root, *trans_root.find_all(True)]
+        if len(orig_tags) != len(trans_tags):
+            return False
+        if any(orig_tag.name != trans_tag.name for orig_tag, trans_tag in zip(orig_tags, trans_tags)):
+            return False
+
+    return True
+
+
+def normalize_translated_html_attributes(original: str, translated: str) -> str:
+    """Restore structural attributes while preserving safe translated accessibility text.
+
+    The normalizer is deliberately conservative: it only changes attributes when the
+    original and translated DOM have the same tag count and tag order. Real topology
+    errors still flow into strict validation and retry/fallback paths.
+    """
+    is_valid_raw, _ = verify_html_integrity(translated)
+    if not is_valid_raw:
+        return translated
+
+    original_soup = BeautifulSoup(original, get_markup_parser(original))
+    translated_soup = BeautifulSoup(translated, get_markup_parser(translated))
+    original_elements = [e for e in original_soup.children if isinstance(e, Tag)]
+    translated_elements = [e for e in translated_soup.children if isinstance(e, Tag)]
+
+    if not _tags_match_for_attribute_normalization(original_elements, translated_elements):
+        return translated
+
+    changed = False
+    for orig_root, trans_root in zip(original_elements, translated_elements):
+        orig_tags = [orig_root, *orig_root.find_all(True)]
+        trans_tags = [trans_root, *trans_root.find_all(True)]
+        for orig_tag, trans_tag in zip(orig_tags, trans_tags):
+            normalized_attrs = {}
+            for attr_name, original_value in orig_tag.attrs.items():
+                translated_value = trans_tag.attrs.get(attr_name)
+                if (
+                    translated_value is not None
+                    and _is_localizable_html_attribute(attr_name)
+                    and _is_safe_localizable_attribute_value(translated_value)
+                ):
+                    normalized_attrs[attr_name] = translated_value
+                else:
+                    normalized_attrs[attr_name] = original_value
+
+            if trans_tag.attrs != normalized_attrs:
+                trans_tag.attrs = normalized_attrs
+                changed = True
+
+    return str(translated_soup) if changed else translated
+
+
+def _attribute_mismatch_reason(orig_attrs: dict, trans_attrs: dict) -> str | None:
+    for attr_name, original_value in orig_attrs.items():
+        if attr_name not in trans_attrs:
+            return "缺少属性"
+
+        translated_value = trans_attrs[attr_name]
+        if _normalize_attr_value(original_value) == _normalize_attr_value(translated_value):
+            continue
+
+        if _is_localizable_html_attribute(attr_name) and _is_safe_localizable_attribute_value(translated_value):
+            continue
+
+        return "属性值不一致"
+
+    extra_attrs = set(trans_attrs) - set(orig_attrs)
+    if extra_attrs:
+        return "新增属性"
+
+    return None
+
+
+def _collect_tag_structure_mismatches(original_elements: list, translated_elements: list) -> list[str]:
+    """按 DOM 顺序比较子标签拓扑，避免将结构损坏误报为属性问题。"""
     mismatches: list[str] = []
 
     for element_index, (orig_root, trans_root) in enumerate(zip(original_elements, translated_elements), start=1):
@@ -640,13 +782,31 @@ def _collect_attribute_mismatches(original_elements: list, translated_elements: 
                 mismatches.append(
                     f"元素{element_index} 子标签{tag_index} 标签名不一致: 原始 <{orig_tag.name}>, 翻译 <{trans_tag.name}>"
                 )
+
+    return mismatches
+
+
+def _collect_attribute_mismatches(original_elements: list, translated_elements: list) -> list[str]:
+    """按 DOM 顺序比较所有标签属性，防止模型污染属性边界或改写结构属性。"""
+    mismatches: list[str] = []
+
+    for element_index, (orig_root, trans_root) in enumerate(zip(original_elements, translated_elements), start=1):
+        orig_tags = [orig_root, *orig_root.find_all(True)]
+        trans_tags = [trans_root, *trans_root.find_all(True)]
+
+        if len(orig_tags) != len(trans_tags):
+            continue
+
+        for tag_index, (orig_tag, trans_tag) in enumerate(zip(orig_tags, trans_tags), start=1):
+            if orig_tag.name != trans_tag.name:
                 continue
 
             orig_attrs = {key: _normalize_attr_value(value) for key, value in orig_tag.attrs.items()}
             trans_attrs = {key: _normalize_attr_value(value) for key, value in trans_tag.attrs.items()}
-            if orig_attrs != trans_attrs:
+            mismatch_reason = _attribute_mismatch_reason(orig_attrs, trans_attrs)
+            if mismatch_reason:
                 mismatches.append(
-                    f"元素{element_index} 子标签{tag_index} <{orig_tag.name}> 属性不一致: "
+                    f"元素{element_index} 子标签{tag_index} <{orig_tag.name}> {mismatch_reason}: "
                     f"原始 {orig_attrs}, 翻译 {trans_attrs}"
                 )
 
@@ -728,7 +888,12 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
         if orig.name != trans.name:
             return False, f"第 {i + 1} 个元素标签不一致: 原始 <{orig.name}>, 翻译 <{trans.name}>"
 
-    # 2.5 标签属性一致，避免模型污染属性值或引号边界
+    # 2.5 子标签拓扑一致，避免模型删除空锚点、页码标记或合并内联标签。
+    tag_structure_mismatches = _collect_tag_structure_mismatches(original_elements, translated_elements)
+    if tag_structure_mismatches:
+        return False, f"标签结构不一致: {'; '.join(tag_structure_mismatches)}"
+
+    # 2.6 标签属性一致，避免模型污染属性值或引号边界
     attribute_mismatches = _collect_attribute_mismatches(original_elements, translated_elements)
     if attribute_mismatches:
         return False, f"标签属性不一致: {'; '.join(attribute_mismatches)}"

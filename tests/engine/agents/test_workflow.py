@@ -520,7 +520,7 @@ class TestTranslateStep:
         assert len(text_payloads) == 2
         assert "previous_translation" not in text_payloads[0]
         assert text_payloads[1]["previous_translation"] == "[TEXT:0]你好\n[TEXT:1]世界"
-        assert "标签属性不一致" in text_payloads[1]["validation_error"]
+        assert "标签结构不一致" in text_payloads[1]["validation_error"]
         assert "TEXT 标记不一致" in text_payloads[1]["validation_error"]
 
     @patch("engine.agents.workflow.get_translator")
@@ -561,8 +561,10 @@ class TestTranslateStep:
         assert "CODE 占位符不一致" in text_payloads[1]["validation_error"]
 
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_routes_high_risk_chunk_directly_to_text_node_mode(self, mock_get_translator):
-        """translate_step: inline-heavy complex chunks should skip HTML regeneration and start in text-node mode."""
+    async def test_translate_step_keeps_high_risk_chunk_on_html_mode_when_html_translation_valid(
+        self, mock_get_translator
+    ):
+        """translate_step: inline-heavy chunks should still try HTML mode first for fluent translation."""
         chunk = make_chunk(
             original=(
                 "<p>"
@@ -576,15 +578,16 @@ class TestTranslateStep:
         async def translator_response(json_input):
             payload = json.loads(json_input)
             if "[TEXT:0]" in payload["text_to_translate"]:
-                lines = []
-                for line in payload["text_to_translate"].splitlines():
-                    marker, text = line.split("]", 1)
-                    lines.append(f"{marker}]中文{text}")
-                return MagicMock(
-                    status=RunStatus.completed,
-                    content=MockTranslationResponse("\n".join(lines)),
-                )
-            return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("<p>不应走到这里</p>"))
+                return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("[TEXT:0]不应走到这里"))
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse(
+                    "<p>"
+                    "一 <i>二</i> 三 <b>四</b> 五 <em>六</em> 七 <span>八</span> "
+                    "九 <strong>十</strong> 十一 <a href='#'>十二</a> 十三 <code>十四</code>。"
+                    "</p>"
+                ),
+            )
 
         mock_translator = MagicMock()
         mock_translator.arun = translator_response
@@ -599,8 +602,13 @@ class TestTranslateStep:
         output = await translate_step(step_input)
 
         assert output.content.status == TranslationStatus.TRANSLATED
-        assert requested_modes
-        assert all(mode == "text_node" for mode in requested_modes)
+        assert output.content.translated == (
+            "<p>"
+            "一 <i>二</i> 三 <b>四</b> 五 <em>六</em> 七 <span>八</span> "
+            "九 <strong>十</strong> 十一 <a href='#'>十二</a> 十三 <code>十四</code>。"
+            "</p>"
+        )
+        assert requested_modes == ["html"]
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_text_node_output_decodes_literal_newline_escapes(self, mock_get_translator):
@@ -616,6 +624,8 @@ class TestTranslateStep:
 
         async def translator_response(json_input):
             payload = json.loads(json_input)
+            if "[TEXT:0]" not in payload["text_to_translate"]:
+                return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("<p>结构错误</p>"))
             lines = []
             for line in payload["text_to_translate"].splitlines():
                 marker, text = line.split("]", 1)
@@ -681,10 +691,49 @@ class TestTranslateStep:
         assert requested_modes == ["html"]
 
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_routes_code_and_math_heavy_chunk_directly_to_text_node_mode(
+    async def test_translate_step_normalizes_model_changed_structural_attributes(self, mock_get_translator):
+        """translate_step: model-translated accessibility text is allowed, but structural attrs are restored."""
+        chunk = make_chunk(
+            original=(
+                '<p>See <a id="doi-link" class="xref" aria-label="D.O.I. link to this document." '
+                'href="https://dx.doi.org/10.1201/9781003773504-91">DOI</a>.</p>'
+            )
+        )
+        requested_modes = []
+
+        mock_translator = MagicMock()
+        mock_translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse(
+                    '<p>参见 <a id="doi-cn" class="changed" aria-label="D.O.I. 链接到本文档。" '
+                    'href="https://example.com/bad">DOI</a>。</p>'
+                ),
+            )
+        )
+
+        def translator_factory(*args, **kwargs):
+            requested_modes.append(kwargs.get("mode"))
+            return mock_translator
+
+        mock_get_translator.side_effect = translator_factory
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        translated = require_text(output.content.translated)
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert requested_modes == ["html"]
+        assert 'id="doi-link"' in translated
+        assert 'class="xref"' in translated
+        assert 'href="https://dx.doi.org/10.1201/9781003773504-91"' in translated
+        assert 'aria-label="D.O.I. 链接到本文档。"' in translated
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_keeps_code_and_math_heavy_chunk_on_html_mode_when_html_translation_valid(
         self, mock_get_translator
     ):
-        """translate_step: code-placeholder headings with dense mathy inline markup should bypass HTML mode directly."""
+        """translate_step: math-heavy markup should not force brittle text-node markers before HTML validation fails."""
         chunk = make_chunk(
             original=(
                 "<section><h3>[CODE:0]</h3>"
@@ -698,16 +747,15 @@ class TestTranslateStep:
         async def translator_response(json_input):
             payload = json.loads(json_input)
             if "[TEXT:0]" in payload["text_to_translate"]:
-                lines = []
-                for line in payload["text_to_translate"].splitlines():
-                    marker, text = line.split("]", 1)
-                    lines.append(f"{marker}]中文{text}")
-                return MagicMock(
-                    status=RunStatus.completed,
-                    content=MockTranslationResponse("\n".join(lines)),
-                )
+                return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("[TEXT:0]不应走到这里"))
             return MagicMock(
-                status=RunStatus.completed, content=MockTranslationResponse("<section>不应走到这里</section>")
+                status=RunStatus.completed,
+                content=MockTranslationResponse(
+                    "<section><h3>[CODE:0]</h3>"
+                    "<p>令 <i>x</i><sub>1</sub> 和 <i>y</i><sup>2</sup> 定义该级数。</p>"
+                    "<p>则 <i>z</i><sub>3</sub> = <i>x</i><sub>1</sub> + <i>y</i><sup>2</sup>。</p>"
+                    "</section>"
+                ),
             )
 
         mock_translator = MagicMock()
@@ -723,8 +771,13 @@ class TestTranslateStep:
         output = await translate_step(step_input)
 
         assert output.content.status == TranslationStatus.TRANSLATED
-        assert requested_modes
-        assert all(mode == "text_node" for mode in requested_modes)
+        assert output.content.translated == (
+            "<section><h3>[CODE:0]</h3>"
+            "<p>令 <i>x</i><sub>1</sub> 和 <i>y</i><sup>2</sup> 定义该级数。</p>"
+            "<p>则 <i>z</i><sub>3</sub> = <i>x</i><sub>1</sub> + <i>y</i><sup>2</sup>。</p>"
+            "</section>"
+        )
+        assert requested_modes == ["html"]
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_error_status_retries_without_fallback_and_keeps_provider_error_message(
@@ -807,6 +860,60 @@ class TestTranslateStep:
         )
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_freezes_empty_structural_tags_before_translation(self, mock_get_translator):
+        """translate_step: empty index/pagebreak tags should be frozen so the model cannot drop them."""
+        chunk = make_chunk(
+            original=(
+                '<p>Intro</p><p>Focus <a id="_idIndexMarker465"></a><a id="_idIndexMarker466"></a>'
+                'minimum viable products <span class="No-Break">recommendation.</span></p>'
+            ),
+            xpaths=["/html/body/p[1]", "/html/body/p[2]"],
+        )
+        requested_modes = []
+        seen_payloads = []
+
+        async def translated_with_or_without_frozen_empty_tags(json_input):
+            payload = json.loads(json_input)
+            seen_payloads.append(payload)
+            text = payload["text_to_translate"]
+            if "[TEXT:0]" in text:
+                return MagicMock(status=RunStatus.completed, content=MockTranslationResponse("[TEXT:0]坏"))
+            if "[TAG:0]" in text and "[TAG:1]" in text:
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse(
+                        '<p>引言</p><p>聚焦 [TAG:0][TAG:1]最小可行产品'
+                        '<span class="No-Break">建议。</span></p>'
+                    ),
+                )
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse(
+                    '<p>引言</p><p>聚焦最小可行产品<span class="No-Break">建议。</span></p>'
+                ),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = translated_with_or_without_frozen_empty_tags
+
+        def translator_factory(*args, **kwargs):
+            requested_modes.append(kwargs.get("mode"))
+            return mock_translator
+
+        mock_get_translator.side_effect = translator_factory
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert requested_modes == ["html"]
+        assert "[TAG:0]" in seen_payloads[0]["text_to_translate"]
+        assert "[TAG:1]" in seen_payloads[0]["text_to_translate"]
+        assert '<a id="_idIndexMarker465"></a><a id="_idIndexMarker466"></a>' in require_text(
+            output.content.translated
+        )
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_recovers_when_frozen_tag_placeholder_is_missing(self, mock_get_translator):
         """translate_step: missing frozen-tag placeholders can still recover via text-node mode on the final retry."""
         chunk = make_chunk(
@@ -874,8 +981,51 @@ class TestTranslateStep:
         assert "[TEXT:2]" in seen_text_payloads[0]["text_to_translate"]
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_recovers_text_node_batch_marker_mismatch_with_single_node_retry(
+        self, mock_get_translator
+    ):
+        """translate_step: a batch-level extra TEXT marker should fall back to one-node translation, not fail the chunk."""
+        chunk = make_chunk(original="<p>Alpha <em>Beta</em> Gamma <strong>Delta</strong>.</p>")
+        text_payloads = []
+
+        async def extra_marker_for_batch_then_valid_single_nodes(json_input):
+            payload = json.loads(json_input)
+            text = payload["text_to_translate"]
+            if "[TEXT:0]" in text:
+                text_payloads.append(payload)
+                if text.count("[TEXT:") > 1:
+                    return MagicMock(
+                        status=RunStatus.completed,
+                        content=MockTranslationResponse(
+                            "[TEXT:0]阿尔法\n[TEXT:1]贝塔\n[TEXT:2]伽马\n"
+                            "[TEXT:3]德尔塔\n[TEXT:4]。\n[TEXT:5]额外"
+                        ),
+                    )
+                original_payload = text.split("]", 1)[1]
+                return MagicMock(
+                    status=RunStatus.completed,
+                    content=MockTranslationResponse(f"[TEXT:0]译{original_payload}"),
+                )
+            return MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>阿尔法贝塔伽马德尔塔。</p>"),
+            )
+
+        mock_translator = MagicMock()
+        mock_translator.arun = extra_marker_for_batch_then_valid_single_nodes
+        mock_get_translator.return_value = mock_translator
+
+        step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
+        output = await translate_step(step_input)
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert require_text(output.content.translated).startswith("<p>译Alpha <em>译Beta</em>")
+        assert any(payload["text_to_translate"].count("[TEXT:") > 1 for payload in text_payloads)
+        assert sum(1 for payload in text_payloads if payload["text_to_translate"].count("[TEXT:") == 1) == 5
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_batches_text_node_fallback_for_large_html(self, mock_get_translator):
-        """translate_step: high-risk large HTML should be split into multiple direct text-node batches."""
+        """translate_step: large HTML should be split into text-node batches only after structure failures."""
         original = "<div>" + "".join(f"<span>Paragraph {i}</span>" for i in range(30)) + "</div>"
         chunk = make_chunk(original=original, xpaths=["/html/body/div"])
         text_payloads = []

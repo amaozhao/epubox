@@ -7,7 +7,11 @@ from agno.workflow import Step, StepInput, StepOutput, Workflow
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString
 
-from engine.agents.verifier import find_untranslated_english_texts, validate_translated_html
+from engine.agents.verifier import (
+    find_untranslated_english_texts,
+    normalize_translated_html_attributes,
+    validate_translated_html,
+)
 from engine.core.logger import engine_logger as logger
 from engine.core.markup import get_markup_parser
 from engine.schemas import Chunk, TranslationStatus
@@ -48,12 +52,16 @@ NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
 TEXT_MARKER_PATTERN = re.compile(r"\[TEXT:\d+\]")
 FROZEN_TAG_PATTERN = re.compile(r"\[TAG:\d+\]")
 FROZEN_TRANSLATION_TAGS = {"img", "br", "hr", "meta", "link"}
+FROZEN_EMPTY_STRUCTURAL_TAGS = {"a", "div", "span"}
+FROZEN_EMPTY_STRUCTURAL_ATTRS = {"aria-label", "class", "epub:type", "id", "name", "role"}
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 MODEL_FORMAT_NEWLINE_ESCAPE_RE = re.compile(
     r"(?:(?<=>)\\n|\\n(?=\s*(?:\[(?:TEXT|NAVTXT):\d+\]|</?[A-Za-z][A-Za-z0-9:_-]*\b|<!--)))"
 )
 STRUCTURE_ERROR_KEYWORDS = (
     "标签属性不一致",
+    "标签结构不一致",
+    "标签名不一致",
     "子标签数量不一致",
     "HTML标签结构错误",
     "冻结标签占位符不一致",
@@ -61,29 +69,6 @@ STRUCTURE_ERROR_KEYWORDS = (
 TEXT_NODE_FALLBACK_UNIT_LIMIT = 8
 TEXT_NODE_FALLBACK_RETRIES = 3
 VALIDATION_ERROR_HISTORY_LIMIT = 4
-DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD = 6
-DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD = 12
-DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD = 8
-DIRECT_TEXT_NODE_PLACEHOLDER_RISK_THRESHOLD = 1
-DIRECT_TEXT_NODE_MATH_TAG_THRESHOLD = 4
-HIGH_RISK_INLINE_TAGS = {
-    "a",
-    "b",
-    "code",
-    "em",
-    "i",
-    "kbd",
-    "q",
-    "s",
-    "small",
-    "span",
-    "strong",
-    "sub",
-    "sup",
-    "u",
-    "var",
-}
-MATHY_INLINE_TAGS = {"sub", "sup"}
 
 
 def is_content_safety_error(error_msg: str = "", status_code: int | None = None) -> bool:
@@ -254,27 +239,6 @@ def _collect_translatable_text_nodes(html: str) -> tuple[BeautifulSoup, list[tup
     return soup, nodes
 
 
-def _should_translate_chunk_via_text_nodes_directly(html: str) -> bool:
-    """Direct text-node translation when inline markup density makes HTML regeneration fragile."""
-    soup, text_nodes = _collect_translatable_text_nodes(html)
-    tags = list(soup.find_all(True))
-    inline_tag_count = sum(1 for tag in tags if str(tag.name).lower() in HIGH_RISK_INLINE_TAGS)
-    math_tag_count = sum(1 for tag in tags if str(tag.name).lower() in MATHY_INLINE_TAGS)
-    placeholder_count = len(SECONDARY_PLACEHOLDER_PATTERN.findall(html))
-
-    if placeholder_count >= DIRECT_TEXT_NODE_PLACEHOLDER_RISK_THRESHOLD and (
-        inline_tag_count >= 4 or math_tag_count >= DIRECT_TEXT_NODE_MATH_TAG_THRESHOLD
-    ):
-        return True
-
-    if len(text_nodes) < DIRECT_TEXT_NODE_TEXT_NODE_THRESHOLD:
-        return False
-
-    return (
-        inline_tag_count >= DIRECT_TEXT_NODE_INLINE_TAG_THRESHOLD or len(tags) >= DIRECT_TEXT_NODE_TOTAL_TAG_THRESHOLD
-    )
-
-
 def _validate_text_node_translation(original: str, translated: str) -> tuple[bool, str]:
     translated = _normalize_missing_leading_text_marker(original, translated)
     original_segments = _extract_text_segments(original)
@@ -376,7 +340,35 @@ async def _translate_with_text_node_fallback(
                 batch_previous_translation = translated
 
         if batch_error_msg:
-            return None, batch_error_msg
+            single_error_msg = None
+            for text_node, _, text in batch:
+                single_marked_text = f"[TEXT:0]{text}"
+                single_error_history = _append_error_history(list(error_history or []), batch_error_msg)
+                single_previous_translation = None
+                single_payload = None
+
+                for _ in range(TEXT_NODE_FALLBACK_RETRIES):
+                    translated = await _call_translator(
+                        single_marked_text,
+                        glossary,
+                        single_previous_translation,
+                        _build_validation_feedback(single_error_history),
+                        mode="text_node",
+                    )
+                    translated = _normalize_missing_leading_text_marker(single_marked_text, translated)
+                    is_valid, validation_error = _validate_text_node_translation(single_marked_text, translated)
+                    if is_valid:
+                        translated_segments = _extract_text_segments(translated)
+                        single_payload = translated_segments[0][1]
+                        single_error_msg = None
+                        break
+                    single_error_msg = validation_error
+                    single_error_history = _append_error_history(single_error_history, validation_error)
+                    single_previous_translation = translated
+
+                if single_payload is None:
+                    return None, single_error_msg or batch_error_msg
+                text_node.replace_with(single_payload)
 
     return str(soup), None
 
@@ -407,12 +399,28 @@ def _apply_corrections_to_text_nodes(html: str, corrections: dict[str, str]) -> 
     return str(soup), replacement_count, len(matched_corrections)
 
 
+def _should_freeze_translation_tag(tag) -> bool:
+    name = str(getattr(tag, "name", "")).lower()
+    if name in FROZEN_TRANSLATION_TAGS:
+        return True
+
+    if name not in FROZEN_EMPTY_STRUCTURAL_TAGS:
+        return False
+    if tag.find(True) is not None:
+        return False
+    if tag.get_text(strip=True):
+        return False
+    return any(attr in tag.attrs for attr in FROZEN_EMPTY_STRUCTURAL_ATTRS)
+
+
 def _freeze_translation_tags(html: str) -> tuple[str, list[tuple[str, str]]]:
     """将高风险空标签整体替换为占位符，避免模型破坏其属性或边界。"""
     soup = BeautifulSoup(html, get_markup_parser(html))
     replacements: list[tuple[str, str]] = []
 
-    for tag in list(soup.find_all(FROZEN_TRANSLATION_TAGS)):
+    for tag in list(soup.find_all(True)):
+        if not _should_freeze_translation_tag(tag):
+            continue
         placeholder = f"[TAG:{len(replacements)}]"
         replacements.append((placeholder, str(tag)))
         tag.replace_with(placeholder)
@@ -537,25 +545,19 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
     last_error_msg = None
     last_translation = None
     error_history: list[str] = []
-    prefer_text_node_directly = chunk.chunk_mode != "nav_text" and _should_translate_chunk_via_text_nodes_directly(
-        original
-    )
 
     for attempt in range(MAX_TRANSLATION_RETRIES):
         translated: str | None = None
         is_valid = False
         error_msg = "翻译未执行"
         try:
-            use_text_node_fallback = prefer_text_node_directly or (
+            use_text_node_fallback = (
                 chunk.chunk_mode != "nav_text"
                 and attempt == MAX_TRANSLATION_RETRIES - 1
                 and _is_structure_validation_error(last_error_msg)
             )
             if use_text_node_fallback:
-                if prefer_text_node_directly and attempt == 0:
-                    logger.info("检测到高风险复杂 chunk，直接执行 text-node translate 调用")
-                else:
-                    logger.info("开始执行 text-node fallback translate 调用")
+                logger.info("开始执行 text-node fallback translate 调用")
                 translated, text_node_error = await _translate_with_text_node_fallback(
                     original,
                     glossary,
@@ -565,6 +567,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
                     is_valid, error_msg = False, text_node_error
                 else:
                     if translated is not None:
+                        translated = normalize_translated_html_attributes(original, translated)
                         is_valid, error_msg = validate_translated_html(original, translated)
                     else:
                         is_valid, error_msg = False, "Translation failed: translated is None"
@@ -596,6 +599,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
                         is_valid, error_msg = False, tag_restore_error
                     else:
                         if translated is not None:
+                            translated = normalize_translated_html_attributes(original, translated)
                             is_valid, error_msg = validate_translated_html(original, translated)
                         else:
                             is_valid, error_msg = False, "translated is None"
@@ -774,6 +778,7 @@ def apply_corrections_step(step_input: StepInput) -> ChunkStepOutput:
     # 后处理：统一词汇和标点
     final_text = final_text.replace("您", "你").replace("大型语言模型", "大语言模型")
     final_text = final_text.replace("。。", "。").replace("，，", "，")
+    final_text = normalize_translated_html_attributes(chunk.original, final_text)
 
     is_valid, error_msg = validate_translated_html(chunk.original, final_text)
     if not is_valid:
