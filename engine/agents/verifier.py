@@ -6,7 +6,7 @@ from enum import Enum
 from typing import List, Optional, Tuple
 
 from bs4 import BeautifulSoup, Tag
-from bs4.element import NavigableString
+from bs4.element import Comment, NavigableString
 
 from engine.core.markup import get_markup_parser
 
@@ -195,7 +195,7 @@ def _looks_like_bibliographic_reference(text: str) -> bool:
     return has_surname_initial and (len(initials) >= 1 or has_author_joiner or comma_count >= 2)
 
 
-UNTRANSLATED_SKIP_TAGS = {"pre", "code", "script", "style"}
+UNTRANSLATED_SKIP_TAGS = {"pre", "code", "math", "script", "style"}
 UNTRANSLATED_CODE_CLASS_MARKERS = ("Code", "pre", "mono", "TheSansMono", "NSAnnotations")
 UNTRANSLATED_NAV_MARKER_PATTERN = re.compile(r"\[NAVTXT:\d+\]")
 UNTRANSLATED_ALLOWED_WORDS = {
@@ -396,6 +396,8 @@ def _ancestor_classes(node: NavigableString) -> str:
 
 
 def _should_skip_untranslated_scan(node: NavigableString) -> bool:
+    if isinstance(node, Comment):
+        return True
     parent = node.parent
     while isinstance(parent, Tag):
         if str(parent.name).lower() in UNTRANSLATED_SKIP_TAGS:
@@ -651,6 +653,32 @@ def _collect_attribute_mismatches(original_elements: list, translated_elements: 
     return mismatches
 
 
+MODEL_SERIALIZATION_ARTIFACT_PATTERNS = (
+    re.compile(r"\\n"),
+    re.compile(r'\{\s*"translation"\s*:'),
+    re.compile(r'"\s*:\s*"'),
+    re.compile(r'"\s*\}+'),
+    re.compile(r'\}+\s*"'),
+    re.compile(r'\}+\s*$'),
+)
+
+
+def _find_visible_model_serialization_artifact(soup: BeautifulSoup) -> str | None:
+    for node in soup.find_all(string=True):
+        if (
+            not isinstance(node, NavigableString)
+            or isinstance(node, Comment)
+            or node.find_parent({"code", "math", "pre", "script", "style"})
+        ):
+            continue
+        text = str(node)
+        for pattern in MODEL_SERIALIZATION_ARTIFACT_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                return match.group(0)
+    return None
+
+
 def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]:
     """
     验证翻译结果的 HTML 结构完整性（chunk 级别）
@@ -676,6 +704,10 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
 
     original_soup = BeautifulSoup(original, get_markup_parser(original))
     translated_soup = BeautifulSoup(translated, get_markup_parser(translated))
+
+    serialization_artifact = _find_visible_model_serialization_artifact(translated_soup)
+    if serialization_artifact:
+        return False, f"疑似模型格式残片: {serialization_artifact!r}"
 
     original_elements = [e for e in original_soup.children if isinstance(e, Tag)]
     translated_elements = [e for e in translated_soup.children if isinstance(e, Tag)]

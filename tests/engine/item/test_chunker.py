@@ -118,6 +118,18 @@ class TestDomChunker:
         assert "[NAVTXT:0]" in chunks[0].original
         assert len(chunks[0].nav_targets) == 1
 
+    def test_nav_file_includes_document_title(self):
+        """NCX 的 docTitle 也是可见导航文本，必须进入翻译 chunk。"""
+        html = (
+            "<ncx><docTitle><text>Book Title and Subtitle</text></docTitle>"
+            '<navMap><navPoint id="ch1"><navLabel><text>Chapter 1</text></navLabel></navPoint></navMap></ncx>'
+        )
+
+        chunks = DomChunker(token_limit=1000).chunk(html, is_nav_file=True)
+
+        assert sum(len(chunk.nav_targets) for chunk in chunks) == 2
+        assert any("Book Title and Subtitle" in chunk.original for chunk in chunks)
+
     def test_large_nav_file_respects_token_limit(self):
         """测试大导航文件会按 token_limit 切分为多个 nav_text chunk。"""
         nav_points = "".join(

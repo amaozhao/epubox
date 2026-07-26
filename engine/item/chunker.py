@@ -121,13 +121,21 @@ class DomChunker:
         return self._pack_nav_units(units)
 
     def _nav_containers(self, soup) -> List[BeautifulSoup]:
+        containers = []
+        doc_title = soup.find("doctitle") or soup.find("docTitle")
+        if doc_title:
+            containers.append(doc_title)
+
         nav_map = soup.find("navmap") or soup.find("navMap")
         if nav_map:
-            return [nav_map]
+            return [*containers, nav_map]
 
         nav_elements = soup.find_all("nav")
         if nav_elements:
-            return nav_elements
+            return [*containers, *nav_elements]
+
+        if containers:
+            return containers
 
         body = soup.find("body")
         return [body or soup]

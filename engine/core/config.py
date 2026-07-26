@@ -13,18 +13,15 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Epubox"
     DEBUG: bool = True
 
-    # 模型提供商配置
-    MODEL_PROVIDER: Literal["mistral", "openai", "deepseek", "kimi", "cr_proxy"] = "mistral"
-
     # OpenAI 配置
     OPENAI_API_KEY: str = "your-api-key-here"
     OPENAI_API_BASE: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4o"
 
-    # Mistral 配置
-    MISTRAL_API_KEY: str = "your-api-key-here"
-    # MISTRAL_MODEL: str = "devstral-small-2505"
-    MISTRAL_MODEL: str = "mistral-medium-latest"
+    # Agnes 配置
+    AGNES_API_KEY: str = ""
+    AGNES_BASE_URL: str = "https://apihub.agnes-ai.com/v1"
+    AGNES_MODEL: str = "agnes-2.0-flash"
 
     # Deepseek引擎配置
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"

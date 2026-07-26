@@ -636,8 +636,8 @@ class TestTranslateStep:
         assert "\\n" not in require_text(output.content.translated)
 
     @patch("engine.agents.workflow.get_translator")
-    async def test_translate_step_preserves_literal_newline_escape_in_content(self, mock_get_translator):
-        """translate_step: literal \\n used as content is not converted into a real newline."""
+    async def test_translate_step_rejects_literal_newline_escape_in_content(self, mock_get_translator):
+        """translate_step: visible literal \\n is treated as model-format contamination."""
         chunk = make_chunk(original="<p>Use newline escapes.</p>")
         mock_translator = MagicMock()
         mock_translator.arun = AsyncMock(
@@ -651,8 +651,8 @@ class TestTranslateStep:
         step_input = MagicMock(input=chunk, additional_data={"glossary": {}})
         output = await translate_step(step_input)
 
-        assert output.content.status == TranslationStatus.TRANSLATED
-        assert output.content.translated == "<p>使用 \\n 表示换行。</p>"
+        assert output.content.status == TranslationStatus.TRANSLATION_FAILED
+        assert output.content.translated == ""
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_keeps_simple_chunk_on_html_mode(self, mock_get_translator):

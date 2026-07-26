@@ -64,10 +64,10 @@ class Builder:
 
         modified = False
 
-        # 1. 修改 <dc:language id="pub-language">xxx</dc:language> 标签（如果有 id）
-        dc_lang_pattern = r'<dc:language\s+id="pub-language"[^>]*>[^<]*</dc:language>'
+        # 1. 修改 <dc:language> 标签并保留原有属性
+        dc_lang_pattern = r"(<dc:language\b[^>]*>)[^<]*(</dc:language>)"
         if re.search(dc_lang_pattern, content):
-            content = re.sub(dc_lang_pattern, f'<dc:language id="pub-language">{self.language}</dc:language>', content)
+            content = re.sub(dc_lang_pattern, rf"\g<1>{self.language}\g<2>", content)
             modified = True
 
         # 2. 修改 <meta id="meta-language" property="dcterms:language">xxx</meta> 标签

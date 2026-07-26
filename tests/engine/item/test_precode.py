@@ -279,6 +279,42 @@ class TestPreCodeExtractor:
         assert "[PRE:" not in result
         assert extractor.preserved_pre == []
 
+    def test_extract_prose_list_with_inline_code_is_not_protected_as_pre(self):
+        """说明型列表中的内联 code 不应导致整张列表按 PRE 保护。"""
+        html = (
+            "<ul>"
+            "<li><code>gradio</code>: Used to create an interactive web UI.</li>"
+            "<li><code>radius</code>: The radius of the circular neighborhood.</li>"
+            "</ul><p>text</p>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert result == (
+            "<ul>"
+            "<li>[CODE:0]: Used to create an interactive web UI.</li>"
+            "<li>[CODE:1]: The radius of the circular neighborhood.</li>"
+            "</ul><p>text</p>"
+        )
+        assert extractor.preserved_pre == []
+
+    def test_extract_prose_table_with_inline_code_is_not_protected_as_pre(self):
+        """说明型表格中的内联 code 不应导致整张表格按 PRE 保护。"""
+        html = (
+            "<table>"
+            "<tr><th>Method</th><th>When to use it</th></tr>"
+            "<tr><td><code>nearest</code></td><td>Use it for discrete masks.</td></tr>"
+            "<tr><td><code>linear</code></td><td>Use it for continuous images.</td></tr>"
+            "</table><p>text</p>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:" not in result
+        assert result.count("[CODE:") == 2
+        assert "Use it for discrete masks." in result
+        assert extractor.preserved_pre == []
+
     def test_extract_navigation_section_is_not_protected_as_pre(self):
         """测试目录型 section/nav 不会被误判为整块 PRE。"""
         html = (
@@ -340,6 +376,91 @@ class TestPreCodeExtractor:
 
         assert "[PRE:" not in result
         assert "This chapter is a recap" in result
+        assert extractor.preserved_pre == []
+
+    def test_extract_generic_prose_div_with_inline_code_is_not_protected_as_pre(self):
+        """无章节语义标记的正文 div 也不能因内联 code 被整块保护。"""
+        html = (
+            '<div id="_idContainer3066">'
+            "<h1>Generative AI for Image Processing</h1>"
+            "<p>This chapter explains image processing techniques and practical "
+            "computer vision workflows for Python developers.</p>"
+            "<p>We use <code>load_image()</code> to open an image while explaining "
+            "every operation clearly.</p>"
+            "<p>We use <code>transform()</code> to modify pixels while preserving "
+            "important visual details.</p>"
+            "<p>We use <code>save_image()</code> to write the result while discussing "
+            "the relevant file formats.</p>"
+            "</div>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:" not in result
+        assert "This chapter explains image processing" in result
+        assert result.count("[CODE:") == 3
+        assert extractor.preserved_pre == []
+
+    def test_extract_chapter_div_with_code_word_in_id_is_not_protected_as_pre(self):
+        """章节标题生成的 id 含 code/source 时，不应把整章误判为代码块。"""
+        html = (
+            '<div class="chapter" id="ch02_how_code_crosses_over">'
+            "<h1>How Code Crosses Over</h1>"
+            "<p>Developers validate intent in production after every deployment.</p>"
+            "<p>Operators inspect runtime behavior and compare the observed result.</p>"
+            "</div>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:" not in result
+        assert "Developers validate intent" in result
+        assert extractor.preserved_pre == []
+
+    def test_extract_generic_section_with_code_word_in_id_is_not_protected_as_pre(self):
+        """普通 section 的 id 含 code/source 时，也不能把正文整块保护。"""
+        html = (
+            '<section id="source-code-guide">'
+            "<h1>Source Code Guide</h1>"
+            "<p>Use <code>foo()</code> and <code>bar()</code> to configure the service safely.</p>"
+            "</section>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:" not in result
+        assert "configure the service safely" in result
+        assert result.count("[CODE:") == 2
+
+    def test_extract_figure_caption_is_translatable_while_inline_code_is_protected(self):
+        """图注属于正文，不能因图中含 code 就把整个 figure 保护为 PRE。"""
+        html = (
+            "<figure><img src='trace.png'/>"
+            "<figcaption>The trace shows <code>request.user_id</code> and "
+            "<code>request.duration</code> for each span.</figcaption>"
+            "</figure>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:" not in result
+        assert "The trace shows" in result
+        assert result.count("[CODE:") == 2
+
+    def test_extract_single_paragraph_note_div_is_not_protected_as_pre(self):
+        """只有一个正文段落的 note div 也不能被符号和短语误判为代码块。"""
+        html = (
+            '<div class="note"><p>'
+            "A <strong>document</strong> is one unit of text; a "
+            "<strong>corpus</strong> is a collection of documents, and a "
+            "<strong>vocabulary</strong> is a set of distinct tokens."
+            "</p></div>"
+        )
+        extractor = PreCodeExtractor()
+        result = extractor.extract(html)
+
+        assert "[PRE:" not in result
+        assert "a collection of documents" in result
         assert extractor.preserved_pre == []
 
     def test_extract_prose_division_with_code_listing_is_not_protected_as_pre(self):

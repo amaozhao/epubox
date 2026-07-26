@@ -200,8 +200,8 @@ class Orchestrator:
         suffix = "-cn-incomplete.epub" if self._has_incomplete_output(book) else "-cn.epub"
         return os.path.join(os.path.dirname(book.path), f"{book.name}{suffix}")
 
-    def _apply_final_untranslated_gate(self, book) -> int:
-        """Scan all final chunk translations and fail chunks with residual natural English."""
+    def _apply_final_untranslated_gate(self, book, output_extract_dir: str | None = None) -> int:
+        """Scan chunk translations and rendered output for residual natural English."""
         failed_count = 0
         self.final_untranslated_review_findings = []
         for item in book.items:
@@ -216,7 +216,9 @@ class Orchestrator:
                     chunk.translated,
                     split_nav_payloads=chunk.chunk_mode == "nav_text",
                 )
-                fail_findings = [finding for finding in findings if finding.decision == EnglishResidualDecision.FAIL]
+                fail_findings = [
+                    finding for finding in findings if finding.decision == EnglishResidualDecision.FAIL
+                ]
                 review_findings = [
                     finding for finding in findings if finding.decision == EnglishResidualDecision.REVIEW
                 ]
@@ -240,6 +242,51 @@ class Orchestrator:
                 logger.warning(
                     f"Chunk '{chunk.name}' 最终整书扫描发现疑似残留未翻译英文，已标记为 TRANSLATION_FAILED: "
                     f"{fail_findings[0].text[:160]}"
+                )
+
+        if output_extract_dir:
+            for item in book.items:
+                relative_path = os.path.relpath(item.path, book.extract_path)
+                output_item_path = os.path.join(output_extract_dir, relative_path)
+                if not os.path.isfile(output_item_path):
+                    continue
+                item_basename = os.path.basename(item.id).lower()
+                if item_basename.startswith("index") and item.preserved_pre:
+                    continue
+                with open(output_item_path, "r", encoding="utf-8") as handle:
+                    rendered_html = handle.read()
+                is_nav_item = item_basename.startswith("toc") or item_basename.endswith(
+                    ("nav.xhtml", "nav.html", ".ncx")
+                )
+                findings = classify_untranslated_english_texts(
+                    rendered_html,
+                    split_nav_payloads=is_nav_item,
+                )
+                fail_findings = [
+                    finding
+                    for finding in findings
+                    if finding.decision == EnglishResidualDecision.FAIL
+                    or (
+                        not is_nav_item
+                        and finding.decision == EnglishResidualDecision.REVIEW
+                        and not any("\u4e00" <= char <= "\u9fff" for char in finding.text)
+                    )
+                ]
+                if not fail_findings:
+                    continue
+                failed_count += 1
+                finding = fail_findings[0]
+                self.final_untranslated_review_findings.append(
+                    {
+                        "file": item.id,
+                        "chunk_name": None,
+                        "path": output_item_path,
+                        "text": finding.text[:240],
+                        "reason": f"rendered_output:{finding.reason}",
+                    }
+                )
+                logger.warning(
+                    f"成品文件 '{item.id}' 仍含未进入 chunk 的英文正文，阻止打包: {finding.text[:160]}"
                 )
         return failed_count
 
@@ -350,7 +397,7 @@ class Orchestrator:
         if writeback_state_changed:
             parser.save_json(book)
 
-        final_gate_failed_count = self._apply_final_untranslated_gate(book)
+        final_gate_failed_count = self._apply_final_untranslated_gate(book, output_extract_dir)
         if final_gate_failed_count:
             logger.warning(f"最终整书扫描拦截 {final_gate_failed_count} 个疑似漏译 chunk。")
             parser.save_json(book)
@@ -392,7 +439,7 @@ class Orchestrator:
         # 打印最终统计
         logger.info(str(stats))
 
-        if self._has_incomplete_output(book):
+        if final_gate_failed_count or self._has_incomplete_output(book):
             logger.warning("检测到未完成或回写失败的 chunk，跳过 EPUB 打包。")
             return None
 

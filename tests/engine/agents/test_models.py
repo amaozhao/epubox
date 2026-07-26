@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from agno.models.message import Message
-from agno.models.mistral import MistralChat
+from agno.models.openai.like import OpenAILike
 from agno.models.response import ModelResponse
 
 from engine.agents.models import build_primary_model, fallback_model
@@ -47,36 +47,21 @@ class TestStreamingOpenAILike:
 
 
 class TestBuildPrimaryModel:
-    def test_build_primary_model_ignores_proxy_provider_and_stays_on_mistral(self, monkeypatch):
+    def test_build_primary_model_uses_agnes_openai_compatible_api(self, monkeypatch):
         fake_settings = SimpleNamespace(
-            MODEL_PROVIDER="cr_proxy",
-            CR_PROXY_MODEL="gpt-5.3-codex-spark",
-            CR_PROXY_API_KEY="proxy-key",
-            CR_PROXY_BASE_URL="http://proxy.example.com/api/v1",
-            MISTRAL_MODEL="mistral-medium-latest",
-            MISTRAL_API_KEY="mistral-key",
+            AGNES_MODEL="agnes-2.0-flash",
+            AGNES_API_KEY="agnes-key",
+            AGNES_BASE_URL="https://apihub.agnes-ai.com/v1",
         )
         monkeypatch.setattr("engine.agents.models.settings", fake_settings)
 
         model = build_primary_model()
 
-        assert isinstance(model, MistralChat)
-        assert model.id == "mistral-medium-latest"
-
-    def test_build_primary_model_defaults_to_mistral(self, monkeypatch):
-        fake_settings = SimpleNamespace(
-            MODEL_PROVIDER="mistral",
-            CR_PROXY_MODEL="gpt-5.3-codex-spark",
-            CR_PROXY_API_KEY="proxy-key",
-            CR_PROXY_BASE_URL="http://proxy.example.com/api/v1",
-            MISTRAL_MODEL="mistral-medium-latest",
-            MISTRAL_API_KEY="mistral-key",
-        )
-        monkeypatch.setattr("engine.agents.models.settings", fake_settings)
-
-        model = build_primary_model()
-
-        assert isinstance(model, MistralChat)
+        assert isinstance(model, OpenAILike)
+        assert model.id == "agnes-2.0-flash"
+        assert model.api_key == "agnes-key"
+        assert model.base_url == "https://apihub.agnes-ai.com/v1"
+        assert model.provider == "Agnes"
 
 
 class TestFallbackModel:

@@ -29,6 +29,25 @@ class TestValidateTranslatedHtmlTagErrors:
         is_valid, error = validate_translated_html(original, translated)
         assert is_valid
 
+    def test_validate_rejects_visible_model_serialization_artifacts(self):
+        """正文中的 JSON 包装、转义换行和尾部花括号必须被拦截。"""
+        original = "<p>Profit stream</p>"
+        corrupted = [
+            '<p>利润流（百万美元）"}\n}</p>',
+            '<p>容量136\\n": "136\\n", "</p>',
+            '<p>{"translation": "35"}</p>',
+        ]
+
+        for translated in corrupted:
+            is_valid, error = validate_translated_html(original, translated)
+            assert not is_valid
+            assert "模型格式残片" in error
+
+        safe_original = '<button onclick="if(x){y()}">Long description</button>'
+        safe_translation = '<button onclick="if(x){y()}">长描述</button>'
+        is_valid, error = validate_translated_html(safe_original, safe_translation)
+        assert is_valid, error
+
     def test_validate_catches_unescaped_ampersand(self):
         """测试能检测未转义的 & 字符（XML 格式错误）"""
         original = "<p>Tom & Jerry</p>"
@@ -105,6 +124,18 @@ class TestValidateTranslatedHtmlTagErrors:
         assert find_untranslated_english_texts(html) == [
             "The client software will automatically retrieve the new URL."
         ]
+
+    def test_classifier_ignores_html_comments(self):
+        """HTML 注释不是可见正文，不应被判定为漏译。"""
+        html = "<!-- PROD: This internal note must remain in English. --><p>这是正文。</p>"
+
+        assert classify_untranslated_english_texts(html) == []
+
+    def test_classifier_ignores_mathml_text(self):
+        """MathML 由 chunker 排除，公式内的英文说明也不参与漏译扫描。"""
+        html = "<math><mtext>where x is observed and y is expected</mtext></math>"
+
+        assert classify_untranslated_english_texts(html) == []
 
     def test_classifier_ignores_bibliographic_citations_in_chinese_text(self):
         """测试中文段落中的作者年份引用不会进入复核区。"""

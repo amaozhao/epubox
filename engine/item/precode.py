@@ -220,7 +220,6 @@ class PreCodeExtractor:
         block_like_tags = {
             "blockquote",
             "div",
-            "figure",
             "section",
             "article",
             "aside",
@@ -236,7 +235,7 @@ class PreCodeExtractor:
         if name not in block_like_tags:
             return False
 
-        if name in {"section", "article"} and self._is_epub_prose_container(element):
+        if self._is_epub_prose_container(element):
             return False
 
         score, _ = self._score_code_like_container(element)
@@ -250,10 +249,41 @@ class PreCodeExtractor:
         codeish_chunks = sum(1 for chunk in text_chunks if self._is_codeish_text_chunk(chunk))
         prose_runs = sum(1 for chunk in text_chunks if len(self._prose_word_re.findall(chunk)) >= 5)
 
+        prose_blocks = element.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6"])
+        prose_block_count = len(prose_blocks)
+        has_prose_block = any(len(self._prose_word_re.findall(block.get_text(" ", strip=True))) >= 4 for block in prose_blocks)
+        if (
+            name in {"section", "article", "aside"}
+            and tt_count == 0
+            and has_prose_block
+        ):
+            return False
+        if (
+            metadata_hits == 0
+            and tt_count == 0
+            and (
+                prose_runs > codeish_chunks
+                or (name in {"div", "section", "article", "aside"} and prose_block_count >= 1)
+            )
+        ):
+            return False
+
         if name in {"section", "article", "aside"}:
             structural_anchor = metadata_hits > 0 or tt_count > 0
             return structural_anchor and codeish_chunks >= max(2, prose_runs)
 
+        # Lists and tables frequently pair an inline identifier with prose
+        # explaining it.  A descendant <code> tag alone does not make the
+        # surrounding structure a code listing; recurse so only the inline
+        # identifiers are protected.  Real exported listings still have an
+        # explicit code-like class/id or <tt> structure.
+        if name in {"ul", "ol", "table", "tbody", "thead", "tr", "td", "th"}:
+            if metadata_hits == 0 and tt_count == 0:
+                return False
+
+        # A generic EPUB body wrapper is often a plain ``div`` containing many
+        # inline ``code`` elements.  Those descendants are not evidence that the
+        # whole wrapper is a code listing when prose still dominates the block.
         strong_anchor = metadata_hits > 0 or tt_count > 0 or semantic_code_tag_count > 0
         if strong_anchor:
             return True
@@ -290,7 +320,9 @@ class PreCodeExtractor:
             return True
         if any(marker in epub_type.split() for marker in epub_markers):
             return True
-        return any(marker in class_text for marker in ("chapter", "bodymatter", "frontmatter", "backmatter"))
+        return any(marker in class_text for marker in ("chapter", "bodymatter", "frontmatter", "backmatter")) or bool(
+            re.search(r"(?:^|\s)sect\d+(?:\s|$)", class_text)
+        )
 
     def _score_code_like_container(self, element) -> tuple[int, list[str]]:
         score = 0

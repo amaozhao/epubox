@@ -368,6 +368,114 @@ class TestOrchestrator:
             }
         ]
 
+    def test_final_untranslated_gate_scans_rendered_html_outside_chunks(self, orchestrator, tmp_path):
+        """成品正文即使没有对应 chunk，也必须被最终门禁拦截。"""
+        chunk = Chunk(
+            name="title",
+            original="<title>Book</title>",
+            translated="<title>书名</title>",
+            tokens=2,
+            status=TranslationStatus.COMPLETED,
+            xpaths=["/html/head/title"],
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[
+                EpubItem(
+                    id="chapter.html",
+                    path="/mock/path/test_book/chapter.html",
+                    content="<html><head><title>Book</title></head><body></body></html>",
+                    chunks=[chunk],
+                )
+            ],
+        )
+        (tmp_path / "chapter.html").write_text(
+            "<html><head><title>书名</title></head><body>"
+            "<p>This entire chapter body was never extracted into a translation chunk.</p>"
+            "</body></html>",
+            encoding="utf-8",
+        )
+
+        failed_count = orchestrator._apply_final_untranslated_gate(book, str(tmp_path))
+
+        assert failed_count == 1
+        assert chunk.status == TranslationStatus.COMPLETED
+        assert orchestrator.final_untranslated_review_findings[-1]["chunk_name"] is None
+
+    def test_final_untranslated_gate_blocks_rendered_english_only_review(self, orchestrator, tmp_path):
+        """未进入 chunk 的纯英文短标题即使只到 REVIEW，也必须阻止打包。"""
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[
+                EpubItem(
+                    id="chapter.html",
+                    path="/mock/path/test_book/chapter.html",
+                    content="<html><body></body></html>",
+                    chunks=[],
+                )
+            ],
+        )
+        (tmp_path / "chapter.html").write_text(
+            "<html><body><h1>The Origins of Observability</h1></body></html>",
+            encoding="utf-8",
+        )
+
+        failed_count = orchestrator._apply_final_untranslated_gate(book, str(tmp_path))
+
+        assert failed_count == 1
+        assert orchestrator.final_untranslated_review_findings[-1]["reason"].startswith("rendered_output:")
+
+    def test_final_untranslated_gate_allows_author_names_in_rendered_navigation(self, orchestrator, tmp_path):
+        """目录中的作者姓名可保留原文，不应作为短标题漏译阻断。"""
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[
+                EpubItem(
+                    id="toc01.html",
+                    path="/mock/path/test_book/toc01.html",
+                    content="<html><body></body></html>",
+                    chunks=[],
+                )
+            ],
+        )
+        (tmp_path / "toc01.html").write_text(
+            "<html><body><a>Charity Majors</a></body></html>",
+            encoding="utf-8",
+        )
+
+        assert orchestrator._apply_final_untranslated_gate(book, str(tmp_path)) == 0
+
+    def test_final_untranslated_gate_skips_deliberately_preserved_index(self, orchestrator, tmp_path):
+        """索引正文由 PRE 原样保留，不应被成品漏译门禁误判。"""
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[
+                EpubItem(
+                    id="EPUB/Index.xhtml",
+                    path="/mock/path/test_book/EPUB/Index.xhtml",
+                    content="<html><body><section><h1>Index</h1></section></body></html>",
+                    chunks=[],
+                    preserved_pre=["<section>automated GenAI tasks, for Gmail account</section>"],
+                )
+            ],
+        )
+        output = tmp_path / "EPUB" / "Index.xhtml"
+        output.parent.mkdir()
+        output.write_text(
+            "<html><body><section>automated GenAI tasks, for Gmail account</section></body></html>",
+            encoding="utf-8",
+        )
+
+        assert orchestrator._apply_final_untranslated_gate(book, str(tmp_path)) == 0
+
     # --- 测试 translate_epub 方法 ---
     @pytest.mark.asyncio
     @patch.object(Parser, "parse", new_callable=MagicMock)

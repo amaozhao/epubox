@@ -117,7 +117,7 @@ class TestModifyContentOpf:
         opf_content = """<?xml version="1.0"?>
 <package version="2.0">
     <metadata>
-        <dc:language id="pub-language">en</dc:language>
+        <dc:language id="en_language">en-us</dc:language>
     </metadata>
 </package>"""
         opf_path = tmp_path / "content.opf"
@@ -128,7 +128,7 @@ class TestModifyContentOpf:
         assert result is True
 
         content = opf_path.read_text()
-        assert 'id="pub-language">' in content
+        assert '<dc:language id="en_language">zh</dc:language>' in content
 
     def test_opf_with_meta_language_tag(self, tmp_path):
         """测试修改meta language标签"""
