@@ -84,10 +84,13 @@ def generate_glossary(
         typer.echo(f"指定输出路径: {output_path}")
 
     extractor = GlossaryExtractor()
-    extractor.run(
+    generated = extractor.run(
         epub_path=str(epub_path),
         output_path=str(output_path) if output_path else None,
     )
+    if not generated:
+        typer.echo("术语表未生成；详情请查看上方日志。", err=True)
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

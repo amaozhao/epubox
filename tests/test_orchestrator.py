@@ -301,7 +301,9 @@ class TestOrchestrator:
         assert failed_count == 1
         assert chunk.status == TranslationStatus.TRANSLATION_FAILED
         assert chunk.translated is None
-        assert orchestrator.final_untranslated_review_findings[0]["rejected_translation"] == f"<p>{translated_text}</p>"
+        assert (
+            orchestrator.final_untranslated_review_findings[0]["rejected_translation"] == f"<p>{translated_text}</p>"
+        )
 
     def test_invalid_completed_chunks_are_requeued(self, orchestrator):
         chunk = Chunk(
@@ -614,10 +616,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_successful_translation(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -632,7 +632,6 @@ class TestOrchestrator:
         """
         # 模拟术语表加载（避免文件 I/O）
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         # 定义测试数据：一个包含三个 EpubItem，其中两个需要翻译的 EpubBook 实例
         mock_chunk1 = Chunk(
@@ -717,10 +716,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_skips_translated_chunks(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -736,7 +733,6 @@ class TestOrchestrator:
         """
         # 模拟术语表加载（避免文件 I/O）
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         # 模拟 Parser 的行为
         mock_parser_parse.return_value = mock_book
@@ -769,10 +765,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_handles_errors(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -788,7 +782,6 @@ class TestOrchestrator:
         """
         # 模拟术语表加载（避免文件 I/O）
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         # 模拟 Parser 的行为
         mock_parser_parse.return_value = mock_book
@@ -818,10 +811,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_retries_untranslated_chunks_on_rerun(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -833,7 +824,6 @@ class TestOrchestrator:
     ):
         """测试重跑时会重新处理之前标记为 UNTRANSLATED 的 chunk。"""
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         untranslated_chunk = Chunk(
             name="1",
@@ -886,10 +876,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_skips_empty_chunks(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -905,7 +893,6 @@ class TestOrchestrator:
         """
         # 模拟术语表加载（避免文件 I/O）
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         # 模拟 Parser 的行为
         mock_parser_parse.return_value = mock_book
@@ -939,10 +926,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_skips_epub_build_for_failed_chunks(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -954,7 +939,6 @@ class TestOrchestrator:
     ):
         """测试存在失败 chunk 时不会生成 EPUB 文件。"""
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         failed_chunk = Chunk(
             name="1",
@@ -1000,10 +984,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_final_gate_blocks_residual_untranslated_english(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -1015,7 +997,6 @@ class TestOrchestrator:
     ):
         """测试最终整书扫描会阻止残留英文进入正常 EPUB 输出。"""
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         leaked_chunk = Chunk(
             name="1",
@@ -1064,10 +1045,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_preserves_writeback_failed_status_when_recovery_rerun_errors(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -1078,7 +1057,6 @@ class TestOrchestrator:
     ):
         """测试 WRITEBACK_FAILED 恢复重跑异常时不会把 checkpoint 乐观写成 translated。"""
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         recovery_chunk = Chunk(
             name="1",
@@ -1135,10 +1113,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_persists_writeback_failed_status_to_checkpoint(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -1149,7 +1125,6 @@ class TestOrchestrator:
     ):
         """测试回写失败后的 WRITEBACK_FAILED 状态会被再次保存到 checkpoint。"""
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         translated_chunk = Chunk(
             name="1",
@@ -1209,10 +1184,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_reports_writeback_failed_chunks_for_manual_followup(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -1223,7 +1196,6 @@ class TestOrchestrator:
     ):
         """测试回写失败的 chunk 会进入手动报告并输出 incomplete 文件。"""
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         translated_chunk = Chunk(
             name="1",
@@ -1289,10 +1261,8 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
-    @patch("engine.orchestrator.GlossaryExtractor")
     async def test_translate_epub_logs_writeback_failures_as_errors(
         self,
-        mock_glossary_extractor,
         mock_glossary_loader,
         mock_get_translator_workflow,
         mock_shutil,
@@ -1303,7 +1273,6 @@ class TestOrchestrator:
     ):
         """测试回写失败会体现在最终统计日志里，而不是仍被记为成功。"""
         mock_glossary_loader.return_value.load.return_value = {}
-        mock_glossary_extractor.return_value.extract_from_epub.return_value = {}
 
         translated_chunk = Chunk(
             name="1",

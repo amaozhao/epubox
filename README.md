@@ -52,6 +52,14 @@ python main.py generate-glossary ./book.epub
 
 编辑生成的 `glossary/<书名>.json`，为需要统一的术语填写译法。非空条目会被锁定，长短语优先于其中的单词；空白候选不会影响翻译。术语表修改后再次运行翻译，受影响的旧 chunk 会自动重译。
 
+术语表生成是可选功能，普通翻译不会自动联网下载 NLTK 数据。首次使用该命令前，请在可信网络或离线数据源中为本地环境准备：
+
+```bash
+.venv/bin/python -m nltk.downloader punkt_tab stopwords averaged_perceptron_tagger_eng
+```
+
+受限网络可将预下载数据目录通过 `NLTK_DATA=/path/to/nltk_data` 提供给程序；不要为了下载而关闭 NLTK 的代理安全检查。
+
 ## 工作流程
 
 ```

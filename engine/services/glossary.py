@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import re
-import sys
 from typing import Any, Dict, cast
 
 import ebooklib
@@ -34,26 +33,37 @@ class GlossaryExtractor:
 
     # 3. 最终、最全面的通用/示例词黑名单
     GENERIC_BLACKLIST = GENERIC_BLACKLIST
+    REQUIRED_NLTK_DATA = {
+        "tokenizers/punkt_tab/english/": "punkt_tab",
+        "corpora/stopwords/": "stopwords",
+        "taggers/averaged_perceptron_tagger_eng/": "averaged_perceptron_tagger_eng",
+    }
 
-    def _ensure_nltk_data(self):
-        """确保运行所需的所有NLTK数据包都已下载。"""
-        required_packages = ["punkt", "stopwords", "averaged_perceptron_tagger"]
-        try:
-            for package in required_packages:
-                nltk.download(package, quiet=True, raise_on_error=True)
-        except Exception as e:
-            logging.error(f"❌ 下载NLTK核心数据包时失败: {e}", exc_info=False)
-            logging.error("   请检查您的网络连接。程序无法继续。")
-            sys.exit(1)
+    def _ensure_nltk_data(self) -> bool:
+        """只检查本地资源；应用运行时绝不联网下载。"""
+        missing = []
+        for resource, package in self.REQUIRED_NLTK_DATA.items():
+            try:
+                nltk.data.find(resource)
+            except LookupError:
+                missing.append(package)
+        if missing:
+            logging.warning(
+                "缺少可选 NLTK 数据，术语表生成已禁用；普通翻译不受影响。"
+                f"请在可信网络中预装: python -m nltk.downloader {' '.join(missing)}"
+            )
+            return False
+        return True
 
     def __init__(self):
         logging.info("正在初始化 GlossaryExtractor (方案: 终极版)...")
-        self._ensure_nltk_data()
-        stop_words_set = set(nltk.corpus.stopwords.words("english"))
+        self.available = self._ensure_nltk_data()
+        stop_words_set = set(nltk.corpus.stopwords.words("english")) if self.available else set()
         self.forbidden_words = stop_words_set.union(self.GENERIC_BLACKLIST)
         self.grammar = r"NP: {<JJ.*>*<NN.*>+}"
         self.chunker = RegexpParser(self.grammar)
-        logging.info("✅ Extractor 初始化成功。")
+        if self.available:
+            logging.info("✅ Extractor 初始化成功。")
 
     def _is_valid_term(self, term: str) -> bool:
         """对单个候选术语进行多层强力规则校验。"""
@@ -98,6 +108,8 @@ class GlossaryExtractor:
 
     def _get_all_unique_terms(self, documents: list[str], top_n: int = 200) -> list[str]:
         """结合名词短语提取、TF-IDF评分和强力规则过滤。"""
+        if not self.available:
+            return []
         logging.info("🔍 [阶段2/3] 正在提取候选短语并进行强力过滤...")
         full_text = " ".join(documents)
         sentences = nltk.sent_tokenize(full_text)
@@ -132,8 +144,11 @@ class GlossaryExtractor:
         logging.info(f"   最终结果: 筛选出 Top {len(final_terms)} 个高质量术语。")
         return sorted(final_terms)
 
-    def run(self, epub_path: str, output_path: str | None = None):
+    def run(self, epub_path: str, output_path: str | None = None) -> bool:
         """执行完整的术语提取流程。"""
+        if not self.available:
+            logging.warning("术语表未生成：请先安装日志中列出的 NLTK 数据包。")
+            return False
         logging.info(f"🚀 开始处理EPUB文件: {os.path.basename(epub_path)}")
         if output_path is None:
             glossary_dir = "glossary"
@@ -147,11 +162,11 @@ class GlossaryExtractor:
                 os.makedirs(output_dir, exist_ok=True)
         documents = self._extract_text_from_epub(epub_path)
         if not documents:
-            return
+            return False
         all_terms = self._get_all_unique_terms(documents)
         if not all_terms:
             logging.warning("⚠️ 未能生成候选术语列表。流程终止。")
-            return
+            return False
         existing_glossary = {}
         if os.path.exists(output_path):
             try:
@@ -183,11 +198,15 @@ class GlossaryExtractor:
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(dict(sorted(final_glossary.items())), f, indent=4, ensure_ascii=False)
             logging.info(f"\n✅ 术语表已成功更新并保存到: '{output_path}'")
+            return True
         except IOError as e:
             logging.error(f"❌ 无法写入文件 '{output_path}': {e}")
+            return False
 
     def extract_from_epub(self, epub_path: str) -> Dict[str, str]:
         """从EPUB提取术语并返回字典（不保存文件）"""
+        if not self.available:
+            return {}
         documents = self._extract_text_from_epub(epub_path)
         if not documents:
             return {}

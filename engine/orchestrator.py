@@ -16,7 +16,7 @@ from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
 from engine.epub import Builder, DomReplacer, Parser
 from engine.schemas import Chunk, TranslationStatus
-from engine.services.glossary import GlossaryExtractor, GlossaryLoader
+from engine.services.glossary import GlossaryLoader
 
 
 # 翻译结果统计
@@ -417,18 +417,11 @@ class Orchestrator:
         report_path = os.path.join(os.path.dirname(book.path), "manual_translation_report.json")
         self._apply_manual_translations_to_book(book, report_path)
 
-        # 加载或自动生成术语表
+        # 术语表是可选输入；普通翻译绝不为此联网或中止。
         loader = GlossaryLoader()
         glossary = loader.load(epub_path)
         if not glossary:
-            glossary_path = os.path.join(
-                loader.glossary_dir,
-                f"{os.path.splitext(os.path.basename(epub_path))[0]}.json",
-            )
-            if not os.path.exists(glossary_path):
-                logger.info("术语表为空，生成可编辑草稿中...")
-                GlossaryExtractor().run(epub_path)
-            logger.warning("本次没有锁定术语；请填写 glossary 目录中的草稿后重跑以获得书内术语一致性。")
+            logger.warning("未找到有效术语表，将继续翻译；需要草稿时请单独运行 generate-glossary 命令。")
 
         requeued = self._requeue_invalid_completed_chunks(book, glossary)
         if requeued:
