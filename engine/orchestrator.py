@@ -71,6 +71,38 @@ class Orchestrator:
         self.replacer = DomReplacer()
         self.final_untranslated_review_findings: list[dict] = []
 
+    @staticmethod
+    def _language_code(target_language: str) -> str:
+        normalized = target_language.strip().lower().replace("_", "-")
+        known = {
+            "chinese": "zh-CN",
+            "simplified chinese": "zh-CN",
+            "zh": "zh-CN",
+            "zh-cn": "zh-CN",
+            "traditional chinese": "zh-TW",
+            "zh-tw": "zh-TW",
+            "english": "en",
+            "french": "fr",
+            "german": "de",
+            "spanish": "es",
+            "japanese": "ja",
+            "korean": "ko",
+        }
+        if normalized in known:
+            return known[normalized]
+        parts = normalized.split("-")
+        if 2 <= len(parts[0]) <= 3 and parts[0].isalpha() and all(part.isalnum() for part in parts[1:]):
+            canonical = [parts[0].lower()]
+            for part in parts[1:]:
+                if len(part) == 2 and part.isalpha():
+                    canonical.append(part.upper())
+                elif len(part) == 4 and part.isalpha():
+                    canonical.append(part.title())
+                else:
+                    canonical.append(part.lower())
+            return "-".join(canonical)
+        return "und"
+
     def _save_manual_translation_report(
         self,
         manual_chunks: list,
@@ -362,7 +394,13 @@ class Orchestrator:
                 )
         return failed_count
 
-    async def translate_epub(self, epub_path: str, limit: int = 3000, target_language: str = "Chinese") -> str | None:
+    async def translate_epub(
+        self,
+        epub_path: str,
+        limit: int = 3000,
+        target_language: str = "Chinese",
+        preserve_fonts: bool = False,
+    ) -> str | None:
         """
         翻译给定路径的 EPUB 文件。
 
@@ -525,6 +563,11 @@ class Orchestrator:
 
         # 从输出目录构建 EPUB
         output_path = self._get_output_path(book)
-        builder = Builder(output_extract_dir, output_path)
+        builder = Builder(
+            output_extract_dir,
+            output_path,
+            language=self._language_code(target_language),
+            optimize_fonts=not preserve_fonts,
+        )
         builder.build()
         return output_path

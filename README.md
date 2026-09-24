@@ -9,6 +9,7 @@
 - **二级占位符**：`<pre>`/`<code>`/`<style>` 标签按原子块单独保护；命中后整体替换为占位符，不再递归展开内部子树
 - **断点续传**：每个 chunk 翻译后即时保存 JSON，中断后可继续
 - **智能校对**：翻译后自动校对，修正错词和表达
+- **Kindle 字体优化**：可重排书使用设备默认中文字体，并安全删除无引用字体
 - **多格式支持**：支持 NCX（toc.ncx）和 XHTML（nav.xhtml）两种导航文件格式
 
 ## 安装
@@ -37,6 +38,12 @@ python main.py translate ./path/to/book.epub
 python main.py translate ./book.epub --language Chinese --limit 1200
 ```
 
+默认会为可重排 EPUB 设置 `zh-CN`，使用设备字体并安全剪枝无引用字体。固定版式、加密字体、PUA/icon、SVG/MathML 或无法安全解析的样式会自动保留。需要完整保留原字体时使用：
+
+```bash
+python main.py translate ./book.epub --preserve-fonts
+```
+
 ### 生成术语表
 
 ```bash
@@ -57,6 +64,7 @@ EPUB 解析 → 标签替换为 [idN] → 分块 → LLM 翻译 → 校对修正
 4. **自动校对**：修正错词、统一词汇（"您"→"你"）
 5. **质量门禁**：拦截重复退化、术语漂移和残留英文
 6. **精准恢复**：将 `[idN]` 恢复为原始标签
+7. **字体处理**：设置中文语言、使用设备字体并删除可证明未引用的字体
 
 ## 配置
 

@@ -1,9 +1,59 @@
 import os
+import xml.etree.ElementTree as ET
 import zipfile
 
 import pytest
 
 from engine.epub.builder import Builder
+
+
+def make_font_epub(tmp_path, *, fixed: bool = False, risky_content: str = "", encrypted: bool = False):
+    root = tmp_path / "book"
+    oebps = root / "OEBPS"
+    meta_inf = root / "META-INF"
+    fonts = oebps / "fonts"
+    fonts.mkdir(parents=True)
+    meta_inf.mkdir()
+    (root / "mimetype").write_text("application/epub+zip")
+    (fonts / "used.ttf").write_bytes(b"used-font")
+    (fonts / "unused.ttf").write_bytes(b"unused-font")
+    (oebps / "style.css").write_text(
+        '@font-face { font-family: "Book Font"; src: url(fonts/used.ttf); }\n'
+        'body { font-family: "Book Font"; }\n' + risky_content,
+        encoding="utf-8",
+    )
+    (oebps / "chapter.xhtml").write_text(
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="style.css"/></head>'
+        "<body><p>中文正文 English</p></body></html>",
+        encoding="utf-8",
+    )
+    fixed_meta = '<meta property="rendition:layout">pre-paginated</meta>' if fixed else ""
+    (oebps / "content.opf").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<package xmlns="http://www.idpf.org/2007/opf" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">'
+        f"<metadata><dc:language>en</dc:language>{fixed_meta}</metadata>"
+        '<manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>'
+        '<item id="css" href="style.css" media-type="text/css"/>'
+        '<item id="used" href="fonts/used.ttf" media-type="font/ttf"/>'
+        '<item id="unused" href="fonts/unused.ttf" media-type="font/ttf"/></manifest>'
+        '<spine><itemref idref="chapter"/></spine></package>',
+        encoding="utf-8",
+    )
+    (meta_inf / "container.xml").write_text(
+        '<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+        '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+        "</rootfiles></container>",
+        encoding="utf-8",
+    )
+    if encrypted:
+        (meta_inf / "encryption.xml").write_text(
+            '<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+            '<EncryptedData><CipherData><CipherReference URI="OEBPS/fonts/unused.ttf"/>'
+            "</CipherData></EncryptedData></encryption>",
+            encoding="utf-8",
+        )
+    return Builder(str(root), str(tmp_path / "output.epub")), root
 
 
 class TestBuilder:
@@ -117,9 +167,314 @@ class TestBuilder:
         with open(css_path, encoding="utf-8") as f:
             assert f.read() == css_content
         with open(opf_path, encoding="utf-8") as f:
-            assert "<dc:language>zh</dc:language>" in f.read()
+            assert "<dc:language>zh-CN</dc:language>" in f.read()
         with zipfile.ZipFile(result_path) as zf:
             assert zf.read("OEBPS/style.css").decode() == css_content
+
+    def test_reflowable_book_uses_device_font_then_prunes_fonts(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+
+        result_path = builder.build()
+
+        chapter = (root / "OEBPS/chapter.xhtml").read_text()
+        opf = ET.parse(root / "OEBPS/content.opf")
+        manifest_hrefs = {item.attrib["href"] for item in opf.getroot().iter() if item.tag.endswith("item")}
+        assert 'lang="zh-CN"' in chapter
+        assert 'xml:lang="zh-CN"' in chapter
+        assert "epubox-device-font" in chapter
+        assert "font-family: serif !important" in chapter
+        assert "fonts/used.ttf" in manifest_hrefs
+        assert "fonts/unused.ttf" not in manifest_hrefs
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert not (root / "OEBPS/fonts/unused.ttf").exists()
+        with zipfile.ZipFile(result_path) as zf:
+            assert "OEBPS/fonts/used.ttf" in zf.namelist()
+
+    def test_fixed_layout_preserves_referenced_font_but_prunes_unused(self, tmp_path):
+        builder, root = make_font_epub(tmp_path, fixed=True)
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert not (root / "OEBPS/fonts/unused.ttf").exists()
+        assert "epubox-device-font" not in (root / "OEBPS/chapter.xhtml").read_text()
+
+    def test_spine_fixed_layout_property_preserves_font_mode(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        opf_path = root / "OEBPS/content.opf"
+        opf_path.write_text(
+            opf_path.read_text().replace(
+                '<itemref idref="chapter"/>',
+                '<itemref idref="chapter" properties="rendition:layout-pre-paginated"/>',
+            )
+        )
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert "epubox-device-font" not in (root / "OEBPS/chapter.xhtml").read_text()
+
+    def test_standalone_svg_font_reference_is_preserved(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        opf_path = root / "OEBPS/content.opf"
+        opf_path.write_text(
+            opf_path.read_text().replace(
+                "</manifest>",
+                '<item id="svg" href="diagram.svg" media-type="image/svg+xml"/></manifest>',
+            )
+        )
+        (root / "OEBPS/diagram.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"><style>@font-face {'
+            'font-family: "Book Font"; src: url(fonts/used.ttf);}</style><text>图</text></svg>',
+            encoding="utf-8",
+        )
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert not (root / "OEBPS/fonts/unused.ttf").exists()
+        assert "epubox-device-font" in (root / "OEBPS/chapter.xhtml").read_text()
+
+    def test_css_escaped_font_url_is_resolved_before_pruning(self, tmp_path):
+        builder, root = make_font_epub(tmp_path, fixed=True)
+        (root / "OEBPS/style.css").write_text(
+            '@font-face { font-family: "Book Font"; src: url(fonts/\\75 sed.ttf); }',
+            encoding="utf-8",
+        )
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert not (root / "OEBPS/fonts/unused.ttf").exists()
+
+    @pytest.mark.parametrize(
+        "icon_content",
+        [
+            '.icon::before { content: "\\e001"; }',
+            '.icon::before { content: "\\00e001"; }',
+            '.icon::before { content: "\ue001"; }',
+        ],
+    )
+    def test_css_icon_keeps_referenced_font_and_skips_device_mode(self, tmp_path, icon_content):
+        builder, root = make_font_epub(tmp_path, risky_content=icon_content)
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert not (root / "OEBPS/fonts/unused.ttf").exists()
+        assert "epubox-device-font" not in (root / "OEBPS/chapter.xhtml").read_text()
+
+    def test_inline_svg_and_code_pua_are_preserved_locally(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        chapter_path = root / "OEBPS/chapter.xhtml"
+        chapter_path.write_text(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="style.css"/></head>'
+            "<body><svg><text>Logo</text></svg><p>中文正文</p><pre><code>\uec02file.py</code></pre></body></html>",
+            encoding="utf-8",
+        )
+
+        builder.build()
+
+        chapter = chapter_path.read_text()
+        assert "epubox-preserve-font" in chapter
+        assert "<svg" in chapter
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert not (root / "OEBPS/fonts/unused.ttf").exists()
+        tree = ET.parse(chapter_path)
+        svg_text = next(element for element in tree.getroot().iter() if element.tag.endswith("text"))
+        assert "epubox-device-font" not in svg_text.attrib.get("class", "")
+
+    def test_encrypted_font_is_never_pruned(self, tmp_path):
+        builder, root = make_font_epub(tmp_path, fixed=True, encrypted=True)
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/unused.ttf").exists()
+
+    def test_font_optimization_can_be_disabled(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        builder.optimize_fonts = False
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert (root / "OEBPS/fonts/unused.ttf").exists()
+        assert "epubox-device-font" not in (root / "OEBPS/chapter.xhtml").read_text()
+        assert 'lang="zh-CN"' in (root / "OEBPS/chapter.xhtml").read_text()
+
+    def test_manifest_path_escape_fails_closed(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        outside = tmp_path / "outside.css"
+        outside.write_text("author-content", encoding="utf-8")
+        opf_path = root / "OEBPS/content.opf"
+        opf_path.write_text(
+            opf_path.read_text().replace(
+                "</manifest>",
+                '<item id="outside" href="../../outside.css" media-type="text/css"/></manifest>',
+            )
+        )
+
+        builder.build()
+
+        assert outside.read_text() == "author-content"
+        assert "epubox-device-font" not in (root / "OEBPS/chapter.xhtml").read_text()
+
+    def test_device_font_processing_is_idempotent(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+
+        builder.build()
+        builder.build()
+
+        chapter = ET.parse(root / "OEBPS/chapter.xhtml")
+        device_elements = [
+            element for element in chapter.getroot().iter() if "epubox-device-font" in element.attrib.get("class", "")
+        ]
+        assert len(device_elements) == 1
+        assert device_elements[0].attrib["style"].count("font-family") == 1
+
+    def test_scripted_epub_preserves_all_fonts(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        opf_path = root / "OEBPS/content.opf"
+        opf_path.write_text(
+            opf_path.read_text().replace(
+                "</manifest>",
+                '<item id="script" href="font-loader.js" media-type="text/javascript"/></manifest>',
+            )
+        )
+        (root / "OEBPS/font-loader.js").write_text("new FontFace('Book', 'url(fonts/unused.ttf)')")
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert (root / "OEBPS/fonts/unused.ttf").exists()
+        assert "epubox-device-font" not in (root / "OEBPS/chapter.xhtml").read_text()
+
+    def test_inline_important_font_is_replaced_on_chinese_element(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        chapter_path = root / "OEBPS/chapter.xhtml"
+        chapter_path.write_text(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head></head><body>'
+            '<p id="x" style="color: red; font-family: Book Font !important">中文正文</p></body></html>',
+            encoding="utf-8",
+        )
+
+        builder.build()
+
+        paragraph = next(element for element in ET.parse(chapter_path).getroot().iter() if element.tag.endswith("p"))
+        assert "color: red" in paragraph.attrib["style"]
+        assert paragraph.attrib["style"].count("font-family") == 1
+        assert "font-family: serif !important" in paragraph.attrib["style"]
+
+    def test_inline_script_or_scripted_property_preserves_all_fonts(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        chapter_path = root / "OEBPS/chapter.xhtml"
+        chapter_path.write_text(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head><script>new FontFace("Book", '
+            '"url(fonts/unused.ttf)")</script></head><body><p>中文</p></body></html>',
+            encoding="utf-8",
+        )
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert (root / "OEBPS/fonts/unused.ttf").exists()
+        assert "epubox-device-font" not in chapter_path.read_text()
+
+    def test_scripted_property_without_script_preserves_all_fonts(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        opf_path = root / "OEBPS/content.opf"
+        opf_path.write_text(
+            opf_path.read_text().replace(
+                '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>',
+                '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml" properties="scripted"/>',
+            )
+        )
+
+        builder.build()
+
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+        assert (root / "OEBPS/fonts/unused.ttf").exists()
+
+    def test_cjk_extension_character_uses_device_font(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        chapter_path = root / "OEBPS/chapter.xhtml"
+        chapter_path.write_text(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head></head><body><p>\U00020000</p></body></html>',
+            encoding="utf-8",
+        )
+
+        builder.build()
+
+        paragraph = next(element for element in ET.parse(chapter_path).getroot().iter() if element.tag.endswith("p"))
+        assert "font-family: serif !important" in paragraph.attrib["style"]
+
+    def test_inline_vertical_writing_fails_closed_but_language_is_set(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        chapter_path = root / "OEBPS/chapter.xhtml"
+        chapter_path.write_text(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head></head><body>'
+            '<p style="writing-mode: vertical-rl">中文</p></body></html>',
+            encoding="utf-8",
+        )
+
+        builder.build()
+
+        chapter = chapter_path.read_text()
+        assert 'lang="zh-CN"' in chapter
+        assert "epubox-device-font" not in chapter
+        assert (root / "OEBPS/fonts/used.ttf").exists()
+
+    def test_pua_descendant_prevents_ancestor_font_override(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        chapter_path = root / "OEBPS/chapter.xhtml"
+        chapter_path.write_text(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head></head><body>中文<span>\ue001</span></body></html>',
+            encoding="utf-8",
+        )
+
+        builder.build()
+
+        body = next(element for element in ET.parse(chapter_path).getroot().iter() if element.tag.endswith("body"))
+        span = next(element for element in body.iter() if element.tag.endswith("span"))
+        assert "epubox-device-font" not in body.attrib.get("class", "")
+        assert "font-family" not in body.attrib.get("style", "")
+        assert "epubox-preserve-font" in span.attrib["class"]
+
+    def test_xml_stylesheet_processing_instruction_is_preserved(self, tmp_path):
+        builder, root = make_font_epub(tmp_path)
+        chapter_path = root / "OEBPS/chapter.xhtml"
+        chapter_path.write_text(
+            '<?xml version="1.0"?><!-- template begins with <html marker -->'
+            '<?xml-stylesheet type="text/css" href="style.css"?>'
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head></head><body><p>中文</p></body></html>'
+            "<?tail keep?><!-- trailing -->",
+            encoding="utf-8",
+        )
+
+        builder.build()
+
+        content = chapter_path.read_text()
+        assert "<!-- template begins with <html marker -->" in content
+        assert "<?xml-stylesheet" in content
+        assert "<?tail keep?>" in content
+        assert "<!-- trailing -->" in content
+        ET.parse(chapter_path)
+
+    @pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be"])
+    def test_non_utf8_xhtml_is_preserved_byte_for_byte(self, tmp_path, encoding):
+        builder, root = make_font_epub(tmp_path)
+        chapter_path = root / "OEBPS/chapter.xhtml"
+        text = (
+            f'<?xml version="1.0" encoding="{encoding}"?>'
+            '<html xmlns="http://www.w3.org/1999/xhtml"><head></head><body><p>中文</p></body></html>'
+        )
+        chapter_path.write_bytes(text.encode(encoding))
+        original = chapter_path.read_bytes()
+
+        builder.build()
+
+        assert chapter_path.read_bytes() == original
+        assert "<html" in chapter_path.read_bytes().decode(encoding)
 
 
 class TestModifyContentOpf:
@@ -147,7 +502,7 @@ class TestModifyContentOpf:
         assert result is True
 
         content = opf_path.read_text()
-        assert '<dc:language id="en_language">zh</dc:language>' in content
+        assert '<dc:language id="en_language">zh-CN</dc:language>' in content
 
     def test_opf_with_meta_language_tag(self, tmp_path):
         """测试修改meta language标签"""

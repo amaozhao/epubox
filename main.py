@@ -25,6 +25,7 @@ def translate(
     ),
     limit: Optional[int] = typer.Option(1200, "--limit", "-l", help="每个分块的最大 token 数。"),
     language: Optional[str] = typer.Option("Chinese", "--language", "-lg", help="目标翻译语言。"),
+    preserve_fonts: bool = typer.Option(False, "--preserve-fonts", help="保留原 EPUB 的全部字体和字体 CSS。"),
 ):
     """
     翻译指定的 EPUB 文件。
@@ -39,7 +40,12 @@ def translate(
         # 实例化并运行 Orchestrator
         orchestrator = Orchestrator()
         translated_path = asyncio.run(
-            orchestrator.translate_epub(str(epub_path), limit=limit or 1200, target_language=language or "Chinese")
+            orchestrator.translate_epub(
+                str(epub_path),
+                limit=limit or 1200,
+                target_language=language or "Chinese",
+                preserve_fonts=preserve_fonts,
+            )
         )
 
         # 翻译成功，打印完成信息

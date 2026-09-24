@@ -24,6 +24,13 @@ class TestOrchestrator:
         """
         return Orchestrator()
 
+    def test_language_code_mapping(self, orchestrator):
+        assert orchestrator._language_code("Chinese") == "zh-CN"
+        assert orchestrator._language_code("Traditional Chinese") == "zh-TW"
+        assert orchestrator._language_code("ja_JP") == "ja-JP"
+        assert orchestrator._language_code("French") == "fr"
+        assert orchestrator._language_code("Klingon") == "und"
+
     @pytest.fixture
     def mock_book(self):
         """
