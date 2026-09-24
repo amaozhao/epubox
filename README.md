@@ -63,6 +63,7 @@ EPUB 解析 → 标签替换为 [idN] → 分块 → LLM 翻译 → 校对修正
 AGNES_API_KEY=
 AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
 AGNES_MODEL=agnes-2.0-flash
+AGNES_TEXT_RPM=10
 ```
 
 将 Agnes 控制台生成的 API Key 填入项目根目录 `.env` 的 `AGNES_API_KEY`。

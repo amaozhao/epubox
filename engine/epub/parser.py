@@ -148,7 +148,7 @@ class Parser:
         figure_count = len(body.find_all("figure"))
         section_count = len(body.find_all("section"))
         aside_count = len(body.find_all("aside"))
-        pagebreak_count = len(body.find_all(attrs={"epub:type": "pagebreak"}))
+        pagebreak_count = len(body.find_all(True, attrs={"epub:type": "pagebreak"}))
 
         if (
             figure_count >= COMPLEX_ITEM_FIGURE_THRESHOLD

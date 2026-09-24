@@ -35,7 +35,9 @@ async def reset_fallback_runtime_between_tests(monkeypatch):
     from engine.agents import fallback_runtime
 
     await fallback_runtime.reset_fallback_runtime_state()
+    await fallback_runtime.reset_primary_runtime_state()
     monkeypatch.setattr(fallback_runtime, "FALLBACK_MIN_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(fallback_runtime, "PRIMARY_MIN_INTERVAL_SECONDS", 0.0)
 
 
 def make_chunk(

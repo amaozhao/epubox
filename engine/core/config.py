@@ -5,6 +5,7 @@ Configuration settings for the Epubox application.
 from pathlib import Path
 from typing import Literal, Optional
 
+from pydantic import PositiveInt
 from pydantic_settings import BaseSettings
 
 
@@ -22,6 +23,7 @@ class Settings(BaseSettings):
     AGNES_API_KEY: str = ""
     AGNES_BASE_URL: str = "https://apihub.agnes-ai.com/v1"
     AGNES_MODEL: str = "agnes-2.0-flash"
+    AGNES_TEXT_RPM: PositiveInt = 10
 
     # Deepseek引擎配置
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"

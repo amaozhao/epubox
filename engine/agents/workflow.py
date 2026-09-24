@@ -16,7 +16,7 @@ from engine.core.logger import engine_logger as logger
 from engine.core.markup import get_markup_parser
 from engine.schemas import Chunk, TranslationStatus
 
-from .fallback_runtime import run_fallback_agent
+from .fallback_runtime import run_fallback_agent, run_primary_agent
 from .models import fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
@@ -515,7 +515,7 @@ async def _call_translator(
     try:
         translator = get_translator(mode=mode)
         payload = json.dumps(translator_input, ensure_ascii=False, indent=2)
-        response = await translator.arun(payload)
+        response = await run_primary_agent("translate", translator, payload)
 
         raw_content = response.content
         if response.status == RunStatus.error:
@@ -695,7 +695,7 @@ async def proofread_step(step_input: StepInput) -> ProofreadStepOutput:
             if use_fallback_this_attempt:
                 response = await run_fallback_agent("proofread", proofer, payload)
             else:
-                response = await proofer.arun(payload)
+                response = await run_primary_agent("proofread", proofer, payload)
             if isinstance(response.content, ProofreadingResult):
                 proofreading_result = response.content
                 break

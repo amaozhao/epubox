@@ -107,3 +107,56 @@ async def test_run_fallback_agent_delegates_to_agent_arun(monkeypatch):
 
     assert result == "translated"
     agent.arun.assert_awaited_once_with('{"text":"hello"}')
+
+
+@pytest.mark.asyncio
+async def test_primary_text_rate_limit_applies_across_translate_and_proofread(monkeypatch):
+    from engine.agents import fallback_runtime
+
+    await fallback_runtime.reset_primary_runtime_state()
+
+    current_time = {"value": 300.0}
+    sleep_calls: list[float] = []
+
+    monkeypatch.setattr(fallback_runtime, "_monotonic", lambda: current_time["value"])
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        current_time["value"] += seconds
+
+    monkeypatch.setattr(fallback_runtime, "_sleep", fake_sleep)
+    monkeypatch.setattr(fallback_runtime, "PRIMARY_MIN_INTERVAL_SECONDS", 6.0)
+
+    await fallback_runtime.run_with_primary_rate_limit("translate", AsyncMock(return_value="translated"))
+    current_time["value"] += 1.0
+    await fallback_runtime.run_with_primary_rate_limit("proofread", AsyncMock(return_value="proofread"))
+
+    assert sleep_calls == [5.0]
+
+
+@pytest.mark.asyncio
+async def test_primary_text_rate_limit_does_not_wait_for_previous_call_to_finish(monkeypatch):
+    from engine.agents import fallback_runtime
+
+    await fallback_runtime.reset_primary_runtime_state()
+    monkeypatch.setattr(fallback_runtime, "PRIMARY_MIN_INTERVAL_SECONDS", 0.0)
+
+    first_started = asyncio.Event()
+    first_can_finish = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def first_call():
+        first_started.set()
+        await first_can_finish.wait()
+
+    async def second_call():
+        second_started.set()
+
+    first_task = asyncio.create_task(fallback_runtime.run_with_primary_rate_limit("translate", first_call))
+    await first_started.wait()
+    second_task = asyncio.create_task(fallback_runtime.run_with_primary_rate_limit("proofread", second_call))
+    try:
+        await asyncio.wait_for(second_started.wait(), timeout=1)
+    finally:
+        first_can_finish.set()
+        await asyncio.gather(first_task, second_task)
