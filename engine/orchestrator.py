@@ -5,7 +5,13 @@ from datetime import datetime
 
 from tqdm import tqdm
 
-from engine.agents.verifier import EnglishResidualDecision, classify_untranslated_english_texts
+from engine.agents.verifier import (
+    EnglishResidualDecision,
+    classify_untranslated_english_texts,
+    find_degenerate_translation,
+    select_glossary_terms,
+    validate_locked_glossary_terms,
+)
 from engine.agents.workflow import get_translator_workflow
 from engine.core.logger import engine_logger as logger
 from engine.epub import Builder, DomReplacer, Parser
@@ -184,6 +190,31 @@ class Orchestrator:
             return False
         return True
 
+    @staticmethod
+    def _requeue_invalid_completed_chunks(book, glossary: dict[str, str]) -> int:
+        requeued = 0
+        changed_glossary = {
+            term: target
+            for term, target in glossary.items()
+            if book.glossary_snapshot.get(term) != target
+        }
+
+        for item in book.items:
+            for chunk in item.chunks or []:
+                if not chunk.translated or chunk.status not in (
+                    TranslationStatus.ACCEPTED_AS_IS,
+                    TranslationStatus.COMPLETED,
+                ):
+                    continue
+                has_changed_term = bool(select_glossary_terms(chunk.original, changed_glossary))
+                if not has_changed_term and not find_degenerate_translation(chunk.original, chunk.translated):
+                    continue
+                chunk.translated = None
+                chunk.status = TranslationStatus.PENDING
+                requeued += 1
+        book.glossary_snapshot = dict(glossary)
+        return requeued
+
     def _has_incomplete_output(self, book) -> bool:
         for item in book.items:
             if not item.chunks:
@@ -200,8 +231,13 @@ class Orchestrator:
         suffix = "-cn-incomplete.epub" if self._has_incomplete_output(book) else "-cn.epub"
         return os.path.join(os.path.dirname(book.path), f"{book.name}{suffix}")
 
-    def _apply_final_untranslated_gate(self, book, output_extract_dir: str | None = None) -> int:
-        """Scan chunk translations and rendered output for residual natural English."""
+    def _apply_final_untranslated_gate(
+        self,
+        book,
+        output_extract_dir: str | None = None,
+        glossary: dict[str, str] | None = None,
+    ) -> int:
+        """Scan chunk translations and rendered output for quality failures."""
         failed_count = 0
         self.final_untranslated_review_findings = []
         for item in book.items:
@@ -211,6 +247,30 @@ class Orchestrator:
                 if chunk.status in (TranslationStatus.TRANSLATION_FAILED, TranslationStatus.WRITEBACK_FAILED):
                     continue
                 if not chunk.translated:
+                    continue
+                quality_error = find_degenerate_translation(chunk.original, chunk.translated)
+                glossary_valid, glossary_error = validate_locked_glossary_terms(
+                    chunk.original,
+                    chunk.translated,
+                    glossary,
+                )
+                if quality_error or not glossary_valid:
+                    reason = quality_error or glossary_error
+                    failed_count += 1
+                    failed_text = chunk.translated
+                    self.final_untranslated_review_findings.append(
+                        {
+                            "file": item.id,
+                            "chunk_name": chunk.name,
+                            "path": item.path,
+                            "text": failed_text[:240],
+                            "rejected_translation": failed_text,
+                            "reason": f"quality_gate:{reason}",
+                        }
+                    )
+                    chunk.translated = None
+                    chunk.status = TranslationStatus.TRANSLATION_FAILED
+                    logger.warning(f"Chunk '{chunk.name}' 最终质量扫描失败: {reason}")
                     continue
                 findings = classify_untranslated_english_texts(
                     chunk.translated,
@@ -238,7 +298,19 @@ class Orchestrator:
                 if not fail_findings:
                     continue
                 chunk.status = TranslationStatus.TRANSLATION_FAILED
+                rejected_translation = chunk.translated
+                chunk.translated = None
                 failed_count += 1
+                self.final_untranslated_review_findings.append(
+                    {
+                        "file": item.id,
+                        "chunk_name": chunk.name,
+                        "path": item.path,
+                        "text": rejected_translation[:240],
+                        "rejected_translation": rejected_translation,
+                        "reason": f"english_residual:{fail_findings[0].reason}",
+                    }
+                )
                 logger.warning(
                     f"Chunk '{chunk.name}' 最终整书扫描发现疑似残留未翻译英文，已标记为 TRANSLATION_FAILED: "
                     f"{fail_findings[0].text[:160]}"
@@ -311,10 +383,18 @@ class Orchestrator:
         loader = GlossaryLoader()
         glossary = loader.load(epub_path)
         if not glossary:
-            logger.info("术语表为空，自动生成中...")
-            extractor = GlossaryExtractor()
-            glossary = extractor.extract_from_epub(epub_path)
-            logger.info(f"术语表生成完成，共提取 {len(glossary)} 个术语")
+            glossary_path = os.path.join(
+                loader.glossary_dir,
+                f"{os.path.splitext(os.path.basename(epub_path))[0]}.json",
+            )
+            if not os.path.exists(glossary_path):
+                logger.info("术语表为空，生成可编辑草稿中...")
+                GlossaryExtractor().run(epub_path)
+            logger.warning("本次没有锁定术语；请填写 glossary 目录中的草稿后重跑以获得书内术语一致性。")
+
+        requeued = self._requeue_invalid_completed_chunks(book, glossary)
+        if requeued:
+            logger.info(f"质量规则已变化，重新处理 {requeued} 个旧 checkpoint chunk。")
 
         # 统计翻译结果
         stats = TranslationStats()
@@ -397,9 +477,9 @@ class Orchestrator:
         if writeback_state_changed:
             parser.save_json(book)
 
-        final_gate_failed_count = self._apply_final_untranslated_gate(book, output_extract_dir)
+        final_gate_failed_count = self._apply_final_untranslated_gate(book, output_extract_dir, glossary)
         if final_gate_failed_count:
-            logger.warning(f"最终整书扫描拦截 {final_gate_failed_count} 个疑似漏译 chunk。")
+            logger.warning(f"最终整书扫描拦截 {final_gate_failed_count} 个质量异常 chunk。")
             parser.save_json(book)
 
         manual_chunks = [

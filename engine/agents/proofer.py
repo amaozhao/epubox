@@ -10,8 +10,15 @@ description = (
 )
 
 instructions = [
-    "1. **Task**: Proofread the 'text_to_proofread' (Simplified Chinese) for grammar, typos, and technical professionality.",
+    (
+        "1. **Task**: Compare 'text_to_proofread' with 'source_text'. Correct mistranslations, omissions, "
+        "grammar, typos, and technical terminology while keeping the HTML structure unchanged."
+    ),
     "2. **Constraint - Minimal Intervention**: Only correct errors or significant awkwardness. If a phrase is technically correct and natural, do NOT change it just for the sake of variety.",
+    (
+        "2.1 **LOCKED GLOSSARY**: Preserve every exact Chinese value from the 'glossaries' dictionary. "
+        "Do not replace locked terminology with synonyms."
+    ),
     "3. **Placeholder Integrity**: '[PRE:N]', '[CODE:N]', '[STYLE:N]' placeholders MUST be preserved EXACTLY. "
     "   - Do not translate, modify, or delete them."
     "   - Keep the SAME left-to-right order as in the source text."
@@ -27,7 +34,7 @@ instructions = [
     '   - ESCAPE all internal double quotes with a backslash (\\").'
     "   - Do not add line breaks or extra spaces outside the JSON object.",
     "7. **Pre-computation Check**: "
-    "   - [ ] Is every 'original_phrase' (key) a literal substring of the source text?"
+    "   - [ ] Is every 'original_phrase' (key) a literal substring of 'text_to_proofread'?"
     "   - [ ] Does the 'improved_phrase' (value) maintain the same number AND the same order of placeholders as the key?"
     "   - [ ] If the phrase contains placeholders, did you avoid rephrasing the surrounding clause structure?",
 ]

@@ -23,7 +23,7 @@ class GlossaryExtractor:
     """
 
     # --- 过滤规则配置 (终极版) ---
-    MIN_WORDS = 2
+    MIN_WORDS = 1
     MAX_WORDS = 5
 
     # 1. 任何包含这些字符的术语都将被视为代码或垃圾

@@ -1,5 +1,6 @@
 import re
 import xml.etree.ElementTree as ET
+import zlib
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
@@ -821,6 +822,11 @@ MODEL_SERIALIZATION_ARTIFACT_PATTERNS = (
     re.compile(r'\}+\s*"'),
     re.compile(r'\}+\s*$'),
 )
+QUALITY_MARKER_PATTERN = re.compile(r"\[(?:PRE|CODE|STYLE|TAG|TEXT|NAVTXT):\d+\]")
+DEGENERATE_MIN_CHARS = 80
+DEGENERATE_MAX_COMPRESSION_RATIO = 0.22
+DEGENERATE_MIN_EXPANSION_RATIO = 1.15
+# ponytail: conservative corpus-calibrated heuristic; add an eval set before widening detection.
 
 
 def _find_visible_model_serialization_artifact(soup: BeautifulSoup) -> str | None:
@@ -839,7 +845,148 @@ def _find_visible_model_serialization_artifact(soup: BeautifulSoup) -> str | Non
     return None
 
 
-def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]:
+def _visible_prose_text(value: str) -> str:
+    soup = BeautifulSoup(value, get_markup_parser(value))
+    parts = [
+        str(node)
+        for node in soup.find_all(string=True)
+        if isinstance(node, NavigableString) and not _should_skip_untranslated_scan(node)
+    ]
+    return re.sub(r"\s+", " ", QUALITY_MARKER_PATTERN.sub("", " ".join(parts))).strip()
+
+
+def _glossary_term_pattern(term: str) -> re.Pattern[str]:
+    escaped = re.escape(term)
+    if " " not in term and term.isascii():
+        lowered = term.lower()
+        if len(term) > 1 and lowered.endswith("y") and lowered[-2] not in "aeiou":
+            escaped = rf"{re.escape(term[:-1])}(?:y|ies)"
+        elif lowered.endswith(("s", "x", "z", "ch", "sh")):
+            escaped = rf"{escaped}(?:es)?"
+        else:
+            escaped = rf"{escaped}(?:s|es)?"
+    return re.compile(rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
+def _matched_glossary_terms(text: str, glossary: dict[str, str]) -> dict[str, tuple[str, int]]:
+    visible_text = _visible_prose_text(text)
+    claimed_spans: list[tuple[int, int]] = []
+    matched: dict[str, tuple[str, int]] = {}
+
+    for term in sorted(glossary, key=len, reverse=True):
+        translation = glossary[term].strip()
+        if not term.strip() or not translation:
+            continue
+
+        count = 0
+        for match in _glossary_term_pattern(term).finditer(visible_text):
+            span = match.span()
+            if any(start < span[1] and span[0] < end for start, end in claimed_spans):
+                continue
+            claimed_spans.append(span)
+            count += 1
+        if count:
+            matched[term] = (translation, count)
+
+    return matched
+
+
+def select_glossary_terms(text: str, glossary: dict[str, str]) -> dict[str, str]:
+    return {term: translation for term, (translation, _) in _matched_glossary_terms(text, glossary).items()}
+
+
+def _count_glossary_targets(text: str, targets: set[str]) -> dict[str, int]:
+    claimed_spans: list[tuple[int, int]] = []
+    counts: dict[str, int] = {}
+
+    for target in sorted(targets, key=len, reverse=True):
+        normalized = re.sub(r"\s+", " ", target.strip())
+        if not normalized:
+            continue
+        if " " not in normalized and not normalized.isascii():
+            pattern_text = r"\s*".join(re.escape(char) for char in normalized)
+        else:
+            pattern_text = re.escape(normalized).replace(r"\ ", r"\s+")
+        prefix = r"(?<![A-Za-z0-9_])" if normalized[0].isascii() and normalized[0].isalnum() else ""
+        suffix = r"(?![A-Za-z0-9_])" if normalized[-1].isascii() and normalized[-1].isalnum() else ""
+        pattern = re.compile(f"{prefix}{pattern_text}{suffix}", re.IGNORECASE)
+
+        count = 0
+        for match in pattern.finditer(text):
+            span = match.span()
+            if any(start < span[1] and span[0] < end for start, end in claimed_spans):
+                continue
+            claimed_spans.append(span)
+            count += 1
+        counts[target] = count
+
+    return counts
+
+
+def validate_locked_glossary_terms(
+    original: str,
+    translated: str,
+    glossary: dict[str, str] | None,
+) -> tuple[bool, str]:
+    if not glossary:
+        return True, ""
+
+    required: dict[str, tuple[int, list[str]]] = {}
+    for term, (target, count) in _matched_glossary_terms(original, glossary).items():
+        total, terms = required.get(target, (0, []))
+        required[target] = (total + count, [*terms, term])
+
+    actual_counts = _count_glossary_targets(_visible_prose_text(translated), set(required))
+    for target, (required_count, terms) in required.items():
+        actual_count = actual_counts.get(target, 0)
+        # ponytail: presence/count floor only; per-occurrence alignment needs source TERM markers.
+        if actual_count < required_count:
+            return (
+                False,
+                f"锁定术语不一致: {', '.join(terms)} 必须译为 {target!r}，"
+                f"需要 {required_count} 次，实际 {actual_count} 次",
+            )
+    return True, ""
+
+
+def _compression_ratio(text: str) -> float:
+    data = text.encode("utf-8")
+    return len(zlib.compress(data, level=9)) / len(data) if data else 1.0
+
+
+def _max_character_run(text: str) -> int:
+    return max((len(match.group(0)) for match in re.finditer(r"([^\W\d_])\1+", text)), default=1)
+
+
+def find_degenerate_translation(original: str, translated: str) -> str | None:
+    original_text = re.sub(r"\s+", "", _visible_prose_text(original))
+    translated_text = re.sub(r"\s+", "", _visible_prose_text(translated))
+    if len(translated_text) < DEGENERATE_MIN_CHARS:
+        return None
+
+    source_run = _max_character_run(original_text)
+    translated_run = _max_character_run(translated_text)
+    if translated_run >= 12 and translated_run >= source_run * 3:
+        return f"连续字符重复 {translated_run} 次"
+
+    if not original_text or len(translated_text) < len(original_text) * DEGENERATE_MIN_EXPANSION_RATIO:
+        return None
+
+    source_ratio = _compression_ratio(original_text)
+    translated_ratio = _compression_ratio(translated_text)
+    if translated_ratio < DEGENERATE_MAX_COMPRESSION_RATIO and translated_ratio < source_ratio * 0.55:
+        return (
+            f"异常重复压缩率 {translated_ratio:.3f}（原文 {source_ratio:.3f}），"
+            f"长度 {len(translated_text)}/{len(original_text)}"
+        )
+    return None
+
+
+def validate_translated_html(
+    original: str,
+    translated: str,
+    glossary: dict[str, str] | None = None,
+) -> Tuple[bool, str]:
     """
     验证翻译结果的 HTML 结构完整性（chunk 级别）
 
@@ -868,6 +1015,10 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
     serialization_artifact = _find_visible_model_serialization_artifact(translated_soup)
     if serialization_artifact:
         return False, f"疑似模型格式残片: {serialization_artifact!r}"
+
+    degeneration = find_degenerate_translation(original, translated)
+    if degeneration:
+        return False, f"译文疑似退化重复: {degeneration}"
 
     original_elements = [e for e in original_soup.children if isinstance(e, Tag)]
     translated_elements = [e for e in translated_soup.children if isinstance(e, Tag)]
@@ -922,6 +1073,10 @@ def validate_translated_html(original: str, translated: str) -> Tuple[bool, str]
         )
         if mismatch_details:
             return False, _format_placeholder_sequence_error(label, mismatch_details)
+
+    glossary_valid, glossary_error = validate_locked_glossary_terms(original, translated, glossary)
+    if not glossary_valid:
+        return False, glossary_error
 
     untranslated_hits = find_untranslated_english_texts(translated)
     if untranslated_hits:

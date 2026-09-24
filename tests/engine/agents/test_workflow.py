@@ -96,6 +96,49 @@ class TestTranslateStep:
         assert output.content.translated == "<p>你好世界</p>"
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_discards_degenerate_output_before_retry(self, mock_get_translator):
+        original_text = "This chapter explains how vector similarity improves search relevance. " * 8
+        degenerate = "亲近度".join("本章介绍向量相似度如何提升搜索相关性。" * 8)
+        translator = MagicMock()
+        translator.arun = AsyncMock(
+            side_effect=[
+                MagicMock(status=RunStatus.completed, content=MockTranslationResponse(f"<p>{degenerate}</p>")),
+                MagicMock(status=RunStatus.completed, content=MockTranslationResponse("<p>本章介绍向量相似度。</p>")),
+            ]
+        )
+        mock_get_translator.return_value = translator
+
+        output = await translate_step(
+            MagicMock(input=make_chunk(original=f"<p>{original_text}</p>"), additional_data={"glossary": {}})
+        )
+
+        assert output.content.translated == "<p>本章介绍向量相似度。</p>"
+        second_payload = json.loads(translator.arun.await_args_list[1].args[0])
+        assert "previous_translation" not in second_payload
+        assert "退化重复" in second_payload["validation_error"]
+
+    async def test_text_node_retry_does_not_reuse_degenerate_output(self, monkeypatch):
+        from engine.agents import workflow
+
+        source = "This chapter explains how vector similarity improves search relevance. " * 8
+        degenerate = "亲近度".join("本章介绍向量相似度如何提升搜索相关性。" * 8)
+        previous_values = []
+        responses = iter([f"[TEXT:0]{degenerate}", "[TEXT:0]本章介绍向量相似度。"])
+
+        async def fake_call(_text, _glossary, previous_translation, _error, mode):
+            assert mode == "text_node"
+            previous_values.append(previous_translation)
+            return next(responses)
+
+        monkeypatch.setattr(workflow, "_call_translator", fake_call)
+
+        translated, error = await workflow._translate_with_text_node_fallback(f"<p>{source}</p>")
+
+        assert error is None
+        assert translated == "<p>本章介绍向量相似度。</p>"
+        assert previous_values == [None, None]
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_already_translated(self, mock_get_translator):
         """translate_step: already translated chunk is returned directly without calling translator"""
         chunk = make_chunk(
@@ -109,6 +152,27 @@ class TestTranslateStep:
         assert output.success is True
         assert output.content.translated == "<p>你好世界</p>"
         mock_get_translator.assert_not_called()
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_mixed_chinese_with_locked_english_term_is_translated(self, mock_get_translator):
+        translator = MagicMock()
+        translator.arun = AsyncMock(
+            return_value=MagicMock(
+                status=RunStatus.completed,
+                content=MockTranslationResponse("<p>这是智能体系统。</p>"),
+            )
+        )
+        mock_get_translator.return_value = translator
+
+        output = await translate_step(
+            MagicMock(
+                input=make_chunk(original="<p>这是 agent 系统。</p>"),
+                additional_data={"glossary": {"agent": "智能体"}},
+            )
+        )
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "<p>这是智能体系统。</p>"
 
     @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_empty_content_skipped(self, mock_get_translator):
@@ -1174,6 +1238,47 @@ class TestTranslateStep:
         assert output.content.translated == "[NAVTXT:0] 第1章"
 
     @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_nav_text_retries_locked_glossary_mismatch(self, mock_get_translator):
+        chunk = make_chunk(original="[NAVTXT:0] Memory Architecture", xpaths=[], chunk_mode="nav_text")
+        translator = MagicMock()
+        translator.arun = AsyncMock(
+            side_effect=[
+                MagicMock(status=RunStatus.completed, content=MockTranslationResponse("[NAVTXT:0] 记忆建筑")),
+                MagicMock(status=RunStatus.completed, content=MockTranslationResponse("[NAVTXT:0] 内存架构")),
+            ]
+        )
+        mock_get_translator.return_value = translator
+
+        output = await translate_step(
+            MagicMock(
+                input=chunk,
+                additional_data={"glossary": {"memory": "内存", "architecture": "架构"}},
+            )
+        )
+
+        assert output.content.status == TranslationStatus.TRANSLATED
+        assert output.content.translated == "[NAVTXT:0] 内存架构"
+
+    @patch("engine.agents.workflow.get_translator")
+    async def test_translate_step_nav_text_retries_degenerate_output(self, mock_get_translator):
+        original = "[NAVTXT:0] " + "This chapter explains vector similarity and search relevance. " * 8
+        degenerate = "[NAVTXT:0] " + "亲近度".join("本章介绍向量相似度如何提升搜索相关性。" * 8)
+        translator = MagicMock()
+        translator.arun = AsyncMock(
+            side_effect=[
+                MagicMock(status=RunStatus.completed, content=MockTranslationResponse(degenerate)),
+                MagicMock(status=RunStatus.completed, content=MockTranslationResponse("[NAVTXT:0] 向量相似度")),
+            ]
+        )
+        mock_get_translator.return_value = translator
+
+        output = await translate_step(
+            MagicMock(input=make_chunk(original=original, xpaths=[], chunk_mode="nav_text"), additional_data={})
+        )
+
+        assert output.content.translated == "[NAVTXT:0] 向量相似度"
+
+    @patch("engine.agents.workflow.get_translator")
     async def test_translate_step_nav_text_invalid_marker_fails(self, mock_get_translator):
         """translate_step: nav_text marker mismatch should fail retries."""
         chunk = make_chunk(original="[NAVTXT:0] Chapter 1", xpaths=[], chunk_mode="nav_text")
@@ -1241,7 +1346,10 @@ class TestProofreadStep:
         )
         mock_get_proofer.return_value = mock_proofer
 
-        step_input = MagicMock(previous_step_content=chunk)
+        step_input = MagicMock(
+            previous_step_content=chunk,
+            additional_data={"glossary": {"Hello": "你好"}},
+        )
         output = await proofread_step(step_input)
 
         assert output.success is True
@@ -1249,6 +1357,9 @@ class TestProofreadStep:
         assert isinstance(output.content["chunk"], Chunk)
         assert isinstance(output.content["proofreading_result"], ProofreadingResult)
         assert output.content["proofreading_result"].corrections == {"你好": "您好"}
+        payload = json.loads(mock_proofer.arun.await_args.args[0])
+        assert payload["source_text"] == "<p>Hello</p>"
+        assert payload["glossaries"] == {"Hello": "你好"}
 
     @patch("engine.agents.workflow.get_proofer")
     async def test_proofread_step_no_translated_text(self, mock_get_proofer):
@@ -1636,6 +1747,23 @@ class TestHelpers:
         assert "large language model" in result
         assert "LLM" in result
         assert "API" not in result
+
+    def test_filter_glossary_terms_prefers_longest_overlapping_term(self):
+        glossary = {"memory": "内存", "working memory": "工作记忆"}
+
+        assert filter_glossary_terms("Working memory improves reasoning.", glossary) == {
+            "working memory": "工作记忆"
+        }
+
+    def test_filter_glossary_terms_handles_common_plural_forms(self):
+        glossary = {"memory": "内存", "process": "进程", "agent": "智能体"}
+
+        assert filter_glossary_terms("Memories, processes, and agents.", glossary) == glossary
+
+    def test_filter_glossary_terms_ignores_identifiers(self):
+        glossary = {"memory": "内存", "agent": "智能体"}
+
+        assert filter_glossary_terms("agent_id and memory_cache", glossary) == {}
 
     def test_filter_glossary_terms_empty(self):
         result = filter_glossary_terms("hello world", {})

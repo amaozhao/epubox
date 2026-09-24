@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -263,6 +264,127 @@ class TestOrchestrator:
 
         assert failed_count == 0
         assert chunk.status == TranslationStatus.COMPLETED
+
+    def test_final_gate_rejects_completed_degenerate_checkpoint(self, orchestrator):
+        original_text = "This chapter explains how vector similarity improves search relevance. " * 8
+        translated_text = "亲近度".join("本章介绍向量相似度如何提升搜索相关性。" * 8)
+        chunk = Chunk(
+            name="loop",
+            original=f"<p>{original_text}</p>",
+            translated=f"<p>{translated_text}</p>",
+            tokens=100,
+            status=TranslationStatus.COMPLETED,
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[
+                EpubItem(
+                    id="item1",
+                    path="/mock/path/test_book/item1.html",
+                    content=f"<p>{original_text}</p>",
+                    chunks=[chunk],
+                )
+            ],
+        )
+
+        failed_count = orchestrator._apply_final_untranslated_gate(book)
+
+        assert failed_count == 1
+        assert chunk.status == TranslationStatus.TRANSLATION_FAILED
+        assert chunk.translated is None
+        assert orchestrator.final_untranslated_review_findings[0]["rejected_translation"] == f"<p>{translated_text}</p>"
+
+    def test_invalid_completed_chunks_are_requeued(self, orchestrator):
+        chunk = Chunk(
+            name="term",
+            original="<p>Memory architecture matters.</p>",
+            translated="<p>记忆建筑很重要。</p>",
+            tokens=5,
+            status=TranslationStatus.COMPLETED,
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[EpubItem(id="item1", path="item1.html", content=chunk.original, chunks=[chunk])],
+        )
+
+        count = orchestrator._requeue_invalid_completed_chunks(
+            book,
+            {"memory": "内存", "architecture": "架构"},
+        )
+
+        assert count == 1
+        assert chunk.status == TranslationStatus.PENDING
+        assert chunk.translated is None
+        assert book.glossary_snapshot == {"memory": "内存", "architecture": "架构"}
+
+    def test_changed_glossary_requeues_even_when_target_appears_for_another_term(self, orchestrator):
+        chunk = Chunk(
+            name="term",
+            original="<p>Memory uses RAM.</p>",
+            translated="<p>记忆使用内存。</p>",
+            tokens=5,
+            status=TranslationStatus.COMPLETED,
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[EpubItem(id="item1", path="item1.html", content=chunk.original, chunks=[chunk])],
+        )
+
+        count = orchestrator._requeue_invalid_completed_chunks(book, {"memory": "内存"})
+
+        assert count == 1
+        assert chunk.status == TranslationStatus.PENDING
+        assert chunk.translated is None
+
+    def test_unchanged_glossary_does_not_requeue_completed_chunk(self, orchestrator):
+        chunk = Chunk(
+            name="term",
+            original="<p>Memory uses RAM.</p>",
+            translated="<p>内存使用 RAM。</p>",
+            tokens=5,
+            status=TranslationStatus.COMPLETED,
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            glossary_snapshot={"memory": "内存"},
+            items=[EpubItem(id="item1", path="item1.html", content=chunk.original, chunks=[chunk])],
+        )
+
+        count = orchestrator._requeue_invalid_completed_chunks(book, {"memory": "内存"})
+
+        assert count == 0
+        assert chunk.status == TranslationStatus.COMPLETED
+
+    def test_degenerate_completed_checkpoint_is_requeued_before_translation(self, orchestrator):
+        original_text = "This chapter explains how vector similarity improves search relevance. " * 8
+        translated_text = "亲近度".join("本章介绍向量相似度如何提升搜索相关性。" * 8)
+        chunk = Chunk(
+            name="loop",
+            original=f"<p>{original_text}</p>",
+            translated=f"<p>{translated_text}</p>",
+            tokens=100,
+            status=TranslationStatus.COMPLETED,
+        )
+        book = EpubBook(
+            name="test_book",
+            path="/mock/path/test_book.epub",
+            extract_path="/mock/path/test_book",
+            items=[EpubItem(id="item1", path="item1.html", content=chunk.original, chunks=[chunk])],
+        )
+
+        count = orchestrator._requeue_invalid_completed_chunks(book, {})
+
+        assert count == 1
+        assert chunk.status == TranslationStatus.PENDING
+        assert chunk.translated is None
 
     def test_final_untranslated_gate_validates_nav_text_payloads_individually(self, orchestrator):
         """测试最终整书扫描不会把 NAV 批量产品名累积误判为漏译。"""
@@ -1271,6 +1393,28 @@ class TestManualTranslationReport:
         assert report["total"] == 0
         assert report["suspect_total"] == 1
         assert report["suspect_english_terms"] == suspect_terms
+
+    def test_save_report_preserves_rejected_translation_without_auto_loading_it(self, tmp_path):
+        orchestrator = Orchestrator()
+        rejected = "<p>用户手工译文" + "错误" * 200 + "</p>"
+        finding = {
+            "file": "chapter.xhtml",
+            "chunk_name": "abc123",
+            "path": "/tmp/chapter.xhtml",
+            "text": rejected[:240],
+            "rejected_translation": rejected,
+            "reason": "quality_gate:test",
+        }
+
+        report_path = orchestrator._save_manual_translation_report(
+            [],
+            str(tmp_path / "test.epub"),
+            [finding],
+        )
+
+        report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        assert report["suspect_english_terms"][0]["rejected_translation"] == rejected
+        assert orchestrator._load_manual_translations(report_path) == {}
 
     def test_load_manual_translations(self, tmp_path):
         """测试加载手动翻译报告"""

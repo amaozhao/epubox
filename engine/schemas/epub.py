@@ -12,6 +12,7 @@ class EpubBook(BaseModel):
     path: str
     extract_path: str
     checkpoint_schema_version: int = CHECKPOINT_SCHEMA_VERSION
+    glossary_snapshot: Dict[str, str] = Field(default_factory=dict)
     items: List["EpubItem"] = Field(default_factory=list)
 
 

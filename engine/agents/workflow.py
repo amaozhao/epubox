@@ -8,8 +8,11 @@ from bs4 import BeautifulSoup
 from bs4.element import NavigableString
 
 from engine.agents.verifier import (
+    find_degenerate_translation,
     find_untranslated_english_texts,
     normalize_translated_html_attributes,
+    select_glossary_terms,
+    validate_locked_glossary_terms,
     validate_translated_html,
 )
 from engine.core.logger import engine_logger as logger
@@ -66,6 +69,7 @@ STRUCTURE_ERROR_KEYWORDS = (
     "HTML标签结构错误",
     "冻结标签占位符不一致",
 )
+QUALITY_ERROR_KEYWORDS = ("疑似退化重复", "锁定术语不一致")
 TEXT_NODE_FALLBACK_UNIT_LIMIT = 8
 TEXT_NODE_FALLBACK_RETRIES = 3
 VALIDATION_ERROR_HISTORY_LIMIT = 4
@@ -83,12 +87,7 @@ def is_content_safety_error(error_msg: str = "", status_code: int | None = None)
 
 def filter_glossary_terms(text: str, glossary: Dict[str, str]) -> Dict[str, str]:
     """从文本中过滤出出现在术语表中的术语"""
-    found_terms = {}
-    sorted_terms = sorted(glossary.keys(), key=len, reverse=True)
-    for term in sorted_terms:
-        if term.lower() in text.lower():
-            found_terms[term] = glossary[term]
-    return found_terms
+    return select_glossary_terms(text, glossary)
 
 
 def _filter_invalid_corrections(corrections: dict[str, str]) -> tuple[dict[str, str], int]:
@@ -210,6 +209,12 @@ def _is_structure_validation_error(error_msg: str | None) -> bool:
     return any(keyword in error_msg for keyword in STRUCTURE_ERROR_KEYWORDS)
 
 
+def _is_quality_validation_error(error_msg: str | None) -> bool:
+    if not error_msg:
+        return False
+    return any(keyword in error_msg for keyword in QUALITY_ERROR_KEYWORDS)
+
+
 def _collect_translatable_text_nodes(html: str) -> tuple[BeautifulSoup, list[tuple[NavigableString, str, str]]]:
     soup = BeautifulSoup(html, get_markup_parser(html))
     nodes: list[tuple[NavigableString, str, str]] = []
@@ -264,6 +269,10 @@ def _validate_text_node_translation(original: str, translated: str) -> tuple[boo
                     False,
                     f"TEXT 标记 {marker} 内 {label} 占位符不一致: 原始 {original_placeholders}, 翻译 {translated_placeholders}",
                 )
+
+    degeneration = find_degenerate_translation(original, translated)
+    if degeneration:
+        return False, f"译文疑似退化重复: {degeneration}"
 
     return True, ""
 
@@ -337,7 +346,9 @@ async def _translate_with_text_node_fallback(
             else:
                 batch_error_msg = validation_error
                 batch_error_history = _append_error_history(batch_error_history, validation_error)
-                batch_previous_translation = translated
+                batch_previous_translation = (
+                    None if _is_quality_validation_error(validation_error) else translated
+                )
 
         if batch_error_msg:
             single_error_msg = None
@@ -364,7 +375,9 @@ async def _translate_with_text_node_fallback(
                         break
                     single_error_msg = validation_error
                     single_error_history = _append_error_history(single_error_history, validation_error)
-                    single_previous_translation = translated
+                    single_previous_translation = (
+                        None if _is_quality_validation_error(validation_error) else translated
+                    )
 
                 if single_payload is None:
                     return None, single_error_msg or batch_error_msg
@@ -554,7 +567,10 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
             use_text_node_fallback = (
                 chunk.chunk_mode != "nav_text"
                 and attempt == MAX_TRANSLATION_RETRIES - 1
-                and _is_structure_validation_error(last_error_msg)
+                and (
+                    _is_structure_validation_error(last_error_msg)
+                    or _is_quality_validation_error(last_error_msg)
+                )
             )
             if use_text_node_fallback:
                 logger.info("开始执行 text-node fallback translate 调用")
@@ -568,14 +584,14 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
                 else:
                     if translated is not None:
                         translated = normalize_translated_html_attributes(original, translated)
-                        is_valid, error_msg = validate_translated_html(original, translated)
+                        is_valid, error_msg = validate_translated_html(original, translated, glossary)
                     else:
                         is_valid, error_msg = False, "Translation failed: translated is None"
             else:
                 translated = await _call_translator(
                     protected_original,
                     glossary,
-                    last_translation,
+                    None if _is_quality_validation_error(last_error_msg) else last_translation,
                     _build_validation_feedback(error_history),
                     mode="nav_text" if chunk.chunk_mode == "nav_text" else "html",
                 )
@@ -590,6 +606,12 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
             if chunk.chunk_mode == "nav_text":
                 if translated is not None:
                     is_valid, error_msg = _validate_nav_translation(original, translated)
+                    if is_valid:
+                        degeneration = find_degenerate_translation(original, translated)
+                        if degeneration:
+                            is_valid, error_msg = False, f"译文疑似退化重复: {degeneration}"
+                    if is_valid:
+                        is_valid, error_msg = validate_locked_glossary_terms(original, translated, glossary)
                 else:
                     is_valid, error_msg = False, "translated is None"
             else:
@@ -600,7 +622,7 @@ async def _translate_with_fallback(chunk: Chunk, glossary: Dict[str, str] | None
                     else:
                         if translated is not None:
                             translated = normalize_translated_html_attributes(original, translated)
-                            is_valid, error_msg = validate_translated_html(original, translated)
+                            is_valid, error_msg = validate_translated_html(original, translated, glossary)
                         else:
                             is_valid, error_msg = False, "translated is None"
                 else:
@@ -642,7 +664,8 @@ async def translate_step(step_input: StepInput) -> ChunkStepOutput:
         return ChunkStepOutput(content=chunk)
 
     untranslated_hits = find_untranslated_english_texts(chunk.original)
-    if _looks_like_already_simplified_chinese(chunk.original) and not untranslated_hits:
+    glossary_valid, _ = validate_locked_glossary_terms(chunk.original, chunk.original, glossary)
+    if _looks_like_already_simplified_chinese(chunk.original) and not untranslated_hits and glossary_valid:
         logger.info(f"Chunk '{chunk.name}' 检测到原文已是目标语言，直接接受原文。")
         chunk.translated = chunk.original
         chunk.status = TranslationStatus.ACCEPTED_AS_IS
@@ -681,7 +704,13 @@ async def proofread_step(step_input: StepInput) -> ProofreadStepOutput:
             error=error_msg,
         )
 
-    proofer_input = {"text_to_proofread": translated}
+    additional_data = step_input.additional_data if isinstance(step_input.additional_data, dict) else {}
+    glossary = additional_data.get("glossary", {})
+    proofer_input = {
+        "source_text": chunk.original,
+        "text_to_proofread": translated,
+        "glossaries": filter_glossary_terms(chunk.original, glossary),
+    }
 
     max_attempts = 3
     proofreading_result = None
@@ -734,6 +763,8 @@ def apply_corrections_step(step_input: StepInput) -> ChunkStepOutput:
     chunk: Chunk = step_data["chunk"]
     proofreading_result: ProofreadingResult = step_data["proofreading_result"]
     translated_text = chunk.translated
+    additional_data = step_input.additional_data if isinstance(step_input.additional_data, dict) else {}
+    glossary = additional_data.get("glossary", {})
 
     # 翻译失败或接受原文，跳过应用校对建议
     if chunk.status in (TranslationStatus.TRANSLATION_FAILED, TranslationStatus.ACCEPTED_AS_IS):
@@ -780,7 +811,7 @@ def apply_corrections_step(step_input: StepInput) -> ChunkStepOutput:
     final_text = final_text.replace("。。", "。").replace("，，", "，")
     final_text = normalize_translated_html_attributes(chunk.original, final_text)
 
-    is_valid, error_msg = validate_translated_html(chunk.original, final_text)
+    is_valid, error_msg = validate_translated_html(chunk.original, final_text, glossary)
     if not is_valid:
         logger.warning(
             f"Chunk '{chunk.name}' 校对后校验失败，回退到校对前译文: {error_msg}；"

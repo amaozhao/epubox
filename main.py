@@ -54,7 +54,7 @@ def translate(
         typer.Exit(1)
 
 
-@app.command("generate-glossary", help="为指定的 EPUB 文件生成【多词术语】的 JSON 文件。")
+@app.command("generate-glossary", help="为指定的 EPUB 文件生成可编辑的术语 JSON 文件。")
 def generate_glossary(
     epub_path: Path = typer.Argument(
         ...,
@@ -72,7 +72,7 @@ def generate_glossary(
         help="输出术语表文件的路径（可选，会自动生成）。",
     ),
 ):
-    """为指定的 EPUB 文件生成【多词术语】的 JSON 文件。"""
+    """为指定的 EPUB 文件生成可编辑的术语 JSON 文件。"""
     typer.echo("-" * 50)
     if output_path:
         typer.echo(f"指定输出路径: {output_path}")

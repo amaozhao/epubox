@@ -12,7 +12,11 @@ description = (
 
 BASE_INSTRUCTIONS = [
     '1. **JSON OUTPUT ONLY**: Return ONLY {"translation": "..."} with no extra keys or commentary.',
-    "2. **GLOSSARY**: Use the 'glossaries' dictionary for technical term translations.",
+    (
+        "2. **GLOSSARY**: Every entry in the 'glossaries' dictionary is locked. "
+        "Use its exact Chinese translation every time the source term occurs; "
+        "longer phrases take priority over words contained inside them."
+    ),
     "3. **RETRY INPUTS**: The input may include 'validation_error' and 'previous_translation'. 'validation_error' may summarize multiple previous failures. When present, repair the previous translation to satisfy those constraints instead of restarting from scratch.",
     "4. **MINIMAL REPAIR ON RETRY**: If 'previous_translation' is provided, keep all already-correct content unchanged and make only the smallest edit needed to fix the reported problem.",
 ]

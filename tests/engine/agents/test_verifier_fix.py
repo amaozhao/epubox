@@ -30,6 +30,72 @@ class TestValidateTranslatedHtmlTagErrors:
         is_valid, error = validate_translated_html(original, translated)
         assert is_valid
 
+    def test_validate_rejects_degenerate_repeated_translation(self):
+        original_text = "This chapter explains how vector similarity improves search relevance. " * 8
+        translated_text = "亲近度".join("本章介绍向量相似度如何提升搜索相关性。" * 8)
+
+        is_valid, error = validate_translated_html(f"<p>{original_text}</p>", f"<p>{translated_text}</p>")
+
+        assert not is_valid
+        assert "退化重复" in error
+
+    def test_validate_accepts_naturally_repeated_translation(self):
+        original = "<p>The system retries requests, records failures, and reports the final result.</p>"
+        translated = "<p>系统会重试请求、记录失败，并报告最终结果；这些步骤共同保证处理过程可靠。</p>"
+
+        is_valid, error = validate_translated_html(original, translated)
+
+        assert is_valid, error
+
+    def test_validate_enforces_locked_glossary_terms(self):
+        original = "<p>Memory architecture uses an agent.</p>"
+        glossary = {"memory": "内存", "architecture": "架构", "agent": "智能体"}
+
+        is_valid, error = validate_translated_html(original, "<p>记忆建筑使用一个代理。</p>", glossary)
+
+        assert not is_valid
+        assert "锁定术语" in error
+
+        is_valid, error = validate_translated_html(original, "<p>内存架构使用一个智能体。</p>", glossary)
+        assert is_valid, error
+
+    def test_validate_accepts_locked_term_split_by_inline_tag(self):
+        is_valid, error = validate_translated_html(
+            "<p>Working <em>memory</em> matters.</p>",
+            "<p>工作<em>记忆</em>很重要。</p>",
+            {"working memory": "工作记忆"},
+        )
+
+        assert is_valid, error
+
+    def test_validate_allows_target_used_by_unlocked_synonym(self):
+        is_valid, error = validate_translated_html(
+            "<p>Memory uses RAM.</p>",
+            "<p>内存使用内存。</p>",
+            {"memory": "内存"},
+        )
+
+        assert is_valid, error
+
+    def test_validate_preserves_spaces_in_locked_target(self):
+        is_valid, error = validate_translated_html(
+            "<p>OpenAI API</p>",
+            "<p>OpenAIAPI</p>",
+            {"OpenAI API": "OpenAI API"},
+        )
+
+        assert not is_valid
+        assert "锁定术语" in error
+
+    def test_validate_counts_overlapping_targets_independently(self):
+        is_valid, error = validate_translated_html(
+            "<p>An intelligent agent cooperates with an agent.</p>",
+            "<p>一个智能智能体与另一个智能体协作。</p>",
+            {"intelligent agent": "智能智能体", "agent": "智能体"},
+        )
+
+        assert is_valid, error
+
     def test_validate_rejects_visible_model_serialization_artifacts(self):
         """正文中的 JSON 包装、转义换行和尾部花括号必须被拦截。"""
         original = "<p>Profit stream</p>"
