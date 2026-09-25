@@ -6,6 +6,7 @@ from agno.run import RunStatus
 from agno.workflow import Step, StepInput, StepOutput, Workflow
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString
+from pydantic import ValidationError
 
 from engine.agents.verifier import (
     find_degenerate_translation,
@@ -20,7 +21,7 @@ from engine.core.markup import get_markup_parser
 from engine.schemas import Chunk, TranslationStatus
 
 from .fallback_runtime import run_fallback_agent, run_primary_agent
-from .models import fallback_model
+from .models import proofreader_fallback_model
 from .proofer import get_proofer
 from .schemas import ProofreadingResult, TranslationResponse
 from .translator import get_translator
@@ -73,6 +74,10 @@ QUALITY_ERROR_KEYWORDS = ("疑似退化重复", "锁定术语不一致")
 TEXT_NODE_FALLBACK_UNIT_LIMIT = 8
 TEXT_NODE_FALLBACK_RETRIES = 3
 VALIDATION_ERROR_HISTORY_LIMIT = 4
+MAX_PROOFREAD_CORRECTIONS = 20
+MAX_PROOFREAD_PHRASE_CHARS = 300
+MAX_PROOFREAD_PREVIOUS_RESPONSE_CHARS = 2000
+MAX_PROOFREAD_ERROR_CHARS = 1000
 
 
 def is_content_safety_error(error_msg: str = "", status_code: int | None = None) -> bool:
@@ -500,6 +505,72 @@ def _sanitize_model_text(text: str) -> str:
     return MODEL_FORMAT_NEWLINE_ESCAPE_RE.sub("\n", cleaned)
 
 
+def _proofread_response_excerpt(content: str) -> str:
+    if len(content) <= MAX_PROOFREAD_PREVIOUS_RESPONSE_CHARS:
+        return content
+    marker = f"\n...[truncated {len(content) - MAX_PROOFREAD_PREVIOUS_RESPONSE_CHARS} chars]...\n"
+    remaining = MAX_PROOFREAD_PREVIOUS_RESPONSE_CHARS - len(marker)
+    head = remaining // 2
+    tail = remaining - head
+    return f"{content[:head]}{marker}{content[-tail:]}"
+
+
+def _proofread_error_excerpt(content: str) -> str:
+    if len(content) <= MAX_PROOFREAD_ERROR_CHARS:
+        return content
+    return f"{content[: MAX_PROOFREAD_ERROR_CHARS - 16]}...[truncated]"
+
+
+def _validate_proofreading_result(result: ProofreadingResult) -> str | None:
+    if len(result.corrections) > MAX_PROOFREAD_CORRECTIONS:
+        return f"校对修正数量超过 {MAX_PROOFREAD_CORRECTIONS}，请仅返回最必要的局部修正"
+    for original, corrected in result.corrections.items():
+        if not original or not corrected:
+            return "校对修正的原文和译文都不能为空"
+        if len(original) > MAX_PROOFREAD_PHRASE_CHARS or len(corrected) > MAX_PROOFREAD_PHRASE_CHARS:
+            return f"校对短语超过 {MAX_PROOFREAD_PHRASE_CHARS} 字符，请缩小到局部短语"
+    return None
+
+
+def _parse_proofreading_response(content) -> tuple[ProofreadingResult | None, str | None, str | None]:
+    raw_content: str | None = None
+    try:
+        if isinstance(content, ProofreadingResult):
+            result = content
+        elif isinstance(content, dict):
+            result = ProofreadingResult.model_validate(content)
+        elif isinstance(content, str):
+            raw_content = content
+            cleaned = content.strip()
+            if cleaned.startswith("```json") and cleaned.endswith("```"):
+                cleaned = cleaned[7:-3].strip()
+            elif cleaned.startswith("```") and cleaned.endswith("```"):
+                cleaned = cleaned[3:-3].strip()
+            result = ProofreadingResult.model_validate(json.loads(cleaned))
+        else:
+            return None, f"校对响应类型无效: {type(content).__name__}", None
+    except json.JSONDecodeError as error:
+        return None, f"校对响应不是有效 JSON: {error.msg} (char {error.pos})", raw_content
+    except ValidationError as error:
+        details = error.errors(include_url=False, include_input=False)[:3]
+        return None, _proofread_error_excerpt(f"校对响应不符合 corrections 结构: {details}"), raw_content
+
+    validation_error = _validate_proofreading_result(result)
+    if validation_error:
+        return None, validation_error, raw_content or result.model_dump_json()
+    return result, None, raw_content
+
+
+def _raw_proofreading_content(response):
+    messages = getattr(response, "messages", None)
+    if isinstance(messages, list):
+        assistant_messages = [message for message in messages if getattr(message, "role", None) == "assistant"]
+        if assistant_messages:
+            content = getattr(assistant_messages[-1], "content", None)
+            return content if isinstance(content, str) else None
+    return response.content if isinstance(response.content, str) else None
+
+
 async def _call_translator(
     text: str,
     glossary: Dict[str, str] | None = None,
@@ -706,7 +777,7 @@ async def proofread_step(step_input: StepInput) -> ProofreadStepOutput:
 
     additional_data = step_input.additional_data if isinstance(step_input.additional_data, dict) else {}
     glossary = additional_data.get("glossary", {})
-    proofer_input = {
+    base_proofer_input = {
         "source_text": chunk.original,
         "text_to_proofread": translated,
         "glossaries": filter_glossary_terms(chunk.original, glossary),
@@ -715,44 +786,74 @@ async def proofread_step(step_input: StepInput) -> ProofreadStepOutput:
     max_attempts = 3
     proofreading_result = None
     used_fallback = False
+    validation_error: str | None = None
+    previous_response: str | None = None
 
     for attempt in range(max_attempts):
         use_fallback_this_attempt = used_fallback or attempt == max_attempts - 1
-        proofer = get_proofer(fallback_model) if use_fallback_this_attempt else get_proofer()
+        proofer = get_proofer(proofreader_fallback_model) if use_fallback_this_attempt else get_proofer()
         try:
+            proofer_input = dict(base_proofer_input)
+            if validation_error:
+                validation_error = _proofread_error_excerpt(validation_error)
+                proofer_input["validation_error"] = validation_error
+            if previous_response:
+                proofer_input["previous_response"] = previous_response
             payload = json.dumps(proofer_input, ensure_ascii=False, indent=2)
             if use_fallback_this_attempt:
                 response = await run_fallback_agent("proofread", proofer, payload)
             else:
                 response = await run_primary_agent("proofread", proofer, payload)
-            if isinstance(response.content, ProofreadingResult):
-                proofreading_result = response.content
-                break
-            if response.status == RunStatus.error:
+            if response.status != RunStatus.completed:
                 error_content = str(response.content) if response.content else ""
-                if not use_fallback_this_attempt and not used_fallback and is_content_safety_error(error_content):
+                if (
+                    response.status == RunStatus.error
+                    and not use_fallback_this_attempt
+                    and not used_fallback
+                    and is_content_safety_error(error_content)
+                ):
                     logger.warning("主模型校对失败（内容安全审核），尝试使用备用模型...")
                     used_fallback = True
+                    validation_error = f"主模型内容安全审核失败: {error_content[:300]}"
                     continue
-            logger.warning(f"校对步骤失败：代理返回了意外的响应类型 (attempt {attempt + 1}/{max_attempts})")
+                validation_error = (
+                    f"校对代理状态为 {response.status}: {error_content[:300] or '没有错误详情'}"
+                )
+                previous_response = _proofread_response_excerpt(error_content) if error_content else None
+            else:
+                proofreading_result, validation_error, raw_response = _parse_proofreading_response(
+                    _raw_proofreading_content(response)
+                )
+                if proofreading_result is not None:
+                    _, rejected_corrections = _filter_invalid_corrections(proofreading_result.corrections)
+                    if rejected_corrections:
+                        validation_error = (
+                            f"{rejected_corrections} 个校对建议破坏了占位符；"
+                            "不要修改或移动 [PRE:N]、[CODE:N]、[STYLE:N]"
+                        )
+                        raw_response = raw_response or proofreading_result.model_dump_json()
+                        proofreading_result = None
+                    else:
+                        break
+                previous_response = _proofread_response_excerpt(raw_response) if raw_response else None
+            validation_error = _proofread_error_excerpt(validation_error or "未知响应错误")
+            logger.warning(f"校对重试 {attempt + 1}/{max_attempts} 失败: {validation_error or '未知响应错误'}")
         except Exception as e:
             if not use_fallback_this_attempt and not used_fallback and is_content_safety_error(str(e)):
                 logger.warning("主模型校对异常（内容安全审核），尝试使用备用模型...")
                 used_fallback = True
+                validation_error = f"主模型内容安全审核异常: {str(e)[:300]}"
                 continue
             logger.error(f"校对步骤异常 (attempt {attempt + 1}/{max_attempts}): {e}")
+            validation_error = f"校对调用异常: {type(e).__name__}: {str(e)[:300]}"
+            previous_response = None
 
         if attempt < max_attempts - 1:
             logger.info("将在下次尝试中重试校对步骤...")
 
     if proofreading_result is None:
-        error_msg = f"校对步骤失败：经过 {max_attempts} 次尝试后仍未成功。"
-        logger.error(error_msg)
-        return ProofreadStepOutput(
-            content={"chunk": chunk, "proofreading_result": ProofreadingResult(corrections={})},
-            success=False,
-            error=error_msg,
-        )
+        logger.warning(f"校对经过 {max_attempts} 次尝试仍失败，保留已验证译文并跳过校对。")
+        proofreading_result = ProofreadingResult(corrections={})
 
     return ProofreadStepOutput(content={"chunk": chunk, "proofreading_result": proofreading_result})
 

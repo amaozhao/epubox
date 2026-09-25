@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,6 +29,15 @@ class MockTranslationResponse(TranslationResponse):
 class MockProofreadingResult(ProofreadingResult):
     def __init__(self, corrections: dict):
         super().__init__(corrections=corrections)
+
+
+def mock_proofread_run(corrections: dict[str, str]):
+    content = MockProofreadingResult(corrections)
+    return MagicMock(
+        status=RunStatus.completed,
+        content=content,
+        messages=[SimpleNamespace(role="assistant", content=content.model_dump_json())],
+    )
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -1338,12 +1348,7 @@ class TestProofreadStep:
             status=TranslationStatus.TRANSLATED,
         )
         mock_proofer = MagicMock()
-        mock_proofer.arun = AsyncMock(
-            return_value=MagicMock(
-                status=RunStatus.completed,
-                content=MockProofreadingResult({"你好": "您好"}),
-            )
-        )
+        mock_proofer.arun = AsyncMock(return_value=mock_proofread_run({"你好": "您好"}))
         mock_get_proofer.return_value = mock_proofer
 
         step_input = MagicMock(
@@ -1360,6 +1365,168 @@ class TestProofreadStep:
         payload = json.loads(mock_proofer.arun.await_args.args[0])
         assert payload["source_text"] == "<p>Hello</p>"
         assert payload["glossaries"] == {"Hello": "你好"}
+
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_retries_malformed_json_with_feedback(self, mock_get_proofer):
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofer = MagicMock()
+        proofer.arun = AsyncMock(
+            side_effect=[
+                MagicMock(status=RunStatus.completed, content='{"corrections":{"你好":"您好"'),
+                mock_proofread_run({"你好": "您好"}),
+            ]
+        )
+        mock_get_proofer.return_value = proofer
+
+        output = await proofread_step(MagicMock(previous_step_content=chunk, additional_data={}))
+
+        assert output.success is True
+        first_payload = json.loads(proofer.arun.await_args_list[0].args[0])
+        second_payload = json.loads(proofer.arun.await_args_list[1].args[0])
+        assert "validation_error" not in first_payload
+        assert "previous_response" not in first_payload
+        assert "不是有效 JSON" in second_payload["validation_error"]
+        assert second_payload["previous_response"] == '{"corrections":{"你好":"您好"'
+
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_rejects_agno_cleaned_malformed_json(self, mock_get_proofer):
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        malformed = '{"corrections":{"你好":"您好" "世界":"世间"}}'
+        proofer = MagicMock()
+        proofer.arun = AsyncMock(
+            side_effect=[
+                MagicMock(
+                    status=RunStatus.completed,
+                    content=MockProofreadingResult({"你好": '您好" "世界":"世间'}),
+                    messages=[SimpleNamespace(role="assistant", content=malformed)],
+                ),
+                mock_proofread_run({}),
+            ]
+        )
+        mock_get_proofer.return_value = proofer
+
+        output = await proofread_step(MagicMock(previous_step_content=chunk, additional_data={}))
+
+        assert output.content["proofreading_result"].corrections == {}
+        assert proofer.arun.await_count == 2
+
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_requires_raw_json_for_structured_content(self, mock_get_proofer):
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofer = MagicMock()
+        proofer.arun = AsyncMock(
+            side_effect=[
+                MagicMock(
+                    status=RunStatus.completed,
+                    content=MockProofreadingResult({"你好": "您好"}),
+                    messages=[],
+                ),
+                mock_proofread_run({}),
+            ]
+        )
+        mock_get_proofer.return_value = proofer
+
+        output = await proofread_step(MagicMock(previous_step_content=chunk, additional_data={}))
+
+        assert output.content["proofreading_result"].corrections == {}
+        assert proofer.arun.await_count == 2
+
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_retries_non_completed_status(self, mock_get_proofer):
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofer = MagicMock()
+        proofer.arun = AsyncMock(
+            side_effect=[
+                MagicMock(status=RunStatus.cancelled, content='{"corrections":{}}'),
+                mock_proofread_run({}),
+            ]
+        )
+        mock_get_proofer.return_value = proofer
+
+        output = await proofread_step(MagicMock(previous_step_content=chunk, additional_data={}))
+
+        assert output.content["proofreading_result"].corrections == {}
+        assert proofer.arun.await_count == 2
+
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_retries_oversized_correction_map(self, mock_get_proofer):
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofer = MagicMock()
+        proofer.arun = AsyncMock(
+            side_effect=[
+                mock_proofread_run({f"原文{i}": f"修正{i}" for i in range(21)}),
+                mock_proofread_run({}),
+            ]
+        )
+        mock_get_proofer.return_value = proofer
+
+        output = await proofread_step(MagicMock(previous_step_content=chunk, additional_data={}))
+
+        assert output.success is True
+        assert output.content["proofreading_result"].corrections == {}
+        second_payload = json.loads(proofer.arun.await_args_list[1].args[0])
+        assert "修正数量超过 20" in second_payload["validation_error"]
+
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_retries_placeholder_breaking_corrections(self, mock_get_proofer):
+        chunk = make_chunk(
+            original="<p>Hello [CODE:0]</p>",
+            translated="<p>你好 [CODE:0]</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        proofer = MagicMock()
+        proofer.arun = AsyncMock(
+            side_effect=[
+                mock_proofread_run({"你好 [CODE:0]": "您好 [CODE:1]"}),
+                mock_proofread_run({}),
+            ]
+        )
+        mock_get_proofer.return_value = proofer
+
+        output = await proofread_step(MagicMock(previous_step_content=chunk, additional_data={}))
+
+        assert output.content["proofreading_result"].corrections == {}
+        second_payload = json.loads(proofer.arun.await_args_list[1].args[0])
+        assert "破坏了占位符" in second_payload["validation_error"]
+
+    @patch("engine.agents.workflow.run_fallback_agent")
+    @patch("engine.agents.workflow.get_proofer")
+    async def test_proofread_step_all_invalid_outputs_skip_review(self, mock_get_proofer, mock_run_fallback_agent):
+        chunk = make_chunk(
+            original="<p>Hello</p>",
+            translated="<p>你好</p>",
+            status=TranslationStatus.TRANSLATED,
+        )
+        invalid = MagicMock(status=RunStatus.completed, content="not json")
+        proofer = MagicMock()
+        proofer.arun = AsyncMock(return_value=invalid)
+        mock_get_proofer.return_value = proofer
+        mock_run_fallback_agent.return_value = invalid
+
+        output = await proofread_step(MagicMock(previous_step_content=chunk, additional_data={}))
+
+        assert output.success is True
+        assert output.content["proofreading_result"].corrections == {}
 
     @patch("engine.agents.workflow.get_proofer")
     async def test_proofread_step_no_translated_text(self, mock_get_proofer):
@@ -1389,10 +1556,7 @@ class TestProofreadStep:
                 mock_response.status = RunStatus.error
                 mock_response.content = "相关法律法规不予显示"
                 return mock_response
-            return MagicMock(
-                status=RunStatus.completed,
-                content=MockProofreadingResult({"你好": "您好"}),
-            )
+            return mock_proofread_run({"你好": "您好"})
 
         mock_proofer = MagicMock()
         mock_proofer.arun = safety_then_success
@@ -1422,10 +1586,7 @@ class TestProofreadStep:
         mock_proofer = MagicMock()
         mock_proofer.arun = AsyncMock(side_effect=RuntimeError("timeout"))
         mock_get_proofer.return_value = mock_proofer
-        mock_run_fallback_agent.return_value = MagicMock(
-            status=RunStatus.completed,
-            content=MockProofreadingResult({"你好": "您好"}),
-        )
+        mock_run_fallback_agent.return_value = mock_proofread_run({"你好": "您好"})
 
         step_input = MagicMock(previous_step_content=chunk)
         output = await proofread_step(step_input)
@@ -1673,12 +1834,7 @@ class TestGetTranslatorWorkflow:
         mock_get_translator.return_value = mock_translator
 
         mock_proofer = MagicMock()
-        mock_proofer.arun = AsyncMock(
-            return_value=MagicMock(
-                status=RunStatus.completed,
-                content=MockProofreadingResult({}),
-            )
-        )
+        mock_proofer.arun = AsyncMock(return_value=mock_proofread_run({}))
         mock_get_proofer.return_value = mock_proofer
 
         workflow: Workflow = get_translator_workflow()
@@ -1768,3 +1924,23 @@ class TestHelpers:
     def test_filter_glossary_terms_empty(self):
         result = filter_glossary_terms("hello world", {})
         assert result == {}
+
+    def test_proofread_previous_response_excerpt_is_bounded(self):
+        from engine.agents import workflow
+
+        excerpt = workflow._proofread_response_excerpt("x" * 2_000_000)
+
+        assert len(excerpt) <= 2000
+        assert excerpt.startswith("x" * 900)
+        assert excerpt.endswith("x" * 900)
+
+    def test_proofread_validation_error_omits_large_invalid_input(self):
+        from engine.agents import workflow
+
+        _, error, _ = workflow._parse_proofreading_response(
+            {"corrections": {"原文": ["x" * 100_000]}}
+        )
+
+        assert error is not None
+        assert len(error) <= 1000
+        assert "x" * 1000 not in error

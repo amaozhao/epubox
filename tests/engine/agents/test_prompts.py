@@ -1,3 +1,4 @@
+from engine.agents.proofer import get_proofer
 from engine.agents.proofer import instructions as proofer_instructions
 from engine.agents.translator import instructions as translator_instructions
 
@@ -15,3 +16,10 @@ def test_proofer_prompt_discourages_placeholder_reordering():
     assert "Keep the SAME left-to-right order" in joined
     assert "Never swap two placeholders" in joined
     assert "prefer returning NO correction" in joined
+
+
+def test_proofer_keeps_provider_json_schema_enabled():
+    proofer = get_proofer()
+
+    assert proofer.output_schema is not None
+    assert proofer.use_json_mode is True

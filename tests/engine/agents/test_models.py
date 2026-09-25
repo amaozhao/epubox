@@ -6,7 +6,12 @@ from agno.models.message import Message
 from agno.models.openai.like import OpenAILike
 from agno.models.response import ModelResponse
 
-from engine.agents.models import build_primary_model, fallback_model
+from engine.agents.models import (
+    build_primary_model,
+    fallback_model,
+    proofreader_fallback_model,
+    proofreader_model,
+)
 from engine.agents.streaming_openai_like import StreamingOpenAILike
 
 
@@ -67,3 +72,8 @@ class TestBuildPrimaryModel:
 class TestFallbackModel:
     def test_fallback_model_uses_proxy_client(self):
         assert isinstance(fallback_model, StreamingOpenAILike)
+
+
+def test_proofreader_model_caps_completion_size():
+    assert proofreader_model.max_completion_tokens == 2048
+    assert proofreader_fallback_model.max_completion_tokens == 2048

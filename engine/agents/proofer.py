@@ -1,7 +1,7 @@
 from agno.agent import Agent
 from agno.models.base import Model
 
-from .models import model as default_model
+from .models import proofreader_model as default_model
 from .schemas import ProofreadingResult
 
 description = (
@@ -28,6 +28,8 @@ instructions = [
     "4. **Output Structure**: Your response must be ONLY a RAW JSON object. No markdown blocks, no preamble.",
     '   - Format: {"corrections": {"original_phrase": "improved_phrase"}}',
     '   - If no changes are needed, return: {"corrections": {}}',
+    "4.1 **BOUNDED OUTPUT**: Return at most 20 corrections. Each original/improved phrase must be at most 300 characters.",
+    "4.2 **RETRY REPAIR**: The input may include 'validation_error' and 'previous_response'. On retry, fix only that JSON/output problem and return a fresh complete JSON object.",
     "5. **Language Rule**: Both keys and values must be in Chinese. Do not include English explanations or 'Note' fields.",
     "6. **Robustness & Escaping**: "
     "   - Ensure the JSON is valid and parseable by `json.loads()`."
