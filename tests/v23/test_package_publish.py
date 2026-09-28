@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -26,7 +28,7 @@ from engine.epub.validation import (
     inspect_epub,
     validate_internal_references,
 )
-from engine.item.extractor import extract_document
+from engine.item.extractor import EXTRACTOR_VERSION, extract_document
 from engine.item.planner import PlannerConfig, PlanningError, plan_unit
 from engine.schemas.v23 import ItemStatus, RunConfig, canonical_hash
 from engine.services.store import StaleWrite, Store
@@ -43,6 +45,19 @@ class StubChecker:
     def check(self, path: Path) -> EpubCheckResult:
         self.paths.append(path)
         return EpubCheckResult(("stub-epubcheck",), 0, warnings=self.warnings)
+
+
+def test_epubcheck_counts_diagnostics_without_counting_summary_or_book_title(monkeypatch, tmp_path: Path) -> None:
+    output = (
+        "Validating Trial and Error.epub\n"
+        "ERROR(RSC-005): chapter.xhtml: invalid role\n"
+        "WARNING(OPF-053): cover image has no media type\n"
+        "Messages: 0 fatals / 1 error / 1 warning / 0 infos\n"
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess([], 1, output, ""))
+    result = EpubChecker((sys.executable,)).check(tmp_path / "book.epub")
+    assert len(result.errors) == len(result.warnings) == 1
+    assert not result.fatals and not result.passed
 
 
 def test_preparation_uses_unambiguous_primary_title_and_passes_local_stylesheets(tmp_path: Path) -> None:
@@ -79,7 +94,7 @@ def test_preparation_uses_unambiguous_primary_title_and_passes_local_stylesheets
         model="test-model",
         provider="test-provider",
         prompt_version="test-prompt",
-        extractor_version="epubox-extractor-1",
+        extractor_version=EXTRACTOR_VERSION,
         run_http_limit=0,
     )
     prepare_book(
@@ -105,7 +120,7 @@ def test_preparation_resumes_same_unready_run_and_revalidates_saved_document(
         model="test-model",
         provider="test-provider",
         prompt_version="test-prompt",
-        extractor_version="epubox-extractor-1",
+        extractor_version=EXTRACTOR_VERSION,
         run_http_limit=0,
     )
     calls: list[str] = []
@@ -173,7 +188,7 @@ def test_unplannable_unit_is_recorded_without_blocking_ready_inventory(tmp_path:
         model="test-model",
         provider="test-provider",
         prompt_version="test-prompt",
-        extractor_version="epubox-extractor-1",
+        extractor_version=EXTRACTOR_VERSION,
         run_http_limit=0,
     )
 
@@ -218,7 +233,7 @@ def test_prepare_commits_snapshot_documents_units_then_ready_bookplan(tmp_path: 
         model="test-model",
         provider="test-provider",
         prompt_version="test-prompt",
-        extractor_version="epubox-extractor-1",
+        extractor_version=EXTRACTOR_VERSION,
         run_http_limit=100,
     )
     prepared = prepare_book(

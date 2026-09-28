@@ -331,7 +331,7 @@ def _css_urls(css: str) -> list[str]:
 def _classify_epubcheck_output(output: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     buckets: dict[str, list[str]] = {"FATAL": [], "ERROR": [], "WARNING": []}
     for line in output.splitlines():
-        match = re.search(r"\b(FATAL|ERROR|WARNING)\b", line, re.IGNORECASE)
+        match = re.match(r"\s*(FATAL|ERROR|WARNING)(?=\(|:|\s)", line, re.IGNORECASE)
         if match:
             buckets[match.group(1).upper()].append(line.strip())
     return tuple(buckets["FATAL"]), tuple(buckets["ERROR"]), tuple(buckets["WARNING"])

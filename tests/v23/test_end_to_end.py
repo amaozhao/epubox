@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from engine.epub.preparation import PreparationConfig, prepare_book
-from engine.item.extractor import extract_document
+from engine.item.extractor import EXTRACTOR_VERSION, extract_document
 from engine.item.inline import events_to_projection, parse_projection
 from engine.item.planner import PlannerConfig, plan_unit
 from engine.orchestrator_v23 import TranslationEngine
@@ -25,7 +25,7 @@ def prepared(tmp_path: Path, version: str):
         model="fake",
         provider="test",
         prompt_version="test-1",
-        extractor_version="epubox-extractor-1",
+        extractor_version=EXTRACTOR_VERSION,
         run_http_limit=300,
         max_context_tokens=16000,
         max_output_tokens=2048,

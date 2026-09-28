@@ -216,7 +216,7 @@ def test_same_generation_segments_merge_without_lost_update_and_late_epoch_is_re
     plan = plan_unit(
         unit,
         PlannerConfig(
-            context_tokens=1300,
+            context_tokens=1500,
             max_output_tokens=512,
             review_output_tokens=128,
             safety_margin=16,

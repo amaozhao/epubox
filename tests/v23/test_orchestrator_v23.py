@@ -277,6 +277,7 @@ class ScriptedTransport:
         review_failures: Iterable[str] = (),
         review_scripts: dict[str, list[tuple[str, str | None]]] | None = None,
         coherence_major_once: str | None = None,
+        coherence_affected: list[tuple[str, ...]] | None = None,
         malformed_coherence: bool = False,
         coherence_empty_major_once: bool = False,
         delays: dict[str, float] | None = None,
@@ -285,6 +286,7 @@ class ScriptedTransport:
         self.review_failures = set(review_failures)
         self.review_scripts = {key: list(value) for key, value in (review_scripts or {}).items()}
         self.coherence_major_once = coherence_major_once
+        self.coherence_affected = list(coherence_affected or ())
         self.malformed_coherence = malformed_coherence
         self.coherence_empty_major_once = coherence_empty_major_once
         self.coherence_calls = 0
@@ -313,9 +315,12 @@ class ScriptedTransport:
             self.coherence_calls += 1
             if self.malformed_coherence:
                 return {"raw": "{truncated", "usage": {"input_tokens": 4, "output_tokens": 1}}
-            blocking = (
-                self.coherence_major_once is not None or self.coherence_empty_major_once
-            ) and self.coherence_calls == 1
+            affected = (
+                self.coherence_affected[self.coherence_calls - 1]
+                if self.coherence_calls <= len(self.coherence_affected)
+                else ((self.coherence_major_once,) if self.coherence_major_once and self.coherence_calls == 1 else ())
+            )
+            blocking = bool(affected) or (self.coherence_empty_major_once and self.coherence_calls == 1)
             return {
                 "raw": json.dumps(
                     {
@@ -324,11 +329,7 @@ class ScriptedTransport:
                         "items": [
                             {
                                 "item_id": item_id,
-                                "unit_ids": (
-                                    [self.coherence_major_once]
-                                    if blocking and self.coherence_major_once is not None
-                                    else []
-                                ),
+                                "unit_ids": list(affected),
                                 "issues": (
                                     [
                                         {
@@ -603,6 +604,110 @@ async def test_coherence_major_issue_revises_only_the_named_unit_then_rechecks_w
     assert check.status == "valid"
     assert check.candidate_versions == {"u1": 1, "u2": 0}
     assert transport.coherence_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_coherence_rechecks_after_one_affected_unit_changes_and_the_other_passes_review(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path, ((("u1", ("First.",)), ("u2", ("Second.",))),))
+    transport = ScriptedTransport(
+        review_scripts={
+            "u1:e0:s0": [("no_change", None), ("replace", "衔接修订"), ("no_change", None)],
+            "u2:e0:s0": [("no_change", None), ("no_change", None)],
+        },
+        coherence_affected=[("u1", "u2"), ()],
+    )
+
+    report = await TranslationEngine(store, transport=transport).execute()
+
+    assert report["ready_to_publish"] is True
+    assert store.load_unit("u1").accepted_revision == 1
+    assert store.load_unit("u2").accepted_revision == 0
+    assert not store.load_unit("u2").unresolved_issues
+    assert store.read_document_status("d1").status == "valid"
+    assert transport.coherence_calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("second_affected", "expected_status"), [((), "valid"), (("u1", "u2"), "needs_attention")])
+async def test_coherence_rechecks_same_revision_after_all_affected_units_pass_review(
+    tmp_path: Path,
+    second_affected: tuple[str, ...],
+    expected_status: str,
+) -> None:
+    store = _make_store(tmp_path, ((("u1", ("First.",)), ("u2", ("Second.",))),))
+    transport = ScriptedTransport(
+        review_scripts={
+            "u1:e0:s0": [("no_change", None), ("no_change", None)],
+            "u2:e0:s0": [("no_change", None), ("no_change", None)],
+        },
+        coherence_affected=[("u1", "u2"), second_affected],
+    )
+
+    report = await TranslationEngine(store, transport=transport).execute()
+
+    check = store.read_document_status("d1")
+    assert check.status == expected_status
+    assert check.repair_rounds == 1
+    assert transport.coherence_calls == 2
+    assert store.load_unit("u1").accepted_revision == 0
+    assert store.load_unit("u2").accepted_revision == 0
+    assert report["ready_to_publish"] is (expected_status == "valid")
+
+
+@pytest.mark.asyncio
+async def test_resume_drops_cached_failed_coherence_window_without_reopening_accepted_targets(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path, ((("u1", ("First.",)), ("u2", ("Second.",))),))
+    await TranslationEngine(store, transport=ScriptedTransport()).execute()
+    check = store.read_document_status("d1")
+    window_id = str(check.windows[0]["item_id"])
+    failed_window = {
+        "item_id": window_id,
+        "unit_ids": ["u1", "u2"],
+        "issues": [{"code": "continuity", "severity": "major", "message": "mismatch"}],
+    }
+    store.write_document_status(
+        check.model_copy(
+            update={
+                "status": "blocked_dependency",
+                "repair_rounds": 1,
+                "dependency_ids": ("u1", "u2"),
+                "checks": {**check.checks, window_id: failed_window},
+            }
+        )
+    )
+    for unit_id in ("u1", "u2"):
+        record = store.load_unit(unit_id)
+        issue = FailureRecord(
+            scope="unit",
+            stage="coherence",
+            code="blocking_coherence",
+            message="mismatch",
+            plan_epoch=record.plan_epoch,
+            revision=record.revision,
+            retry_action="repair",
+        )
+        store.save_unit(
+            record.model_copy(
+                update={
+                    "accepted_revision": None,
+                    "accepted_target_hash": None,
+                    "review": None,
+                    "unresolved_issues": (*record.unresolved_issues, issue),
+                }
+            )
+        )
+    transport = ScriptedTransport()
+
+    report = await TranslationEngine(Store(tmp_path), transport=transport).execute()
+
+    assert report["ready_to_publish"] is True
+    assert transport.calls == [("coherence", window_id)]
+    assert all(Store(tmp_path).load_unit(unit_id).accepted_revision == 0 for unit_id in ("u1", "u2"))
+    assert Store(tmp_path).read_document_status("d1").status == "valid"
 
 
 def test_late_review_of_an_old_target_hash_is_rejected_without_undoing_replacement(

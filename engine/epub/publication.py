@@ -27,7 +27,7 @@ from engine.epub.validation import (
     validate_internal_references,
 )
 from engine.item.inline import plain_text, projection_identities, validate_projection
-from engine.schemas.v23 import DocumentPlan, SourceSlot, Unit, UnitRecord, canonical_hash, is_accepted
+from engine.schemas.v23 import DocumentPlan, Event, SourceSlot, Unit, UnitRecord, canonical_hash, is_accepted
 from engine.services.store import Store
 
 _TRANSLATABLE_ATTRIBUTES = {"alt", "title", "aria-label", "aria-description"}
@@ -116,7 +116,7 @@ def validate_assembled_document(
 
     for unit_id, target in accepted_targets.items():
         unit = units[unit_id]
-        validate_projection(unit, target)
+        events = validate_projection(unit, target)
         if unit.kind == "attribute":
             slot = document.source_slots[unit.slot_ids[0]]
             if _document_slot_value(document, actual_nodes, slot) != plain_text(target):
@@ -130,11 +130,39 @@ def validate_assembled_document(
         if _unit_element_identities(unit, actual_nodes) != expected_identities:
             raise EpubValidationError("inline_identity_mismatch", f"Inline object order mismatch: {unit_id}")
         actual_text = _unit_region_text(unit, actual_nodes)
-        for entry in unit.registry.values():
-            if entry.kind == "x" and entry.source_text and "slot_id" in entry.hints:
-                actual_text = actual_text.replace(entry.source_text, "", 1)
-        if actual_text != plain_text(target):
+        if actual_text != _expected_unit_text(document, unit, events):
             raise EpubValidationError("target_text_mismatch", f"Target text mismatch: {unit_id}")
+
+
+def _expected_unit_text(document: DocumentPlan, unit: Unit, events: Sequence[Event]) -> str:
+    parts: list[str] = []
+    for event in events:
+        if event.kind == "text":
+            parts.append(event.value)
+            continue
+        if not event.value.startswith("=x"):
+            continue
+        entry = unit.registry[event.value[1:]]
+        slot_id = entry.hints.get("slot_id")
+        if slot_id is None:
+            continue
+        slot = document.source_slots.get(slot_id)
+        if slot is None:
+            raise EpubValidationError("invalid_slot_reference", f"Unknown protected source slot: {slot_id}")
+        try:
+            start = int(entry.hints.get("start", "0"))
+            end = int(entry.hints.get("end", str(len(slot.source_value))))
+        except ValueError as error:
+            raise EpubValidationError(
+                "invalid_slot_reference", f"Invalid protected source range: {slot_id}"
+            ) from error
+        if start < 0 or end < start or end > len(slot.source_value):
+            raise EpubValidationError("invalid_slot_reference", f"Protected source range is out of bounds: {slot_id}")
+        source_text = slot.source_value[start:end]
+        if source_text != entry.source_text:
+            raise EpubValidationError("invalid_slot_reference", f"Protected source range does not match: {slot_id}")
+        parts.append(source_text)
+    return "".join(parts)
 
 
 def _valid_derived_target(

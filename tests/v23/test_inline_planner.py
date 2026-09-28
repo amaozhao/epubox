@@ -242,6 +242,22 @@ def test_css_scan_is_limited_conservative_and_follows_bounded_local_imports():
         scan_css("p { color: red } /* unrelated data-trace values never enter CSS */").policy
         == ReorderPolicy.REORDER_ALLOWED
     )
+    namespace = scan_css('@namespace epub "http://www.idpf.org/2007/ops"; a { color: red }')
+    assert namespace.policy == ReorderPolicy.REORDER_ALLOWED
+    assert not namespace.issues
+
+    localized = scan_css(".danger > a:first-child { color: red } .rtl { direction: rtl }")
+    assert [(item.selector, item.mode) for item in localized.constraints] == [
+        (".danger > a:first-child", "group"),
+        (".rtl", "descendants"),
+    ]
+    combined = scan_css("div[dir] { direction: rtl }")
+    assert [(item.selector, item.mode) for item in combined.constraints] == [
+        ("div[dir]", "group"),
+        ("div[dir]", "descendants"),
+    ]
+    assert selector_policy("article:has(> p)") == ReorderPolicy.UNKNOWN
+    assert selector_policy("article:is(:has(> p))") == ReorderPolicy.UNKNOWN
 
 
 def test_short_unit_has_one_stable_segment_and_batching_does_not_change_identity():
@@ -360,7 +376,7 @@ def test_planning_checks_review_budget_and_batch_packing_only_changes_transport(
     source = "word " * 160
     unit = make_unit(source)
     config = PlannerConfig(
-        context_tokens=1300,
+        context_tokens=1500,
         max_output_tokens=512,
         review_output_tokens=128,
         safety_margin=16,

@@ -14,7 +14,7 @@ from engine.agents.runtime_v23 import PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.preparation import PreparationConfig, prepare_book, repair_document, resume_preparation
 from engine.epub.validation import EpubChecker
-from engine.item.extractor import extract_document
+from engine.item.extractor import EXTRACTOR_VERSION, extract_document
 from engine.item.planner import PlannerConfig, plan_unit
 from engine.orchestrator_v23 import TranslationEngine
 from engine.schemas.v23 import RunConfig, RunResult, strict_json_loads
@@ -135,7 +135,7 @@ def translate_v23(
         model=str(model.id),
         provider=provider,
         prompt_version=PROMPT_VERSION,
-        extractor_version="epubox-extractor-1",
+        extractor_version=EXTRACTOR_VERSION,
         run_http_limit=http_limit,
         max_concurrency=concurrency,
         max_context_tokens=context_tokens,
@@ -182,6 +182,8 @@ def resume_v23(
     store = Store(work_dir)
     book = store.read_bookplan()
     config = RunConfig.model_validate(book.frozen_config)
+    if book.preparation_state != "ready" and config.extractor_version != EXTRACTOR_VERSION:
+        raise ValueError("extractor version changed during preparation; start a new run")
     model = model_for(config.provider, max_output_tokens=config.max_output_tokens or 2048)
     if model.id != config.model or str(model.base_url) != config.generation.get("base_url"):
         raise ValueError("provider/model configuration changed; start a new run instead of reusing old results")

@@ -304,6 +304,153 @@ def test_external_missing_or_inline_sensitive_styles_lock_reordering(head: str, 
     assert link.registry["g1"].reorder_allowed is False
 
 
+def test_styles_lock_only_potentially_affected_groups_and_inherited_descendants():
+    source = (
+        '<html><head><title>Book</title><link rel="stylesheet" href="book.css"/></head><body><article>'
+        '<p class="danger"><em>lead</em><a href="#d">danger</a></p>'
+        '<p class="safe"><em>lead</em><a href="#s">safe</a></p>'
+        '<p class="rtl"><span><a href="#r">rtl</a></span><em>tail</em></p>'
+        "</article></body></html>"
+    )
+    document = extract_document(
+        source,
+        "OEBPS/chapter.xhtml",
+        "source-hash",
+        styles={
+            "OEBPS/book.css": (
+                '@namespace epub "http://www.idpf.org/2007/ops"; '
+                ".danger > a:first-child { color: red; } "
+                ".rtl { direction: rtl; } article { display: block; }"
+            )
+        },
+    )
+    danger = next(unit for unit in document.units if "danger" in unit.source_projection)
+    safe = next(unit for unit in document.units if "safe" in unit.source_projection)
+    rtl = next(unit for unit in document.units if "rtl" in unit.source_projection)
+
+    assert all(entry.movement == "locked" for entry in danger.registry.values() if entry.kind == "g")
+    assert all(entry.movement == "same_parent" for entry in safe.registry.values() if entry.kind == "g")
+    assert all(entry.movement == "locked" for entry in rtl.registry.values() if entry.kind == "g")
+
+
+def test_unknown_selector_still_uses_document_fallback():
+    source = (
+        '<html><head><title>Book</title><link rel="stylesheet" href="book.css"/></head>'
+        '<body><p>Use <a href="#x">text</a>.</p><p>More <em>prose</em>.</p></body></html>'
+    )
+    document = extract_document(
+        source,
+        "OEBPS/chapter.xhtml",
+        "source-hash",
+        styles={"OEBPS/book.css": "svg|a { color: red; }"},
+    )
+    assert all(
+        entry.movement == "locked" for unit in document.units for entry in unit.registry.values() if entry.kind == "g"
+    )
+
+
+def test_attribute_selectors_use_stable_rightmost_candidates_without_false_empty_sets():
+    source = (
+        '<html xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Book</title>'
+        '<link rel="stylesheet" href="book.css"/></head><body>'
+        '<p data-kind="x"><em>emphasis</em><a href="#x">link</a></p>'
+        '<p><span epub:type="keyword">keyword</span><a href="#y">other</a></p>'
+        "</body></html>"
+    )
+    document = extract_document(
+        source,
+        "OEBPS/chapter.xhtml",
+        "source-hash",
+        styles={"OEBPS/book.css": "p[data-kind] > em:first-child, span[epub|type]:first-child { color: red; }"},
+    )
+    emphasis = next(unit for unit in document.units if "emphasis" in unit.source_projection)
+    keyword = next(unit for unit in document.units if "keyword" in unit.source_projection)
+    assert all(entry.movement == "locked" for entry in emphasis.registry.values() if entry.kind == "g")
+    assert all(entry.movement == "locked" for entry in keyword.registry.values() if entry.kind == "g")
+
+
+def test_order_sensitive_descendants_lock_their_movable_inline_ancestors():
+    source = (
+        '<html><head><title>Book</title><link rel="stylesheet" href="book.css"/></head><body>'
+        "<p><strong>lead</strong><span><em>nested</em></span><i>tail</i></p>"
+        '<p><b class="foo">lead</b><span class="bar"><a href="#x">nested link</a></span><em>tail</em></p>'
+        "</body></html>"
+    )
+    document = extract_document(
+        source,
+        "OEBPS/chapter.xhtml",
+        "source-hash",
+        styles={"OEBPS/book.css": "strong + span em:first-child, .foo + .bar a { color: red; }"},
+    )
+    nested = next(
+        unit
+        for unit in document.units
+        if "nested" in unit.source_projection and "nested link" not in unit.source_projection
+    )
+    nested_link = next(unit for unit in document.units if "nested link" in unit.source_projection)
+    assert next(entry for entry in nested.registry.values() if entry.source_text == "nested").movement == "locked"
+    assert (
+        next(entry for entry in nested_link.registry.values() if entry.source_text == "nested link").movement
+        == "locked"
+    )
+    assert next(entry for entry in nested_link.registry.values() if entry.source_text == "tail").movement == "locked"
+
+
+def test_order_sensitive_block_candidate_locks_transparent_anchor_group():
+    source = (
+        '<html><head><title>Book</title><link rel="stylesheet" href="book.css"/></head><body>'
+        '<a href="#x"><div>A</div><section>B</section></a></body></html>'
+    )
+    document = extract_document(
+        source,
+        "OEBPS/chapter.xhtml",
+        "source-hash",
+        styles={"OEBPS/book.css": "div:first-child { color: red; }"},
+    )
+    unit = next(item for item in document.units if "A" in item.source_projection and "B" in item.source_projection)
+    assert all(entry.movement == "locked" for entry in unit.registry.values() if entry.kind == "g")
+
+
+def test_order_sensitive_descendant_inside_block_locks_block_parent_domain():
+    source = (
+        '<html><head><title>Book</title><link rel="stylesheet" href="book.css"/></head><body>'
+        '<a href="#x"><div><em>A</em></div><section>B</section></a></body></html>'
+    )
+    document = extract_document(
+        source,
+        "OEBPS/chapter.xhtml",
+        "source-hash",
+        styles={"OEBPS/book.css": "div:first-child em { color: red; }"},
+    )
+    unit = next(item for item in document.units if "A" in item.source_projection and "B" in item.source_projection)
+    assert next(entry for entry in unit.registry.values() if entry.source_text == "A").movement == "locked"
+    assert next(entry for entry in unit.registry.values() if entry.source_text == "B").movement == "locked"
+
+
+def test_inherited_external_and_inline_direction_lock_descendants_but_not_unrelated_units():
+    external = (
+        '<html><head><title>Book</title><link rel="stylesheet" href="book.css"/></head><body>'
+        '<div dir="rtl"><p><a href="#r">rtl external</a></p></div>'
+        '<p><a href="#s">safe external</a></p></body></html>'
+    )
+    document = extract_document(
+        external,
+        "OEBPS/chapter.xhtml",
+        "source-hash",
+        styles={"OEBPS/book.css": "div[dir] { direction: rtl; }"},
+    )
+    rtl = next(unit for unit in document.units if "rtl external" in unit.source_projection)
+    safe = next(unit for unit in document.units if "safe external" in unit.source_projection)
+    assert next(entry for entry in rtl.registry.values() if entry.kind == "g").movement == "locked"
+    assert next(entry for entry in safe.registry.values() if entry.kind == "g").movement == "same_parent"
+
+    inline = _plan('<p style="direction:rtl"><a href="#r">rtl inline</a></p><p><a href="#s">safe inline</a></p>')
+    rtl_inline = next(unit for unit in inline.units if "rtl inline" in unit.source_projection)
+    safe_inline = next(unit for unit in inline.units if "safe inline" in unit.source_projection)
+    assert next(entry for entry in rtl_inline.registry.values() if entry.kind == "g").movement == "locked"
+    assert next(entry for entry in safe_inline.registry.values() if entry.kind == "g").movement == "same_parent"
+
+
 def test_real_rust_fixture_monospace_command_is_a_bounded_code_atom():
     source = Path("tests/chapter1.xhtml").read_bytes().decode("utf-8")
     document = extract_document(source, "OEBPS/chapter1.xhtml", "source-hash")

@@ -12,10 +12,11 @@ from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
 import regex
+import tinycss2
 from lxml import etree  # type: ignore[attr-defined]
 
 from engine.core.markup import element_path, parse_xml_safely, qname_local_name
-from engine.core.styles import ReorderPolicy, scan_inline_style, scan_stylesheets
+from engine.core.styles import ReorderPolicy, StyleIssue, StyleScan, scan_inline_style, scan_stylesheets
 from engine.item.inline import Event, events_to_projection, parse_projection
 from engine.schemas.v23 import (
     DocumentPlan,
@@ -28,7 +29,7 @@ from engine.schemas.v23 import (
     canonical_hash,
 )
 
-EXTRACTOR_VERSION = "epubox-extractor-1"
+EXTRACTOR_VERSION = "epubox-extractor-2"
 ADAPTER_VERSION = "epubox-xml-1"
 
 _EPUB_TYPE = "{http://www.idpf.org/2007/ops}type"
@@ -219,7 +220,9 @@ class _Extractor:
         self.non_element_tail_slots: dict[etree._Element, _Slot] = {}
         self.translate_overrides = self._compile_translate_exceptions()
         self._collect_slots()
-        self.document_reorder_allowed = self._style_policy(styles)
+        self.style_scan = self._style_policy(styles)
+        self.style_document_fallback = self.style_scan.policy == ReorderPolicy.UNKNOWN
+        self.style_locked_elements, self.style_locked_parents = self._style_locks(self.style_scan)
 
     def extract(self) -> DocumentPlan:
         root = self.tree.getroot()
@@ -353,7 +356,7 @@ class _Extractor:
                 overrides[node] = translated
         return overrides
 
-    def _style_policy(self, styles: Any) -> bool:
+    def _style_policy(self, styles: Any) -> StyleScan:
         sheets: dict[str, str] = {}
         roots: list[str] = []
         for index, node in enumerate(self.elements):
@@ -371,10 +374,13 @@ class _Extractor:
                 continue
             resolved = _resolve_local_resource(self.resource_path, node.get("href") or "")
             if resolved is None:
-                return False
+                return StyleScan(
+                    ReorderPolicy.UNKNOWN,
+                    issues=(StyleIssue("external_stylesheet", self.resource_path, node.get("href") or ""),),
+                )
             roots.append(resolved)
         if not roots:
-            return True
+            return StyleScan(ReorderPolicy.REORDER_ALLOWED)
 
         def load_import(current: str, href: str) -> tuple[str, str] | None:
             resolved = _resolve_local_resource(current.split("#", 1)[0], href)
@@ -382,10 +388,114 @@ class _Extractor:
                 return None
             return resolved, sheets[resolved]
 
-        return (
-            scan_stylesheets(sheets, roots=tuple(dict.fromkeys(roots)), loader=load_import).policy
-            == ReorderPolicy.REORDER_ALLOWED
-        )
+        return scan_stylesheets(sheets, roots=tuple(dict.fromkeys(roots)), loader=load_import)
+
+    def _style_locks(self, scan: StyleScan) -> tuple[set[etree._Element], set[etree._Element]]:
+        locked_elements: set[etree._Element] = set()
+        locked_parents: set[etree._Element] = set()
+        if scan.policy == ReorderPolicy.UNKNOWN:
+            return locked_elements, locked_parents
+        for constraint in scan.constraints:
+            candidates = self._selector_candidates(constraint.selector)
+            if constraint.mode == "group":
+                for element in candidates:
+                    current = element
+                    while isinstance(current.tag, str):
+                        parent = current.getparent()
+                        if parent is None:
+                            break
+                        locked_parents.add(parent)
+                        current = parent
+            elif constraint.mode == "descendants":
+                for element in candidates:
+                    locked_elements.update(
+                        descendant for descendant in element.iter() if isinstance(descendant.tag, str)
+                    )
+            else:
+                locked_elements.update(candidates)
+        return locked_elements, locked_parents
+
+    def _selector_candidates(self, selector: str) -> list[etree._Element]:
+        tokens = tinycss2.parse_component_value_list(selector, skip_comments=True)
+        compounds, combinators = self._selector_parts(tokens)
+        if not compounds:
+            return list(self.elements)
+        candidates = [element for element in self.elements if self._matches_stable_compound(element, compounds[-1])]
+        for index in range(len(compounds) - 2, -1, -1):
+            combinator = combinators[index]
+            if combinator in {"+", "~"}:
+                break  # Ignoring sibling requirements is a conservative superset.
+            required = compounds[index]
+            filtered: list[etree._Element] = []
+            for element in candidates:
+                if combinator == ">":
+                    parent = element.getparent()
+                    if parent is not None and self._matches_stable_compound(parent, required):
+                        filtered.append(element)
+                elif any(self._matches_stable_compound(ancestor, required) for ancestor in element.iterancestors()):
+                    filtered.append(element)
+            candidates = filtered
+        return candidates
+
+    def _selector_parts(self, tokens: list[Any]) -> tuple[list[list[Any]], list[str]]:
+        compounds: list[list[Any]] = []
+        combinators: list[str] = []
+        current: list[Any] = []
+        pending_space = False
+        for token in tokens:
+            if token.type == "whitespace":
+                pending_space = bool(current)
+                continue
+            value = getattr(token, "value", None)
+            if token.type == "literal" and value in {">", "+", "~"}:
+                if current:
+                    compounds.append(current)
+                    current = []
+                combinators.append(str(value))
+                pending_space = False
+                continue
+            if pending_space:
+                compounds.append(current)
+                combinators.append(" ")
+                current = []
+                pending_space = False
+            current.append(token)
+        if current:
+            compounds.append(current)
+        if len(combinators) != max(0, len(compounds) - 1):
+            return [], []
+        return compounds, combinators
+
+    def _matches_stable_compound(self, element: etree._Element, tokens: list[Any]) -> bool:
+        tag: str | None = None
+        element_id: str | None = None
+        classes: set[str] = set()
+        pseudo = False
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            token_type = token.type
+            value = getattr(token, "value", None)
+            if token_type == "literal" and value == ":":
+                pseudo = True
+            elif token_type == "hash" and not pseudo:
+                element_id = str(value)
+            elif token_type == "ident" and not pseudo:
+                previous = getattr(tokens[index - 1], "value", None) if index else None
+                if previous == ".":
+                    classes.add(str(value))
+                elif tag is None:
+                    tag = str(value).casefold()
+            elif token_type == "literal" and value not in {".", "*"}:
+                return True  # Widen an already classified selector rather than miss a candidate.
+            if token_type not in {"ident", "function"} and not (token_type == "literal" and value == ":"):
+                pseudo = False
+            index += 1
+        if tag is not None and qname_local_name(element.tag) != tag:
+            return False
+        if element_id is not None and element.get("id") != element_id:
+            return False
+        return not classes or classes.issubset(set((element.get("class") or "").split()))
 
     def _walk(self, node: etree._Element, inherited_translate: bool, metadata_mode: bool = False) -> None:
         if not isinstance(node.tag, str):
@@ -544,7 +654,7 @@ class _Extractor:
             return
         counter["g"] += 1
         ref = f"g{counter['g']}"
-        reorder = self.document_reorder_allowed and self._inline_reorder_allowed(node)
+        reorder = self._style_reorder_allowed(node) and self._inline_reorder_allowed(node)
         registry[ref] = RegistryEntry(
             ref_id=ref,
             kind="g",
@@ -1251,7 +1361,25 @@ class _Extractor:
         if qname_local_name(node.tag) in {"ruby", "rb", "rt", "rp", "bdo", "bdi"}:
             return False
         style = node.get("style")
-        return not style or scan_inline_style(style).policy == ReorderPolicy.REORDER_ALLOWED
+        if style and scan_inline_style(style).policy != ReorderPolicy.REORDER_ALLOWED:
+            return False
+        for ancestor in node.iterancestors():
+            inherited_style = ancestor.get("style")
+            if not inherited_style:
+                continue
+            scan = scan_inline_style(inherited_style)
+            if scan.policy == ReorderPolicy.UNKNOWN or any(
+                constraint.mode == "descendants" for constraint in scan.constraints
+            ):
+                return False
+        return True
+
+    def _style_reorder_allowed(self, node: etree._Element) -> bool:
+        return (
+            not self.style_document_fallback
+            and node not in self.style_locked_elements
+            and node.getparent() not in self.style_locked_parents
+        )
 
     def _kind(self, node: etree._Element, virtual: bool = False) -> str:
         name = qname_local_name(node.tag)

@@ -472,6 +472,9 @@ class TranslationEngine:
             or any(item.status != ItemStatus.REVIEWED for item in record.items.values())
         ):
             return
+        remaining_issues = tuple(issue for issue in record.unresolved_issues if issue.code != "blocking_coherence")
+        if remaining_issues != record.unresolved_issues:
+            record = self._save(record.model_copy(update={"unresolved_issues": remaining_issues}))
         if record.unresolved_issues:
             return
         self._save(
@@ -1030,6 +1033,18 @@ class TranslationEngine:
             return
         if check.candidate_versions != vector:
             check = check.model_copy(update={"checks": {}, "issues": (), "status": "pending"})
+        elif check.status == "blocked_dependency":
+
+            def passed_window(value: Any) -> bool:
+                if not isinstance(value, dict) or not isinstance(value.get("issues"), list):
+                    return False
+                return not any(
+                    isinstance(issue, dict) and issue.get("severity") in {"major", "critical"}
+                    for issue in value["issues"]
+                )
+
+            passed = {item_id: item for item_id, item in check.checks.items() if passed_window(item)}
+            check = check.model_copy(update={"checks": passed, "status": "pending"})
         fallback_base = max(0, check.http_limit - check.extra_http_limit) if check.http_limit else 6 * len(windows)
         limit = self.book.initial_coherence_limits.get(document_id, fallback_base) + check.extra_http_limit
         check = check.model_copy(
@@ -1058,7 +1073,6 @@ class TranslationEngine:
             raise ProtocolError(parsed.errors.get(job.item_id, "missing coherence window"))
         item = parsed.accepted[job.item_id]
         blocking = [issue for issue in item["issues"] if issue["severity"] in {"major", "critical"}]
-        checks = {**check.checks, job.item_id: item}
         if blocking:
             ids = item.get("unit_ids", list(manifest.unit_ids))
             if check.repair_rounds >= 1:
@@ -1068,7 +1082,6 @@ class TranslationEngine:
                 check.model_copy(
                     update={
                         "repair_rounds": check.repair_rounds + 1,
-                        "checks": checks,
                         "status": "blocked_dependency",
                         "dependency_ids": tuple(ids),
                     }
@@ -1119,6 +1132,7 @@ class TranslationEngine:
                 )
                 self._queue_unit(unit_id)
             return
+        checks = {**check.checks, job.item_id: item}
         status = "valid" if all(str(window["item_id"]) in checks for window in check.windows) else "pending"
         self.checks[job.document_id] = self.store.write_document_status(
             check.model_copy(update={"checks": checks, "status": status})

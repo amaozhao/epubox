@@ -6,7 +6,7 @@ import posixpath
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 import tinycss2
 
@@ -25,9 +25,16 @@ class StyleIssue:
 
 
 @dataclass(frozen=True, slots=True)
+class StyleConstraint:
+    selector: str
+    mode: Literal["group", "element", "descendants"]
+
+
+@dataclass(frozen=True, slots=True)
 class StyleScan:
     policy: ReorderPolicy
     locked_selectors: tuple[str, ...] = ()
+    constraints: tuple[StyleConstraint, ...] = ()
     issues: tuple[StyleIssue, ...] = ()
     visited: tuple[str, ...] = ()
 
@@ -40,11 +47,14 @@ def scan_css(css: str, *, source: str = "<style>") -> StyleScan:
 def scan_inline_style(style: str, *, source: str = "style attribute") -> StyleScan:
     declarations = tinycss2.parse_declaration_list(style, skip_comments=True, skip_whitespace=True)
     issues: list[StyleIssue] = []
-    locked = _declarations_lock(declarations, source, issues)
+    mode = _declaration_lock_mode(declarations, source, issues)
     if any(issue.code == "css_parse_error" for issue in issues):
         return StyleScan(ReorderPolicy.UNKNOWN, issues=tuple(issues), visited=(source,))
     return StyleScan(
-        ReorderPolicy.LOCKED if locked else ReorderPolicy.REORDER_ALLOWED, issues=tuple(issues), visited=(source,)
+        ReorderPolicy.LOCKED if mode else ReorderPolicy.REORDER_ALLOWED,
+        constraints=(StyleConstraint(":scope", mode),) if mode else (),
+        issues=tuple(issues),
+        visited=(source,),
     )
 
 
@@ -70,6 +80,7 @@ def scan_stylesheets(
     visited: list[str] = []
     seen: set[str] = set()
     locked_selectors: list[str] = []
+    constraints: list[StyleConstraint] = []
     issues: list[StyleIssue] = []
     unknown = False
 
@@ -85,7 +96,7 @@ def scan_stylesheets(
             continue
         visited.append(name)
         rules = tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True)
-        result = _scan_rules(rules, name, issues, locked_selectors)
+        result = _scan_rules(rules, name, issues, locked_selectors, constraints)
         unknown |= result
 
         for import_url in _imports(rules):
@@ -113,7 +124,13 @@ def scan_stylesheets(
         if unknown
         else (ReorderPolicy.LOCKED if locked_selectors else ReorderPolicy.REORDER_ALLOWED)
     )
-    return StyleScan(policy, tuple(dict.fromkeys(locked_selectors)), tuple(issues), tuple(visited))
+    return StyleScan(
+        policy,
+        tuple(dict.fromkeys(locked_selectors)),
+        tuple(dict.fromkeys(constraints)),
+        tuple(issues),
+        tuple(visited),
+    )
 
 
 def selector_policy(selector: str) -> ReorderPolicy:
@@ -122,6 +139,8 @@ def selector_policy(selector: str) -> ReorderPolicy:
     if any(token.type == "error" for token in tokens):
         return ReorderPolicy.UNKNOWN
     if any(token.type == "literal" and getattr(token, "value", "") == "|" for token in tokens):
+        return ReorderPolicy.UNKNOWN
+    if _contains_function(tokens, "has"):
         return ReorderPolicy.UNKNOWN
     if any(
         token.type in {"[] block", "() block", "function"}
@@ -132,7 +151,13 @@ def selector_policy(selector: str) -> ReorderPolicy:
     return ReorderPolicy.REORDER_ALLOWED if _supported_selector(tokens) else ReorderPolicy.UNKNOWN
 
 
-def _scan_rules(rules: Sequence[Any], source: str, issues: list[StyleIssue], locked_selectors: list[str]) -> bool:
+def _scan_rules(
+    rules: Sequence[Any],
+    source: str,
+    issues: list[StyleIssue],
+    locked_selectors: list[str],
+    constraints: list[StyleConstraint],
+) -> bool:
     unknown = False
     for rule in rules:
         if rule.type == "error":
@@ -140,17 +165,21 @@ def _scan_rules(rules: Sequence[Any], source: str, issues: list[StyleIssue], loc
             unknown = True
             continue
         if rule.type == "qualified-rule":
-            selector = tinycss2.serialize(rule.prelude).strip()
-            policy = selector_policy(selector)
             declarations = tinycss2.parse_declaration_list(rule.content, skip_comments=True, skip_whitespace=True)
             issue_count = len(issues)
-            declaration_lock = _declarations_lock(declarations, source, issues)
+            declaration_mode = _declaration_lock_mode(declarations, source, issues)
             unknown |= any(issue.code == "css_parse_error" for issue in issues[issue_count:])
-            if policy == ReorderPolicy.UNKNOWN:
-                issues.append(StyleIssue("unknown_selector", source, selector))
-                unknown = True
-            elif policy == ReorderPolicy.LOCKED or declaration_lock:
-                locked_selectors.append(selector)
+            for selector in _selector_groups(rule.prelude):
+                policy = selector_policy(selector)
+                if policy == ReorderPolicy.UNKNOWN:
+                    issues.append(StyleIssue("unknown_selector", source, selector))
+                    unknown = True
+                elif policy == ReorderPolicy.LOCKED:
+                    locked_selectors.append(selector)
+                    constraints.append(StyleConstraint(selector, "group"))
+                if policy != ReorderPolicy.UNKNOWN and declaration_mode:
+                    locked_selectors.append(selector)
+                    constraints.append(StyleConstraint(selector, declaration_mode))
             continue
         if rule.type != "at-rule":
             issues.append(StyleIssue("unknown_rule", source, str(rule.type)))
@@ -162,9 +191,14 @@ def _scan_rules(rules: Sequence[Any], source: str, issues: list[StyleIssue], loc
                 issues.append(StyleIssue("invalid_import", source, tinycss2.serialize(rule.prelude).strip()))
                 unknown = True
             continue
+        if keyword == "namespace":
+            if not rule.prelude or any(token.type == "error" for token in rule.prelude):
+                issues.append(StyleIssue("invalid_namespace", source, tinycss2.serialize(rule.prelude).strip()))
+                unknown = True
+            continue
         if keyword in {"media", "supports", "layer", "container", "scope"} and rule.content is not None:
             nested = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
-            unknown |= _scan_rules(nested, source, issues, locked_selectors)
+            unknown |= _scan_rules(nested, source, issues, locked_selectors, constraints)
         elif keyword in {"font-face", "page"}:
             declarations = tinycss2.parse_declaration_list(
                 rule.content or (), skip_comments=True, skip_whitespace=True
@@ -204,20 +238,24 @@ def _supported_selector(tokens: Sequence[Any]) -> bool:
     return not expect_simple
 
 
-def _declarations_lock(declarations: Sequence[Any], source: str, issues: list[StyleIssue]) -> bool:
-    locked = False
-    sensitive = {
-        "content",
-        "quotes",
-        "counter-increment",
-        "counter-reset",
-        "counter-set",
+def _declaration_lock_mode(
+    declarations: Sequence[Any], source: str, issues: list[StyleIssue]
+) -> Literal["element", "descendants"] | None:
+    mode: Literal["element", "descendants"] | None = None
+    inherited = {
         "direction",
         "unicode-bidi",
         "writing-mode",
         "ruby-position",
         "ruby-align",
         "ruby-merge",
+    }
+    sensitive = {
+        "content",
+        "quotes",
+        "counter-increment",
+        "counter-reset",
+        "counter-set",
     }
     structural_display = {
         "block",
@@ -243,9 +281,40 @@ def _declarations_lock(declarations: Sequence[Any], source: str, issues: list[St
             continue
         name = declaration.lower_name
         value = tinycss2.serialize(declaration.value).strip().lower()
-        if name in sensitive or (name == "display" and any(word in structural_display for word in value.split())):
-            locked = True
-    return locked
+        if name in inherited:
+            mode = "descendants"
+        elif name in sensitive or (name == "display" and any(word in structural_display for word in value.split())):
+            mode = mode or "element"
+    return mode
+
+
+def _selector_groups(tokens: Sequence[Any]) -> tuple[str, ...]:
+    groups: list[str] = []
+    current: list[Any] = []
+    for token in tokens:
+        if token.type == "literal" and token.value == ",":
+            selector = tinycss2.serialize(current).strip()
+            if selector:
+                groups.append(selector)
+            current = []
+        else:
+            current.append(token)
+    selector = tinycss2.serialize(current).strip()
+    if selector:
+        groups.append(selector)
+    return tuple(groups)
+
+
+def _contains_function(tokens: Sequence[Any], name: str) -> bool:
+    for token in tokens:
+        if token.type == "function" and (
+            getattr(token, "lower_name", "") == name or _contains_function(token.arguments, name)
+        ):
+            return True
+        content = getattr(token, "content", None)
+        if content is not None and _contains_function(content, name):
+            return True
+    return False
 
 
 def _imports(rules: Sequence[Any]) -> tuple[str, ...]:
