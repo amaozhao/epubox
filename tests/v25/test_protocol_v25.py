@@ -4,6 +4,7 @@ import pytest
 
 from engine.agents.protocol_v23 import ProtocolError
 from engine.agents.protocol_v25 import validate_resolution_response, validate_terms_response
+from engine.agents.runtime_v23 import Stage, request_messages
 
 
 def _terms(items: list[dict]) -> str:
@@ -66,3 +67,17 @@ def test_resolution_only_selects_requested_candidates_and_units() -> None:
     ):
         with pytest.raises(ProtocolError):
             validate_resolution_response(json.dumps(invalid), "r1", "g1", {"c1"}, {"u1"})
+
+
+def test_single_runtime_builds_v25_term_and_review_prompts() -> None:
+    stages: tuple[tuple[Stage, str], ...] = (
+        ("terms", "epubox-terms-1"),
+        ("resolution", "epubox-term-resolution-1"),
+        ("review", "epubox-review-2"),
+    )
+    for stage, protocol in stages:
+        messages = request_messages(stage, {"protocol": protocol, "request_id": "r1", "items": []})
+        assert protocol in messages[0]["content"]
+        assert json.loads(messages[1]["content"])["request_id"] == "r1"
+    with pytest.raises(ValueError, match="protocol does not match"):
+        request_messages("terms", {"protocol": "epubox-review-2", "request_id": "r1"})
