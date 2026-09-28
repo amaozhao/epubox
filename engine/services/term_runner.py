@@ -91,13 +91,19 @@ class TermRunner:
         with self.store.lock():
             manifest = self.store.read_request(request_id)
             item_id = manifest.owner_id
-            item = next(entry for entry in self.plan.items if entry.item_id == item_id)
             if self._spent() >= self.plan.extraction_http_limit or (
                 self.run_limit and self._spent() >= self.run_limit
             ):
                 raise TermBudgetPaused("run terminology HTTP budget exhausted")
-            if self._spent(item_id) >= item.http_limit:
-                raise RequestError(f"term extraction item HTTP budget exhausted: {item_id}", attempts=0)
+            if manifest.stage == "terms":
+                item = next(entry for entry in self.plan.items if entry.item_id == item_id)
+                item_limit = item.http_limit
+            elif manifest.stage == "resolution":
+                item_limit = 3
+            else:
+                raise ValueError("terminology runner cannot reserve a translation request")
+            if self._spent(item_id) >= item_limit:
+                raise RequestError(f"term preparation item HTTP budget exhausted: {item_id}", attempts=0)
             self.store.reserve_attempt(request_id, Attempt.model_validate(attempt.model_dump(mode="python")))
 
     def _finish(self, request_id: str, attempt_id: str, **fields: Any) -> None:
