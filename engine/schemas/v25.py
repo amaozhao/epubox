@@ -216,8 +216,32 @@ class DocumentPlan(FrozenModel):
             raise ValueError("node map keys must match node_key")
         if any(key != slot.slot_id for key, slot in self.source_slots.items()):
             raise ValueError("source slot map keys must match slot_id")
-        physical_slots = {(slot.node_key, slot.field, slot.attribute_name) for slot in self.source_slots.values()}
-        if len(physical_slots) != len(self.source_slots):
+        special_slots: set[str] = set()
+        special_positions: set[tuple[str, int]] = set()
+        for boundary in self.boundaries:
+            if boundary.get("kind") != "non_element_tail":
+                continue
+            slot_id = boundary.get("slot_id")
+            parent = boundary.get("parent_node_key")
+            child_index = boundary.get("child_index")
+            slot = self.source_slots.get(slot_id) if isinstance(slot_id, str) else None
+            if (
+                not isinstance(slot_id, str)
+                or slot is None
+                or slot.field != "tail"
+                or not isinstance(parent, str)
+                or slot.node_key != parent
+                or type(child_index) is not int
+                or child_index < 0
+                or slot_id in special_slots
+                or (parent, child_index) in special_positions
+            ):
+                raise ValueError("invalid or duplicate non-element tail boundary")
+            special_slots.add(slot_id)
+            special_positions.add((parent, child_index))
+        ordinary_slots = [slot for slot in self.source_slots.values() if slot.slot_id not in special_slots]
+        physical_slots = {(slot.node_key, slot.field, slot.attribute_name) for slot in ordinary_slots}
+        if len(physical_slots) != len(ordinary_slots):
             raise ValueError("duplicate physical source slot")
         if any(key != view.view_id for key, view in self.source_views.items()):
             raise ValueError("source view map keys must match view_id")

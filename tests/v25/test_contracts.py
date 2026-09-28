@@ -204,6 +204,27 @@ def test_document_rejects_unknown_view_and_bad_hash() -> None:
             | {"source_slots": {"s1": document.source_slots["s1"], "s2": duplicate_slot}}
         )
 
+
+def test_non_element_tail_has_its_own_physical_boundary() -> None:
+    document = make_document()
+    regular = SourceSlot(
+        slot_id="tail-regular",
+        node_key="n1",
+        field="tail",
+        source_value=" ",
+        ranges=(SlotRange(start=0, end=1, owner_kind="whitespace"),),
+    )
+    special = regular.model_copy(update={"slot_id": "tail-comment"})
+    slots = document.source_slots | {regular.slot_id: regular, special.slot_id: special}
+    boundary = {"kind": "non_element_tail", "slot_id": special.slot_id, "parent_node_key": "n1", "child_index": 0}
+    accepted = DocumentPlan.model_validate(
+        document.model_dump(mode="python") | {"source_slots": slots, "boundaries": (boundary,)}
+    )
+    assert accepted.source_slots[special.slot_id] == special
+    with pytest.raises(ValidationError, match="duplicate physical source slot"):
+        DocumentPlan.model_validate(document.model_dump(mode="python") | {"source_slots": slots})
+
+    view = document.source_views["v1"]
     for refs in (
         (SourceRef(slot_id="s1", start=0, end=21),) * 2,
         (SourceRef(slot_id="s1", start=10, end=21), SourceRef(slot_id="s1", start=0, end=10)),
