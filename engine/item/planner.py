@@ -197,9 +197,7 @@ def validate_cut_plan(unit: Unit, plan: CutPlan) -> None:
 def initial_coherence_windows(document: DocumentPlan, records: Mapping[str, UnitRecord]) -> tuple[dict[str, Any], ...]:
     """Build the frozen source relationships that receive the initial check budget."""
     relations = _document_relations(document)
-    nav_paths = tuple(
-        node.element_path for node in document.nodes.values() if qname_local_name(node.qname).lower() == "nav"
-    )
+    nav_paths = relations["navigation_paths"]
     derived_navigation = {
         str(binding.get("unit_id", ""))
         for binding in document.derived_bindings
@@ -297,7 +295,7 @@ def _relation_window(
 
 
 def _document_relations(document: DocumentPlan) -> dict[str, Any]:
-    """Recover table and note relationships from one immutable source parse."""
+    """Recover structural relationships from one immutable source parse."""
     table_groups: dict[tuple[int, ...], list[str]] = {}
     note_groups: dict[tuple[int, ...], list[str]] = {}
     note_fragments: dict[str, tuple[int, ...]] = {}
@@ -313,8 +311,13 @@ def _document_relations(document: DocumentPlan) -> dict[str, Any]:
 
     singular_notes: set[tuple[int, ...]] = set()
     plural_notes: set[tuple[int, ...]] = set()
+    navigation_paths = {
+        node.element_path for node in document.nodes.values() if qname_local_name(node.qname).lower() == "nav"
+    }
     for path, element in elements.items():
         tokens = _semantic_tokens(element)
+        if tokens & {"toc", "index", "doc-toc", "doc-index"}:
+            navigation_paths.add(path)
         if tokens & {"footnote", "endnote", "rearnote", "doc-footnote", "doc-endnote"}:
             singular_notes.add(path)
         if tokens & {"footnotes", "endnotes", "rearnotes", "doc-footnotes", "doc-endnotes"}:
@@ -369,6 +372,7 @@ def _document_relations(document: DocumentPlan) -> dict[str, Any]:
         table_groups.update({(index,): units for index, units in enumerate(legacy.values())})
 
     return {
+        "navigation_paths": tuple(sorted(navigation_paths)),
         "table_rows": tuple(tuple(units) for units in table_groups.values() if len(units) > 1),
         "table_units": {unit_id for units in table_groups.values() for unit_id in units},
         "note_units": set(unit_note_groups),

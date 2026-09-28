@@ -629,6 +629,63 @@ def test_coherence_windows_exclude_all_nav_descendants_and_derived_navigation_ta
     assert any(window["unit_ids"] == outside_units for window in windows)
 
 
+def test_coherence_windows_exclude_semantic_toc_and_index_regions_but_keep_their_seams():
+    long_toc = "Long table of contents entry. " * 100
+    long_index = "Long index entry. " * 100
+    document = extract_document(
+        '<html xmlns="http://www.w3.org/1999/xhtml" '
+        'xmlns:epub="http://www.idpf.org/2007/ops"><body>'
+        f'<section epub:type="toc"><p>Contents.</p><p>{long_toc}</p></section>'
+        f'<section role="doc-index"><p>Index.</p><p>{long_index}</p></section>'
+        "<p>Outside navigation one.</p><p>Outside navigation two.</p>"
+        "</body></html>",
+        "OPS/navigation.xhtml",
+        "source-hash",
+        "application/xhtml+xml",
+    )
+    split_config = PlannerConfig(
+        context_tokens=1200,
+        max_output_tokens=160,
+        review_output_tokens=80,
+        safety_margin=8,
+        translation_overhead=8,
+        review_overhead=8,
+    )
+    normal_config = PlannerConfig(context_tokens=4096)
+    semantic_units = {
+        unit.unit_id
+        for unit in document.units
+        if plain_text(unit.source_projection).startswith(("Contents", "Long table", "Index", "Long index"))
+    }
+    long_units = {
+        unit.unit_id
+        for unit in document.units
+        if plain_text(unit.source_projection).startswith(("Long table", "Long index"))
+    }
+    plans = {
+        unit.unit_id: plan_unit(unit, split_config if unit.unit_id in long_units else normal_config)
+        for unit in document.units
+    }
+    records = {
+        unit.unit_id: make_record(unit, plans[unit.unit_id], candidate=f"target-{unit.unit_id}")
+        for unit in document.units
+    }
+
+    windows = initial_coherence_windows(document, records)
+    narrative = [window for window in windows if window["relation"] == "narrative_adjacent"]
+
+    assert all(semantic_units.isdisjoint(window["unit_ids"]) for window in narrative)
+    assert len(narrative) == 1
+    assert all(len(plans[unit_id].segments) > 1 for unit_id in long_units)
+    assert all(
+        any(
+            window["unit_ids"] == [unit_id] and window["relation"] == "seam" and window["scope"] == "unit"
+            for window in windows
+        )
+        for unit_id in long_units
+    )
+
+
 def test_frozen_document_relations_cover_table_rows_notes_and_independent_seams():
     long_text = "Long independent field. " * 180
     markup = (
