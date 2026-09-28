@@ -9,8 +9,13 @@ from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
+from engine.item.extractor_v25 import validate_source_relations
+from engine.item.inline import events_to_projection, parse_projection
+from engine.item.planner import _atomize, _range_stacks, _segment_events
+from engine.item.planner_v25 import plan_unit_v25
 from engine.item.source_views import validate_source_views
 from engine.schemas.v25 import (
+    BOOK_FORMAT,
     CANDIDATES_FORMAT,
     DOCUMENT_FORMAT,
     EXTRACTION_RECORD_FORMAT,
@@ -19,23 +24,30 @@ from engine.schemas.v25 import (
     PREPARATION_FORMAT,
     REQUEST_FORMAT,
     TERM_PLAN_FORMAT,
+    UNIT_FORMAT,
     Attempt,
+    BookPlan,
     CandidatePool,
     DocumentPlan,
     FreezeIntent,
     GlossarySnapshot,
+    ItemStatus,
     JsonValue,
     PreparationPlan,
     RequestManifest,
     TermExtractionPlan,
     TermExtractionRecord,
     TermPreparation,
+    Unit,
+    UnitRecord,
     UnsupportedFormatError,
     Usage,
     UserTerm,
     candidate_pool_record_hash,
     canonical_hash,
     parse_contract,
+    unit_record_hash,
+    validate_cut_plan_coverage,
     validate_term_scopes,
 )
 from engine.services.store import CorruptRecord, IdentityMismatch, StaleWrite, Store
@@ -97,6 +109,7 @@ class StoreV25:
 
     def write_document(self, plan: DocumentPlan) -> str:
         validate_source_views(plan)
+        validate_source_relations(plan)
         with self.lock():
             return self._write_immutable(
                 self._path("documents", plan.document_id), plan, DocumentPlan, DOCUMENT_FORMAT
@@ -134,6 +147,7 @@ class StoreV25:
             for document_id, expected_hash in plan.document_hashes.items():
                 document = self.read_document(document_id, expected_hash=expected_hash)
                 validate_source_views(document)
+                validate_source_relations(document)
                 if document.source_hash != plan.source_hash:
                     raise IdentityMismatch(f"document source mismatch: {document_id}")
                 for unit in document.units:
@@ -156,38 +170,11 @@ class StoreV25:
 
     def write_term_plan(self, plan: TermExtractionPlan) -> str:
         with self.lock():
-            preparation = self.read_preparation()
-            if (
-                preparation.source_path != "source.epub"
-                or self._file_hash(self.root / preparation.source_path) != preparation.source_hash
-            ):
-                raise IdentityMismatch("preparation source snapshot identity changed")
+            preparation, documents = self._trusted_preparation_documents()
             if plan.source_hash != preparation.source_hash or plan.preparation_hash != self._file_hash(
                 self.root / "preparation.json"
             ):
                 raise IdentityMismatch("term plan does not belong to the committed preparation")
-            disk_ids = {entry.stem for entry in (self.root / "documents").glob("*.json")}
-            if disk_ids != set(preparation.document_hashes):
-                raise IdentityMismatch("term plan document inventory differs from preparation")
-            documents = {
-                document_id: self.read_document(document_id, expected_hash=document_hash)
-                for document_id, document_hash in preparation.document_hashes.items()
-            }
-            try:
-                with zipfile.ZipFile(self.root / preparation.source_path) as archive:
-                    for document in documents.values():
-                        validate_source_views(document)
-                        raw = archive.read(document.resource.path)
-                        if hashlib.sha256(
-                            raw
-                        ).hexdigest() != document.resource.source_sha256 or raw != document.source_markup.encode(
-                            "utf-8"
-                        ):
-                            raise IdentityMismatch(
-                                f"DocumentPlan no longer matches source snapshot: {document.document_id}"
-                            )
-            except (KeyError, zipfile.BadZipFile) as error:
-                raise IdentityMismatch("DocumentPlan resource is unavailable in source snapshot") from error
             ordered_ids = (
                 *preparation.reading_order,
                 *(
@@ -231,6 +218,36 @@ class StoreV25:
         if not isinstance(value, bool):
             raise IdentityMismatch(f"invalid boolean extraction configuration: {name}")
         return value
+
+    def _trusted_preparation_documents(self) -> tuple[PreparationPlan, dict[str, DocumentPlan]]:
+        preparation = self.read_preparation()
+        if (
+            preparation.source_path != "source.epub"
+            or self._file_hash(self.root / preparation.source_path) != preparation.source_hash
+        ):
+            raise IdentityMismatch("preparation source snapshot identity changed")
+        disk_ids = {entry.stem for entry in (self.root / "documents").glob("*.json")}
+        if disk_ids != set(preparation.document_hashes):
+            raise IdentityMismatch("document inventory differs from preparation")
+        documents = {
+            document_id: self.read_document(document_id, expected_hash=document_hash)
+            for document_id, document_hash in preparation.document_hashes.items()
+        }
+        try:
+            with zipfile.ZipFile(self.root / preparation.source_path) as archive:
+                for document in documents.values():
+                    validate_source_views(document)
+                    validate_source_relations(document)
+                    raw = archive.read(document.resource.path)
+                    if hashlib.sha256(
+                        raw
+                    ).hexdigest() != document.resource.source_sha256 or raw != document.source_markup.encode("utf-8"):
+                        raise IdentityMismatch(
+                            f"DocumentPlan no longer matches source snapshot: {document.document_id}"
+                        )
+        except (KeyError, zipfile.BadZipFile) as error:
+            raise IdentityMismatch("DocumentPlan resource is unavailable in source snapshot") from error
+        return preparation, documents
 
     def read_term_plan(self) -> TermExtractionPlan:
         return self._read_contract(self.root / "glossary" / "plan.json", TermExtractionPlan, TERM_PLAN_FORMAT)
@@ -357,6 +374,240 @@ class StoreV25:
 
     def read_glossary(self) -> GlossarySnapshot:
         return self._read_contract(self.root / "glossary.json", GlossarySnapshot, GLOSSARY_FORMAT)
+
+    @staticmethod
+    def _with_unit_hash(record: UnitRecord) -> UnitRecord:
+        return record.model_copy(update={"record_hash": unit_record_hash(record)})
+
+    def _unit_source(self, unit_id: str) -> tuple[PreparationPlan, DocumentPlan, Unit]:
+        preparation, documents = self._trusted_preparation_documents()
+        document_id = preparation.unit_documents.get(unit_id)
+        if document_id is None:
+            raise IdentityMismatch(f"unknown UnitRecord source Unit: {unit_id}")
+        document = documents[document_id]
+        unit = next((item for item in document.units if item.unit_id == unit_id), None)
+        if unit is None:
+            raise IdentityMismatch(f"Unit inventory does not contain {unit_id}")
+        return preparation, document, unit
+
+    def _validate_unit_record(self, record: UnitRecord) -> None:
+        preparation, document, unit = self._unit_source(record.unit_id)
+        if (record.document_id, record.source_hash) != (document.document_id, preparation.source_hash):
+            raise IdentityMismatch(f"UnitRecord source identity mismatch: {record.unit_id}")
+        _, glossary = self._trusted_frozen_glossary(preparation)
+        term_ids = {term.term_id for term in glossary.terms}
+        if record.cut_plan is None:
+            if record.logical_hash is not None or record.input_hash is not None or record.items:
+                raise IdentityMismatch(f"unplanned UnitRecord contains executable state: {record.unit_id}")
+            return
+        atoms = _atomize(parse_projection(unit.source_projection))
+        validate_cut_plan_coverage(record.cut_plan, len(atoms))
+        stacks = _range_stacks(atoms)
+        for segment in record.cut_plan.segments:
+            expected_events = _segment_events(atoms, stacks, segment.source_start, segment.source_end)
+            if segment.source_projection != events_to_projection(expected_events):
+                raise IdentityMismatch(f"CutPlan segment does not reconstruct source: {segment.segment_id}")
+            if segment.virtual_boundaries != tuple(event.value for event in expected_events if event.virtual):
+                raise IdentityMismatch(f"CutPlan virtual boundaries are invalid: {segment.segment_id}")
+            if not set(segment.selected_term_ids).issubset(term_ids):
+                raise IdentityMismatch(f"CutPlan references an unknown frozen term: {segment.segment_id}")
+
+    def _trusted_frozen_glossary(
+        self, preparation: PreparationPlan | None = None
+    ) -> tuple[FreezeIntent, GlossarySnapshot]:
+        preparation = preparation or self.read_preparation()
+        term_plan = self.read_term_plan()
+        pool = self.read_candidate_pool()
+        records = {item.item_id: self.read_extraction(item.item_id) for item in term_plan.items}
+        freeze = self.read_freeze()
+        TermPreparation(
+            plan=term_plan,
+            records=records,
+            candidates=pool,
+            unit_documents=preparation.unit_documents,
+            freeze=freeze,
+        )
+        if (
+            freeze.preparation_hash != self._file_hash(self.root / "preparation.json")
+            or freeze.source_hash != preparation.source_hash
+            or freeze.user_terms_hash != preparation.user_terms_hash
+            or freeze.snapshot_payload.extraction_config_hash != canonical_hash(preparation.extraction_config)
+        ):
+            raise IdentityMismatch("freeze identity differs from preparation")
+        glossary = self.read_glossary()
+        expected = GlossarySnapshot.model_validate(
+            freeze.snapshot_payload.model_dump(mode="python") | {"format": GLOSSARY_FORMAT}
+        )
+        if glossary != expected:
+            raise IdentityMismatch("glossary does not replay the committed freeze payload")
+        return freeze, glossary
+
+    def save_unit(self, record: UnitRecord, *, expected_record_version: int | None = None) -> UnitRecord:
+        path = self._path("units", record.unit_id)
+        with self.lock():
+            self._validate_unit_record(record)
+            stored = self._with_unit_hash(record)
+            if not path.exists():
+                if (self.root / "bookplan.json").exists():
+                    raise StaleWrite("cannot create a missing UnitRecord after BookPlan ready")
+                if stored.record_version != 0 or expected_record_version not in {None, 0}:
+                    raise StaleWrite("new UnitRecords must start at record_version 0")
+            else:
+                current = self.read_unit(record.unit_id)
+                if expected_record_version is None or current.record_version != expected_record_version:
+                    raise StaleWrite(
+                        f"UnitRecord version changed: expected {expected_record_version}, "
+                        f"found {current.record_version}"
+                    )
+                if (stored.unit_id, stored.document_id, stored.source_hash, stored.logical_hash) != (
+                    current.unit_id,
+                    current.document_id,
+                    current.source_hash,
+                    current.logical_hash,
+                ):
+                    raise IdentityMismatch("immutable UnitRecord identity changed")
+                if stored.record_version != current.record_version + 1:
+                    raise StaleWrite("UnitRecord record_version must increase by exactly one")
+                if stored.plan_epoch < current.plan_epoch or stored.revision < current.revision:
+                    raise StaleWrite("UnitRecord plan_epoch and revision cannot decrease")
+                for name, amount in current.counters.items():
+                    if stored.counters.get(name, 0) < amount:
+                        raise StaleWrite(f"UnitRecord counter cannot decrease: {name}")
+            self._atomic_write(path, stored)
+            return stored
+
+    def read_unit(self, unit_id: str) -> UnitRecord:
+        record = self._read_contract(self._path("units", unit_id), UnitRecord, UNIT_FORMAT)
+        if record.record_hash is None or record.record_hash != unit_record_hash(record):
+            raise CorruptRecord(f"unit record hash mismatch for {unit_id}")
+        self._validate_unit_record(record)
+        return record
+
+    def write_bookplan(self, plan: BookPlan) -> str:
+        """Commit translation-ready state only after every P4 dependency is trusted."""
+        path = self.root / "bookplan.json"
+        with self.lock():
+            if path.exists():
+                return self._write_immutable(path, plan, BookPlan, BOOK_FORMAT)
+            preparation, documents = self._trusted_preparation_documents()
+            preparation_hash = self._file_hash(self.root / "preparation.json")
+            freeze, glossary = self._trusted_frozen_glossary(preparation)
+            freeze_hash = self._file_hash(self.root / "glossary" / "freeze.json")
+            glossary_hash = self._file_hash(self.root / "glossary.json")
+            expected_identity = (
+                preparation.source_hash,
+                preparation.run_id,
+                preparation_hash,
+                glossary_hash,
+                freeze_hash,
+                freeze.freeze_id,
+                preparation.document_hashes,
+                preparation.unit_documents,
+                preparation.translation_config,
+            )
+            actual_identity = (
+                plan.source_hash,
+                plan.run_id,
+                plan.preparation_hash,
+                plan.glossary_file_sha256,
+                plan.freeze_file_sha256,
+                plan.freeze_id,
+                plan.document_hashes,
+                plan.unit_documents,
+                plan.translation_config,
+            )
+            if actual_identity != expected_identity:
+                raise IdentityMismatch("BookPlan identity differs from P1/P3 inputs")
+
+            ordered_documents = (
+                *preparation.reading_order,
+                *(
+                    document_id
+                    for document_id in preparation.document_hashes
+                    if document_id not in preparation.reading_order
+                ),
+            )
+            expected_units = tuple(
+                unit.unit_id for document_id in ordered_documents for unit in documents[document_id].units
+            )
+            if plan.unit_ids != expected_units or plan.required_unit_count != len(expected_units):
+                raise IdentityMismatch("BookPlan Unit inventory differs from DocumentPlans")
+            disk_units = {entry.stem for entry in (self.root / "units").glob("*.json")}
+            if disk_units != set(expected_units):
+                raise IdentityMismatch("ready BookPlan requires exactly one UnitRecord per Unit")
+            for unit_id in expected_units:
+                record = self.read_unit(unit_id)
+                expected_plan_hash = record.cut_plan.plan_hash if record.cut_plan is not None else None
+                if plan.initial_unit_plans.get(unit_id) != expected_plan_hash:
+                    raise IdentityMismatch(f"BookPlan initial Unit plan mismatch: {unit_id}")
+                if record.record_version != 0 or record.plan_epoch != 0 or record.revision != 0:
+                    raise IdentityMismatch(f"initial UnitRecord version is not zero: {unit_id}")
+                if record.candidate is not None or record.accepted_revision is not None or record.review is not None:
+                    raise IdentityMismatch(f"initial UnitRecord already contains translation state: {unit_id}")
+                if record.term_feedback:
+                    raise IdentityMismatch(f"initial UnitRecord already contains term feedback: {unit_id}")
+                if record.cut_plan is not None:
+                    document = documents[record.document_id]
+                    unit = next(unit for unit in document.units if unit.unit_id == unit_id)
+                    expected = plan_unit_v25(unit, document, glossary, preparation.translation_config)
+                    if (
+                        record.logical_hash != expected.logical_hash
+                        or record.input_hash != expected.input_hash
+                        or record.cut_plan != expected.cut_plan
+                        or record.items != expected.items
+                    ):
+                        raise IdentityMismatch(f"initial UnitRecord differs from frozen Unit plan: {unit_id}")
+                if any(
+                    item.status != ItemStatus.PENDING
+                    or item.target_projection is not None
+                    or item.request_id is not None
+                    or item.failure is not None
+                    for item in record.items.values()
+                ):
+                    raise IdentityMismatch(f"initial UnitRecord already contains item results: {unit_id}")
+
+            for request_path in sorted((self.root / "requests").glob("*.json")):
+                request = self.read_request(request_path.stem)
+                if request.stage in {"terms", "resolution"} and any(
+                    attempt.state in {"reserved", "sent", "unknown"} for attempt in request.attempts
+                ):
+                    raise IdentityMismatch(f"term request is not terminal: {request.request_id}")
+            return self._atomic_write(path, plan)
+
+    def read_bookplan(self) -> BookPlan:
+        plan = self._read_contract(self.root / "bookplan.json", BookPlan, BOOK_FORMAT)
+        preparation, documents = self._trusted_preparation_documents()
+        freeze, glossary = self._trusted_frozen_glossary(preparation)
+        if (
+            plan.preparation_hash != self._file_hash(self.root / "preparation.json")
+            or plan.glossary_file_sha256 != self._file_hash(self.root / "glossary.json")
+            or plan.freeze_file_sha256 != self._file_hash(self.root / "glossary" / "freeze.json")
+            or plan.source_hash != preparation.source_hash
+            or plan.freeze_id != freeze.freeze_id
+            or glossary.freeze_id != freeze.freeze_id
+            or plan.document_hashes != preparation.document_hashes
+            or plan.unit_documents != preparation.unit_documents
+            or plan.translation_config != preparation.translation_config
+        ):
+            raise CorruptRecord("BookPlan dependency hash mismatch")
+        source_units = {unit.unit_id for document in documents.values() for unit in document.units}
+        disk_units = {entry.stem for entry in (self.root / "units").glob("*.json")}
+        ordered_documents = (
+            *preparation.reading_order,
+            *(
+                document_id
+                for document_id in preparation.document_hashes
+                if document_id not in preparation.reading_order
+            ),
+        )
+        expected_units = tuple(
+            unit.unit_id for document_id in ordered_documents for unit in documents[document_id].units
+        )
+        if plan.unit_ids != expected_units or set(expected_units) != source_units or disk_units != source_units:
+            raise CorruptRecord("BookPlan Unit inventory mismatch")
+        for unit_id in plan.unit_ids:
+            self.read_unit(unit_id)
+        return plan
 
     def write_request(self, manifest: RequestManifest) -> RequestManifest:
         path = self._path("requests", manifest.request_id)

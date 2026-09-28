@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import engine.epub.preparation_v25 as preparation_module
+from engine.core.config import settings
 from engine.epub.preparation_v25 import PreparationConfig, prepare_book
 from engine.epub.validation import EpubCheckResult
 from engine.item.extractor_v25 import extract_document
@@ -65,7 +66,8 @@ def test_p1_snapshots_complete_source_inventory_and_commits_parsed_ready_last(tm
         "prompt_version": "epubox-terms-1",
         "auto_extract": True,
         "strategy": TERM_PLANNER_VERSION,
-        "model": "agnes",
+        "provider": "agnes",
+        "model": settings.AGNES_MODEL,
         "target_language": "zh-Hans",
     }
     assert checker.paths == [prepared.source_snapshot]
@@ -149,3 +151,18 @@ def test_bad_user_scope_never_commits_parsed_ready(tmp_path: Path) -> None:
     assert not (work_dir / "preparation.json").exists()
     assert not list((work_dir / "requests").glob("*.json"))
     assert not (work_dir / "bookplan.json").exists()
+
+
+def test_p1_freezes_the_provider_model_id_without_credentials(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub")
+    prepared = prepare_book(
+        source,
+        tmp_path / "work",
+        PreparationConfig(run_id="provider-model", translation_config={"provider": "cr_proxy"}),
+        StubChecker(),
+    )
+
+    config = prepared.preparation.extraction_config
+    assert config["provider"] == "cr_proxy"
+    assert config["model"] == settings.CR_PROXY_MODEL
+    assert not any("key" in name.casefold() for name in config)

@@ -11,6 +11,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
 from engine.epub.validation import EpubChecker, PackageInventory, ZipLimits, inspect_epub
 from engine.item.extractor import select_primary_title
@@ -204,8 +205,12 @@ def _frozen_extraction_config(config: PreparationConfig) -> dict[str, JsonValue]
     extraction["strategy"] = strategy
 
     prompt_version = extraction.get("prompt_version", "epubox-v25-1")
-    translation_model = config.translation_config.get("model", config.translation_config.get("provider", "agnes"))
-    model = extraction.get("model", translation_model)
+    provider = extraction.get("provider", config.translation_config.get("provider", "agnes"))
+    if provider not in {"agnes", "cr_proxy"}:
+        raise ValueError(f"unsupported terminology provider: {provider!r}")
+    extraction["provider"] = provider
+    default_model = settings.AGNES_MODEL if provider == "agnes" else settings.CR_PROXY_MODEL
+    model = extraction.get("model", config.translation_config.get("model", default_model))
     translation_language = config.translation_config.get("target_language", "zh-Hans")
     target_language = extraction.get("target_language", translation_language)
     if target_language != "zh-Hans" or (
@@ -221,6 +226,16 @@ def _frozen_extraction_config(config: PreparationConfig) -> dict[str, JsonValue]
         if not isinstance(value, str) or not value:
             raise ValueError(f"extraction_config {name} must be a non-empty string")
         extraction[name] = value
+    for name in (
+        "max_output_tokens",
+        "run_http_limit",
+        "rpm",
+        "tpm",
+        "concurrency",
+        "request_timeout_seconds",
+    ):
+        if name not in extraction and name in config.translation_config:
+            extraction[name] = config.translation_config[name]
     return extraction
 
 

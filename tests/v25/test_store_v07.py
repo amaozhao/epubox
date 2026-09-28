@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import pytest
+
+from engine.item.planner_v25 import plan_unit_v25
+from engine.schemas.v25 import (
+    Attempt,
+    BookPlan,
+    CutPlan,
+    ItemStatus,
+    RequestManifest,
+    Segment,
+    TermExtractionRecord,
+    Unit,
+    UnitRecord,
+    canonical_hash,
+    compute_input_hash,
+    cut_plan_hash,
+    segment_hash,
+)
+from engine.services.store import IdentityMismatch, StaleWrite
+from engine.services.store_v25 import StoreV25
+from engine.services.term_freeze import freeze_terminology
+from tests.v25.test_store import _prepare, _write_term_plan
+
+
+def _frozen_store(tmp_path: Path) -> tuple[StoreV25, Unit]:
+    store, preparation = _prepare(tmp_path)
+    plan = _write_term_plan(store, preparation)
+    records = {
+        item.item_id: store.save_extraction(
+            TermExtractionRecord(
+                item_id=item.item_id,
+                document_id=item.document_id,
+                view_ids=item.view_ids,
+                extraction_input_hash=item.extraction_input_hash,
+                status="succeeded",
+            )
+        )
+        for item in plan.items
+    }
+    documents = tuple(store.read_document(document_id) for document_id in preparation.document_hashes)
+    frozen = freeze_terminology(
+        plan,
+        records,
+        preparation.user_terms,
+        preparation.unit_documents,
+        documents,
+        extraction_config_hash=canonical_hash(preparation.extraction_config),
+    )
+    store.save_candidate_pool(frozen.candidate_pool)
+    store.write_freeze(frozen.freeze_intent)
+    store.write_glossary(frozen.glossary)
+    return store, next(unit for document in documents for unit in document.units)
+
+
+def _unit_record(
+    store: StoreV25, unit: Unit, *, end_delta: int = 0, selected_terms: tuple[str, ...] = ()
+) -> UnitRecord:
+    preparation = store.read_preparation()
+    document = store.read_document(unit.document_id)
+    initialized = plan_unit_v25(
+        unit,
+        document,
+        store.read_glossary(),
+        preparation.translation_config,
+    )
+    cut_plan = initialized.cut_plan
+    items = initialized.items
+    if end_delta or selected_terms:
+        original = cut_plan.segments[0]
+        segment_data = original.model_dump(mode="python")
+        segment_data["source_end"] = original.source_end + end_delta
+        if selected_terms:
+            segment_data["selected_term_ids"] = selected_terms
+            segment_data["term_applicability"] = {term_id: "target" for term_id in selected_terms}
+            segment_data["terms_hash"] = canonical_hash({"terms": selected_terms})
+        segment_data["segment_hash"] = segment_hash(segment_data)
+        segment = Segment.model_validate(segment_data)
+        plan_data = {"plan_epoch": 0, "segments": (segment, *cut_plan.segments[1:])}
+        cut_plan = CutPlan(**plan_data, plan_hash=cut_plan_hash(plan_data))
+        item = items[segment.item_id].model_copy(
+            update={
+                "selected_term_ids": segment.selected_term_ids,
+                "term_applicability": segment.term_applicability,
+                "terms_hash": segment.terms_hash,
+            }
+        )
+        items = items | {item.item_id: item}
+    return UnitRecord(
+        unit_id=unit.unit_id,
+        document_id=unit.document_id,
+        source_hash=preparation.source_hash,
+        logical_hash=initialized.logical_hash,
+        input_hash=compute_input_hash(initialized.logical_hash, cut_plan.plan_hash),
+        cut_plan=cut_plan,
+        items=items,
+    )
+
+
+def _bookplan(store: StoreV25, record: UnitRecord) -> BookPlan:
+    preparation = store.read_preparation()
+    freeze = store.read_freeze()
+    return BookPlan(
+        source_hash=preparation.source_hash,
+        run_id=preparation.run_id,
+        preparation_hash=hashlib.sha256((store.root / "preparation.json").read_bytes()).hexdigest(),
+        glossary_file_sha256=hashlib.sha256((store.root / "glossary.json").read_bytes()).hexdigest(),
+        freeze_file_sha256=hashlib.sha256((store.root / "glossary" / "freeze.json").read_bytes()).hexdigest(),
+        freeze_id=freeze.freeze_id,
+        document_hashes=preparation.document_hashes,
+        unit_ids=(record.unit_id,),
+        unit_documents=preparation.unit_documents,
+        required_unit_count=1,
+        initial_unit_plans={record.unit_id: record.cut_plan.plan_hash if record.cut_plan else None},
+        translation_config=preparation.translation_config,
+        output_policy_hash="preserve-source-resources-1",
+    )
+
+
+def test_ready_bookplan_is_the_only_p4_commit_after_complete_unit_inventory(tmp_path: Path) -> None:
+    store, unit = _frozen_store(tmp_path)
+    assert not (store.root / "bookplan.json").exists()
+    record = store.save_unit(_unit_record(store, unit))
+    plan = _bookplan(store, record)
+
+    plan_hash = store.write_bookplan(plan)
+    assert plan_hash == hashlib.sha256((store.root / "bookplan.json").read_bytes()).hexdigest()
+    assert store.read_bookplan() == plan
+
+
+def test_unit_cut_plan_must_reconstruct_and_cover_the_atomized_source(tmp_path: Path) -> None:
+    store, unit = _frozen_store(tmp_path)
+    with pytest.raises(ValueError, match="complete Unit"):
+        store.save_unit(_unit_record(store, unit, end_delta=-1))
+    with pytest.raises(IdentityMismatch, match="unknown frozen term"):
+        store.save_unit(_unit_record(store, unit, selected_terms=("ghost-term",)))
+
+
+def test_unit_record_updates_use_cas_after_ready(tmp_path: Path) -> None:
+    store, unit = _frozen_store(tmp_path)
+    initial = store.save_unit(_unit_record(store, unit))
+    store.write_bookplan(_bookplan(store, initial))
+    item_id = next(iter(initial.items))
+    target = "译文"
+    item = initial.items[item_id].model_copy(
+        update={
+            "status": ItemStatus.CANDIDATE,
+            "target_projection": target,
+            "target_hash": canonical_hash(target),
+        }
+    )
+    updated = initial.model_copy(update={"record_version": 1, "items": {item_id: item}})
+
+    saved = store.save_unit(updated, expected_record_version=0)
+    assert saved.record_version == 1 and store.read_unit(unit.unit_id) == saved
+    with pytest.raises(StaleWrite, match="expected 0, found 1"):
+        store.save_unit(saved.model_copy(update={"record_version": 2}), expected_record_version=0)
+
+
+def test_ready_rejects_missing_unit_and_unresolved_term_attempt(tmp_path: Path) -> None:
+    store, unit = _frozen_store(tmp_path)
+    record = _unit_record(store, unit)
+    with pytest.raises(IdentityMismatch, match="exactly one UnitRecord"):
+        store.write_bookplan(_bookplan(store, record))
+
+    stored = store.save_unit(record)
+    request_path = store._path("requests", "unresolved-term")
+    request = RequestManifest(
+        request_id="unresolved-term",
+        stage="terms",
+        owner_kind="extraction_item",
+        owner_id=store.read_term_plan().items[0].item_id,
+        item_ids=(store.read_term_plan().items[0].item_id,),
+        input_hashes={store.read_term_plan().items[0].item_id: store.read_term_plan().items[0].extraction_input_hash},
+        wire_hash="wire",
+        attempts=(
+            Attempt(
+                attempt_id="unknown-attempt",
+                affected_items=(store.read_term_plan().items[0].item_id,),
+                state="unknown",
+                created_at="2026-09-29T00:00:00Z",
+            ),
+        ),
+    )
+    store._atomic_write(request_path, request)
+    with pytest.raises(IdentityMismatch, match="term request is not terminal"):
+        store.write_bookplan(_bookplan(store, stored))
