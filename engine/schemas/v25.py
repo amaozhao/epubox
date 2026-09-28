@@ -443,6 +443,7 @@ class ExtractionItem(FrozenModel):
     view_ids: tuple[str, ...]
     primary_ranges: tuple[dict[str, JsonValue], ...]
     context_refs: tuple[str, ...] = ()
+    context_ranges: tuple[dict[str, JsonValue], ...] = ()
     user_term_ids: tuple[str, ...] = ()
     context_user_term_ids: tuple[str, ...] = ()
     extraction_input_hash: str = Field(min_length=1)
@@ -622,6 +623,7 @@ class TermPreparation(FrozenModel):
     plan: TermExtractionPlan
     records: dict[str, TermExtractionRecord] = Field(default_factory=dict)
     candidates: CandidatePool
+    unit_documents: dict[str, str] = Field(default_factory=dict)
     freeze: FreezeIntent | None = None
     paused: bool = False
 
@@ -718,8 +720,11 @@ class TermPreparation(FrozenModel):
                 }
                 if term.scope.kind == "documents" and not set(term.scope.document_ids).issubset(source_documents):
                     raise ValueError("model term document scope exceeds adopted source evidence")
-                if term.scope.kind == "units" and not set(term.scope.unit_ids).issubset(source_units):
-                    raise ValueError("model term Unit scope exceeds adopted source evidence")
+                if term.scope.kind == "units" and any(
+                    unit_id not in source_units and self.unit_documents.get(unit_id) not in source_documents
+                    for unit_id in term.scope.unit_ids
+                ):
+                    raise ValueError("model term Unit scope exceeds adopted source documents")
         return self
 
 

@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Literal
 
+import regex
+
+from engine.core.markup import UnsafeMarkupError, find_by_element_path, parse_xml_safely, qname_local_name
 from engine.schemas.v25 import (
     DocumentPlan,
     ExtractionItem,
+    JsonValue,
     SourceTextView,
     TermExtractionPlan,
+    Unit,
     UserTerm,
     canonical_hash,
     term_plan_hash,
     validate_term_scopes,
 )
 
-TERM_PLANNER_VERSION = "epubox-term-planner-1"
+TERM_PLANNER_VERSION = "epubox-term-planner-2"
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,9 @@ def plan_term_extraction(
     auto_extract: bool = True,
     max_primary_chars: int = 12_000,
     adjacent_context_views: int = 1,
+    reading_edges: tuple[tuple[str, str], ...] = (),
+    context_chars: int = 400,
+    extraction_identity: Mapping[str, JsonValue],
     item_http_limit: int = 6,
     resolution_group_limit: int = 20,
 ) -> TermPlanningResult:
@@ -45,13 +54,26 @@ def plan_term_extraction(
         raise ValueError("max_primary_chars must be positive")
     if adjacent_context_views < 0:
         raise ValueError("adjacent_context_views cannot be negative")
+    if context_chars < 0:
+        raise ValueError("context_chars cannot be negative")
     if item_http_limit < 0 or resolution_group_limit < 0:
         raise ValueError("term preparation limits cannot be negative")
+    if auto_extract:
+        required_identity = {"strategy", "prompt_version", "model", "target_language"}
+        missing_identity = required_identity - extraction_identity.keys()
+        if missing_identity or any(
+            not isinstance(extraction_identity[key], str) or not extraction_identity[key]
+            for key in required_identity - missing_identity
+        ):
+            raise ValueError(
+                "extraction_identity requires non-empty strategy, prompt_version, model, and target_language"
+            )
     if any(document.source_hash != source_hash for document in documents):
         raise ValueError("all documents must belong to the planned source")
     document_ids = {document.document_id for document in documents}
     if len(document_ids) != len(documents):
         raise ValueError("document IDs must be unique in reading order")
+    document_successors = _reading_links(reading_edges, document_ids)
     validate_term_scopes(
         user_terms,
         document_ids,
@@ -69,32 +91,59 @@ def plan_term_extraction(
         )
         return TermPlanningResult(plan, "disabled", len(ordered_views))
 
-    view_positions = {view.view_id: index for index, view in enumerate(ordered_views)}
+    views_by_id = {view.view_id: view for document in documents for view in document.source_views.values()}
+    units_by_id = {unit.unit_id: unit for document in documents for unit in document.units}
+    view_predecessors, view_successors = _view_links(documents, document_successors)
     items: list[ExtractionItem] = []
     for document in documents:
         primary = [view for view in ordered_views if view.document_id == document.document_id]
-        for group in _groups(primary, max_primary_chars):
-            primary_ids = tuple(view.view_id for view in group)
-            context_ids = _context_ids(
+        for group in _groups(primary, max_primary_chars, view_successors):
+            primary_ids = tuple(dict.fromkeys(part.view.view_id for part in group))
+            ranges = tuple({"view_id": part.view.view_id, "start": part.start, "end": part.end} for part in group)
+            context_ranges = _context_ranges(
                 document,
                 group,
-                ordered_views,
-                view_positions,
+                views_by_id,
+                units_by_id,
+                view_predecessors,
+                view_successors,
                 adjacent_context_views,
+                reading_edges,
+                context_chars,
             )
+            context_ids = tuple(dict.fromkeys(str(context_range["view_id"]) for context_range in context_ranges))
             selected_terms = tuple(
                 sorted(
                     term.term_id
                     for term in user_terms
-                    if any(_term_applies(term, view) and _term_occurs(term, view) for view in group)
+                    if any(
+                        _term_applies(term, part.view) and _term_occurs(term, part.view.text[part.start : part.end])
+                        for part in group
+                    )
+                )
+            )
+            context_terms = tuple(
+                sorted(
+                    term.term_id
+                    for term in user_terms
+                    if term.term_id not in selected_terms
+                    and any(
+                        _term_applies(term, views_by_id[str(context_range["view_id"])])
+                        and _term_occurs(
+                            term,
+                            views_by_id[str(context_range["view_id"])].text[
+                                _range_int(context_range, "start") : _range_int(context_range, "end")
+                            ],
+                        )
+                        for context_range in context_ranges
+                    )
                 )
             )
             terms_by_id = {term.term_id: term for term in user_terms}
-            ranges = tuple({"view_id": view.view_id, "start": 0, "end": len(view.text)} for view in group)
             item_id = (
                 "te-"
                 + canonical_hash(
-                    {"version": TERM_PLANNER_VERSION, "document_id": document.document_id, "view_ids": primary_ids}
+                    {"version": TERM_PLANNER_VERSION, "document_id": document.document_id, "primary_ranges": ranges}
                 )[:24]
             )
             input_payload = {
@@ -102,14 +151,26 @@ def plan_term_extraction(
                 "item_id": item_id,
                 "document_id": document.document_id,
                 "primary": [
-                    {"view_id": view.view_id, "view_hash": view.view_hash, "start": 0, "end": len(view.text)}
-                    for view in group
+                    {
+                        "view_id": part.view.view_id,
+                        "view_hash": part.view.view_hash,
+                        "start": part.start,
+                        "end": part.end,
+                    }
+                    for part in group
                 ],
                 "context": [
-                    {"view_id": view_id, "view_hash": _view_by_id(documents, view_id).view_hash}
-                    for view_id in context_ids
+                    {
+                        "view_id": context_range["view_id"],
+                        "view_hash": views_by_id[str(context_range["view_id"])].view_hash,
+                        "start": context_range["start"],
+                        "end": context_range["end"],
+                    }
+                    for context_range in context_ranges
                 ],
-                "user_terms": [terms_by_id[term_id].model_dump(mode="json") for term_id in selected_terms],
+                "target_user_terms": [terms_by_id[term_id].model_dump(mode="json") for term_id in selected_terms],
+                "context_user_terms": [terms_by_id[term_id].model_dump(mode="json") for term_id in context_terms],
+                "extraction_identity": dict(extraction_identity),
             }
             items.append(
                 ExtractionItem(
@@ -118,7 +179,9 @@ def plan_term_extraction(
                     view_ids=primary_ids,
                     primary_ranges=ranges,
                     context_refs=context_ids,
+                    context_ranges=context_ranges,
                     user_term_ids=selected_terms,
+                    context_user_term_ids=context_terms,
                     extraction_input_hash=canonical_hash(input_payload),
                     http_limit=item_http_limit,
                 )
@@ -171,55 +234,331 @@ def _ordered_primary_views(documents: Sequence[DocumentPlan]) -> tuple[SourceTex
     return tuple(views)
 
 
-def _groups(views: Sequence[SourceTextView], max_chars: int) -> tuple[tuple[SourceTextView, ...], ...]:
-    groups: list[tuple[SourceTextView, ...]] = []
-    current: list[SourceTextView] = []
+@dataclass(frozen=True)
+class _PrimaryRange:
+    view: SourceTextView
+    start: int
+    end: int
+
+
+def _groups(
+    views: Sequence[SourceTextView], max_chars: int, successors: Mapping[str, tuple[str, ...]]
+) -> tuple[tuple[_PrimaryRange, ...], ...]:
+    groups: list[tuple[_PrimaryRange, ...]] = []
+    current: list[_PrimaryRange] = []
     size = 0
     for view in views:
-        if len(view.text) > max_chars:
-            raise ValueError(f"primary view {view.view_id} exceeds the extraction window budget")
-        if current and size + len(view.text) > max_chars:
-            groups.append(tuple(current))
-            current, size = [], 0
-        current.append(view)
-        size += len(view.text)
+        for part in _split_view(view, max_chars):
+            part_size = part.end - part.start
+            if current and (
+                size + part_size > max_chars
+                or any(existing.view.view_id == view.view_id for existing in current)
+                or view.view_id not in successors.get(current[-1].view.view_id, ())
+            ):
+                groups.append(tuple(current))
+                current, size = [], 0
+            current.append(part)
+            size += part_size
     if current:
         groups.append(tuple(current))
     return tuple(groups)
 
 
-def _context_ids(
+def _split_view(view: SourceTextView, max_chars: int) -> tuple[_PrimaryRange, ...]:
+    if not view.text:
+        raise ValueError(f"primary view {view.view_id} is empty")
+    if len(view.text) <= max_chars:
+        return (_PrimaryRange(view, 0, len(view.text)),)
+    endpoints = [match.end() for match in regex.finditer(r"\X", view.text)]
+    parts: list[_PrimaryRange] = []
+    start = 0
+    while start < len(view.text):
+        fitting = [end for end in endpoints if start < end <= start + max_chars]
+        if not fitting:
+            raise ValueError(f"one grapheme in primary view {view.view_id} exceeds the extraction window budget")
+        farthest = fitting[-1]
+        threshold = start + max(1, (farthest - start) * 3 // 5)
+        sentence = [end for end in fitting if end >= threshold and view.text[end - 1] in ".!?。！？"]
+        whitespace = [end for end in fitting if end >= threshold and view.text[end - 1].isspace()]
+        end = sentence[-1] if sentence else whitespace[-1] if whitespace else farthest
+        parts.append(_PrimaryRange(view, start, end))
+        start = end
+    return tuple(parts)
+
+
+def _context_ranges(
     document: DocumentPlan,
-    group: tuple[SourceTextView, ...],
-    ordered_views: tuple[SourceTextView, ...],
-    positions: dict[str, int],
+    group: tuple[_PrimaryRange, ...],
+    views_by_id: dict[str, SourceTextView],
+    units_by_id: dict[str, Unit],
+    predecessors: dict[str, tuple[str, ...]],
+    successors: dict[str, tuple[str, ...]],
     adjacent_count: int,
-) -> tuple[str, ...]:
-    primary_ids = {view.view_id for view in group}
-    explicit = {
-        view_id
-        for view in group
-        for view_id in next(unit for unit in document.units if unit.unit_id == view.unit_id).context_view_ids
-    }
-    start, end = positions[group[0].view_id], positions[group[-1].view_id]
-    adjacent = {
-        ordered_views[index].view_id
-        for index in range(max(0, start - adjacent_count), min(len(ordered_views), end + adjacent_count + 1))
-        if index < start or index > end
-    }
-    return tuple(
-        sorted(
-            (explicit | adjacent) - primary_ids, key=lambda view_id: (positions.get(view_id, len(positions)), view_id)
+    reading_edges: tuple[tuple[str, str], ...],
+    context_chars: int,
+) -> tuple[dict[str, JsonValue], ...]:
+    if not adjacent_count or not context_chars:
+        return ()
+    primary_ids = {part.view.view_id for part in group}
+    explicit = tuple(
+        dict.fromkeys(view_id for part in group for view_id in units_by_id[part.view.unit_id].context_view_ids)
+    )
+    allowed_edges = set(reading_edges)
+    for view_id in explicit:
+        context = views_by_id[view_id]
+        if context.document_id != document.document_id and not (
+            (context.document_id, document.document_id) in allowed_edges
+            or (document.document_id, context.document_id) in allowed_edges
+        ):
+            raise ValueError("cross-document context requires an explicit reading edge")
+
+    ranges: list[dict[str, JsonValue]] = []
+    first, last = group[0], group[-1]
+    if first.start:
+        start = _tail_start(first.view.text, first.start, context_chars)
+        ranges.append({"view_id": first.view.view_id, "start": start, "end": first.start})
+    for view_id in _walk_links(first.view.view_id, predecessors, adjacent_count):
+        view = views_by_id[view_id]
+        ranges.append(
+            {"view_id": view_id, "start": _tail_start(view.text, len(view.text), context_chars), "end": len(view.text)}
         )
+    ranges.reverse()
+
+    for view_id in explicit:
+        if view_id not in primary_ids:
+            view = views_by_id[view_id]
+            ranges.append({"view_id": view_id, "start": 0, "end": _head_end(view.text, 0, context_chars)})
+
+    if last.end < len(last.view.text):
+        end = _head_end(last.view.text, last.end, context_chars)
+        ranges.append({"view_id": last.view.view_id, "start": last.end, "end": end})
+    for view_id in _walk_links(last.view.view_id, successors, adjacent_count):
+        view = views_by_id[view_id]
+        ranges.append({"view_id": view_id, "start": 0, "end": _head_end(view.text, 0, context_chars)})
+    return tuple(_unique_ranges(ranges))
+
+
+def _walk_links(start: str, links: dict[str, tuple[str, ...]], depth: int) -> tuple[str, ...]:
+    result: list[str] = []
+    frontier = [start]
+    seen = {start}
+    for _ in range(depth):
+        frontier = [neighbor for item in frontier for neighbor in links.get(item, ()) if neighbor not in seen]
+        if not frontier:
+            break
+        seen.update(frontier)
+        result.extend(frontier)
+    return tuple(result)
+
+
+def _unique_ranges(ranges: Sequence[dict[str, JsonValue]]) -> tuple[dict[str, JsonValue], ...]:
+    unique: dict[tuple[str, int, int], dict[str, JsonValue]] = {}
+    for item in ranges:
+        key = (str(item["view_id"]), _range_int(item, "start"), _range_int(item, "end"))
+        if key[1] < key[2]:
+            unique[key] = item
+    return tuple(unique.values())
+
+
+def _range_int(item: dict[str, JsonValue], key: str) -> int:
+    value = item[key]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"context range {key} must be an integer")
+    return value
+
+
+def _tail_start(text: str, end: int, limit: int) -> int:
+    starts = [match.start() for match in regex.finditer(r"\X", text[:end])]
+    return next((start for start in starts if end - start <= limit), end)
+
+
+def _head_end(text: str, start: int, limit: int) -> int:
+    endpoints = [match.end() for match in regex.finditer(r"\X", text[start:]) if match.end() <= limit]
+    return start + (endpoints[-1] if endpoints else 0)
+
+
+def _reading_links(reading_edges: tuple[tuple[str, str], ...], document_ids: set[str]) -> dict[str, str]:
+    predecessors: dict[str, str] = {}
+    successors: dict[str, str] = {}
+    for left, right in reading_edges:
+        if left not in document_ids or right not in document_ids or left == right:
+            raise ValueError(f"invalid reading edge: {(left, right)}")
+        if left in successors or right in predecessors:
+            raise ValueError("reading edges must form an unambiguous chain")
+        successors[left], predecessors[right] = right, left
+    for start in document_ids:
+        seen: set[str] = set()
+        current = start
+        while current in successors:
+            if current in seen:
+                raise ValueError("reading edges cannot contain a cycle")
+            seen.add(current)
+            current = successors[current]
+    return successors
+
+
+def _view_links(
+    documents: Sequence[DocumentPlan],
+    document_successors: dict[str, str],
+) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]]]:
+    predecessors: dict[str, list[str]] = {}
+    successors: dict[str, list[str]] = {}
+    narrative_by_document: dict[str, list[Unit]] = {}
+    for document in documents:
+        lanes = _unit_lanes(document)
+        units_by_id = {unit.unit_id: unit for unit in document.units}
+        for unit in document.units:
+            own_views = [
+                document.source_views[view_id] for view_id in unit.source_view_ids if view_id in document.source_views
+            ]
+            for left, right in pairwise(own_views):
+                _link(successors, predecessors, left.view_id, right.view_id)
+            lane = lanes[unit.unit_id]
+            if lane == "narrative":
+                narrative_by_document.setdefault(document.document_id, []).append(unit)
+
+        for boundary in document.boundaries:
+            if boundary.get("kind") not in {"narrative_adjacent", "table_row", "footnote_reference"}:
+                continue
+            unit_ids = boundary.get("unit_ids")
+            if not isinstance(unit_ids, (list, tuple)) or not all(isinstance(unit_id, str) for unit_id in unit_ids):
+                raise ValueError("source relation unit_ids must be a string array")
+            if not unit_ids or any(unit_id not in units_by_id for unit_id in unit_ids):
+                raise ValueError("source relation references an unknown Unit")
+            relation_edges = boundary.get("relation_edges")
+            if not isinstance(relation_edges, (list, tuple)):
+                raise TypeError("source relation requires explicit relation_edges")
+            allowed = set(units_by_id) if boundary.get("kind") == "table_row" else set(unit_ids)
+            allowed_edge_kinds = {
+                "narrative_adjacent": {"narrative"},
+                "table_row": {"table_row", "table_header"},
+                "footnote_reference": {"footnote_reference"},
+            }[str(boundary.get("kind"))]
+            for edge in relation_edges:
+                if not isinstance(edge, dict):
+                    raise TypeError("source relation edge must be an object")
+                from_unit_id = edge.get("from_unit_id")
+                to_unit_id = edge.get("to_unit_id")
+                edge_kind = edge.get("kind")
+                if (
+                    set(edge) != {"from_unit_id", "to_unit_id", "kind"}
+                    or not isinstance(from_unit_id, str)
+                    or not isinstance(to_unit_id, str)
+                    or edge_kind not in allowed_edge_kinds
+                    or not {from_unit_id, to_unit_id}.issubset(allowed)
+                    or from_unit_id == to_unit_id
+                ):
+                    raise ValueError("source relation contains an invalid explicit edge")
+                row_units = set(unit_ids)
+                if edge_kind == "table_row" and not {from_unit_id, to_unit_id}.issubset(row_units):
+                    raise ValueError("table row edge must stay within the current row")
+                if edge_kind == "table_header" and to_unit_id not in row_units:
+                    raise ValueError("table header edge must target a current-row Unit")
+                _link_units(
+                    document,
+                    units_by_id[from_unit_id],
+                    units_by_id[to_unit_id],
+                    successors,
+                    predecessors,
+                )
+
+    for left_document, right_document in document_successors.items():
+        left, right = narrative_by_document.get(left_document, []), narrative_by_document.get(right_document, [])
+        if left and right:
+            _link_units(
+                next(document for document in documents if document.document_id == left_document),
+                left[-1],
+                right[0],
+                successors,
+                predecessors,
+                right_document=next(document for document in documents if document.document_id == right_document),
+            )
+    return (
+        {view_id: tuple(neighbors) for view_id, neighbors in predecessors.items()},
+        {view_id: tuple(neighbors) for view_id, neighbors in successors.items()},
     )
 
 
-def _view_by_id(documents: Sequence[DocumentPlan], view_id: str) -> SourceTextView:
-    for document in documents:
-        view = document.source_views.get(view_id)
-        if view is not None:
-            return view
-    raise ValueError(f"unknown context view: {view_id}")
+def _link(
+    successors: dict[str, list[str]], predecessors: dict[str, list[str]], left_view_id: str, right_view_id: str
+) -> None:
+    if right_view_id not in successors.setdefault(left_view_id, []):
+        successors[left_view_id].append(right_view_id)
+    if left_view_id not in predecessors.setdefault(right_view_id, []):
+        predecessors[right_view_id].append(left_view_id)
+
+
+def _link_units(
+    document: DocumentPlan,
+    left: Unit,
+    right: Unit,
+    successors: dict[str, list[str]],
+    predecessors: dict[str, list[str]],
+    *,
+    right_document: DocumentPlan | None = None,
+) -> None:
+    right_document = right_document or document
+    left_views = [view_id for view_id in left.source_view_ids if view_id in document.source_views]
+    right_views = [view_id for view_id in right.source_view_ids if view_id in right_document.source_views]
+    if left_views and right_views:
+        _link(successors, predecessors, left_views[-1], right_views[0])
+
+
+def _unit_lanes(
+    document: DocumentPlan,
+) -> dict[str, Literal["narrative", "table", "note", "navigation", "independent"]]:
+    independent = {
+        "attribute",
+        "metadata",
+        "metadata_title",
+        "metadata_description",
+        "opf_title",
+        "opf_description",
+        "head_title",
+    }
+    try:
+        tree = parse_xml_safely(document.source_markup)
+    except UnsafeMarkupError:
+        tree = None
+    lanes: dict[str, Literal["narrative", "table", "note", "navigation", "independent"]] = {}
+    for unit in document.units:
+        kind = unit.kind.casefold()
+        if kind in {"nav", "navigation"}:
+            lanes[unit.unit_id] = "navigation"
+            continue
+        if kind in independent or unit.region.get("attribute_name"):
+            lanes[unit.unit_id] = "independent"
+            continue
+        if "table" in kind:
+            lanes[unit.unit_id] = "table"
+            continue
+        if "footnote" in kind or kind in {"note", "endnote"}:
+            lanes[unit.unit_id] = "note"
+            continue
+        if tree is None:
+            lanes[unit.unit_id] = "narrative"
+            continue
+        path = document.nodes[unit.node_key].element_path
+        try:
+            ancestors = [find_by_element_path(tree, path[:size]) for size in range(len(path) + 1)]
+        except (IndexError, KeyError):
+            lanes[unit.unit_id] = "narrative"
+            continue
+        names = {qname_local_name(element.tag) for element in ancestors}
+        tokens = {
+            token.casefold()
+            for element in ancestors
+            for token in f"{element.get('{http://www.idpf.org/2007/ops}type') or element.get('epub:type') or ''} {element.get('role') or ''}".split()
+        }
+        if "nav" in names or tokens & {"toc", "index", "doc-toc", "doc-index"}:
+            lanes[unit.unit_id] = "navigation"
+        elif names & {"table", "tr", "td", "th"}:
+            lanes[unit.unit_id] = "table"
+        elif tokens & {"footnote", "endnote", "rearnote", "doc-footnote", "doc-endnote", "footnotes", "endnotes"}:
+            lanes[unit.unit_id] = "note"
+        else:
+            lanes[unit.unit_id] = "narrative"
+    return lanes
 
 
 def _term_applies(term: UserTerm, view: SourceTextView) -> bool:
@@ -230,10 +569,8 @@ def _term_applies(term: UserTerm, view: SourceTextView) -> bool:
     return view.unit_id in term.scope.unit_ids
 
 
-def _term_occurs(term: UserTerm, view: SourceTextView) -> bool:
-    return any(
-        _contains(view.text, spelling, term.match_policy == "casefold") for spelling in (term.source, *term.aliases)
-    )
+def _term_occurs(term: UserTerm, text: str) -> bool:
+    return any(_contains(text, spelling, term.match_policy == "casefold") for spelling in (term.source, *term.aliases))
 
 
 def _contains(text: str, spelling: str, casefold: bool) -> bool:
