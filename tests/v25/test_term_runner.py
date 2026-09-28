@@ -118,6 +118,7 @@ def test_reserved_attempt_occupies_budget_without_claiming_an_http_call(tmp_path
     runner = TermRunner(store, transport=lambda *_: None)
     assert runner._spent(item_ids[0]) == 1
     assert runner._spent(item_ids[0], actual=True) == 0
+    assert runner._logical_calls(item_ids[0]) == 0
 
 
 def test_unplannable_term_windows_do_not_enter_an_unbounded_retry_loop(tmp_path: Path) -> None:

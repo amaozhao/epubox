@@ -81,7 +81,9 @@ class TermRunner:
 
     def _logical_calls(self, item_id: str) -> int:
         return sum(
-            request.stage == "terms" and item_id in request.item_ids and bool(request.attempts)
+            request.stage == "terms"
+            and item_id in request.item_ids
+            and any(attempt.state != "reserved" for attempt in request.attempts)
             for request in self._requests()
         )
 
