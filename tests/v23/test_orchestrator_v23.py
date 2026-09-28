@@ -919,9 +919,42 @@ async def test_ready_nav_document_with_derived_units_recovers_without_model_call
 
     assert report["ready_to_publish"] is True
     assert report["completed_units"] == report["required_units"] == 4
+    assert report["pending_items"] == 0
+    assert report["review_pending_items"] == 0
     assert transport.calls == []
     assert Store(tmp_path).read_document_status("d1").status == "valid"
     assert all(Store(tmp_path).load_unit(unit_id).accepted_revision is None for unit_id in ("nav1", "nav2"))
+
+
+def test_blocked_derived_unit_counts_only_as_waiting_and_keeps_failures(tmp_path: Path) -> None:
+    store = _make_store(tmp_path, ((("derived", ("Navigation label",)),),))
+    record = store.load_unit("derived")
+    issue = FailureRecord(
+        scope="unit",
+        stage="derivation",
+        code="source_not_ready",
+        message="source unit is not accepted",
+        plan_epoch=record.plan_epoch,
+        revision=record.revision,
+        retry_action="dependency",
+    )
+    store.save_unit(
+        record.model_copy(
+            update={
+                "derived": {"state": "blocked_dependency", "source_unit_id": "source"},
+                "unresolved_issues": (issue,),
+            }
+        )
+    )
+    engine = TranslationEngine(Store(tmp_path), transport=ScriptedTransport())
+    engine._load()
+
+    report = engine._report()
+
+    assert report["pending_items"] == 0
+    assert report["review_pending_items"] == 0
+    assert report["blocked_dependencies"] == 1
+    assert [failure["code"] for failure in report["local_failures"]] == ["source_not_ready"]
 
 
 def test_late_review_of_an_old_target_hash_is_rejected_without_undoing_replacement(

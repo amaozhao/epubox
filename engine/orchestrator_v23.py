@@ -1411,11 +1411,12 @@ class TranslationEngine:
         for record in self.records.values():
             if record.derived and record.derived.get("state") == "blocked_dependency":
                 waiting += 1
-            for item in record.items.values():
-                if item.target_projection is None:
-                    pending += 1
-                elif item.status != ItemStatus.REVIEWED:
-                    review += 1
+            if not record.derived:
+                for item in record.items.values():
+                    if item.target_projection is None:
+                        pending += 1
+                    elif item.status != ItemStatus.REVIEWED:
+                        review += 1
             failures.extend(issue.model_dump(mode="json") for issue in record.unresolved_issues)
         for key, message in {**self.bad_documents, **self.bad_records}.items():
             failures.append({"scope": "record", "id": key, "code": "corrupt_or_missing", "message": message})
