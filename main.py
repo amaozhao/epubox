@@ -4,8 +4,6 @@ from pathlib import Path
 
 import typer
 
-from engine.services.glossary import GlossaryExtractor
-
 # 初始化 Typer 应用
 app = typer.Typer()
 
@@ -21,12 +19,7 @@ def translate(
         resolve_path=True,
         help="待翻译的 EPUB 文件路径。",
     ),
-    limit: int | None = typer.Option(
-        None, "--limit", "-l", min=1, help="兼容旧命令；v23 自动规划切片，此参数已弃用。"
-    ),
     language: str | None = typer.Option("Chinese", "--language", "-lg", help="目标翻译语言。"),
-    preserve_fonts: bool = typer.Option(False, "--preserve-fonts", help="兼容旧命令；v23 默认保留字体。"),
-    engine: str = typer.Option("v23", "--engine", help="仅支持 v23；旧翻译入口已移除。"),
     output: Path | None = typer.Option(None, "--output", "-o"),
     work_root: Path = typer.Option(Path("work"), "--work-root"),
     context_tokens: int = typer.Option(32768, "--context-tokens", min=1),
@@ -39,8 +32,6 @@ def translate(
     overwrite: bool = typer.Option(False, "--overwrite"),
 ):
     """Translate a complete EPUB with the JSON-backed engine."""
-    if engine != "v23":
-        raise typer.BadParameter("旧翻译入口已移除；translate 只使用 v23")
     if (language or "Chinese").lower().replace("_", "-") not in {
         "chinese",
         "zh",
@@ -52,8 +43,6 @@ def translate(
 
     typer.echo(f"开始翻译 EPUB 文件: {epub_path.name}")
     typer.echo("翻译引擎: v23；目标语言: 简体中文")
-    if limit is not None:
-        typer.echo("提示：旧 --limit 已弃用；v23 按上下文预算规划切片。")
     typer.echo("-" * 50)
 
     from engine.cli_v23 import translate_v23
@@ -72,7 +61,6 @@ def translate(
             epubcheck=epubcheck,
             overwrite=overwrite,
             progress=_v23_progress,
-            input_tokens=None,
         )
     except Exception as error:
         typer.echo(f"v23 未完成：{error}", err=True)
@@ -134,39 +122,6 @@ def resume(
         typer.echo(f"v23 续跑未完成：{error}", err=True)
         raise typer.Exit(1) from error
     _print_v23_result(result)
-
-
-@app.command("generate-glossary", help="为指定的 EPUB 文件生成可编辑的术语 JSON 文件。")
-def generate_glossary(
-    epub_path: Path = typer.Argument(
-        ...,
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-        resolve_path=True,
-        help="要提取术语的 EPUB 文件路径。",
-    ),
-    output_path: Path | None = typer.Option(
-        None,
-        "--output",
-        "-o",
-        help="输出术语表文件的路径（可选，会自动生成）。",
-    ),
-):
-    """为指定的 EPUB 文件生成可编辑的术语 JSON 文件。"""
-    typer.echo("-" * 50)
-    if output_path:
-        typer.echo(f"指定输出路径: {output_path}")
-
-    extractor = GlossaryExtractor()
-    generated = extractor.run(
-        epub_path=str(epub_path),
-        output_path=str(output_path) if output_path else None,
-    )
-    if not generated:
-        typer.echo("术语表未生成；详情请查看上方日志。", err=True)
-        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

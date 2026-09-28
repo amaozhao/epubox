@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from engine.epub.assembly import assemble_document
 from engine.epub.publication import validate_assembled_document
-from engine.epub.replacer import assemble_document
 from engine.epub.validation import EpubValidationError
 from engine.item.extractor import extract_document
 

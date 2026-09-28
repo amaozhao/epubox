@@ -258,6 +258,8 @@ def resume_v23(
     add_check_http: int = 0,
     repair_documents: list[str] | None = None,
 ) -> RunResult:
+    if not (work_dir / "bookplan.json").is_file() and not (work_dir / "preparation.json").is_file():
+        raise ValueError("unsupported legacy checkpoint: start a new v2.5 translation run")
     store = Store(work_dir)
     book = store.read_bookplan()
     config = RunConfig.model_validate(book.frozen_config)

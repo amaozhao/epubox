@@ -18,6 +18,7 @@ from pathlib import Path
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name, serialize_xml
+from engine.epub.assembly import assemble_document
 from engine.epub.validation import (
     EpubCheckResult,
     EpubValidationError,
@@ -240,8 +241,6 @@ def publish_book(
     identity: bool = False,
 ) -> dict[str, object]:
     """Assemble only current accepted targets, verify the real ZIP, then commit it."""
-    from engine.epub.replacer import assemble_document
-
     plan = store.read_bookplan(ready=True)
     snapshot = store.root / "source.epub"
     inventory = inspect_epub(snapshot, plan.source_hash, checker=checker)

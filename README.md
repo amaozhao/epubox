@@ -30,7 +30,7 @@ python main.py translate ./book.epub
 
 默认使用已配置的 Agnes 模型、32768 上下文、4096 输出上限和并发 2，成品路径为源书旁的 `book-cn.epub`。需要时可显式调整 `--context-tokens`、`--max-output-tokens`、`--concurrency`、`--output` 和 `--provider`。`--http-limit` 统计实际 HTTP 调用，包括重试；默认 0 表示按初始 Unit/衔接计划计算有界上限。达到运行上限会暂停，保留进展；达到单个 Unit 的上限只挂起该 Unit。
 
-旧命令中的 `--limit 1200` 仍可传入，但会明确提示已弃用，由新版按上下文预算规划切片；`--preserve-fonts` 也仍可传入，v2.3 本来就保留全部字体。`--language` 只接受简中别名并统一为 `zh-Hans`；`--engine legacy` 会明确拒绝。
+旧 `--limit`、`--preserve-fonts` 和 `--engine` 选项已从翻译入口移除。新版自行按上下文预算切片并默认保留字体；`--language` 只接受简中别名并统一为 `zh-Hans`。
 
 默认保留字体、CSS 和二进制资源，不剪枝、不重压图片。默认不覆盖已有输出；需要时显式传 `--overwrite`，仍先验证临时产物。
 
@@ -101,17 +101,7 @@ python main.py resume ./work/<source_hash>/<run_id> --output ./book.zh.epub \
 
 模式为 `preferred`、`required`、`keep_source`。不要把多义词无条件强锁到一个译法。空词表合法；明确指定但无法加载的文件会报错。运行期间词表固定。
 
-原有可选候选提取继续保留：
-
-```bash
-python main.py generate-glossary ./book.epub
-```
-
-普通翻译不会自动下载 NLTK 数据。需要提取功能时，先在可信网络或离线环境准备资源：
-
-```bash
-.venv/bin/python -m nltk.downloader punkt_tab stopwords averaged_perceptron_tagger_eng
-```
+旧的独立 `generate-glossary` 命令已移除。v2.5 的默认自动术语提取和冻结流程按[审定实施计划](docs/epubox_v25_implementation_plan.md)开发；在该任务完成前，此处仅描述当前已存在的用户词表输入。
 
 ## 工作目录与结果
 
@@ -141,7 +131,7 @@ work/<source_hash>/<run_id>/
 
 ## 历史运行与开发验证
 
-旧 HTML checkpoint 不自动转换成 v2.3 的 accepted 结果。旧打包器的错误传播已修正：失败不再返回伪成功路径，也不先截断已有产物；旧翻译模块仅为历史代码保留，普通 CLI 不再调度它。
+旧 HTML checkpoint 不自动转换成新版 accepted 结果。旧模块当前无法从 CLI 调用，按 v2.5 计划在共享正确性能力迁移后物理删除。
 
 ```bash
 .venv/bin/python -m pytest -q

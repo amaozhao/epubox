@@ -1,37 +1,19 @@
 import re
 import uuid
-from functools import lru_cache
-from typing import Any, List, NamedTuple
+from typing import List, NamedTuple
 
-import tiktoken
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, ProcessingInstruction
 
+from engine.core import tokens as token_utils
 from engine.core.markup import get_markup_parser
 from engine.item.xpath import get_xpath
 from engine.schemas.chunk import Chunk, NavTextTarget
 
-
-@lru_cache(maxsize=1)
-def _get_tokenizer() -> Any | None:
-    """优先使用 tiktoken；不可用时回退到本地近似估算。"""
-    try:
-        return tiktoken.encoding_for_model("gpt-3.5-turbo")
-    except Exception:
-        try:
-            return tiktoken.get_encoding("cl100k_base")
-        except Exception:
-            return None
-
-
-def count_tokens(text: str) -> int:
-    """计算文本的 token 数。"""
-    tokenizer = _get_tokenizer()
-    if tokenizer is None:
-        # Keep chunk sizing deterministic even when the tokenizer assets
-        # cannot be fetched in sandboxed or offline environments.
-        return max(1, len(re.findall(r"\w+|[^\w\s]", text)))
-    return len(tokenizer.encode(text))
+# Temporary compatibility exports; V12 removes this legacy module.
+_get_tokenizer = token_utils._get_tokenizer
+count_tokens = token_utils.count_tokens
+tiktoken = token_utils.tiktoken
 
 
 class Block(NamedTuple):

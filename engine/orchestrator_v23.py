@@ -443,7 +443,7 @@ class TranslationEngine:
         """The same local gate applies to every translation, revision, repair and reload."""
         from html import escape
 
-        from engine.agents.verifier import (
+        from engine.core.quality import (
             EnglishResidualDecision,
             classify_untranslated_english_texts,
             find_degenerate_translation,
@@ -688,7 +688,7 @@ class TranslationEngine:
 
     def _request_budget(self, stage: Stage, payload: dict[str, Any]) -> tuple[int, int]:
         from engine.agents.runtime_v23 import request_messages
-        from engine.item.chunker import count_tokens
+        from engine.core.tokens import count_tokens
         from engine.schemas.v23 import canonical_json_bytes
 
         inputs = count_tokens(canonical_json_bytes(request_messages(stage, payload)).decode())

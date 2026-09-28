@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from engine.core.markup import UnsafeMarkupError, parse_xml_safely
+from engine.epub.assembly import assemble_document
 from engine.epub.publication import validate_assembled_document
-from engine.epub.replacer import assemble_document
 from engine.item.extractor import extract_document, select_primary_title
 from engine.item.inline import ProjectionError, validate_projection
 from engine.schemas.v23 import DocumentPlan
