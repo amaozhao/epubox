@@ -417,6 +417,7 @@ class DocumentStatus(FrozenModel):
     format: Literal["epubox-check-1"] = CHECK_FORMAT
     document_id: str = Field(min_length=1)
     candidate_versions: dict[str, int] = Field(default_factory=dict)
+    window_versions: dict[str, dict[str, int]] = Field(default_factory=dict)
     dependency_ids: tuple[str, ...] = ()
     windows: tuple[dict[str, JsonValue], ...] = ()
     summary_hash: str | None = None

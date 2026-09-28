@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import json
 import math
+import posixpath
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import pairwise
 from typing import Any, Literal
+from urllib.parse import unquote, urlsplit
 
 import regex
 import tiktoken
 
 from engine.agents.runtime_v23 import request_messages
+from engine.core.markup import UnsafeMarkupError, find_by_element_path, parse_xml_safely, qname_local_name
 from engine.item.inline import Event, events_to_projection, parse_projection, validate_projection
 from engine.schemas.v23 import CutPlan, DocumentPlan, Segment, Unit, UnitRecord, canonical_hash
 
@@ -193,9 +196,26 @@ def validate_cut_plan(unit: Unit, plan: CutPlan) -> None:
 
 def initial_coherence_windows(document: DocumentPlan, records: Mapping[str, UnitRecord]) -> tuple[dict[str, Any], ...]:
     """Build the frozen source relationships that receive the initial check budget."""
-    units = [unit for unit in document.units if _coherence_lane(unit) is not None]
+    relations = _document_relations(document)
+    nav_paths = tuple(
+        node.element_path for node in document.nodes.values() if qname_local_name(node.qname).lower() == "nav"
+    )
+    derived_navigation = {
+        str(binding.get("unit_id", ""))
+        for binding in document.derived_bindings
+        if binding.get("kind") == "derived_navigation"
+    }
+    seam_units = [unit for unit in document.units if unit.unit_id not in derived_navigation]
+    adjacency_units = [
+        unit
+        for unit in seam_units
+        if not _independent_coherence_unit(unit)
+        if not any(document.nodes[unit.node_key].element_path[: len(nav_path)] == nav_path for nav_path in nav_paths)
+        if unit.unit_id not in relations["table_units"]
+        if unit.unit_id not in relations["note_units"]
+    ]
     windows: list[dict[str, Any]] = []
-    for left, right in pairwise(units):
+    for left, right in pairwise(adjacency_units):
         left_lane, right_lane = _coherence_lane(left), _coherence_lane(right)
         if left.context.get("section") != right.context.get("section") or left_lane != right_lane:
             continue
@@ -206,10 +226,30 @@ def initial_coherence_windows(document: DocumentPlan, records: Mapping[str, Unit
                 "unit_ids": [left.unit_id, right.unit_id],
                 "source": [_snippet(left.source_projection, tail=True), _snippet(right.source_projection)],
                 "target": target,
+                "scope": "chapter",
+                "relation": "narrative_adjacent",
             }
         )
 
-    for unit in units:
+    by_id = {unit.unit_id: unit for unit in document.units}
+    for row_units in relations["table_rows"]:
+        selected = [by_id[unit_id] for unit_id in row_units if unit_id in by_id and unit_id not in derived_navigation]
+        if len(selected) < 2:
+            continue
+        windows.append(_relation_window(document, records, selected, relation="table_row", identity=row_units))
+
+    for body_id, note_units in relations["note_references"]:
+        selected_ids = (body_id, *note_units)
+        selected = [
+            by_id[unit_id] for unit_id in selected_ids if unit_id in by_id and unit_id not in derived_navigation
+        ]
+        if len(selected) < 2:
+            continue
+        windows.append(
+            _relation_window(document, records, selected, relation="footnote_reference", identity=selected_ids)
+        )
+
+    for unit in seam_units:
         record = records.get(unit.unit_id)
         if record is None or record.cut_plan is None:
             continue
@@ -229,9 +269,196 @@ def initial_coherence_windows(document: DocumentPlan, records: Mapping[str, Unit
                     "unit_ids": [unit.unit_id],
                     "source": [_snippet(left.source_projection, tail=True), _snippet(right.source_projection)],
                     "target": target,
+                    "scope": "unit"
+                    if _independent_coherence_unit(unit) or _inside_nav(document, unit, nav_paths)
+                    else "chapter",
+                    "relation": "seam",
                 }
             )
     return tuple(windows)
+
+
+def _relation_window(
+    document: DocumentPlan,
+    records: Mapping[str, UnitRecord],
+    units: Sequence[Unit],
+    *,
+    relation: Literal["table_row", "footnote_reference"],
+    identity: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "item_id": "w" + canonical_hash([document.document_id, relation, *identity])[:24],
+        "unit_ids": [unit.unit_id for unit in units],
+        "source": [_snippet(unit.source_projection, tail=index == 0) for index, unit in enumerate(units)],
+        "target": _candidate_group(records, units),
+        "scope": "chapter",
+        "relation": relation,
+    }
+
+
+def _document_relations(document: DocumentPlan) -> dict[str, Any]:
+    """Recover table and note relationships from one immutable source parse."""
+    table_groups: dict[tuple[int, ...], list[str]] = {}
+    note_groups: dict[tuple[int, ...], list[str]] = {}
+    note_fragments: dict[str, tuple[int, ...]] = {}
+    unit_note_groups: dict[str, tuple[int, ...]] = {}
+    elements: dict[tuple[int, ...], Any] = {}
+    try:
+        tree = parse_xml_safely(document.source_markup)
+        elements = {
+            node.element_path: find_by_element_path(tree, node.element_path) for node in document.nodes.values()
+        }
+    except (KeyError, UnsafeMarkupError):
+        tree = None
+
+    singular_notes: set[tuple[int, ...]] = set()
+    plural_notes: set[tuple[int, ...]] = set()
+    for path, element in elements.items():
+        tokens = _semantic_tokens(element)
+        if tokens & {"footnote", "endnote", "rearnote", "doc-footnote", "doc-endnote"}:
+            singular_notes.add(path)
+        if tokens & {"footnotes", "endnotes", "rearnotes", "doc-footnotes", "doc-endnotes"}:
+            plural_notes.add(path)
+
+    for unit in document.units:
+        if _independent_coherence_unit(unit):
+            continue
+        path = document.nodes[unit.node_key].element_path
+        row_path = _nearest_element_path(path, elements, {"tr"})
+        table_path = _nearest_element_path(path, elements, {"table"})
+        cell_path = _nearest_element_path(path, elements, {"td", "th"})
+        if table_path is not None and row_path is not None and cell_path is not None:
+            table_groups.setdefault(row_path, []).append(unit.unit_id)
+
+        note_path = _note_container(path, elements, singular_notes, plural_notes)
+        if note_path is not None:
+            note_groups.setdefault(note_path, []).append(unit.unit_id)
+            unit_note_groups[unit.unit_id] = note_path
+
+    if tree is not None:
+        for path in note_groups:
+            element = find_by_element_path(tree, path)
+            for item in element.iter():
+                fragment = item.get("id")
+                if fragment:
+                    note_fragments[fragment] = path
+
+    note_references: list[tuple[str, tuple[str, ...]]] = []
+    seen_references: set[tuple[str, tuple[str, ...]]] = set()
+    for binding in document.derived_bindings:
+        if binding.get("kind") != "href_candidate":
+            continue
+        body_id = str(binding.get("source_unit_id", ""))
+        if not body_id or body_id in unit_note_groups:
+            continue
+        fragment = _same_document_fragment(document.resource.path, str(binding.get("href", "")))
+        note_path = note_fragments.get(fragment) if fragment else None
+        note_ids = tuple(note_groups.get(note_path, ())) if note_path is not None else ()
+        key = (body_id, note_ids)
+        if note_ids and key not in seen_references:
+            seen_references.add(key)
+            note_references.append(key)
+
+    # Old frozen plans with explicit table identity still get the same relationship.
+    if not table_groups:
+        legacy: dict[tuple[str, ...], list[str]] = {}
+        for unit in document.units:
+            lane = _coherence_lane(unit)
+            if lane and lane[0] == "table":
+                legacy.setdefault(lane, []).append(unit.unit_id)
+        table_groups.update({(index,): units for index, units in enumerate(legacy.values())})
+
+    return {
+        "table_rows": tuple(tuple(units) for units in table_groups.values() if len(units) > 1),
+        "table_units": {unit_id for units in table_groups.values() for unit_id in units},
+        "note_units": set(unit_note_groups),
+        "note_references": tuple(note_references),
+    }
+
+
+def _semantic_tokens(element: Any) -> set[str]:
+    epub_type = element.get("{http://www.idpf.org/2007/ops}type") or element.get("epub:type") or ""
+    return {token.casefold() for token in f"{epub_type} {element.get('role') or ''}".split()}
+
+
+def _nearest_element_path(
+    path: tuple[int, ...], elements: Mapping[tuple[int, ...], Any], names: set[str]
+) -> tuple[int, ...] | None:
+    return next(
+        (
+            prefix
+            for size in range(len(path), -1, -1)
+            if (prefix := path[:size]) in elements and qname_local_name(elements[prefix].tag) in names
+        ),
+        None,
+    )
+
+
+def _note_container(
+    path: tuple[int, ...],
+    elements: Mapping[tuple[int, ...], Any],
+    singular: set[tuple[int, ...]],
+    plural: set[tuple[int, ...]],
+) -> tuple[int, ...] | None:
+    direct = next((path[:size] for size in range(len(path), -1, -1) if path[:size] in singular), None)
+    if direct is not None:
+        return direct
+    parent = next((path[:size] for size in range(len(path), -1, -1) if path[:size] in plural), None)
+    if parent is None:
+        return None
+    descendants = [path[:size] for size in range(len(parent) + 1, len(path) + 1)]
+    for candidate in descendants:
+        element = elements.get(candidate)
+        if element is not None and qname_local_name(element.tag) in {"li", "aside"}:
+            return candidate
+    for candidate in reversed(descendants):
+        element = elements.get(candidate)
+        if element is not None and element.get("id"):
+            return candidate
+    return path
+
+
+def _same_document_fragment(resource_path: str, href: str) -> str:
+    parsed = urlsplit(href)
+    if parsed.scheme or parsed.netloc or not parsed.fragment:
+        return ""
+    target_path = unquote(parsed.path)
+    if target_path:
+        target_path = posixpath.normpath(posixpath.join(posixpath.dirname(resource_path), target_path)).lstrip("/")
+        if target_path != posixpath.normpath(resource_path).lstrip("/"):
+            return ""
+    return unquote(parsed.fragment)
+
+
+def _candidate_group(records: Mapping[str, UnitRecord], units: Sequence[Unit]) -> list[str]:
+    candidates = [records.get(unit.unit_id) for unit in units]
+    if any(record is None or record.candidate is None for record in candidates):
+        return []
+    return [
+        _snippet(record.candidate or "", tail=index == 0)
+        for index, record in enumerate(candidates)
+        if record is not None
+    ]
+
+
+def _independent_coherence_unit(unit: Unit) -> bool:
+    kind = unit.kind.lower()
+    return kind in {
+        "attribute",
+        "metadata",
+        "metadata_title",
+        "metadata_description",
+        "opf_title",
+        "opf_description",
+        "head_title",
+        "nav",
+        "navigation",
+    } or bool(unit.region.get("attribute_name"))
+
+
+def _inside_nav(document: DocumentPlan, unit: Unit, nav_paths: Sequence[tuple[int, ...]]) -> bool:
+    path = document.nodes[unit.node_key].element_path
+    return any(path[: len(nav_path)] == nav_path for nav_path in nav_paths)
 
 
 def estimate_request_tokens(

@@ -17,6 +17,7 @@ from engine.schemas.v23 import (
     Counters,
     CutPlan,
     DocumentPlan,
+    DocumentStatus,
     Event,
     FailureRecord,
     ItemStatus,
@@ -717,6 +718,210 @@ async def test_resume_drops_cached_failed_coherence_window_without_reopening_acc
     assert transport.calls == [("coherence", window_id)]
     assert all(Store(tmp_path).load_unit(unit_id).accepted_revision == 0 for unit_id in ("u1", "u2"))
     assert Store(tmp_path).read_document_status("d1").status == "valid"
+
+
+def _scoped_windows() -> list[dict[str, Any]]:
+    return [
+        {
+            "item_id": "body-window",
+            "scope": "chapter",
+            "unit_ids": ["body1", "body2"],
+            "source": ["Body one.", "Body two."],
+            "target": [],
+        },
+        {
+            "item_id": "attr-seam",
+            "scope": "unit",
+            "unit_ids": ["attr"],
+            "source": ["Attribute one.", "Attribute two."],
+            "target": [],
+        },
+    ]
+
+
+def _advance_accepted_revision(store: Store, unit_id: str) -> None:
+    record = store.load_unit(unit_id)
+    store.save_unit(
+        record.model_copy(
+            update={
+                "revision": record.revision + 1,
+                "accepted_revision": record.revision + 1,
+                "review": {**(record.review or {}), "revision": record.revision + 1},
+            }
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_unfinished_independent_unit_does_not_block_ready_chapter_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("body1", ("Body one.",)), ("body2", ("Body two.",)), ("attr", ("Attribute one. ", "Attribute two."))),),
+    )
+    transport = ScriptedTransport(translation_failures={"attr:e0:s0"})
+    engine = TranslationEngine(store, transport=transport)
+    monkeypatch.setattr(engine, "_windows", lambda document: _scoped_windows())
+
+    report = await engine.execute()
+
+    check = store.read_document_status("d1")
+    assert report["outcome"] == "needs_attention"
+    assert "body-window" in check.checks
+    assert "attr-seam" not in check.checks
+    assert check.status == "blocked_dependency"
+    assert check.dependency_ids == ("attr",)
+    assert check.candidate_versions == {"body1": 0, "body2": 0}
+    assert check.window_versions == {"attr-seam": {"attr": 0}}
+    assert transport.coherence_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unfinished_chapter_unit_does_not_block_ready_independent_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("body1", ("Body one.",)), ("body2", ("Body two.",)), ("attr", ("Attribute one. ", "Attribute two."))),),
+    )
+    transport = ScriptedTransport(translation_failures={"body1:e0:s0"})
+    engine = TranslationEngine(store, transport=transport)
+    monkeypatch.setattr(engine, "_windows", lambda document: _scoped_windows())
+
+    await engine.execute()
+
+    check = store.read_document_status("d1")
+    assert "body-window" not in check.checks
+    assert "attr-seam" in check.checks
+    assert check.status == "blocked_dependency"
+    assert check.dependency_ids == ("body1",)
+    assert transport.coherence_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_independent_revision_invalidates_only_its_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("body1", ("Body one.",)), ("body2", ("Body two.",)), ("attr", ("Attribute one. ", "Attribute two."))),),
+    )
+    first = TranslationEngine(store, transport=ScriptedTransport())
+    monkeypatch.setattr(first, "_windows", lambda document: _scoped_windows())
+    await first.execute()
+    _advance_accepted_revision(store, "attr")
+    transport = ScriptedTransport()
+    resumed = TranslationEngine(Store(tmp_path), transport=transport)
+    monkeypatch.setattr(resumed, "_windows", lambda document: _scoped_windows())
+
+    report = await resumed.execute()
+
+    check = Store(tmp_path).read_document_status("d1")
+    assert report["ready_to_publish"] is True
+    assert transport.calls == [("coherence", "attr-seam")]
+    assert set(check.checks) == {"body-window", "attr-seam"}
+    assert check.candidate_versions == {"body1": 0, "body2": 0}
+    assert check.window_versions == {"attr-seam": {"attr": 1}}
+
+
+@pytest.mark.asyncio
+async def test_chapter_revision_invalidates_chapter_windows_but_reuses_independent_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("body1", ("Body one.",)), ("body2", ("Body two.",)), ("attr", ("Attribute one. ", "Attribute two."))),),
+    )
+    first = TranslationEngine(store, transport=ScriptedTransport())
+    monkeypatch.setattr(first, "_windows", lambda document: _scoped_windows())
+    await first.execute()
+    _advance_accepted_revision(store, "body1")
+    transport = ScriptedTransport()
+    resumed = TranslationEngine(Store(tmp_path), transport=transport)
+    monkeypatch.setattr(resumed, "_windows", lambda document: _scoped_windows())
+
+    report = await resumed.execute()
+
+    check = Store(tmp_path).read_document_status("d1")
+    assert report["ready_to_publish"] is True
+    assert transport.calls == [("coherence", "body-window")]
+    assert set(check.checks) == {"body-window", "attr-seam"}
+    assert check.candidate_versions == {"body1": 1, "body2": 0}
+    assert check.window_versions == {"attr-seam": {"attr": 0}}
+
+
+def test_document_status_defaults_window_versions_for_old_json() -> None:
+    assert DocumentStatus.model_validate({"document_id": "d1"}).window_versions == {}
+
+
+@pytest.mark.asyncio
+async def test_ready_nav_document_with_derived_units_recovers_without_model_calls(tmp_path: Path) -> None:
+    store = _make_store(
+        tmp_path,
+        (
+            (("nav1", ("Chapter one",)), ("nav2", ("Chapter two",))),
+            (("source1", ("Chapter one",)), ("source2", ("Chapter two",))),
+        ),
+    )
+    await TranslationEngine(store, transport=ScriptedTransport()).execute()
+    book = store.read_bookplan(ready=True)
+    document = store.read_document("d1")
+    nodes = {
+        **document.nodes,
+        "nav-root": NodeRecord(
+            node_key="nav-root",
+            element_path=(1,),
+            qname="{http://www.w3.org/1999/xhtml}nav",
+        ),
+    }
+    bindings = tuple(
+        {
+            "kind": "derived_navigation",
+            "unit_id": target,
+            "source_unit_id": source,
+        }
+        for target, source in (("nav1", "source1"), ("nav2", "source2"))
+    )
+    updated_document = document.model_copy(update={"nodes": nodes, "derived_bindings": bindings})
+    document_hash = store._atomic_write(tmp_path / "documents" / "d1.json", updated_document)
+    store._atomic_write(
+        tmp_path / "bookplan.json",
+        book.model_copy(update={"document_hashes": {**book.document_hashes, "d1": document_hash}}),
+    )
+    for target, source in (("nav1", "source1"), ("nav2", "source2")):
+        record = store.load_unit(target)
+        source_record = store.load_unit(source)
+        store.save_unit(
+            record.model_copy(
+                update={
+                    "accepted_revision": None,
+                    "accepted_target_hash": None,
+                    "review": None,
+                    "derived": {
+                        "state": "valid",
+                        "source_unit_id": source,
+                        "source_revision": source_record.revision,
+                        "source_target_hash": source_record.target_hash,
+                        "target": record.candidate,
+                        "target_hash": record.target_hash,
+                    },
+                }
+            )
+        )
+    check = store.read_document_status("d1")
+    store.write_document_status(
+        check.model_copy(update={"status": "blocked_dependency", "dependency_ids": ("nav1", "nav2")})
+    )
+    transport = ScriptedTransport()
+
+    report = await TranslationEngine(Store(tmp_path), transport=transport).execute()
+
+    assert report["ready_to_publish"] is True
+    assert report["completed_units"] == report["required_units"] == 4
+    assert transport.calls == []
+    assert Store(tmp_path).read_document_status("d1").status == "valid"
+    assert all(Store(tmp_path).load_unit(unit_id).accepted_revision is None for unit_id in ("nav1", "nav2"))
 
 
 def test_late_review_of_an_old_target_hash_is_rejected_without_undoing_replacement(

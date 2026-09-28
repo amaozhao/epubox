@@ -928,7 +928,13 @@ class TranslationEngine:
             )
             updated = check.model_copy(
                 update={
-                    "status": "pending",
+                    "status": (
+                        "needs_attention"
+                        if any(existing.retry_action != "automatic" for existing in check.issues)
+                        else "blocked_dependency"
+                        if check.dependency_ids
+                        else "pending"
+                    ),
                     "issues": (
                         *tuple(
                             existing
@@ -1084,6 +1090,63 @@ class TranslationEngine:
         return "valid" if all(str(window["item_id"]) in checks for window in windows) else "pending"
 
     @staticmethod
+    def _window_scope(window: dict[str, Any]) -> str:
+        return "unit" if window.get("scope") == "unit" else "chapter"
+
+    def _window_versions(self, window: dict[str, Any]) -> dict[str, int]:
+        return {
+            str(unit_id): self.records[str(unit_id)].revision
+            for unit_id in window["unit_ids"]
+            if str(unit_id) in self.records
+        }
+
+    def _window_ready(
+        self,
+        window: dict[str, Any],
+        windows: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    ) -> bool:
+        unit_ids = (
+            {
+                str(unit_id)
+                for candidate in windows
+                if self._window_scope(candidate) == "chapter"
+                for unit_id in candidate["unit_ids"]
+            }
+            if self._window_scope(window) == "chapter"
+            else {str(unit_id) for unit_id in window["unit_ids"]}
+        )
+        return all(unit_id in self.records and is_accepted(self.records[unit_id]) for unit_id in unit_ids)
+
+    def _current_coherence_state(
+        self, windows: list[dict[str, Any]] | tuple[dict[str, Any], ...]
+    ) -> tuple[dict[str, int], dict[str, dict[str, int]], tuple[str, ...]]:
+        chapter_ids = {
+            str(unit_id)
+            for window in windows
+            if self._window_scope(window) == "chapter"
+            for unit_id in window["unit_ids"]
+        }
+        chapter_versions = {
+            unit_id: self.records[unit_id].revision for unit_id in chapter_ids if unit_id in self.records
+        }
+        independent_versions = {
+            str(window["item_id"]): self._window_versions(window)
+            for window in windows
+            if self._window_scope(window) == "unit"
+        }
+        missing = {
+            unit_id for unit_id in chapter_ids if unit_id not in self.records or not is_accepted(self.records[unit_id])
+        }
+        for window in windows:
+            if self._window_scope(window) == "unit":
+                missing.update(
+                    str(unit_id)
+                    for unit_id in window["unit_ids"]
+                    if str(unit_id) not in self.records or not is_accepted(self.records[str(unit_id)])
+                )
+        return chapter_versions, independent_versions, tuple(sorted(missing))
+
+    @staticmethod
     def _without_protocol_issue(check: DocumentStatus, item_id: str) -> DocumentStatus:
         issues = tuple(
             issue
@@ -1096,52 +1159,74 @@ class TranslationEngine:
         document = self.documents[document_id]
         check = self.checks.get(document_id, DocumentStatus(document_id=document_id))
         windows = self._windows(document)
-        participant_ids = {str(unit_id) for window in windows for unit_id in window["unit_ids"]}
-        participants = [unit for unit in document.units if unit.unit_id in participant_ids]
-        missing = tuple(
-            unit.unit_id
-            for unit in participants
-            if unit.unit_id not in self.records or not is_accepted(self.records[unit.unit_id])
-        )
-        if missing:
-            self.checks[document_id] = self.store.write_document_status(
-                check.model_copy(
-                    update={
-                        "status": "blocked_dependency",
-                        "dependency_ids": missing,
-                    }
-                )
-            )
-            return
-        vector = {unit.unit_id: self.records[unit.unit_id].revision for unit in participants}
-        if check.candidate_versions == vector and check.status in {"valid", "needs_attention"}:
-            return
-        if check.candidate_versions != vector:
-            check = check.model_copy(update={"checks": {}, "issues": (), "status": "pending"})
-        elif check.status == "blocked_dependency":
-            check = check.model_copy(
-                update={"checks": self._passed_coherence_checks(check.checks, windows), "status": "pending"}
-            )
+        chapter_versions, independent_versions, missing = self._current_coherence_state(windows)
+        passed = self._passed_coherence_checks(check.checks, windows)
+        same_chapter = check.candidate_versions == chapter_versions
+        old_window_ids = {str(window["item_id"]) for window in check.windows}
+        old_chapter_ids = {
+            str(window["item_id"]) for window in check.windows if self._window_scope(window) == "chapter"
+        }
+        current_chapter_ids = {str(window["item_id"]) for window in windows if self._window_scope(window) == "chapter"}
+        same_chapter_windows = old_chapter_ids == current_chapter_ids
+        checks: dict[str, Any] = {}
+        window_versions: dict[str, dict[str, int]] = {}
+        valid_bindings: set[str] = set()
+        for window in windows:
+            item_id = str(window["item_id"])
+            if self._window_scope(window) == "chapter":
+                binding_valid = same_chapter_windows and same_chapter
+            else:
+                current = independent_versions[item_id]
+                binding_valid = item_id in old_window_ids and check.window_versions.get(item_id) == current
+                window_versions[item_id] = current
+            if binding_valid:
+                valid_bindings.add(item_id)
+                if item_id in passed:
+                    checks[item_id] = passed[item_id]
+        issues = tuple(issue for issue in check.issues if issue.item_id is None or issue.item_id in valid_bindings)
+        terminal_windows = {
+            issue.item_id for issue in issues if issue.item_id is not None and issue.retry_action != "automatic"
+        }
         fallback_base = max(0, check.http_limit - check.extra_http_limit) if check.http_limit else 6 * len(windows)
         limit = self.book.initial_coherence_limits.get(document_id, fallback_base) + check.extra_http_limit
+        if len(checks) == len(windows) and not missing:
+            status = "valid"
+        elif terminal_windows:
+            status = "needs_attention"
+        elif missing:
+            status = "blocked_dependency"
+        else:
+            status = "pending"
         check = check.model_copy(
             update={
-                "candidate_versions": vector,
-                "dependency_ids": (),
+                "candidate_versions": chapter_versions,
+                "window_versions": window_versions,
+                "dependency_ids": missing,
                 "windows": tuple(windows),
                 "http_limit": limit,
-                "summary_hash": canonical_hash(vector),
-                "status": self._coherence_status(windows, check.checks),
+                "summary_hash": canonical_hash(chapter_versions),
+                "checks": checks,
+                "issues": issues,
+                "status": status,
             }
         )
         self.checks[document_id] = self.store.write_document_status(check)
         for window in windows:
             item_id = str(window["item_id"])
-            if item_id not in check.checks:
+            if item_id not in check.checks and item_id not in terminal_windows and self._window_ready(window, windows):
                 self._enqueue(Job("coherence", "", item_id, 0, 0, document_id))
 
     def _apply_coherence(self, job: Job, manifest: RequestManifest, raw: str | bytes) -> None:
         check = self.checks[job.document_id]
+        window = next(
+            (window for window in check.windows if str(window["item_id"]) == job.item_id),
+            None,
+        )
+        if window is None or not self._window_ready(window, check.windows):
+            return
+        chapter_versions, _, _ = self._current_coherence_state(check.windows)
+        if self._window_scope(window) == "chapter" and chapter_versions != check.candidate_versions:
+            return
         for unit_id, revision in manifest.revisions.items():
             if self.records[unit_id].revision != revision or not is_accepted(self.records[unit_id]):
                 return
@@ -1162,7 +1247,7 @@ class TranslationEngine:
                     update={
                         "repair_rounds": check.repair_rounds + 1,
                         "status": "blocked_dependency",
-                        "dependency_ids": tuple(ids),
+                        "dependency_ids": tuple(sorted(set(check.dependency_ids) | set(ids))),
                     }
                 )
             )
@@ -1212,9 +1297,28 @@ class TranslationEngine:
                 self._queue_unit(unit_id)
             return
         checks = {**check.checks, job.item_id: item}
-        status = self._coherence_status(check.windows, checks)
+        window_versions = dict(check.window_versions)
+        if self._window_scope(window) == "unit":
+            window_versions[job.item_id] = dict(manifest.revisions)
+        _, _, missing = self._current_coherence_state(check.windows)
+        terminal = any(issue.retry_action != "automatic" for issue in check.issues)
+        if len(checks) == len(check.windows) and not missing:
+            status = "valid"
+        elif terminal:
+            status = "needs_attention"
+        elif missing:
+            status = "blocked_dependency"
+        else:
+            status = "pending"
         self.checks[job.document_id] = self.store.write_document_status(
-            check.model_copy(update={"checks": checks, "status": status})
+            check.model_copy(
+                update={
+                    "checks": checks,
+                    "window_versions": window_versions,
+                    "dependency_ids": missing,
+                    "status": status,
+                }
+            )
         )
 
     def _apply_derived(self) -> None:
@@ -1277,7 +1381,16 @@ class TranslationEngine:
     def _job_current(self, job: Job) -> bool:
         if job.stage == "coherence":
             check = self.checks.get(job.document_id)
-            return bool(check and check.status == "pending" and job.item_id not in check.checks)
+            if check is None or job.item_id in check.checks:
+                return False
+            window = next(
+                (window for window in check.windows if str(window["item_id"]) == job.item_id),
+                None,
+            )
+            terminal = any(
+                issue.item_id == job.item_id and issue.retry_action != "automatic" for issue in check.issues
+            )
+            return bool(window and not terminal and self._window_ready(window, check.windows))
         record = self.records.get(job.unit_id)
         return bool(
             record
@@ -1695,33 +1808,46 @@ class TranslationEngine:
                     raise ValueError(f"document unavailable: {document_id}")
                 check = self.checks[document_id]
                 windows = self._windows(self.documents[document_id])
-                window_ids = {str(window["item_id"]) for window in windows}
-                participant_ids = {str(unit_id) for window in windows for unit_id in window["unit_ids"]}
-                vector = {
-                    unit_id: self.records[unit_id].revision
-                    for unit_id in participant_ids
-                    if unit_id in self.records and is_accepted(self.records[unit_id])
-                }
+                chapter_versions, independent_versions, missing = self._current_coherence_state(windows)
                 stored_window_ids = {str(window["item_id"]) for window in check.windows}
-                preserve = (
-                    len(vector) == len(participant_ids)
-                    and check.candidate_versions == vector
-                    and stored_window_ids == window_ids
-                )
-                checks = (
-                    {
-                        item_id: item
-                        for item_id, item in self._passed_coherence_checks(check.checks, windows).items()
-                        if item_id in window_ids
-                    }
-                    if preserve
-                    else {}
+                stored_chapter_ids = {
+                    str(window["item_id"]) for window in check.windows if self._window_scope(window) == "chapter"
+                }
+                current_chapter_ids = {
+                    str(window["item_id"]) for window in windows if self._window_scope(window) == "chapter"
+                }
+                passed = self._passed_coherence_checks(check.checks, windows)
+                checks: dict[str, Any] = {}
+                window_versions: dict[str, dict[str, int]] = {}
+                for window in windows:
+                    item_id = str(window["item_id"])
+                    if self._window_scope(window) == "chapter":
+                        preserve = (
+                            stored_chapter_ids == current_chapter_ids and check.candidate_versions == chapter_versions
+                        )
+                    else:
+                        current = independent_versions[item_id]
+                        preserve = item_id in stored_window_ids and check.window_versions.get(item_id) == current
+                        window_versions[item_id] = current
+                    if preserve and item_id in passed:
+                        checks[item_id] = passed[item_id]
+                status = (
+                    "valid"
+                    if len(checks) == len(windows) and not missing
+                    else "blocked_dependency"
+                    if missing
+                    else "pending"
                 )
                 updated = check.model_copy(
                     update={
-                        "status": self._coherence_status(windows, checks),
+                        "status": status,
                         "checks": checks,
                         "issues": (),
+                        "candidate_versions": chapter_versions,
+                        "window_versions": window_versions,
+                        "dependency_ids": missing,
+                        "windows": tuple(windows),
+                        "summary_hash": canonical_hash(chapter_versions),
                         "extra_http_limit": check.extra_http_limit + add_http,
                         "http_limit": check.http_limit + add_http,
                         "retry_history": (
@@ -1730,7 +1856,7 @@ class TranslationEngine:
                                 "action": "explicit_retry",
                                 "add_http": add_http,
                                 "http_attempts": check.http_attempts,
-                                "summary_hash": check.summary_hash,
+                                "summary_hash": canonical_hash(chapter_versions),
                                 "preserved_windows": sorted(checks),
                             },
                         ),

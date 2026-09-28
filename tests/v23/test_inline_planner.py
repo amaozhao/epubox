@@ -3,6 +3,7 @@ from typing import Literal
 import pytest
 
 from engine.core.styles import ReorderPolicy, scan_css, scan_inline_style, scan_stylesheets, selector_policy
+from engine.epub.preparation import _resolve_derived_bindings
 from engine.item.extractor import extract_document
 from engine.item.inline import (
     Event,
@@ -549,3 +550,187 @@ def test_initial_coherence_windows_freeze_only_valid_source_relationships_and_se
     assert [window["item_id"] for window in windows] == [
         window["item_id"] for window in initial_coherence_windows(document, records)
     ]
+
+
+def test_coherence_windows_exclude_all_nav_descendants_and_derived_navigation_targets():
+    chapter_one = extract_document(
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="one">Chapter One</h1>'
+        "<p>First body paragraph.</p><p>Second body paragraph.</p></body></html>",
+        "OPS/one.xhtml",
+        "source-hash",
+        "application/xhtml+xml",
+    )
+    chapter_two = extract_document(
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="two">Chapter Two</h1>'
+        "<p>Third body paragraph.</p><p>Fourth body paragraph.</p></body></html>",
+        "OPS/two.xhtml",
+        "source-hash",
+        "application/xhtml+xml",
+    )
+    navigation = extract_document(
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body><nav><h1>Contents</h1><ol>'
+        '<li><a href="one.xhtml#one">Chapter One</a></li>'
+        '<li><a href="two.xhtml#two">Chapter Two</a></li>'
+        f"<li>{'Long navigation entry. ' * 100}</li>"
+        "</ol></nav><p>Outside navigation one.</p><p>Outside navigation two.</p></body></html>",
+        "OPS/nav.xhtml",
+        "source-hash",
+        "application/xhtml+xml",
+    )
+    prepared = _resolve_derived_bindings([chapter_one, chapter_two, navigation])
+    navigation = next(document for document in prepared if document.resource.path == "OPS/nav.xhtml")
+    config = PlannerConfig(context_tokens=4096)
+    split_config = PlannerConfig(
+        context_tokens=1200,
+        max_output_tokens=160,
+        review_output_tokens=80,
+        safety_margin=8,
+        translation_overhead=8,
+        review_overhead=8,
+    )
+    long_nav = next(unit for unit in navigation.units if unit.source_projection.startswith("Long navigation"))
+    plans = {unit.unit_id: plan_unit(unit, split_config if unit is long_nav else config) for unit in navigation.units}
+    records = {
+        unit.unit_id: make_record(unit, plans[unit.unit_id], candidate=f"target-{unit.unit_id}")
+        for unit in navigation.units
+    }
+
+    windows = initial_coherence_windows(navigation, records)
+    adjacency_participants = {
+        unit_id for window in windows if len(window["unit_ids"]) == 2 for unit_id in window["unit_ids"]
+    }
+    nav_path = next(node.element_path for node in navigation.nodes.values() if node.qname.endswith("}nav"))
+    nav_units = {
+        unit.unit_id
+        for unit in navigation.units
+        if navigation.nodes[unit.node_key].element_path[: len(nav_path)] == nav_path
+    }
+    derived_units = {
+        str(binding["unit_id"])
+        for binding in navigation.derived_bindings
+        if binding.get("kind") == "derived_navigation"
+    }
+    outside_units = [unit.unit_id for unit in navigation.units if unit.unit_id not in nav_units]
+
+    assert len(derived_units) == 2
+    assert len(plans[long_nav.unit_id].segments) > 1
+    assert nav_units.isdisjoint(adjacency_participants)
+    assert all(long_nav.unit_id not in window["unit_ids"] for window in windows if len(window["unit_ids"]) == 2)
+    assert (
+        sum(window["unit_ids"] == [long_nav.unit_id] for window in windows)
+        == len(plans[long_nav.unit_id].segments) - 1
+    )
+    assert all(
+        window["scope"] == "unit" and window["relation"] == "seam"
+        for window in windows
+        if window["unit_ids"] == [long_nav.unit_id]
+    )
+    assert all(unit_id not in derived_units for window in windows for unit_id in window["unit_ids"])
+    assert any(window["unit_ids"] == outside_units for window in windows)
+
+
+def test_frozen_document_relations_cover_table_rows_notes_and_independent_seams():
+    long_text = "Long independent field. " * 180
+    markup = (
+        '<html xmlns="http://www.w3.org/1999/xhtml" '
+        'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>'
+        f"{long_text}</title></head><body>"
+        '<p id="p1">Body one<a epub:type="noteref" href="#n1">1</a>.</p>'
+        '<p id="p2">Body two<a role="doc-noteref" href="chapter.xhtml#n%32">2</a>.</p>'
+        '<p>Read the <a href="#topic">topic</a> and '
+        '<a href="https://example.invalid/chapter.xhtml#n1">external note</a>.</p>'
+        '<h2 id="topic">Topic</h2>'
+        "<table>"
+        + "".join(
+            f'<tr><td><p title="cell label">R{row}C1</p></td><td><p title="cell label">R{row}C2</p></td></tr>'
+            for row in range(1, 7)
+        )
+        + "</table>"
+        '<section epub:type="endnotes"><ol id="notes"><li id="n1">Note one.'
+        "<ul><li>Nested detail.</li></ul></li>"
+        '<li id="n2">Note two.</li></ol></section>'
+        f'<img src="cover.png" alt="{long_text}"/></body></html>'
+    )
+    extracted = extract_document(
+        markup,
+        "OPS/chapter.xhtml",
+        "source-hash",
+        "application/xhtml+xml",
+    )
+    document = DocumentPlan.model_validate_json(extracted.model_dump_json())
+    original_units = tuple(unit.unit_id for unit in document.units)
+    config = PlannerConfig(
+        context_tokens=1200,
+        max_output_tokens=160,
+        review_output_tokens=80,
+        safety_margin=8,
+        translation_overhead=8,
+        review_overhead=8,
+    )
+    normal_config = PlannerConfig(context_tokens=16_384)
+    plans = {
+        unit.unit_id: plan_unit(
+            unit,
+            config if unit.kind in {"attribute", "head_title"} else normal_config,
+        )
+        for unit in document.units
+    }
+    records = {
+        unit.unit_id: make_record(unit, plans[unit.unit_id], candidate=f"target-{unit.unit_id}")
+        for unit in document.units
+    }
+    windows = initial_coherence_windows(document, records)
+    units_by_text = {plain_text(unit.source_projection): unit for unit in document.units}
+
+    table_windows = [window for window in windows if window["relation"] == "table_row"]
+    assert len(table_windows) == 6
+    assert all(len(window["unit_ids"]) == 2 and window["scope"] == "chapter" for window in table_windows)
+
+    body_one = units_by_text["Body one."]
+    body_two = units_by_text["Body two."]
+    note_one = units_by_text["Note one."]
+    nested_note = units_by_text["Nested detail."]
+    note_two = units_by_text["Note two."]
+    pairs = {tuple(window["unit_ids"]) for window in windows}
+    assert (body_one.unit_id, body_two.unit_id) in pairs
+    assert (body_one.unit_id, note_one.unit_id, nested_note.unit_id) in pairs
+    assert (body_two.unit_id, note_two.unit_id) in pairs
+    assert (body_two.unit_id, note_one.unit_id) not in pairs
+    assert (note_one.unit_id, note_two.unit_id) not in pairs
+    assert sum(window["relation"] == "footnote_reference" for window in windows) == 2
+    assert all(
+        window["scope"] == "chapter"
+        for window in windows
+        if window["relation"] in {"narrative_adjacent", "footnote_reference"}
+    )
+
+    all_independent = [unit for unit in document.units if unit.kind in {"attribute", "head_title"}]
+    independent = [unit for unit in all_independent if len(unit.source_projection) > 1_000]
+    assert all(len(plans[unit.unit_id].segments) > 1 for unit in independent)
+    assert all(
+        any(
+            window["unit_ids"] == [unit.unit_id] and window["relation"] == "seam" and window["scope"] == "unit"
+            for window in windows
+        )
+        for unit in independent
+    )
+    independent_ids = {unit.unit_id for unit in all_independent}
+    assert all(window["scope"] == "unit" for window in windows if independent_ids.intersection(window["unit_ids"]))
+    assert tuple(unit.unit_id for unit in document.units) == original_units
+
+    opf = extract_document(
+        '<package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+        '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Title</dc:title>'
+        f"<dc:description>{long_text}</dc:description></metadata></package>",
+        "content.opf",
+        "source-hash",
+        "application/oebps-package+xml",
+    )
+    description = next(unit for unit in opf.units if unit.kind == "metadata_description")
+    description_plan = plan_unit(description, config)
+    opf_windows = initial_coherence_windows(
+        opf,
+        {description.unit_id: make_record(description, description_plan, candidate="translated description")},
+    )
+    assert len(description_plan.segments) > 1
+    assert all(window["scope"] == "unit" and window["relation"] == "seam" for window in opf_windows)
