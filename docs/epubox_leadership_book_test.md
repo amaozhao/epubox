@@ -8,7 +8,7 @@ EPUBCheck 5.4.0 对原书 `OEBPS/navigation.xhtml` 的四处 `<nav aria-labelled
 
 这四处属于 5.4.0 的[已知误报](https://github.com/w3c/epubcheck/issues/1726)：W3C [EPUB 3.4 导航示例](https://www.w3.org/TR/epub-34/#sec-nav-def-types-lot)也使用 `aria-labelledby`。本次固定使用官方 EPUBCheck 5.3.0 作为源文件和输出文件的检查器；安装包来自官方发行页，SHA256 与发行资产登记的 `6c07e68584b2e2ce2f89fe06e1246dfead3eb36b46b340e7d93524f29dcff6c5` 相符。保留原有无障碍标签。
 
-当前 CLI 自动发现会选到本地的 5.4.0；之后用正式 `translate`/`resume` 命令处理**这本书**时，须通过 `--epubcheck-command` 显式传入 `.tools/epubcheck/epubcheck-5.3.0/epubcheck.jar` 与便携 Java 的完整命令，直到含修复的校验器正式发布。其他源书仍按各自校验结果处理。
+当前 CLI 默认选本地的 5.4.0；若它对 EPUB 3.0 导航 `<nav aria-labelledby>` 报出且**只有**该已知误报，程序会用本地便携 5.3.0 重新验证同一本书，全部通过才用于后续准备和发布。显式 `--epubcheck-command`/`EPUBCHECK_COMMAND` 始终优先；其他诊断仍阻断。
 
 ## 全书无模型原样往返
 
@@ -34,4 +34,4 @@ EPUBCheck 5.4.0 对原书 `OEBPS/navigation.xhtml` 的四处 `<nav aria-labelled
 
 ## 结论与边界
 
-这本书已证明**全书原始文本和 XML 结构可以无损通过提取、规划、装配和打包路径**。真实模型的首轮 10 Unit 样本没有全部自动通过；已验证的代理修订可经相同复核入口接受。对 6736 个 Unit 的整书中文译文及其章节衔接、阅读器显示和人工语义质量，本轮尚无通过证据，因此不能称“完全正确处理了整本译文”，也不据此切换默认引擎。
+这本书已证明**全书原始文本和 XML 结构可以无损通过提取、规划、装配和打包路径**。真实模型的首轮 10 Unit 样本没有全部自动通过；已验证的代理修订可经相同复核入口接受。对 6736 个 Unit 的整书中文译文及其章节衔接、阅读器显示和人工语义质量，本轮尚无通过证据，因此不能称“完全正确处理了整本译文”。2026-09-29 用户另行明确要求切换默认翻译入口；入口切换不构成本报告的质量结论。

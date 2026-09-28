@@ -1,6 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 
@@ -9,24 +9,30 @@ from engine.schemas.v23 import RunConfig
 from main import app
 
 
-def test_legacy_none_and_exception_return_nonzero(tmp_path: Path):
+def test_default_translate_uses_v23_and_accepts_old_flags(tmp_path: Path):
     source = tmp_path / "input.epub"
     source.write_bytes(b"mock input")
-    for result in (AsyncMock(return_value=None), AsyncMock(side_effect=RuntimeError("failed"))):
-        with patch("main.Orchestrator.translate_epub", result):
-            response = CliRunner().invoke(app, ["translate", str(source)])
-        assert response.exit_code == 1
-        assert "翻译完成！" not in response.output
+    completed = SimpleNamespace(
+        status="completed", work_dir=tmp_path, report_path=None, output_path=tmp_path / "out.epub"
+    )
+    with patch("engine.cli_v23.translate_v23", return_value=completed) as translate:
+        response = CliRunner().invoke(app, ["translate", str(source), "--limit", "1200", "--preserve-fonts"])
+    assert response.exit_code == 0
+    assert "翻译引擎: v23" in response.output
+    assert "已弃用" in response.output
+    assert translate.call_args.kwargs["context_tokens"] == 32768
+    assert translate.call_args.kwargs["max_output_tokens"] == 4096
+    assert translate.call_args.kwargs["input_tokens"] is None
 
 
-def test_v23_unknown_capacity_fails_before_provider_or_source_read(tmp_path: Path):
+def test_legacy_translate_entry_is_removed(tmp_path: Path):
     source = tmp_path / "input.epub"
     source.write_bytes(b"not an epub")
-    with patch("engine.cli_v23.model_for") as model:
-        result = CliRunner().invoke(app, ["translate", str(source), "--engine", "v23"])
-    assert result.exit_code == 1
-    assert "--context-tokens" in result.output
-    model.assert_not_called()
+    with patch("engine.cli_v23.translate_v23") as translate:
+        result = CliRunner().invoke(app, ["translate", str(source), "--engine", "legacy"])
+    assert result.exit_code == 2
+    assert "旧翻译入口已移除" in result.output
+    translate.assert_not_called()
 
 
 def test_legacy_glossary_preserves_user_terms_but_not_empty_candidates(tmp_path: Path):

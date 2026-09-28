@@ -1,12 +1,9 @@
 # Typer's declaration API intentionally constructs Argument/Option defaults.
 # ruff: noqa: B008
-import asyncio
 from pathlib import Path
 
 import typer
 
-from engine.core.logger import engine_logger as logger
-from engine.orchestrator import Orchestrator
 from engine.services.glossary import GlossaryExtractor
 
 # 初始化 Typer 应用
@@ -25,15 +22,15 @@ def translate(
         help="待翻译的 EPUB 文件路径。",
     ),
     limit: int | None = typer.Option(
-        None, "--limit", "-l", min=1, help="旧引擎 chunk 上限（默认1200）；v23 请求输入上限。"
+        None, "--limit", "-l", min=1, help="兼容旧命令；v23 自动规划切片，此参数已弃用。"
     ),
     language: str | None = typer.Option("Chinese", "--language", "-lg", help="目标翻译语言。"),
-    preserve_fonts: bool = typer.Option(False, "--preserve-fonts", help="保留原 EPUB 的全部字体和字体 CSS。"),
-    engine: str = typer.Option("legacy", "--engine", help="legacy 保留旧运行；v23 使用已版本化的 JSON 翻译引擎。"),
+    preserve_fonts: bool = typer.Option(False, "--preserve-fonts", help="兼容旧命令；v23 默认保留字体。"),
+    engine: str = typer.Option("v23", "--engine", help="仅支持 v23；旧翻译入口已移除。"),
     output: Path | None = typer.Option(None, "--output", "-o"),
     work_root: Path = typer.Option(Path("work"), "--work-root"),
-    context_tokens: int | None = typer.Option(None, "--context-tokens", min=1),
-    max_output_tokens: int = typer.Option(2048, "--max-output-tokens", min=1),
+    context_tokens: int = typer.Option(32768, "--context-tokens", min=1),
+    max_output_tokens: int = typer.Option(4096, "--max-output-tokens", min=1),
     http_limit: int = typer.Option(0, "--http-limit", min=0, help="v23 运行 HTTP 上限；0 按初始计划计算。"),
     concurrency: int = typer.Option(2, "--concurrency", min=1),
     provider: str = typer.Option("agnes", "--provider"),
@@ -41,79 +38,46 @@ def translate(
     epubcheck: str | None = typer.Option(None, "--epubcheck-command"),
     overwrite: bool = typer.Option(False, "--overwrite"),
 ):
-    """
-    翻译指定的 EPUB 文件。
-    """
-    # 打印开始信息
+    """Translate a complete EPUB with the JSON-backed engine."""
+    if engine != "v23":
+        raise typer.BadParameter("旧翻译入口已移除；translate 只使用 v23")
+    if (language or "Chinese").lower().replace("_", "-") not in {
+        "chinese",
+        "zh",
+        "zh-cn",
+        "zh-hans",
+        "simplified chinese",
+    }:
+        raise typer.BadParameter("v23 currently supports English to simplified Chinese (zh-Hans) only")
+
     typer.echo(f"开始翻译 EPUB 文件: {epub_path.name}")
-    typer.echo(f"目标语言: {language}")
-    typer.echo(
-        f"请求输入上限: {limit or '按上下文预算'} tokens" if engine == "v23" else f"分块大小: {limit or 1200} tokens"
-    )
+    typer.echo("翻译引擎: v23；目标语言: 简体中文")
+    if limit is not None:
+        typer.echo("提示：旧 --limit 已弃用；v23 按上下文预算规划切片。")
     typer.echo("-" * 50)
 
-    if engine not in {"legacy", "v23"}:
-        raise typer.BadParameter("engine must be legacy or v23")
-    if engine == "v23":
-        from engine.cli_v23 import translate_v23
-
-        if (language or "Chinese").lower().replace("_", "-") not in {
-            "chinese",
-            "zh",
-            "zh-cn",
-            "zh-hans",
-            "simplified chinese",
-        }:
-            raise typer.BadParameter("v23 currently supports English to simplified Chinese (zh-Hans) only")
-        try:
-            result = translate_v23(
-                epub_path,
-                output=output,
-                work_root=work_root,
-                context_tokens=context_tokens,
-                max_output_tokens=max_output_tokens,
-                http_limit=http_limit,
-                concurrency=concurrency,
-                provider=provider,
-                glossary=glossary,
-                epubcheck=epubcheck,
-                overwrite=overwrite,
-                progress=_v23_progress,
-                input_tokens=limit,
-            )
-        except Exception as error:
-            typer.echo(f"v23 未完成：{error}", err=True)
-            raise typer.Exit(1) from error
-        _print_v23_result(result)
-        return
+    from engine.cli_v23 import translate_v23
 
     try:
-        # 实例化并运行 Orchestrator
-        orchestrator = Orchestrator()
-        translated_path = asyncio.run(
-            orchestrator.translate_epub(
-                str(epub_path),
-                limit=limit or 1200,
-                target_language=language or "Chinese",
-                preserve_fonts=preserve_fonts,
-            )
+        result = translate_v23(
+            epub_path,
+            output=output,
+            work_root=work_root,
+            context_tokens=context_tokens,
+            max_output_tokens=max_output_tokens,
+            http_limit=http_limit,
+            concurrency=concurrency,
+            provider=provider,
+            glossary=glossary,
+            epubcheck=epubcheck,
+            overwrite=overwrite,
+            progress=_v23_progress,
+            input_tokens=None,
         )
-
-        # 翻译成功，打印完成信息
-        typer.echo("-" * 50)
-        if translated_path is None:
-            typer.echo("翻译尚未完成，进度已保留，请查看问题报告。", err=True)
-            raise typer.Exit(1)
-        typer.echo(f"翻译完成！新文件已保存至 {translated_path}")
-
-    except typer.Exit:
-        raise
-    except Exception as e:
-        # 捕获并打印错误
-        logger.error(f"翻译过程中发生错误: {e}")
-        typer.echo("-" * 50)
-        typer.echo("翻译失败！详情请查看日志。", err=True)
-        raise typer.Exit(1) from e
+    except Exception as error:
+        typer.echo(f"v23 未完成：{error}", err=True)
+        raise typer.Exit(1) from error
+    _print_v23_result(result)
 
 
 def _v23_progress(report: dict) -> None:

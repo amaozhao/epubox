@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 import signal
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +15,14 @@ from engine.agents.models import build_fallback_model, build_primary_model
 from engine.agents.runtime_v23 import PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.preparation import PreparationConfig, prepare_book, repair_document, resume_preparation
-from engine.epub.validation import EpubChecker
+from engine.epub.validation import (
+    EpubChecker,
+    ZipLimits,
+    _container_rootfiles,
+    _manifest_items,
+    _parse_xml_bytes,
+    _validate_zip,
+)
 from engine.item.extractor import EXTRACTOR_VERSION, extract_document
 from engine.item.planner import PlannerConfig, plan_unit
 from engine.orchestrator_v23 import TranslationEngine
@@ -31,6 +40,76 @@ def checker_command(command: str | None = None) -> EpubChecker:
     if java and jars:
         return EpubChecker((str(java[-1]), "-jar", str(jars[-1])))
     return EpubChecker()
+
+
+def _portable_checker(version: str) -> EpubChecker | None:
+    tools = Path(__file__).resolve().parent.parent / ".tools" / "epubcheck"
+    java = sorted(tools.glob("jdk*/Contents/Home/bin/java"))
+    jar = tools / f"epubcheck-{version}" / "epubcheck.jar"
+    return EpubChecker((str(java[-1]), "-jar", str(jar))) if java and jar.is_file() else None
+
+
+def _known_epubcheck_54_nav_errors(source: Path, errors: tuple[str, ...]) -> bool:
+    if not errors:
+        return False
+    try:
+        with zipfile.ZipFile(source) as archive:
+            entries = _validate_zip(archive, ZipLimits())
+
+            def read_xml(name: str) -> bytes:
+                if entries[name] > 8 * 1024 * 1024:
+                    raise ValueError("navigation check resource exceeds the safe probe size")
+                return archive.read(name)
+
+            rootfiles = _container_rootfiles(
+                _parse_xml_bytes(read_xml("META-INF/container.xml"), "META-INF/container.xml")
+            )
+            if len(rootfiles) != 1:
+                return False
+            opf_path = rootfiles[0]
+            package = _parse_xml_bytes(read_xml(opf_path), opf_path)
+            if package.attrib.get("version") != "3.0":
+                return False
+            nav_path = next(
+                (item.path for item in _manifest_items(package, opf_path, entries) if "nav" in item.properties),
+                None,
+            )
+            if not nav_path:
+                return False
+            nav_bytes = read_xml(nav_path)
+            _parse_xml_bytes(nav_bytes, nav_path)
+            nav_lines = nav_bytes.decode("utf-8").splitlines()
+    except (KeyError, UnicodeDecodeError, ValueError, zipfile.BadZipFile):
+        return False
+
+    location = re.compile(rf"/{re.escape(nav_path)}\((\d+),\d+\)")
+    for error in errors:
+        match = location.search(error)
+        if (
+            "ERROR(RSC-005):" not in error
+            or 'attribute "aria-labelledby" not allowed here' not in error
+            or match is None
+        ):
+            return False
+        line_number = int(match.group(1))
+        if not 1 <= line_number <= len(nav_lines) or not re.search(
+            r"<nav\b[^>]*\baria-labelledby\s*=", nav_lines[line_number - 1]
+        ):
+            return False
+    return True
+
+
+def checker_for_source(source: Path, command: str | None = None) -> EpubChecker:
+    checker = checker_command(command)
+    if command or os.environ.get("EPUBCHECK_COMMAND"):
+        return checker
+    if not any(Path(part).parent.name == "epubcheck-5.4.0" for part in checker.command):
+        return checker
+    result = checker.check(source)
+    if result.passed or result.fatals or not _known_epubcheck_54_nav_errors(source, result.errors):
+        return checker
+    fallback = _portable_checker("5.3.0")
+    return fallback if fallback is not None and fallback.check(source).passed else checker
 
 
 def load_terms(path: Path | None) -> list[dict[str, Any]]:
@@ -145,7 +224,7 @@ def translate_v23(
         request_timeout_seconds=120,
         generation=generation,
     )
-    checker = checker_command(epubcheck)
+    checker = checker_for_source(source, epubcheck)
     prepared = prepare_book(
         source,
         work_root,
@@ -188,8 +267,9 @@ def resume_v23(
     if model.id != config.model or str(model.base_url) != config.generation.get("base_url"):
         raise ValueError("provider/model configuration changed; start a new run instead of reusing old results")
     check_output(work_dir / "source.epub", output, overwrite=overwrite or (work_dir / "publish.json").is_file())
-    checker = checker_command(epubcheck)
-    if not checker.check(work_dir / "source.epub").passed:
+    source = work_dir / "source.epub"
+    checker = checker_for_source(source, epubcheck)
+    if not checker.check(source).passed:
         raise ValueError("source EPUB no longer passes the required normative check")
     if book.preparation_state != "ready":
         if config.max_context_tokens is None:

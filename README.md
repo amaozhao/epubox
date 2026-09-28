@@ -2,7 +2,7 @@
 
 本地 EPUB 英译简中工具。v2.3 使用固定语义单元、受限格式引用和持久 JSON；模型不生成原始 XHTML。局部失败会保存原因并继续其他独立任务，只有整书检查完成后才发布 EPUB。
 
-旧引擎继续支持原 checkpoint。新引擎需显式指定 `--engine v23`；完成计划要求的实书、人评和目标阅读器验收后才切换默认，自动测试或少量模型联调不代替这些证据。
+`translate` 现在直接使用 v2.3 JSON 引擎，旧翻译入口已从 CLI 移除。旧 HTML checkpoint 不转换为新引擎结果；已有 v2.3 运行仍通过 `resume` 续跑。实书、人评和阅读器质量验收仍需分别完成。
 
 ## 安装与配置
 
@@ -20,19 +20,17 @@ v2.3 在调用模型前要求源书通过 EPUBCheck。先按 [官方说明](http
 export EPUBCHECK_COMMAND='java -jar /absolute/path/epubcheck.jar'
 ```
 
-也可使用 `--epubcheck-command 'java -jar ...'`。本开发工作区已准备便携工具于 `.tools/epubcheck/`，程序会自动发现；该目录不提交到仓库。没有检查工具、源书有 ERROR/FATAL 或输出路径不安全时，不开始付费调用；WARNING 会记录。
+也可使用 `--epubcheck-command 'java -jar ...'`。本开发工作区已准备便携工具于 `.tools/epubcheck/`，程序会自动发现。对 EPUB 3.0 导航 `<nav aria-labelledby>` 的 EPUBCheck 5.4.0 已知误报，若便携 5.3.0 可用且重新检查全书通过，程序会精确回退到 5.3.0；其他错误仍阻断。工具目录不提交到仓库。没有检查工具、源书有真实 ERROR/FATAL 或输出路径不安全时，不开始付费调用；WARNING 会记录。
 
-## 开始一个 v2.3 运行
+## 翻译一本书
 
 ```bash
-python main.py translate ./book.epub --engine v23 \
-  --context-tokens 32768 --max-output-tokens 2048 \
-  --http-limit 100 --concurrency 2 --output ./book.zh.epub
+python main.py translate ./book.epub
 ```
 
-`--context-tokens` 必须按已配置模型的容量设置，可以选择更低的运行上限；程序不猜服务商容量。`--http-limit` 统计实际 HTTP 调用，包括重试。设为 0 时按初始 Unit/衔接计划计算有界上限。达到运行上限会暂停，保留进展；达到单个 Unit 的上限只挂起该 Unit。
+默认使用已配置的 Agnes 模型、32768 上下文、4096 输出上限和并发 2，成品路径为源书旁的 `book-cn.epub`。需要时可显式调整 `--context-tokens`、`--max-output-tokens`、`--concurrency`、`--output` 和 `--provider`。`--http-limit` 统计实际 HTTP 调用，包括重试；默认 0 表示按初始 Unit/衔接计划计算有界上限。达到运行上限会暂停，保留进展；达到单个 Unit 的上限只挂起该 Unit。
 
-`--limit` 在 v2.3 中是可选的最终请求输入上限；默认由上下文预算决定。它不改变源 Unit 身份。`--language` 只接受简中别名并统一为 `zh-Hans`。
+旧命令中的 `--limit 1200` 仍可传入，但会明确提示已弃用，由新版按上下文预算规划切片；`--preserve-fonts` 也仍可传入，v2.3 本来就保留全部字体。`--language` 只接受简中别名并统一为 `zh-Hans`；`--engine legacy` 会明确拒绝。
 
 默认保留字体、CSS 和二进制资源，不剪枝、不重压图片。默认不覆盖已有输出；需要时显式传 `--overwrite`，仍先验证临时产物。
 
@@ -141,15 +139,9 @@ work/<source_hash>/<run_id>/
 
 只有 `completed` 返回成功退出码与正式输出路径。其他状态不会导出混入英文的草稿；有效译文仍保存在 JSON。真实阅读器未执行时报告 `not_run`，不会自动伪记通过。
 
-## 旧运行与开发验证
+## 历史运行与开发验证
 
-原命令保持旧引擎默认行为，可显式选择：
-
-```bash
-python main.py translate ./book.epub --engine legacy --limit 1200 --preserve-fonts
-```
-
-旧 HTML checkpoint 不自动转换成 v2.3 的 accepted 结果。旧打包器的错误传播已修正：失败不再返回伪成功路径，也不先截断已有产物。
+旧 HTML checkpoint 不自动转换成 v2.3 的 accepted 结果。旧打包器的错误传播已修正：失败不再返回伪成功路径，也不先截断已有产物；旧翻译模块仅为历史代码保留，普通 CLI 不再调度它。
 
 ```bash
 .venv/bin/python -m pytest -q
