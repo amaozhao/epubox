@@ -89,8 +89,8 @@ class SourceSlot(FrozenModel):
         if (self.field == "attribute") != (self.attribute_name is not None):
             raise ValueError("attribute slots require attribute_name, other slots forbid it")
         if not self.source_value:
-            if self.ranges:
-                raise ValueError("empty source slots cannot contain ownership ranges")
+            if any(interval.start != 0 or interval.end != 0 for interval in self.ranges):
+                raise ValueError("empty source slots can only contain empty ownership ranges")
             return self
         position = 0
         for interval in self.ranges:
@@ -444,10 +444,11 @@ class ExtractionItem(FrozenModel):
     primary_ranges: tuple[dict[str, JsonValue], ...]
     context_refs: tuple[str, ...] = ()
     user_term_ids: tuple[str, ...] = ()
+    context_user_term_ids: tuple[str, ...] = ()
     extraction_input_hash: str = Field(min_length=1)
     http_limit: int = Field(default=6, ge=0)
 
-    @field_validator("view_ids", "context_refs", "user_term_ids")
+    @field_validator("view_ids", "context_refs", "user_term_ids", "context_user_term_ids")
     @classmethod
     def unique_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         if len(values) != len(set(values)):

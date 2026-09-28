@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from engine.agents.protocol_v23 import (
     ProtocolError,
     _collect_items,
+    _review_error,
     _valid_xml_text,
     strict_loads,
 )
@@ -19,6 +21,15 @@ _CATEGORIES = {"term", "person", "organization", "product", "abbreviation", "oth
 class TermsValidation:
     accepted: dict[str, tuple[dict[str, Any], ...]]
     rejected_candidates: dict[str, tuple[str, ...]]
+    errors: dict[str, str]
+    missing: tuple[str, ...]
+    unknown: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReviewValidation:
+    accepted: dict[str, dict[str, Any]]
+    rejected_suggestions: dict[str, tuple[str, ...]]
     errors: dict[str, str]
     missing: tuple[str, ...]
     unknown: tuple[str, ...]
@@ -139,7 +150,48 @@ def validate_resolution_response(
         or not set(restricted).issubset(allowed_unit_ids)
     ):
         raise ProtocolError("resolution selection exceeds request scope")
-    if (value["decision"] == "defer" and (selected or restricted)) or (value["decision"] == "select" and not selected):
+    if (value["decision"] == "defer" and (selected or restricted)) or (
+        value["decision"] == "select" and len(selected) != 1
+    ):
         raise ProtocolError("resolution decision and selection disagree")
     _short_text(value["reason"], "reason", 2000)
     return value
+
+
+def validate_review_response_v25(
+    raw: str | bytes,
+    request_id: str,
+    expected_items: Mapping[str, Mapping[str, Any]],
+) -> ReviewValidation:
+    """Keep quality issues even if a non-binding term suggestion is malformed."""
+    items = _root(raw, "epubox-review-2", request_id)
+    candidates, errors, unknown, _ = _collect_items(items, set(expected_items))
+    accepted: dict[str, dict[str, Any]] = {}
+    rejected: dict[str, tuple[str, ...]] = {}
+    for item_id, item in candidates.items():
+        suggestions = item.get("term_suggestions", [])
+        if not isinstance(suggestions, list) or len(suggestions) > 256:
+            rejected[item_id] = ("term_suggestions must be an array of at most 256 entries",)
+            suggestions = []
+        valid_suggestions: list[dict[str, Any]] = []
+        bad: list[str] = []
+        for index, suggestion in enumerate(suggestions):
+            try:
+                valid_suggestions.append(_candidate(suggestion))
+            except (ValueError, TypeError) as error:
+                bad.append(f"suggestion {index}: {error}")
+        if bad:
+            rejected[item_id] = (*rejected.get(item_id, ()), *bad)
+        quality = {key: value for key, value in item.items() if key != "term_suggestions"}
+        error = _review_error(quality, expected_items[item_id])
+        if error:
+            errors[item_id] = error
+        else:
+            accepted[item_id] = quality | {"term_suggestions": valid_suggestions}
+    return ReviewValidation(
+        accepted,
+        rejected,
+        errors,
+        tuple(sorted(set(expected_items) - set(candidates) - set(errors))),
+        unknown,
+    )

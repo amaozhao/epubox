@@ -3,7 +3,11 @@ import json
 import pytest
 
 from engine.agents.protocol_v23 import ProtocolError
-from engine.agents.protocol_v25 import validate_resolution_response, validate_terms_response
+from engine.agents.protocol_v25 import (
+    validate_resolution_response,
+    validate_review_response_v25,
+    validate_terms_response,
+)
 from engine.agents.runtime_v23 import Stage, request_messages
 
 
@@ -62,11 +66,12 @@ def test_resolution_only_selects_requested_candidates_and_units() -> None:
     assert validate_resolution_response(json.dumps(valid), "r1", "g1", {"c1"}, {"u1"}) == valid
     for invalid in (
         valid | {"selected_candidate_ids": ["ghost"]},
+        valid | {"selected_candidate_ids": ["c1", "c2"]},
         valid | {"restricted_unit_ids": ["ghost"]},
         valid | {"decision": "defer"},
     ):
         with pytest.raises(ProtocolError):
-            validate_resolution_response(json.dumps(invalid), "r1", "g1", {"c1"}, {"u1"})
+            validate_resolution_response(json.dumps(invalid), "r1", "g1", {"c1", "c2"}, {"u1"})
 
 
 def test_single_runtime_builds_v25_term_and_review_prompts() -> None:
@@ -81,3 +86,25 @@ def test_single_runtime_builds_v25_term_and_review_prompts() -> None:
         assert json.loads(messages[1]["content"])["request_id"] == "r1"
     with pytest.raises(ValueError, match="protocol does not match"):
         request_messages("terms", {"protocol": "epubox-review-2", "request_id": "r1"})
+
+
+def test_review_keeps_major_issue_when_optional_suggestion_is_bad() -> None:
+    item = {
+        "item_id": "i1",
+        "base_revision": 1,
+        "decision": "needs_attention",
+        "checks": {
+            "accuracy": "fail",
+            "fluency": "pass",
+            "terminology": "pass",
+            "bindings": "pass",
+            "script": "pass",
+        },
+        "issues": [{"code": "wrong_sense", "severity": "major", "message": "Wrong sense of memory"}],
+        "term_suggestions": [{"source": "memory", "target": "内存", "category": "term", "evidence": []}],
+    }
+    raw = json.dumps({"protocol": "epubox-review-2", "request_id": "r1", "items": [item]})
+    result = validate_review_response_v25(raw, "r1", {"i1": {"base_revision": 1}})
+    assert result.accepted["i1"]["issues"] == item["issues"]
+    assert result.accepted["i1"]["term_suggestions"] == []
+    assert result.rejected_suggestions["i1"]

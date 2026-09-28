@@ -224,6 +224,16 @@ def test_non_element_tail_has_its_own_physical_boundary() -> None:
     with pytest.raises(ValidationError, match="duplicate physical source slot"):
         DocumentPlan.model_validate(document.model_dump(mode="python") | {"source_slots": slots})
 
+    empty_attribute = SourceSlot(
+        slot_id="empty-alt",
+        node_key="n1",
+        field="attribute",
+        attribute_name="alt",
+        source_value="",
+        ranges=(SlotRange(start=0, end=0, owner_kind="out_of_scope"),),
+    )
+    assert empty_attribute.source_value == ""
+
     view = document.source_views["v1"]
     for refs in (
         (SourceRef(slot_id="s1", start=0, end=21),) * 2,
