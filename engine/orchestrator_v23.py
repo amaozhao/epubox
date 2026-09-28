@@ -32,6 +32,7 @@ from engine.schemas.v23 import (
     UnitRecord,
     Usage,
     canonical_hash,
+    canonical_json_bytes,
     compute_input_hash,
     is_accepted,
     strict_json_loads,
@@ -900,7 +901,56 @@ class TranslationEngine:
 
     def _protocol_failure(self, job: Job, manifest: RequestManifest, message: str) -> None:
         if job.stage == "coherence":
-            self._fail(job, "invalid_response", message)
+            check = self.checks[job.document_id]
+            repairs = 0
+            for event in reversed(check.retry_history):
+                if event.get("action") == "explicit_retry":
+                    break
+                if (
+                    event.get("action") == "automatic_protocol_repair"
+                    and event.get("window_id") == job.item_id
+                    and event.get("summary_hash") == check.summary_hash
+                ):
+                    repairs += 1
+            if repairs >= 1:
+                self._fail(job, "invalid_response", message)
+                return
+            issue = FailureRecord(
+                scope="request",
+                stage="coherence",
+                code="coherence_protocol_retry",
+                message=message[:2000],
+                request_id=manifest.request_id,
+                item_id=job.item_id,
+                plan_epoch=0,
+                revision=0,
+                retry_action="automatic",
+            )
+            updated = check.model_copy(
+                update={
+                    "status": "pending",
+                    "issues": (
+                        *tuple(
+                            existing
+                            for existing in check.issues
+                            if not (existing.code == "coherence_protocol_retry" and existing.item_id == job.item_id)
+                        ),
+                        issue,
+                    ),
+                    "retry_history": (
+                        *check.retry_history,
+                        {
+                            "action": "automatic_protocol_repair",
+                            "window_id": job.item_id,
+                            "summary_hash": check.summary_hash,
+                            "request_id": manifest.request_id,
+                            "reason": message[:1000],
+                            "http_attempts": check.http_attempts,
+                        },
+                    ),
+                }
+            )
+            self.checks[job.document_id] = self.store.write_document_status(updated)
             return
         record = self.records[job.unit_id]
         if record.revision != job.revision or record.plan_epoch != job.plan_epoch:
@@ -1007,6 +1057,41 @@ class TranslationEngine:
 
         return list(initial_coherence_windows(document, self.records))
 
+    @staticmethod
+    def _passed_coherence_checks(
+        checks: dict[str, Any], windows: list[dict[str, Any]] | tuple[dict[str, Any], ...]
+    ) -> dict[str, Any]:
+        expected = {str(window["item_id"]): {str(unit_id) for unit_id in window["unit_ids"]} for window in windows}
+        passed: dict[str, Any] = {}
+        for item_id, item in checks.items():
+            unit_ids = expected.get(item_id)
+            if unit_ids is None:
+                continue
+            try:
+                raw = canonical_json_bytes({"protocol": "epubox-coherence-1", "request_id": "cached", "items": [item]})
+                parsed = validate_coherence_response(raw, "cached", {item_id: unit_ids})
+            except (ProtocolError, TypeError, ValueError):
+                continue
+            accepted = parsed.accepted.get(item_id)
+            if accepted is not None and not any(
+                issue["severity"] in {"major", "critical"} for issue in accepted["issues"]
+            ):
+                passed[item_id] = accepted
+        return passed
+
+    @staticmethod
+    def _coherence_status(windows: list[dict[str, Any]] | tuple[dict[str, Any], ...], checks: dict[str, Any]) -> str:
+        return "valid" if all(str(window["item_id"]) in checks for window in windows) else "pending"
+
+    @staticmethod
+    def _without_protocol_issue(check: DocumentStatus, item_id: str) -> DocumentStatus:
+        issues = tuple(
+            issue
+            for issue in check.issues
+            if not (issue.code == "coherence_protocol_retry" and issue.item_id == item_id)
+        )
+        return check if issues == check.issues else check.model_copy(update={"issues": issues})
+
     def _queue_coherence(self, document_id: str) -> None:
         document = self.documents[document_id]
         check = self.checks.get(document_id, DocumentStatus(document_id=document_id))
@@ -1034,17 +1119,9 @@ class TranslationEngine:
         if check.candidate_versions != vector:
             check = check.model_copy(update={"checks": {}, "issues": (), "status": "pending"})
         elif check.status == "blocked_dependency":
-
-            def passed_window(value: Any) -> bool:
-                if not isinstance(value, dict) or not isinstance(value.get("issues"), list):
-                    return False
-                return not any(
-                    isinstance(issue, dict) and issue.get("severity") in {"major", "critical"}
-                    for issue in value["issues"]
-                )
-
-            passed = {item_id: item for item_id, item in check.checks.items() if passed_window(item)}
-            check = check.model_copy(update={"checks": passed, "status": "pending"})
+            check = check.model_copy(
+                update={"checks": self._passed_coherence_checks(check.checks, windows), "status": "pending"}
+            )
         fallback_base = max(0, check.http_limit - check.extra_http_limit) if check.http_limit else 6 * len(windows)
         limit = self.book.initial_coherence_limits.get(document_id, fallback_base) + check.extra_http_limit
         check = check.model_copy(
@@ -1054,7 +1131,7 @@ class TranslationEngine:
                 "windows": tuple(windows),
                 "http_limit": limit,
                 "summary_hash": canonical_hash(vector),
-                "status": "valid" if not windows else "pending",
+                "status": self._coherence_status(windows, check.checks),
             }
         )
         self.checks[document_id] = self.store.write_document_status(check)
@@ -1071,6 +1148,8 @@ class TranslationEngine:
         parsed = validate_coherence_response(raw, manifest.request_id, {job.item_id: set(manifest.unit_ids)})
         if job.item_id not in parsed.accepted:
             raise ProtocolError(parsed.errors.get(job.item_id, "missing coherence window"))
+        check = self._without_protocol_issue(check, job.item_id)
+        self.checks[job.document_id] = check
         item = parsed.accepted[job.item_id]
         blocking = [issue for issue in item["issues"] if issue["severity"] in {"major", "critical"}]
         if blocking:
@@ -1133,7 +1212,7 @@ class TranslationEngine:
                 self._queue_unit(unit_id)
             return
         checks = {**check.checks, job.item_id: item}
-        status = "valid" if all(str(window["item_id"]) in checks for window in check.windows) else "pending"
+        status = self._coherence_status(check.windows, checks)
         self.checks[job.document_id] = self.store.write_document_status(
             check.model_copy(update={"checks": checks, "status": status})
         )
@@ -1615,16 +1694,45 @@ class TranslationEngine:
                 if document_id not in self.documents:
                     raise ValueError(f"document unavailable: {document_id}")
                 check = self.checks[document_id]
+                windows = self._windows(self.documents[document_id])
+                window_ids = {str(window["item_id"]) for window in windows}
+                participant_ids = {str(unit_id) for window in windows for unit_id in window["unit_ids"]}
+                vector = {
+                    unit_id: self.records[unit_id].revision
+                    for unit_id in participant_ids
+                    if unit_id in self.records and is_accepted(self.records[unit_id])
+                }
+                stored_window_ids = {str(window["item_id"]) for window in check.windows}
+                preserve = (
+                    len(vector) == len(participant_ids)
+                    and check.candidate_versions == vector
+                    and stored_window_ids == window_ids
+                )
+                checks = (
+                    {
+                        item_id: item
+                        for item_id, item in self._passed_coherence_checks(check.checks, windows).items()
+                        if item_id in window_ids
+                    }
+                    if preserve
+                    else {}
+                )
                 updated = check.model_copy(
                     update={
-                        "status": "pending",
-                        "checks": {},
+                        "status": self._coherence_status(windows, checks),
+                        "checks": checks,
                         "issues": (),
                         "extra_http_limit": check.extra_http_limit + add_http,
                         "http_limit": check.http_limit + add_http,
                         "retry_history": (
                             *check.retry_history,
-                            {"action": "explicit_retry", "add_http": add_http, "http_attempts": check.http_attempts},
+                            {
+                                "action": "explicit_retry",
+                                "add_http": add_http,
+                                "http_attempts": check.http_attempts,
+                                "summary_hash": check.summary_hash,
+                                "preserved_windows": sorted(checks),
+                            },
                         ),
                     }
                 )

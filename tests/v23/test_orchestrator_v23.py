@@ -279,6 +279,7 @@ class ScriptedTransport:
         coherence_major_once: str | None = None,
         coherence_affected: list[tuple[str, ...]] | None = None,
         malformed_coherence: bool = False,
+        coherence_missing_calls: Iterable[int] = (),
         coherence_empty_major_once: bool = False,
         delays: dict[str, float] | None = None,
     ) -> None:
@@ -288,6 +289,7 @@ class ScriptedTransport:
         self.coherence_major_once = coherence_major_once
         self.coherence_affected = list(coherence_affected or ())
         self.malformed_coherence = malformed_coherence
+        self.coherence_missing_calls = set(coherence_missing_calls)
         self.coherence_empty_major_once = coherence_empty_major_once
         self.coherence_calls = 0
         self.delays = delays or {}
@@ -315,6 +317,13 @@ class ScriptedTransport:
             self.coherence_calls += 1
             if self.malformed_coherence:
                 return {"raw": "{truncated", "usage": {"input_tokens": 4, "output_tokens": 1}}
+            if self.coherence_calls in self.coherence_missing_calls:
+                return {
+                    "raw": json.dumps(
+                        {"protocol": "epubox-coherence-1", "request_id": payload["request_id"], "items": []}
+                    ),
+                    "usage": {"input_tokens": 4, "output_tokens": 1},
+                }
             affected = (
                 self.coherence_affected[self.coherence_calls - 1]
                 if self.coherence_calls <= len(self.coherence_affected)
@@ -834,7 +843,8 @@ async def test_failed_coherence_can_be_explicitly_retried_without_resetting_usag
     assert first["outcome"] == "needs_attention"
     failed_check = store.read_document_status("d1")
     assert failed_check.status == "needs_attention"
-    assert failed_check.http_attempts == 1
+    assert failed_check.http_attempts == 2
+    assert failed_check.retry_history[-1]["action"] == "automatic_protocol_repair"
     resumed_engine = TranslationEngine(Store(tmp_path), transport=ScriptedTransport())
     resumed_engine.retry_checks(["d1"])
 
@@ -843,8 +853,190 @@ async def test_failed_coherence_can_be_explicitly_retried_without_resetting_usag
     completed_check = Store(tmp_path).read_document_status("d1")
     assert resumed["ready_to_publish"] is True
     assert completed_check.status == "valid"
-    assert completed_check.http_attempts == 2
-    assert completed_check.retry_history[-1]["http_attempts"] == 1
+    assert completed_check.http_attempts == 3
+    assert completed_check.retry_history[-1]["http_attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_last_missing_coherence_window_gets_one_persisted_automatic_repair(tmp_path: Path) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("u1", ("First.",)), ("u2", ("Second.",)), ("u3", ("Third.",))),),
+    )
+    transport = ScriptedTransport(coherence_missing_calls={2})
+
+    report = await TranslationEngine(store, transport=transport).execute()
+
+    check = store.read_document_status("d1")
+    assert report["ready_to_publish"] is True
+    assert transport.coherence_calls == 3
+    assert len(check.checks) == len(check.windows) == 2
+    repairs = [event for event in check.retry_history if event.get("action") == "automatic_protocol_repair"]
+    assert len(repairs) == 1
+    assert repairs[0]["window_id"] == check.windows[-1]["item_id"]
+    assert repairs[0]["summary_hash"] == check.summary_hash
+    assert not [issue for issue in check.issues if issue.code == "coherence_protocol_retry"]
+
+
+@pytest.mark.asyncio
+async def test_resumed_coherence_window_does_not_get_a_second_free_protocol_repair(tmp_path: Path) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("u1", ("First.",)), ("u2", ("Second.",)), ("u3", ("Third.",))),),
+    )
+    await TranslationEngine(store, transport=ScriptedTransport()).execute()
+    check = store.read_document_status("d1")
+    window_id = str(check.windows[-1]["item_id"])
+    issue = FailureRecord(
+        scope="request",
+        stage="coherence",
+        code="coherence_protocol_retry",
+        message="missing coherence window",
+        request_id="prior-request",
+        item_id=window_id,
+        plan_epoch=0,
+        revision=0,
+        retry_action="automatic",
+    )
+    store.write_document_status(
+        check.model_copy(
+            update={
+                "status": "pending",
+                "checks": {key: value for key, value in check.checks.items() if key != window_id},
+                "issues": (*check.issues, issue),
+                "retry_history": (
+                    *check.retry_history,
+                    {
+                        "action": "automatic_protocol_repair",
+                        "window_id": window_id,
+                        "summary_hash": check.summary_hash,
+                        "request_id": "prior-request",
+                        "reason": "missing coherence window",
+                        "http_attempts": check.http_attempts,
+                    },
+                ),
+            }
+        )
+    )
+    transport = ScriptedTransport(coherence_missing_calls={1})
+
+    report = await TranslationEngine(Store(tmp_path), transport=transport).execute()
+
+    resumed = Store(tmp_path).read_document_status("d1")
+    assert report["outcome"] == "needs_attention"
+    assert transport.coherence_calls == 1
+    assert resumed.status == "needs_attention"
+    assert len([event for event in resumed.retry_history if event.get("action") == "automatic_protocol_repair"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_check_retry_preserves_passed_windows_and_only_fills_the_hole(tmp_path: Path) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("u1", ("First.",)), ("u2", ("Second.",)), ("u3", ("Third.",))),),
+    )
+    first_transport = ScriptedTransport(coherence_missing_calls={2, 3})
+    await TranslationEngine(store, transport=first_transport).execute()
+    failed = store.read_document_status("d1")
+    passed_ids = set(failed.checks)
+    assert failed.status == "needs_attention"
+    assert failed.http_attempts == 3
+    assert len(passed_ids) == 1
+
+    resumed_transport = ScriptedTransport()
+    retry = TranslationEngine(Store(tmp_path), transport=resumed_transport)
+    retry.retry_checks(["d1"])
+    pending = Store(tmp_path).read_document_status("d1")
+    assert set(pending.checks) == passed_ids
+    assert pending.http_attempts == 3
+
+    report = await retry.execute()
+
+    completed = Store(tmp_path).read_document_status("d1")
+    assert report["ready_to_publish"] is True
+    assert resumed_transport.coherence_calls == 1
+    assert completed.http_attempts == 4
+    assert len(completed.checks) == len(completed.windows) == 2
+
+
+@pytest.mark.asyncio
+async def test_explicit_retry_of_complete_valid_check_is_a_noop_without_http(tmp_path: Path) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("u1", ("First.",)), ("u2", ("Second.",)), ("u3", ("Third.",))),),
+    )
+    await TranslationEngine(store, transport=ScriptedTransport()).execute()
+    before = store.read_document_status("d1")
+    resumed_transport = ScriptedTransport()
+    retry = TranslationEngine(Store(tmp_path), transport=resumed_transport)
+
+    retry.retry_checks(["d1"])
+    pending = Store(tmp_path).read_document_status("d1")
+    report = await retry.execute()
+
+    after = Store(tmp_path).read_document_status("d1")
+    assert pending.status == "valid"
+    assert set(pending.checks) == set(before.checks)
+    assert report["ready_to_publish"] is True
+    assert resumed_transport.coherence_calls == 0
+    assert after.http_attempts == before.http_attempts
+
+
+@pytest.mark.parametrize("invalid", ["item_id", "unit_ids", "issues", "severity"])
+def test_explicit_retry_drops_protocol_invalid_cached_window(tmp_path: Path, invalid: str) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("u1", ("First.",)), ("u2", ("Second.",)), ("u3", ("Third.",))),),
+    )
+    asyncio.run(TranslationEngine(store, transport=ScriptedTransport()).execute())
+    check = store.read_document_status("d1")
+    window_id = str(check.windows[0]["item_id"])
+    saved = check.checks[window_id]
+    assert isinstance(saved, dict)
+    cached: dict[str, Any] = dict(saved)
+    if invalid == "item_id":
+        cached["item_id"] = "wrong-window"
+    elif invalid == "unit_ids":
+        cached["unit_ids"] = ["outside-window"]
+    elif invalid == "issues":
+        cached["issues"] = "not-an-array"
+    else:
+        cached["issues"] = [{"code": "x", "severity": "bogus", "message": "bad"}]
+    store.write_document_status(
+        check.model_copy(update={"status": "needs_attention", "checks": {**check.checks, window_id: cached}})
+    )
+
+    TranslationEngine(Store(tmp_path), transport=ScriptedTransport()).retry_checks(["d1"])
+
+    pending = Store(tmp_path).read_document_status("d1")
+    assert pending.status == "pending"
+    assert window_id not in pending.checks
+
+
+def test_explicit_check_retry_invalidates_cache_when_candidate_version_changes(tmp_path: Path) -> None:
+    store = _make_store(
+        tmp_path,
+        ((("u1", ("First.",)), ("u2", ("Second.",)), ("u3", ("Third.",))),),
+    )
+    engine = TranslationEngine(store, transport=ScriptedTransport())
+    asyncio.run(engine.execute())
+    record = store.load_unit("u1")
+    review = {**(record.review or {}), "revision": record.revision + 1}
+    store.save_unit(
+        record.model_copy(
+            update={
+                "revision": record.revision + 1,
+                "accepted_revision": record.revision + 1,
+                "review": review,
+            }
+        )
+    )
+
+    TranslationEngine(Store(tmp_path), transport=ScriptedTransport()).retry_checks(["d1"])
+
+    pending = Store(tmp_path).read_document_status("d1")
+    assert pending.status == "pending"
+    assert pending.checks == {}
 
 
 @pytest.mark.asyncio
@@ -885,7 +1077,7 @@ async def test_missing_check_file_recovers_repair_round_and_forbids_second_auto_
 
 
 @pytest.mark.asyncio
-async def test_blocking_coherence_without_affected_units_is_a_protocol_failure(
+async def test_blocking_coherence_without_affected_units_gets_one_protocol_repair(
     tmp_path: Path,
 ) -> None:
     store = _make_store(
@@ -903,9 +1095,11 @@ async def test_blocking_coherence_without_affected_units_is_a_protocol_failure(
 
     check = store.read_document_status("d1")
     assert report["outcome"] == "needs_attention"
-    assert check.status == "needs_attention"
+    assert report["ready_to_publish"] is True
+    assert check.status == "valid"
     assert check.dependency_ids == ()
-    assert check.issues[-1].code == "invalid_response"
+    assert check.http_attempts == 2
+    assert not check.issues
 
 
 @pytest.mark.asyncio
