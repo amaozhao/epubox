@@ -47,6 +47,7 @@ python main.py resume ./work/<source_hash>/<run_id> --output ./book.zh.epub
 - 已接受的目标继续复用；校对失败从校对继续。
 - 长 Unit 的成功片段保留，同一 CutPlan 下只补缺片。
 - 准备阶段尚未 ready 时，也可从已保存快照继续，不要求原书仍在原路径。
+- 未 ready 时若提取器版本已升级，需要新建运行；ready 的运行继续使用原先冻结的文档 JSON。
 - 修改源书、词表、模型生成参数或提示版本时新建运行，不混用旧结果。
 - `Ctrl+C` 第一次停止新派发并保存返回结果，再次中断可强制停止。
 
@@ -156,7 +157,9 @@ python main.py translate ./book.epub --engine legacy --limit 1200 --preserve-fon
 .venv/bin/ruff check main.py engine tests
 ```
 
-方案、任务和实际证据分别见 [架构计划](docs/epubox_architecture_plan.md)、[实施进度](docs/epubox_implementation_status.md)。规范要求 T01–T32 和真实质量/阅读验证；不能把模型替身通过写成实书验收通过。
+方案、任务和实际证据分别见 [架构计划](docs/epubox_architecture_plan.md)、[实施进度](docs/epubox_implementation_status.md) 和 [P14 实书验收记录](docs/epubox_p14_acceptance.md)。规范要求 T01–T32 和真实质量/阅读验证；不能把模型替身通过写成实书验收通过。
+
+阅读验收使用成品副本：Calibre 可能把阅读进度写进 EPUB 的 `META-INF/calibre_bookmarks.txt`，从而改变已发布文件的哈希。
 
 ## 许可证
 
