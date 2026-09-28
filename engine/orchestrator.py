@@ -462,20 +462,28 @@ class Orchestrator:
                         if chunk.status is not None:
                             stats.record(chunk.status)
 
-                        # 每翻译一个 chunk 立即保存，支持断点续传
-                        parser.save_json(book)
                     else:
-                        if recovering_writeback_failure:
-                            chunk.status = TranslationStatus.WRITEBACK_FAILED
+                        chunk.status = (
+                            TranslationStatus.WRITEBACK_FAILED
+                            if recovering_writeback_failure
+                            else TranslationStatus.TRANSLATION_FAILED
+                        )
                         logger.error(f"Invalid response.content type for chunk {chunk.name}: {type(response.content)}")
                         if not recovering_writeback_failure:
                             stats.record_failure()
                 except Exception as e:
-                    if recovering_writeback_failure:
-                        chunk.status = TranslationStatus.WRITEBACK_FAILED
+                    chunk.status = (
+                        TranslationStatus.WRITEBACK_FAILED
+                        if recovering_writeback_failure
+                        else TranslationStatus.TRANSLATION_FAILED
+                    )
                     logger.error(f"Unexpected error for chunk {chunk.name}: {str(e)}")
                     if not recovering_writeback_failure:
                         stats.record_failure()
+
+                # Persist local failures before scheduling the next independent chunk.
+                # Storage failures are global and must not be mistaken for chunk failures.
+                parser.save_json(book)
 
             # 每处理完一个 item，保存进度（断点续传）
             parser.save_json(book)

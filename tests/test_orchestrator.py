@@ -926,6 +926,7 @@ class TestOrchestrator:
     @patch("engine.orchestrator.shutil")
     @patch("engine.orchestrator.get_translator_workflow")
     @patch("engine.orchestrator.GlossaryLoader")
+    @pytest.mark.parametrize("first_response", ["exception", "invalid_content"])
     async def test_translate_epub_skips_epub_build_for_failed_chunks(
         self,
         mock_glossary_loader,
@@ -936,6 +937,7 @@ class TestOrchestrator:
         mock_parser_save_json,
         mock_parser_parse,
         orchestrator,
+        first_response,
     ):
         """测试存在失败 chunk 时不会生成 EPUB 文件。"""
         mock_glossary_loader.return_value.load.return_value = {}
@@ -943,11 +945,21 @@ class TestOrchestrator:
         failed_chunk = Chunk(
             name="1",
             original="<p>Hello world.</p>",
-            translated="",
+            translated=None,
             tokens=3,
-            status=TranslationStatus.TRANSLATION_FAILED,
+            status=TranslationStatus.PENDING,
         )
-        mock_parser_parse.return_value = EpubBook(
+        later_chunk = Chunk(
+            name="2",
+            original="<p>Later work.</p>",
+            translated=None,
+            tokens=3,
+            status=TranslationStatus.PENDING,
+        )
+        completed_later_chunk = later_chunk.model_copy(
+            update={"translated": "<p>后续工作。</p>", "status": TranslationStatus.COMPLETED}
+        )
+        book = EpubBook(
             name="test_book",
             path="/mock/path/test.epub",
             extract_path="/mock/path/test_epub",
@@ -956,24 +968,44 @@ class TestOrchestrator:
                     id="item1",
                     path="/mock/path/test_epub/item1.html",
                     content="<p>Hello world.</p>",
-                    chunks=[failed_chunk],
+                    chunks=[failed_chunk, later_chunk],
                 )
             ],
         )
+        mock_parser_parse.return_value = book
         mock_workflow = MagicMock()
+        failed_response = (
+            RuntimeError("one chunk failed")
+            if first_response == "exception"
+            else WorkflowRunOutput(status=RunStatus.completed, content="invalid", run_id="mock_run_id")
+        )
         mock_workflow.arun = AsyncMock(
-            return_value=WorkflowRunOutput(
-                status=RunStatus.completed,
-                content=failed_chunk,
-                run_id="mock_run_id",
-            )
+            side_effect=[
+                failed_response,
+                WorkflowRunOutput(
+                    status=RunStatus.completed,
+                    content=completed_later_chunk,
+                    run_id="mock_run_id",
+                ),
+            ]
         )
         mock_get_translator_workflow.return_value = mock_workflow
+        saved_statuses = []
+        mock_parser_save_json.side_effect = lambda current: saved_statuses.append(
+            tuple(chunk.status for chunk in current.items[0].chunks)
+        )
 
         with patch.object(orchestrator, "_save_manual_translation_report"):
             output_path = await orchestrator.translate_epub("mock_epub_path")
 
         assert output_path is None
+        assert mock_workflow.arun.await_count == 2
+        chunks = book.items[0].chunks
+        assert chunks is not None
+        assert chunks[0].status == TranslationStatus.TRANSLATION_FAILED
+        assert chunks[1].status == TranslationStatus.COMPLETED
+        assert saved_statuses[0] == (TranslationStatus.TRANSLATION_FAILED, TranslationStatus.PENDING)
+        assert saved_statuses[1] == (TranslationStatus.TRANSLATION_FAILED, TranslationStatus.COMPLETED)
         mock_builder_build.assert_not_called()
 
     @pytest.mark.asyncio
