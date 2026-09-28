@@ -29,7 +29,7 @@ from engine.schemas.v23 import (
     canonical_hash,
 )
 
-EXTRACTOR_VERSION = "epubox-extractor-2"
+EXTRACTOR_VERSION = "epubox-extractor-3"
 ADAPTER_VERSION = "epubox-xml-1"
 
 _EPUB_TYPE = "{http://www.idpf.org/2007/ops}type"
@@ -1338,12 +1338,28 @@ class _Extractor:
 
     def _is_atom(self, node: etree._Element) -> bool:
         name = qname_local_name(node.tag)
-        return self._is_hard(node) or name in _MEDIA_TAGS | _EMPTY_BOUNDARIES or self._is_footnote_ref(node)
+        return (
+            self._is_hard(node)
+            or name in _MEDIA_TAGS | _EMPTY_BOUNDARIES
+            or self._is_footnote_ref(node)
+            or self._is_pagebreak(node)
+            or self._is_empty_anchor(node)
+        )
 
     def _is_footnote_ref(self, node: etree._Element) -> bool:
         epub_type = (node.get(_EPUB_TYPE) or node.get("epub:type") or "").lower()
-        role = (node.get("role") or "").lower()
-        return "noteref" in epub_type.split() or role == "doc-noteref"
+        roles = (node.get("role") or "").casefold().split()
+        return "noteref" in epub_type.split() or "doc-noteref" in roles
+
+    def _is_pagebreak(self, node: etree._Element) -> bool:
+        epub_type = (node.get(_EPUB_TYPE) or node.get("epub:type") or "").casefold().split()
+        roles = (node.get("role") or "").casefold().split()
+        return "pagebreak" in epub_type or "doc-pagebreak" in roles
+
+    def _is_empty_anchor(self, node: etree._Element) -> bool:
+        if len(node) or "".join(node.itertext()).strip():
+            return False
+        return bool(node.get("id") or (qname_local_name(node.tag) == "a" and node.get("name")))
 
     def _boundary_type(self, node: etree._Element) -> str:
         name = qname_local_name(node.tag)
@@ -1355,6 +1371,10 @@ class _Extractor:
             return "media"
         if self._is_footnote_ref(node):
             return "footnote"
+        if self._is_pagebreak(node):
+            return "page"
+        if self._is_empty_anchor(node):
+            return "anchor"
         return name if name in _EMPTY_BOUNDARIES else "protected"
 
     def _inline_reorder_allowed(self, node: etree._Element) -> bool:

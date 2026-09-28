@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from engine.core.markup import UnsafeMarkupError, parse_xml_safely
+from engine.epub.publication import validate_assembled_document
 from engine.epub.replacer import assemble_document
 from engine.item.extractor import extract_document, select_primary_title
 from engine.item.inline import ProjectionError, validate_projection
@@ -194,6 +195,69 @@ def test_hard_boundaries_lock_ancestor_and_user_exceptions_are_explicit():
 
     with pytest.raises(ValueError, match="exact #id"):
         _plan("<p>Text</p>", {"translate_exceptions": {"p:first-child": "keep"}})
+
+
+def test_pagebreak_with_number_and_empty_pagebreak_are_hard_atoms():
+    document = _plan(
+        '<p>A<span xmlns:epub="http://www.idpf.org/2007/ops" epub:type="pagebreak">35</span>B'
+        '<span id="Page_36" role="doc-pagebreak" aria-label="Page 36"/>C</p>'
+    )
+    unit = next(item for item in document.units if item.kind == "paragraph")
+    page_atoms = [entry for entry in unit.registry.values() if entry.boundary_type == "page"]
+
+    assert [entry.source_text for entry in page_atoms] == ["35", ""]
+    assert unit.source_projection == ("⟦+b1⟧A⟦-b1⟧⟦=x1⟧⟦+b2⟧B⟦-b2⟧⟦=x2⟧⟦+b3⟧C⟦-b3⟧")
+    assert any(item.kind == "attribute" and item.source_projection == "Page 36" for item in document.units)
+
+
+def test_role_token_lists_recognize_pagebreak_and_noteref_without_ids():
+    document = _plan(
+        '<p>A<span role="  DOC-pagebreak presentation  "/>B'
+        '<a role=" presentation DOC-noteref " href="#note">1</a>C</p>'
+        '<aside id="note"><p>Footnote text.</p></aside>'
+    )
+    unit = next(item for item in document.units if item.kind == "paragraph" and "A" in item.source_projection)
+
+    assert any(entry.boundary_type == "page" and not entry.source_text for entry in unit.registry.values())
+    assert any(entry.boundary_type == "footnote" and entry.source_text == "1" for entry in unit.registry.values())
+    assert not any(entry.kind == "g" and not entry.source_text for entry in unit.registry.values())
+
+
+def test_empty_id_and_legacy_name_anchors_are_atoms_but_nonempty_links_remain_groups():
+    document = _plan(
+        '<p>A<span id="spot"/>B<a name="legacy"/>C'
+        '<a id="normal" href="#spot">label</a>'
+        '<a id="image-link" href="#spot"><img src="icon.png"/></a></p>'
+    )
+    unit = next(item for item in document.units if item.kind == "paragraph")
+    anchors = [entry for entry in unit.registry.values() if entry.boundary_type == "anchor"]
+    links = [entry for entry in unit.registry.values() if entry.kind == "g" and entry.hints.get("element") == "a"]
+
+    assert len(anchors) == 2
+    assert {entry.source_text for entry in links} == {"label", ""}
+    assert any(entry.boundary_type == "media" for entry in unit.registry.values())
+
+
+def test_pagebreak_text_cannot_cross_boundary_and_identity_passes_independent_validation():
+    document = _plan(
+        '<p>Before <span xmlns:epub="http://www.idpf.org/2007/ops" '
+        'epub:type="pagebreak" id="p35" aria-label="Page 35"/> after</p>'
+    )
+    unit = next(item for item in document.units if item.kind == "paragraph")
+    with pytest.raises(ProjectionError, match="text moved"):
+        validate_projection(
+            unit,
+            "⟦+b1⟧Before after⟦-b1⟧⟦=x1⟧⟦+b2⟧⟦-b2⟧",
+        )
+
+    targets = _identity_targets(document)
+    assembled = assemble_document(document, targets)
+    validate_assembled_document(
+        document,
+        targets,
+        assembled.markup,
+        source_to_target=assembled.source_to_target,
+    )
 
 
 def test_ncx_navlabel_records_its_content_target_for_cross_document_binding():
