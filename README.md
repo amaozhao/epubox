@@ -1,112 +1,162 @@
 # EPUBox
 
-智能 EPUB 电子书翻译 CLI 工具，基于大语言模型（LLM）实现高效、可靠的翻译功能。
+本地 EPUB 英译简中工具。v2.3 使用固定语义单元、受限格式引用和持久 JSON；模型不生成原始 XHTML。局部失败会保存原因并继续其他独立任务，只有整书检查完成后才发布 EPUB。
 
-## 特性
+旧引擎继续支持原 checkpoint。新引擎需显式指定 `--engine v23`；完成计划要求的实书、人评和目标阅读器验收后才切换默认，自动测试或少量模型联调不代替这些证据。
 
-- **LLM 翻译**：通过 Agno 框架集成 OpenAI/Claude 等模型，支持语义感知翻译
-- **占位符保护**：HTML 标签替换为 `[idN]` 占位符，翻译后精准恢复
-- **二级占位符**：`<pre>`/`<code>`/`<style>` 标签按原子块单独保护；命中后整体替换为占位符，不再递归展开内部子树
-- **断点续传**：每个 chunk 翻译后即时保存 JSON，中断后可继续
-- **智能校对**：翻译后自动校对，修正错词和表达
-- **Kindle 字体优化**：可重排书使用设备默认中文字体，并安全删除无引用字体
-- **多格式支持**：支持 NCX（toc.ncx）和 XHTML（nav.xhtml）两种导航文件格式
+## 安装与配置
 
-## 安装
+需要 Python 3.13+。新引擎的文件锁支持当前 macOS/Linux 环境。
 
 ```bash
-pip install -e .
+pip install -e '.[dev]'
 ```
 
-或直接运行：
+沿用 `.env` 中的模型配置，例如 `AGNES_API_KEY`、`AGNES_BASE_URL`、`AGNES_MODEL`、`AGNES_TEXT_RPM`。新引擎保留 Agnes 和原有 CR proxy 适配；不会自动切换未配置服务商。密钥不写入运行 JSON。
+
+v2.3 在调用模型前要求源书通过 EPUBCheck。先按 [官方说明](https://www.w3.org/publishing/epubcheck/)准备 Java 与 EPUBCheck，再指定命令：
 
 ```bash
-python main.py translate <epub_path>
+export EPUBCHECK_COMMAND='java -jar /absolute/path/epubcheck.jar'
 ```
 
-## 使用
+也可使用 `--epubcheck-command 'java -jar ...'`。本开发工作区已准备便携工具于 `.tools/epubcheck/`，程序会自动发现；该目录不提交到仓库。没有检查工具、源书有 ERROR/FATAL 或输出路径不安全时，不开始付费调用；WARNING 会记录。
 
-### 翻译 EPUB
+## 开始一个 v2.3 运行
 
 ```bash
-python main.py translate ./path/to/book.epub
+python main.py translate ./book.epub --engine v23 \
+  --context-tokens 32768 --max-output-tokens 2048 \
+  --http-limit 100 --concurrency 2 --output ./book.zh.epub
 ```
 
-指定目标语言和分块大小：
+`--context-tokens` 必须按已配置模型的容量设置，可以选择更低的运行上限；程序不猜服务商容量。`--http-limit` 统计实际 HTTP 调用，包括重试。设为 0 时按初始 Unit/衔接计划计算有界上限。达到运行上限会暂停，保留进展；达到单个 Unit 的上限只挂起该 Unit。
+
+`--limit` 在 v2.3 中是可选的最终请求输入上限；默认由上下文预算决定。它不改变源 Unit 身份。`--language` 只接受简中别名并统一为 `zh-Hans`。
+
+默认保留字体、CSS 和二进制资源，不剪枝、不重压图片。默认不覆盖已有输出；需要时显式传 `--overwrite`，仍先验证临时产物。
+
+## 从 JSON 续跑
+
+CLI 会打印工作目录。恢复扫描完整任务清单，补中间失败项，不从“最后成功序号”重新翻译后文。
 
 ```bash
-python main.py translate ./book.epub --language Chinese --limit 1200
+python main.py resume ./work/<source_hash>/<run_id> --output ./book.zh.epub
 ```
 
-默认会为可重排 EPUB 设置 `zh-CN`，使用设备字体并安全剪枝无引用字体。固定版式、加密字体、PUA/icon、SVG/MathML 或无法安全解析的样式会自动保留。需要完整保留原字体时使用：
+- 已接受的目标继续复用；校对失败从校对继续。
+- 长 Unit 的成功片段保留，同一 CutPlan 下只补缺片。
+- 准备阶段尚未 ready 时，也可从已保存快照继续，不要求原书仍在原路径。
+- 修改源书、词表、模型生成参数或提示版本时新建运行，不混用旧结果。
+- `Ctrl+C` 第一次停止新派发并保存返回结果，再次中断可强制停止。
+
+显式重试已经耗尽自动次数的 Unit，并按需要增加额度：
 
 ```bash
-python main.py translate ./book.epub --preserve-fonts
+python main.py resume ./work/<source_hash>/<run_id> --output ./book.zh.epub \
+  --retry-unit <unit_id> --add-unit-http 6 --add-run-http 6
 ```
 
-### 生成术语表
+衔接检查的显式重试入口：
+
+```bash
+python main.py resume ./work/<source_hash>/<run_id> --output ./book.zh.epub \
+  --retry-check <document_id> --add-check-http 3 --add-run-http 3
+```
+
+增加额度会留档，不清空历史计数，也不重开无限修订循环。没有可执行源计划的 Unit 不能靠重试额度解决；报告会保留其准备阶段问题。
+
+## 修订与损坏文档恢复
+
+普通 Unit 的修订文件：
+
+```json
+{"unit_id":"u-...","base_revision":0,"plan_epoch":0,"target":"完整的修订后投影"}
+```
+
+长 Unit 的 `target` 使用完整的 `item_id → 目标投影` 对象，不能只提交半个 Unit。可以用 `{"items":[...]}` 提交多个修订。`base_revision`、`plan_epoch` 从当前 `units/<unit_id>.json` 获取。
+
+```bash
+python main.py resume ./work/<source_hash>/<run_id> --output ./book.zh.epub \
+  --repair-file ./repairs.json
+```
+
+修订仍须经过本地检查、机器校对和相关衔接复核，不能编辑 `accepted` 字段绕过检查。
+
+如单份 DocumentPlan JSON 缺失或损坏，可明确要求从源快照恢复：
+
+```bash
+python main.py resume ./work/<source_hash>/<run_id> --output ./book.zh.epub \
+  --repair-document <document_id>
+```
+
+只有同版本重建结果与 BookPlan 登记哈希完全相同才恢复；否则需要新运行。正常 resume 不会静默重提取并替换已提交计划，结果记录损坏也不会自动变成零计数或已完成。
+
+## 术语表
+
+使用 `--glossary ./terms.json`。支持原来的 `{"cache":"缓存"}` 字典，也支持明确范围与模式的词条：
+
+```json
+[{"source":"cache","target":"缓存","scope":"book","mode":"required","note":"本书计算机语境"}]
+```
+
+模式为 `preferred`、`required`、`keep_source`。不要把多义词无条件强锁到一个译法。空词表合法；明确指定但无法加载的文件会报错。运行期间词表固定。
+
+原有可选候选提取继续保留：
 
 ```bash
 python main.py generate-glossary ./book.epub
 ```
 
-编辑生成的 `glossary/<书名>.json`，为需要统一的术语填写译法。非空条目会被锁定，长短语优先于其中的单词；空白候选不会影响翻译。术语表修改后再次运行翻译，受影响的旧 chunk 会自动重译。
-
-术语表生成是可选功能，普通翻译不会自动联网下载 NLTK 数据。首次使用该命令前，请在可信网络或离线数据源中为本地环境准备：
+普通翻译不会自动下载 NLTK 数据。需要提取功能时，先在可信网络或离线环境准备资源：
 
 ```bash
 .venv/bin/python -m nltk.downloader punkt_tab stopwords averaged_perceptron_tagger_eng
 ```
 
-受限网络可将预下载数据目录通过 `NLTK_DATA=/path/to/nltk_data` 提供给程序；不要为了下载而关闭 NLTK 的代理安全检查。
+## 工作目录与结果
 
-## 工作流程
-
+```text
+work/<source_hash>/<run_id>/
+  source.epub
+  bookplan.json
+  documents/<document_id>.json
+  units/<unit_id>.json
+  checks/<document_id>.json
+  requests/<request_id>.json
+  staging/
+  publish.json
+  report.json
 ```
-EPUB 解析 → 标签替换为 [idN] → 分块 → LLM 翻译 → 校对修正 → 恢复标签 → 构建 EPUB
-```
 
-1. **标签保护**：HTML 标签替换为 `[idN]`，保留结构
-2. **智能分块**：每个 chunk ≤ 2000 tokens，最多 15 个占位符
-3. **LLM 翻译**：保留占位符，翻译文本内容
-4. **自动校对**：修正错词、统一词汇（"您"→"你"）
-5. **质量门禁**：拦截重复退化、术语漂移和残留英文
-6. **精准恢复**：将 `[idN]` 恢复为原始标签
-7. **字体处理**：设置中文语言、使用设备字体并删除可证明未引用的字体
+文档 JSON 保存原始 HTML/XHTML、源槽位、Unit 和 g/x/b 引用。初始结果先写入，最后提交 ready 计划；之后逐项原子保存。运行结果为：
 
-## 配置
+| 状态 | 含义 |
+|---|---|
+| `completed` | 所有必需目标/派生值、机器校对、衔接、结构及 EPUBCheck 通过，并提交本次产物 |
+| `paused` | 运行总额度、取消或共享服务问题导致暂停 |
+| `needs_attention` | 独立可执行工作已处理，仍有局部失败或依赖待处理 |
+| `failed` | 不能继续信任输入/存储/程序状态，或发布失败 |
 
-通过环境变量配置：
+只有 `completed` 返回成功退出码与正式输出路径。其他状态不会导出混入英文的草稿；有效译文仍保存在 JSON。真实阅读器未执行时报告 `not_run`，不会自动伪记通过。
+
+## 旧运行与开发验证
+
+原命令保持旧引擎默认行为，可显式选择：
 
 ```bash
-AGNES_API_KEY=
-AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
-AGNES_MODEL=agnes-2.0-flash
-AGNES_TEXT_RPM=10
+python main.py translate ./book.epub --engine legacy --limit 1200 --preserve-fonts
 ```
 
-将 Agnes 控制台生成的 API Key 填入项目根目录 `.env` 的 `AGNES_API_KEY`。
+旧 HTML checkpoint 不自动转换成 v2.3 的 accepted 结果。旧打包器的错误传播已修正：失败不再返回伪成功路径，也不先截断已有产物。
 
-## 项目结构
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/pyright
+.venv/bin/ruff check main.py engine tests
+```
 
-```
-engine/
-├── orchestrator.py        # 核心协调器
-├── agents/
-│   ├── translator.py     # 翻译代理
-│   ├── proofer.py        # 校对代理
-│   └── workflow.py       # 工作流（翻译→校对→修正）
-├── epub/
-│   ├── parser.py         # EPUB 解析
-│   ├── builder.py        # EPUB 构建
-│   └── replacer.py       # 占位符恢复
-└── item/
-    ├── chunker.py        # HTML 分块
-    ├── placeholder.py     # 占位符管理
-    └── tag/
-        ├── preserve.py  # 标签→占位符
-        └── restore.py    # 占位符→标签
-```
+方案、任务和实际证据分别见 [架构计划](docs/epubox_architecture_plan.md)、[实施进度](docs/epubox_implementation_status.md)。规范要求 T01–T32 和真实质量/阅读验证；不能把模型替身通过写成实书验收通过。
 
 ## 许可证
 

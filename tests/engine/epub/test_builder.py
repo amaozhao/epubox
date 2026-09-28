@@ -1,6 +1,7 @@
 import os
 import xml.etree.ElementTree as ET
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -111,27 +112,53 @@ class TestBuilder:
             mimetype_info = zf.getinfo("mimetype")
             assert mimetype_info.compress_type == zipfile.ZIP_STORED
 
-    def test_build_raises_error_if_source_dir_not_found(self):
-        """测试当源目录不存在时，build 方法是否记录警告日志并返回输出路径（不抛出异常）。"""
-        builder = Builder("/non/existent/path", "/temp/output.epub")
+    def test_build_raises_error_if_source_dir_not_found(self, tmp_path):
+        builder = Builder(str(tmp_path / "missing"), str(tmp_path / "output.epub"))
 
-        # 使用 caplog fixture 捕获日志（可选，如果你的 pytest 配置支持）
-        # 如果不使用 caplog，可以省略日志断言
-        with pytest.MonkeyPatch().context():
-            # 模拟 logger.warning 为 print（如果 logger 不可 mock）
-            # 实际中，你可以 mock logger 或使用 caplog
-            result_path = builder.build()
+        with pytest.raises(FileNotFoundError, match="EPUB 源目录不存在"):
+            builder.build()
 
-            # 断言返回路径与预期一致（新逻辑：返回 self.output）
-            assert result_path == builder.output
+        assert not (tmp_path / "output.epub").exists()
 
-            # 可选：验证日志输出（假设使用 caplog fixture）
-            # import pytest
-            # def test_...(caplog):
-            #     ...
-            #     caplog.set_level("WARNING")
-            #     builder.build()
-            #     assert "源目录不存在" in caplog.text
+    def test_build_failure_preserves_existing_output_and_source(self, setup_builder, monkeypatch):
+        builder = setup_builder
+        output_path = Path(builder.output)
+        source_path = Path(builder.dir) / "OEBPS" / "chapter1.xhtml"
+        output_path.parent.mkdir(parents=True)
+        output_path.write_bytes(b"previous epub")
+        original_source = source_path.read_bytes()
+        original_write = zipfile.ZipFile.write
+
+        def failing_write(archive, filename, arcname=None, compress_type=None, compresslevel=None):
+            if Path(filename) == source_path:
+                raise OSError("resource read failed")
+            return original_write(archive, filename, arcname, compress_type, compresslevel)
+
+        monkeypatch.setattr(zipfile.ZipFile, "write", failing_write)
+
+        with pytest.raises(RuntimeError, match="打包 EPUB 文件失败"):
+            builder.build()
+
+        assert output_path.read_bytes() == b"previous epub"
+        assert source_path.read_bytes() == original_source
+        assert list(output_path.parent.glob(f".{output_path.name}.*.tmp")) == []
+
+    def test_build_zip_open_failure_preserves_existing_output(self, setup_builder, monkeypatch):
+        builder = setup_builder
+        output_path = Path(builder.output)
+        output_path.parent.mkdir(parents=True)
+        output_path.write_bytes(b"previous epub")
+
+        def failing_zip(*args, **kwargs):
+            raise OSError("zip open failed")
+
+        monkeypatch.setattr(zipfile, "ZipFile", failing_zip)
+
+        with pytest.raises(RuntimeError, match="打包 EPUB 文件失败"):
+            builder.build()
+
+        assert output_path.read_bytes() == b"previous epub"
+        assert list(output_path.parent.glob(f".{output_path.name}.*.tmp")) == []
 
     def test_build_handles_mimetype_file_not_found(self, setup_builder):
         """测试当源目录缺少 mimetype 文件时，build 方法是否能正常工作（并创建它）。"""

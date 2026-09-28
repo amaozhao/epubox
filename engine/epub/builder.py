@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -610,9 +611,9 @@ class Builder:
         Returns:
             生成的 EPUB 文件的路径。
         """
-        if not os.path.exists(self.dir):
-            logger.warning(f"源目录不存在：{self.dir}")
-            return self.output
+        source_path = Path(self.dir)
+        if not source_path.is_dir():
+            raise FileNotFoundError(f"EPUB 源目录不存在：{self.dir}")
 
         content_opf_path = self._find_content_opf()
 
@@ -625,15 +626,16 @@ class Builder:
             if self.optimize_fonts:
                 self._prepare_fonts(content_opf_path)
 
-        # 确保输出目录存在
-        try:
-            os.makedirs(os.path.dirname(self.output), exist_ok=True)
-        except Exception as e:
-            logger.warning(f"创建输出目录失败：{os.path.dirname(self.output)}, 错误：{e}")
+        output_path = Path(self.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
 
-        # 打包 EPUB 文件
         try:
-            with zipfile.ZipFile(self.output, "w", zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(temporary_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 # EPUB 规范要求 'mimetype' 文件必须是未压缩的，并且是第一个文件
                 mimetype_path = os.path.join(self.dir, "mimetype")
                 if os.path.exists(mimetype_path):
@@ -647,15 +649,17 @@ class Builder:
                         file_path = os.path.join(root, file)
                         if file == "mimetype" and root == self.dir:
                             continue
+                        if Path(file_path).resolve() in {temporary_path.resolve(), output_path.resolve()}:
+                            continue
                         arcname = os.path.relpath(file_path, self.dir)
-                        try:
-                            zf.write(file_path, arcname)
-                        except Exception as e:
-                            logger.warning(f"打包文件失败：{file_path}, 错误：{e}")
+                        zf.write(file_path, arcname)
 
+            os.replace(temporary_path, output_path)
             logger.info(f"成功将目录 {self.dir} 打包为 EPUB 文件：{self.output}")
-        except Exception as e:
-            logger.warning(f"打包 EPUB 文件失败：{self.output}, 错误：{e}")
+        except Exception as error:
+            raise RuntimeError(f"打包 EPUB 文件失败：{self.output}，错误：{error}") from error
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
         return self.output
 

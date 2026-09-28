@@ -219,6 +219,7 @@ class TranslationEngine:
 
     def _reconcile_attempts(self) -> None:
         by_unit: dict[str, int] = {}
+        logical_by_unit: dict[tuple[str, str], int] = {}
         logical: dict[tuple[str, str, str], int] = {}
         self.attempt_keys.clear()
         self.manifests.clear()
@@ -230,6 +231,8 @@ class TranslationEngine:
                 for unit_id, item_id in zip(manifest.unit_ids, manifest.item_ids, strict=True):
                     key = unit_id, item_id, manifest.stage
                     logical[key] = logical.get(key, 0) + 1
+                    unit_key = unit_id, manifest.stage
+                    logical_by_unit[unit_key] = logical_by_unit.get(unit_key, 0) + 1
             for attempt in manifest.attempts:
                 key = manifest.request_id, attempt.attempt_id
                 if key in self.attempt_keys:
@@ -249,6 +252,14 @@ class TranslationEngine:
             counters = record.counters.model_copy(
                 update={
                     "http_attempts": max(record.counters.http_attempts, by_unit.get(unit_id, 0)),
+                    "translation_attempts": max(
+                        record.counters.translation_attempts,
+                        logical_by_unit.get((unit_id, "translate"), 0),
+                    ),
+                    "review_attempts": max(
+                        record.counters.review_attempts,
+                        logical_by_unit.get((unit_id, "review"), 0),
+                    ),
                 }
             )
             if items != record.items or counters != record.counters:
@@ -484,6 +495,17 @@ class TranslationEngine:
             raise IdentityMismatch("unit has no executable cut plan")
         return next(segment for segment in record.cut_plan.segments if segment.item_id == item_id)
 
+    @staticmethod
+    def _logical_attempts(item: ItemRecord, stage: Stage) -> int:
+        cycle_start = item.attempts.get(f"{stage}_cycle_start", 0)
+        repairs = item.attempts.get(f"{stage}_protocol_repair", 0)
+        repair_start = item.attempts.get(f"{stage}_protocol_repair_cycle_start", 0)
+        return item.attempts.get(stage, 0) - cycle_start - (repairs - repair_start)
+
+    @staticmethod
+    def _has_protocol_repair(item: ItemRecord, stage: Stage) -> bool:
+        return item.attempts.get(f"{stage}_protocol_repair", 0) > 0
+
     def _payload_item(self, unit: Unit, record: UnitRecord, item_id: str, stage: str) -> dict[str, Any]:
         segment = self._segment(record, item_id)
         item = record.items[item_id]
@@ -601,10 +623,8 @@ class TranslationEngine:
                 record = self.records[job.unit_id]
                 unit = self.units[job.unit_id]
                 item = record.items[job.item_id]
-                count = item.attempts.get(job.stage, 0)
-                cycle_start = item.attempts.get(f"{job.stage}_cycle_start", 0)
                 allowed = 3 if job.stage == "translate" else 2
-                if count - cycle_start >= allowed:
+                if self._logical_attempts(item, job.stage) >= allowed:
                     raise UnitBudgetExhausted(f"{job.stage} logical attempt limit exhausted: {job.unit_id}")
                 payload_items.append(self._payload_item(unit, record, job.item_id, job.stage))
                 revisions[job.unit_id] = record.revision
@@ -765,7 +785,7 @@ class TranslationEngine:
             return
         if decision["decision"] == "replace":
             item = record.items[job.item_id]
-            if item.attempts.get("review", 0) - item.attempts.get("review_cycle_start", 0) >= 2:
+            if self._logical_attempts(item, "review") >= 2:
                 self._fail(
                     job, "blocking_revision_limit", "revision review requested another replacement", retry=False
                 )
@@ -875,6 +895,52 @@ class TranslationEngine:
             except (ProtocolError, ProjectionError, StaleWrite) as error:
                 self._fail(job, "invalid_response", str(error), retry=job.stage == "translate")
 
+    def _protocol_failure(self, job: Job, manifest: RequestManifest, message: str) -> None:
+        if job.stage == "coherence":
+            self._fail(job, "invalid_response", message)
+            return
+        record = self.records[job.unit_id]
+        if record.revision != job.revision or record.plan_epoch != job.plan_epoch:
+            return
+        item = record.items[job.item_id]
+        repair_key = f"{job.stage}_protocol_repair"
+        repair_count = item.attempts.get(repair_key, 0)
+        repair_cycle_start = item.attempts.get(f"{repair_key}_cycle_start", 0)
+        retry = repair_count - repair_cycle_start < 1
+        attempts = dict(item.attempts)
+        if retry:
+            attempts[repair_key] = repair_count + 1
+        failure = FailureRecord(
+            scope="request",
+            stage=job.stage,
+            code="invalid_response_envelope",
+            message=message[:2000],
+            request_id=manifest.request_id,
+            item_id=job.item_id,
+            plan_epoch=job.plan_epoch,
+            revision=job.revision,
+            retry_action="automatic" if retry else "explicit_retry",
+        )
+        updated = item.model_copy(
+            update={
+                "status": ItemStatus.RETRY_WAIT if retry else ItemStatus.NEEDS_ATTENTION,
+                "failure": failure,
+                "next_action": job.stage if retry else "repair",
+                "attempts": attempts,
+            }
+        )
+        self._save(
+            record.model_copy(
+                update={
+                    "items": {**record.items, job.item_id: updated},
+                    "unresolved_issues": (
+                        *tuple(issue for issue in record.unresolved_issues if issue.item_id != job.item_id),
+                        failure,
+                    ),
+                }
+            )
+        )
+
     def _fail(self, job: Job, code: str, message: str, *, retry: bool = False) -> None:
         if job.stage == "coherence":
             check = self.checks[job.document_id]
@@ -897,7 +963,7 @@ class TranslationEngine:
             return
         item = record.items[job.item_id]
         allowed = 3 if job.stage == "translate" else 2
-        retry = retry and item.attempts.get(job.stage, 0) - item.attempts.get(f"{job.stage}_cycle_start", 0) < allowed
+        retry = retry and self._logical_attempts(item, job.stage) < allowed
         failure = FailureRecord(
             scope="item",
             stage=job.stage,
@@ -1017,7 +1083,11 @@ class TranslationEngine:
                     key: value.model_copy(
                         update={
                             "status": ItemStatus.LOCAL_VALID,
-                            "attempts": {**value.attempts, "review_cycle_start": value.attempts.get("review", 0)},
+                            "attempts": {
+                                **value.attempts,
+                                "review_cycle_start": value.attempts.get("review", 0),
+                                "review_protocol_repair_cycle_start": value.attempts.get("review_protocol_repair", 0),
+                            },
                         }
                     )
                     for key, value in record.items.items()
@@ -1193,7 +1263,7 @@ class TranslationEngine:
             return f"unit HTTP budget exhausted: {job.unit_id}"
         item = record.items[job.item_id]
         allowed = 3 if job.stage == "translate" else 2
-        spent = item.attempts.get(job.stage, 0) - item.attempts.get(f"{job.stage}_cycle_start", 0)
+        spent = self._logical_attempts(item, job.stage)
         return f"{job.stage} logical attempt limit exhausted" if spent >= allowed else None
 
     def _jobs_fit(self, jobs: tuple[Job, ...]) -> bool:
@@ -1248,7 +1318,10 @@ class TranslationEngine:
             break
         if first is None:
             return None
-        if first.stage == "coherence" or self.batch_limits[first.stage] == 1:
+        first_repair = bool(
+            first.unit_id and self._has_protocol_repair(self.records[first.unit_id].items[first.item_id], first.stage)
+        )
+        if first.stage == "coherence" or self.batch_limits[first.stage] == 1 or first_repair:
             return BatchJob((first,))
 
         jobs = [first]
@@ -1259,6 +1332,9 @@ class TranslationEngine:
                 and candidate.unit_id not in running_units
                 and candidate.unit_id not in {job.unit_id for job in jobs}
                 and self._job_current(candidate)
+                and not self._has_protocol_repair(
+                    self.records[candidate.unit_id].items[candidate.item_id], candidate.stage
+                )
             )
             if eligible and (error := self._job_budget_error(candidate)):
                 self.queued.discard(candidate.key)
@@ -1303,7 +1379,11 @@ class TranslationEngine:
                             manifest, raw = task.result()
                             current = tuple(job for job in batch.jobs if self._job_current(job))
                             if current:
-                                self._apply_batch(BatchJob(current), manifest, raw)
+                                try:
+                                    self._apply_batch(BatchJob(current), manifest, raw)
+                                except ProtocolError as error:
+                                    for job in current:
+                                        self._protocol_failure(job, manifest, str(error))
                         except StaleWrite as error:
                             if any(self._job_current(job) for job in batch.jobs):
                                 self.stop_status, self.stop_reason = "failed", str(error)
@@ -1317,7 +1397,7 @@ class TranslationEngine:
                                         self._fail(job, "budget_exhausted", budget_error)
                                     else:
                                         self._enqueue(job)
-                        except (ProtocolError, ProjectionError, RequestError) as error:
+                        except (ProjectionError, RequestError) as error:
                             oversized = isinstance(error, RequestError) and error.status_code == 413
                             if oversized and len(batch.jobs) > 1:
                                 self.batch_limits[batch.stage] = max(1, len(batch.jobs) // 2)
@@ -1465,7 +1545,13 @@ class TranslationEngine:
                                 "attempts": {
                                     **item.attempts,
                                     "translate_cycle_start": item.attempts.get("translate", 0),
+                                    "translate_protocol_repair_cycle_start": item.attempts.get(
+                                        "translate_protocol_repair", 0
+                                    ),
                                     "review_cycle_start": item.attempts.get("review", 0),
+                                    "review_protocol_repair_cycle_start": item.attempts.get(
+                                        "review_protocol_repair", 0
+                                    ),
                                 },
                                 "failure": None,
                             }
@@ -1573,7 +1659,11 @@ class TranslationEngine:
                             "status": ItemStatus.LOCAL_VALID,
                             "checks": {},
                             "failure": None,
-                            "attempts": {**item.attempts, "review_cycle_start": item.attempts.get("review", 0)},
+                            "attempts": {
+                                **item.attempts,
+                                "review_cycle_start": item.attempts.get("review", 0),
+                                "review_protocol_repair_cycle_start": item.attempts.get("review_protocol_repair", 0),
+                            },
                         }
                     )
                 self._save(

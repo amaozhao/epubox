@@ -214,6 +214,8 @@ __marimo__/
 .qodo_cache/
 
 temp/
+.tools/
+work/
 *.epub
 logs/
 .omx/

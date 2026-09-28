@@ -1,4 +1,8 @@
+import html.entities
 import re
+from functools import lru_cache
+
+from lxml import etree  # type: ignore[attr-defined]
 
 XMLISH_ROOT_RE = re.compile(r"^\s*(?:<\?xml\b[^>]*>\s*)?<([A-Za-z_][\w:.-]*)")
 
@@ -22,3 +26,98 @@ def prefers_xml_parser(markup: str) -> bool:
 
 def get_markup_parser(markup: str) -> str:
     return "xml" if prefers_xml_parser(markup) else "html.parser"
+
+
+class UnsafeMarkupError(ValueError):
+    """Raised when EPUB markup cannot be parsed without external I/O."""
+
+
+_TRUSTED_XHTML_DTDS = {
+    "xhtml1-strict.dtd",
+    "xhtml1-transitional.dtd",
+    "xhtml1-frameset.dtd",
+    "xhtml11.dtd",
+}
+
+
+@lru_cache(maxsize=1)
+def _xhtml_entities_dtd() -> str:
+    declarations = []
+    for name, value in sorted(html.entities.html5.items()):
+        name = name.removesuffix(";")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]+", name):
+            continue
+        codepoints = "".join(f"&#{ord(char)};" for char in value)
+        declarations.append(f'<!ENTITY {name} "{codepoints}">')
+    return "\n".join(declarations)
+
+
+class _EpubResolver(etree.Resolver):
+    def resolve(self, url: str, public_id: str | None, context):
+        filename = (url or "").rsplit("/", 1)[-1].lower()
+        if filename in _TRUSTED_XHTML_DTDS:
+            return self.resolve_string(_xhtml_entities_dtd(), context)
+        raise OSError(f"external entity is not allowed: {url or public_id}")
+
+
+def parse_xml_safely(markup: str) -> etree._ElementTree:
+    """Parse EPUB XML without network or arbitrary local-file entity access."""
+
+    parser = etree.XMLParser(
+        encoding="utf-8",
+        load_dtd=True,
+        no_network=True,
+        resolve_entities=True,
+        remove_blank_text=False,
+        remove_comments=False,
+        remove_pis=False,
+        strip_cdata=False,
+        recover=False,
+        huge_tree=False,
+    )
+    parser.resolvers.add(_EpubResolver())
+    try:
+        root = etree.fromstring(markup.encode("utf-8"), parser)
+    except (OSError, etree.XMLSyntaxError) as exc:
+        raise UnsafeMarkupError(str(exc)) from exc
+    return root.getroottree()
+
+
+def serialize_xml(tree: etree._ElementTree, *, source_markup: str = "") -> str:
+    """Serialize a parsed document while retaining its declaration and doctype."""
+
+    has_declaration = source_markup.lstrip("\ufeff").startswith("<?xml")
+    return etree.tostring(
+        tree,
+        encoding="utf-8",
+        xml_declaration=has_declaration,
+        pretty_print=False,
+    ).decode("utf-8")
+
+
+def qname_local_name(value: str) -> str:
+    return etree.QName(value).localname.lower()
+
+
+def element_path(element: etree._Element) -> tuple[int, ...]:
+    """Return a stable path using element children only (comments/PIs do not count)."""
+
+    path: list[int] = []
+    current = element
+    while current.getparent() is not None:
+        parent = current.getparent()
+        siblings = [child for child in parent if isinstance(child.tag, str)]
+        path.append(siblings.index(current))
+        current = parent
+    return tuple(reversed(path))
+
+
+def find_by_element_path(tree: etree._ElementTree, path: tuple[int, ...] | list[int]) -> etree._Element:
+    current = tree.getroot()
+    for index in path:
+        children = [child for child in current if isinstance(child.tag, str)]
+        try:
+            current = children[index]
+        except IndexError as exc:
+            raise KeyError(tuple(path)) from exc
+    return current
