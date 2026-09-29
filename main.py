@@ -4,6 +4,7 @@
 # ruff: noqa: B008
 
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -44,6 +45,7 @@ def translate(
             concurrency=concurrency,
             epubcheck=epubcheck,
             overwrite=overwrite,
+            progress=_progress_printer(),
         )
     except Exception as error:
         typer.echo(f"翻译未完成：{error}", err=True)
@@ -59,7 +61,13 @@ def resume(
     overwrite: bool = typer.Option(False, "--overwrite"),
 ) -> None:
     try:
-        result = resume_book(work_dir, output=output, epubcheck=epubcheck, overwrite=overwrite)
+        result = resume_book(
+            work_dir,
+            output=output,
+            epubcheck=epubcheck,
+            overwrite=overwrite,
+            progress=_progress_printer(),
+        )
     except Exception as error:
         typer.echo(f"续跑未完成：{error}", err=True)
         raise typer.Exit(1) from error
@@ -68,6 +76,8 @@ def resume(
 
 def _print_result(result: RunOutcome) -> None:
     typer.echo(f"状态：{result.status}；阶段：{result.phase}；工作目录：{result.work_dir}")
+    if result.report_path:
+        typer.echo(f"报告：{result.report_path}")
     if result.required_units:
         typer.echo(f"已接受：{result.accepted_units}/{result.required_units}；累计HTTP：{result.http_attempts}")
     if result.status == "completed":
@@ -76,6 +86,28 @@ def _print_result(result: RunOutcome) -> None:
     if result.reason:
         typer.echo(result.reason, err=True)
     raise typer.Exit(1)
+
+
+def _progress_printer():
+    last: tuple[object, ...] | None = None
+
+    def show(report: dict[str, Any]) -> None:
+        nonlocal last
+        phase = str(report.get("phase", "running"))
+        planned = report.get("planned", report.get("required_units", 0))
+        succeeded = report.get("succeeded", report.get("accepted_units", 0))
+        failed = report.get("failed", report.get("needs_attention_units", 0))
+        attempts = report.get("http_attempts", 0)
+        if any(type(value) is not int for value in (planned, succeeded, failed, attempts)):
+            return
+        bucket = succeeded * 20 // max(1, planned)
+        key = (phase, bucket, failed, attempts // 50, report.get("execution_state"))
+        if key == last:
+            return
+        last = key
+        typer.echo(f"{phase}: {succeeded}/{planned} 完成，局部问题={failed}，HTTP={attempts}")
+
+    return show
 
 
 if __name__ == "__main__":

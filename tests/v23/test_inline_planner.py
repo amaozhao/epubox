@@ -304,7 +304,7 @@ def test_real_extractor_long_g_uses_segment_excerpt_and_rebuilds_exactly(tag: st
     unit = next(unit for unit in document.units if "Long range" in unit.source_projection)
     assert max(len(entry.source_text) for entry in unit.registry.values() if entry.kind == "g") > 10_000
 
-    from engine.agents.runtime_v23 import request_messages as real_request_messages
+    from engine.agents.runtime import request_messages as real_request_messages
 
     checked_hints = 0
 
@@ -341,7 +341,7 @@ def test_long_unit_splits_on_graphemes_tracks_virtual_ranges_and_merges_exactly(
         registry={"b1": ref("b1", "b", movement="fixed"), "g1": ref("g1", "g")},
     )
     config = PlannerConfig(
-        context_tokens=1200,
+        context_tokens=1600,
         max_output_tokens=160,
         review_output_tokens=80,
         safety_margin=8,

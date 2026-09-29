@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlsplit
 import regex
 import tiktoken
 
-from engine.agents.runtime_v23 import request_messages
+from engine.agents.runtime import request_messages
 from engine.core.markup import UnsafeMarkupError, find_by_element_path, parse_xml_safely, qname_local_name
 from engine.item.inline import Event, events_to_projection, parse_projection, validate_projection
 from engine.schemas.v23 import CutPlan, DocumentPlan, Segment, Unit, UnitRecord, canonical_hash
@@ -506,7 +506,7 @@ def recommended_output_tokens(
         target = math.ceil(sum(_count_tokens(_projection(item)) for item in items) * config.target_ratio)
         return max(config.max_output_tokens, envelope + target)
     response = {
-        "protocol": "epubox-review-1",
+        "protocol": "epubox-review-2",
         "request_id": request_id,
         "items": [
             {
@@ -687,7 +687,7 @@ def _fits_batch(items: Sequence[Any], config: PlannerConfig, stage: Literal["tra
 
 
 def _request_payload(items: Sequence[Any], stage: Literal["translation", "review"]) -> dict[str, Any]:
-    protocol = "epubox-text-1" if stage == "translation" else "epubox-review-1"
+    protocol = "epubox-text-1" if stage == "translation" else "epubox-review-2"
     payload: dict[str, Any] = {
         "protocol": protocol,
         "request_id": "r00000000000000000000000000000000",

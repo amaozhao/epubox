@@ -16,7 +16,7 @@ def test_translate_command_routes_only_through_preparation_pipeline(
     monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: model)
     monkeypatch.setattr(cli, "checker_for_source", lambda *_args: object())
 
-    async def advance(actual_source, output, work_root, config, checker, *, model, overwrite):
+    async def advance(actual_source, output, work_root, config, checker, *, model, overwrite, progress):
         captured.update(
             source=actual_source,
             output=output,
@@ -61,3 +61,19 @@ def test_resume_uses_frozen_model_and_snapshot_without_user_term_file(
 
     assert result.status == "paused"
     assert called == [work_dir.resolve()]
+
+
+def test_outcome_report_is_derived_from_the_same_work_directory(tmp_path: Path, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(cli, "StoreV25", lambda root: SimpleNamespace(root=root))
+
+    def fake_report(store, **fields):
+        calls.append((store.root, fields))
+        return store.root / "report.json"
+
+    monkeypatch.setattr(cli, "write_report", fake_report)
+    result = cli._record(cli.RunOutcome("needs_attention", tmp_path, "translation"))
+
+    assert result.report_path == tmp_path / "report.json"
+    assert calls[0][0] == tmp_path
+    assert calls[0][1]["status"] == "needs_attention"

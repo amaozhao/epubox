@@ -1,4 +1,4 @@
-"""Strict wire validation for the v2.3 text-only model protocol."""
+"""Strict wire validation for translated text and chapter coherence."""
 
 from __future__ import annotations
 
@@ -208,22 +208,6 @@ def _review_error(item: dict[str, Any], expected: Mapping[str, Any]) -> str | No
         if blocking:
             return f"blocking check or issue: {', '.join(blocking)}"
     return None
-
-
-def validate_review_response(
-    raw: str | bytes, request_id: str, expected_items: Mapping[str, Mapping[str, Any]]
-) -> BatchValidation:
-    items = _validate_root(strict_loads(raw), "epubox-review-1", request_id)
-    candidates, errors, unknown, _ = _collect_items(items, set(expected_items))
-    accepted: dict[str, dict[str, Any]] = {}
-    for item_id, item in candidates.items():
-        error = _review_error(item, expected_items[item_id])
-        if error:
-            errors[item_id] = error
-        else:
-            accepted[item_id] = item
-    missing = tuple(sorted(set(expected_items) - set(candidates) - set(errors)))
-    return BatchValidation(accepted, errors, missing, unknown)
 
 
 def validate_coherence_response(

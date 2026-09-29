@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from engine.agents.protocol_v23 import ProtocolError
-from engine.agents.protocol_v25 import validate_resolution_response
-from engine.agents.runtime_v23 import RequestError, RuntimePaused, wire_hash
+from engine.agents.protocol import ProtocolError
+from engine.agents.term_protocol import validate_resolution_response
+from engine.agents.runtime import RequestError, RuntimePaused, wire_hash
 from engine.core.tokens import count_tokens
 from engine.schemas.v25 import JsonValue, RequestManifest
 from engine.services.store_v25 import StoreV25

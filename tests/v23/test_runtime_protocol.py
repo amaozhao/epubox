@@ -7,14 +7,13 @@ import httpx
 import pytest
 from openai import APIStatusError
 
-from engine.agents.protocol_v23 import (
+from engine.agents.protocol import (
     ProtocolError,
     strict_loads,
     validate_coherence_response,
-    validate_review_response,
     validate_translation_response,
 )
-from engine.agents.runtime_v23 import (
+from engine.agents.runtime import (
     PROMPT_VERSION,
     ModelRuntime,
     ProviderError,
@@ -23,6 +22,7 @@ from engine.agents.runtime_v23 import (
     request_messages,
     wire_hash,
 )
+from engine.agents.term_protocol import validate_review_response_v25
 from engine.schemas.v23 import Attempt, RequestManifest
 
 
@@ -53,7 +53,7 @@ class MemoryJournal:
 def payload(kind: str, request_id: str = "r1") -> dict:
     protocols = {
         "translate": "epubox-text-1",
-        "review": "epubox-review-1",
+        "review": "epubox-review-2",
         "coherence": "epubox-coherence-1",
     }
     return {"protocol": protocols[kind], "request_id": request_id, "items": []}
@@ -96,7 +96,7 @@ def test_request_messages_are_budgetable_and_wire_hash_is_deterministic():
 def test_review_prompt_shows_no_change_without_target_and_preserves_literal_markup_text():
     system = request_messages("review", payload("review"))[0]["content"]
     no_change_example = system.split("no_change: ", 1)[1].split("\nreplace:", 1)[0]
-    assert PROMPT_VERSION == "epubox-v23-4"
+    assert PROMPT_VERSION == "epubox-v25-1"
     assert '"decision":"no_change"' in no_change_example
     assert '"target"' not in no_change_example
     assert "omit the target key entirely; never return target:null" in system
@@ -147,7 +147,7 @@ def test_translation_duplicate_item_ids_invalidate_all_copies():
 
 def test_review_enforces_all_checks_applicability_and_decision_target_rules():
     base = {
-        "protocol": "epubox-review-1",
+        "protocol": "epubox-review-2",
         "request_id": "r2",
         "items": [
             {
@@ -166,17 +166,17 @@ def test_review_enforces_all_checks_applicability_and_decision_target_rules():
         ],
     }
     expected = {"a": {"base_revision": 3, "terminology_applicable": False, "bindings_applicable": True}}
-    assert validate_review_response(json.dumps(base), "r2", expected).errors == {}
+    assert validate_review_response_v25(json.dumps(base), "r2", expected).errors == {}
 
     base["items"][0]["checks"]["bindings"] = "uncertain"
-    assert validate_review_response(json.dumps(base), "r2", expected).errors["a"].startswith("blocking check")
+    assert validate_review_response_v25(json.dumps(base), "r2", expected).errors["a"].startswith("blocking check")
 
     base["items"][0]["decision"] = "replace"
     base["items"][0]["target"] = "完整新目标"
-    assert validate_review_response(json.dumps(base), "r2", expected).errors == {}
+    assert validate_review_response_v25(json.dumps(base), "r2", expected).errors == {}
 
     base["items"][0]["decision"] = "needs_attention"
-    assert "target is forbidden" in validate_review_response(json.dumps(base), "r2", expected).errors["a"]
+    assert "target is forbidden" in validate_review_response_v25(json.dumps(base), "r2", expected).errors["a"]
 
 
 @pytest.mark.parametrize(
@@ -208,8 +208,8 @@ def test_review_non_string_enums_are_local_item_errors(field, value, message):
         item["issues"] = [{"code": "bad", "severity": value, "message": "bad"}]
     else:
         item[field] = value
-    raw = json.dumps({"protocol": "epubox-review-1", "request_id": "r", "items": [item]})
-    result = validate_review_response(
+    raw = json.dumps({"protocol": "epubox-review-2", "request_id": "r", "items": [item]})
+    result = validate_review_response_v25(
         raw,
         "r",
         {"a": {"base_revision": 1, "terminology_applicable": False, "bindings_applicable": False}},
@@ -232,8 +232,8 @@ def test_review_unknown_item_fields_are_rejected_locally():
         "issues": [],
         "confidence": 1,
     }
-    raw = json.dumps({"protocol": "epubox-review-1", "request_id": "r", "items": [item]})
-    result = validate_review_response(
+    raw = json.dumps({"protocol": "epubox-review-2", "request_id": "r", "items": [item]})
+    result = validate_review_response_v25(
         raw,
         "r",
         {"a": {"base_revision": 1, "terminology_applicable": False, "bindings_applicable": False}},
@@ -256,8 +256,8 @@ def test_review_no_change_rejects_target_null_instead_of_treating_it_as_omitted(
         "issues": [],
         "target": None,
     }
-    raw = json.dumps({"protocol": "epubox-review-1", "request_id": "r", "items": [item]})
-    result = validate_review_response(
+    raw = json.dumps({"protocol": "epubox-review-2", "request_id": "r", "items": [item]})
+    result = validate_review_response_v25(
         raw,
         "r",
         {"a": {"base_revision": 1, "terminology_applicable": False, "bindings_applicable": False}},

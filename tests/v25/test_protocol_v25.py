@@ -2,13 +2,13 @@ import json
 
 import pytest
 
-from engine.agents.protocol_v23 import ProtocolError
-from engine.agents.protocol_v25 import (
+from engine.agents.protocol import ProtocolError
+from engine.agents.term_protocol import (
     validate_resolution_response,
     validate_review_response_v25,
     validate_terms_response,
 )
-from engine.agents.runtime_v23 import Stage, request_messages
+from engine.agents.runtime import Stage, request_messages
 
 
 def _terms(items: list[dict]) -> str:

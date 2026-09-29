@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import uuid4
 
-from engine.agents.protocol_v23 import ProtocolError
-from engine.agents.protocol_v25 import validate_terms_response
-from engine.agents.runtime_v23 import PROMPT_VERSION_V25, ModelRuntime, RequestError, RuntimePaused, wire_hash
+from engine.agents.protocol import ProtocolError
+from engine.agents.term_protocol import validate_terms_response
+from engine.agents.runtime import PROMPT_VERSION, ModelRuntime, RequestError, RuntimePaused, wire_hash
 from engine.core.tokens import count_tokens
 from engine.schemas.v25 import (
     Attempt,
@@ -47,7 +47,7 @@ class TermRunner:
             for document_id, digest in self.preparation.document_hashes.items()
         }
         config = self.preparation.extraction_config
-        if config.get("prompt_version") != PROMPT_VERSION_V25 or config.get("target_language") != "zh-Hans":
+        if config.get("prompt_version") != PROMPT_VERSION or config.get("target_language") != "zh-Hans":
             raise ValueError("frozen terminology prompt or target language does not match this runtime")
         if not isinstance(config.get("model"), str) or not config["model"]:
             raise ValueError("frozen terminology model identity is missing")
