@@ -24,6 +24,8 @@ python main.py translate ./book.epub
 
 默认输出到源书旁的 `book-zh-Hans.epub`，运行资料保存在 `work/<source_hash>/<run_id>/`。默认自动提取术语；`--glossary ./terms.json` 可以同时提供用户规则，不会关闭自动发现。需要调整时可用 `--output`、`--work-root`、`--provider`、`--context-tokens`、`--max-output-tokens`、`--concurrency` 和 `--http-limit`。只有明确传入 `--no-auto-extract` 才跳过自动术语调用；此选项主要用于确定性测试，不降低正文校对要求。
 
+中断后**再次执行同一条 `translate` 命令**，程序会按源 EPUB 字节、冻结的模型/规划参数和用户词表，自动找到唯一匹配的工作目录并续跑；已成功落盘的术语窗口、译文与校对结果不会从头请求。若参数或词表改变、或存在多个匹配运行，会明确报错，避免静默重复付费。只有确定要放弃已有进度时才使用另一 `--work-root`。同一本书的并发执行受锁保护；应等当前命令退出后再重启。
+
 同一容器内连续、可翻译的正文段落会按实际源投影尽量合成一个 Unit，直到下一段会使该 Unit 超过 1200 源 token；标题、列表、表格、注释和不可翻译内容保持结构边界。每段仍有独立的源文视图，段落顺序不能被模型改动。Unit 是有源位置和结构归属的任务；Segment 才是模型看到的源文片段，一个 Unit 若因模型整体预算仍过长，会再切成多个 Segment。**每个 Segment 的源投影硬上限为 1200 token**，无法安全切分只挂起该 Unit。Batch 可把多个独立 Segment 放进一次 HTTP 请求；提示、术语和只读上下文不计入这个源片段上限，但仍受模型请求的整体预算约束。
 
 用户词表支持简单映射，默认是软性偏好：
@@ -40,7 +42,7 @@ python main.py translate ./book.epub
 
 作用范围也可指定已解析的 `document_ids` 或 `unit_ids`。用户规则优先于自动候选；自动候选仅在有可核对的源证据后作为 `preferred` 冻结。未经确认的自动别名会在冻结警告中列出，不会仅凭出现就生效。独立的旧 `generate-glossary` 命令已删除。
 
-## 从 JSON 继续
+## 显式指定工作目录或修订
 
 ```bash
 python main.py resume ./work/<source_hash>/<run_id> --output ./book-zh-Hans.epub

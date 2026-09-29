@@ -14,8 +14,13 @@ from engine.agents.models import build_run_model
 from engine.agents.runtime import PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.checker import checker_for_source
-from engine.epub.preparation import PreparationConfig
-from engine.epub.publication import publish_book
+from engine.epub.preparation import (
+    PreparationConfig,
+    _frozen_extraction_config,
+    _frozen_translation_config,
+    _sha256_file,
+)
+from engine.epub.publication import publish_book, recover_publication
 from engine.item.planner import MAX_SOURCE_TOKENS
 from engine.item.unit_planner import PLANNER_VERSION
 from engine.orchestrator import (
@@ -26,13 +31,20 @@ from engine.orchestrator import (
     validate_repair_file,
     validate_retry_failed_units,
 )
-from engine.schemas.contracts import JsonValue, canonical_hash, canonical_json_bytes, strict_json_loads
-from engine.services.atomic_store import safe_id
+from engine.schemas.contracts import (
+    JsonValue,
+    UnsupportedFormatError,
+    canonical_hash,
+    canonical_json_bytes,
+    strict_json_loads,
+)
+from engine.services.atomic_store import AtomicStore, IdentityMismatch, safe_id
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.coherence import add_http_budget, retry_document_check
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.report import write_report
 from engine.services.store import RunStore
+from engine.services.term_inputs import load_user_terms
 from engine.services.term_planning import TERM_PLANNER_VERSION
 
 type RunStatus = Literal["completed", "paused", "needs_attention", "failed"]
@@ -93,13 +105,10 @@ def translate_book(
     """Start and advance all durable gates with one user command."""
     source = source.resolve(strict=True)
     output = output or source.with_name(f"{source.stem}-zh-Hans.epub")
-    check_output(source, output, overwrite=overwrite)
     provider = _provider(provider)
     if min(context_tokens, max_output_tokens, concurrency) < 1 or http_limit < 0:
         raise ValueError("model limits must be positive and HTTP limit non-negative")
     model_id = _model_id(provider)
-    model = build_run_model(provider, model_id, max_output_tokens=max_output_tokens)
-    checker = checker_for_source(source, epubcheck)
     translation_config: dict[str, JsonValue] = {
         "target_language": "zh-Hans",
         "provider": provider,
@@ -125,11 +134,99 @@ def translate_book(
         extraction_config=extraction_config,
         translation_config=translation_config,
     )
-    return asyncio.run(
-        _advance_source(
-            source, output, work_root, config, checker, model=model, overwrite=overwrite, progress=progress
+    work_root = work_root.resolve()
+    source_hash = _sha256_file(source)
+    with AtomicStore(work_root / source_hash).lock(blocking=False):
+        if run_id := _existing_run_id(work_root / source_hash, source_hash, config):
+            config = replace(config, run_id=run_id)
+            completed = _completed_run_outcome(work_root / source_hash / run_id, output)
+            if completed is not None:
+                return completed
+        check_output(source, output, overwrite=overwrite)
+        model = build_run_model(provider, model_id, max_output_tokens=max_output_tokens)
+        checker = checker_for_source(source, epubcheck)
+        return asyncio.run(
+            _advance_source(
+                source, output, work_root, config, checker, model=model, overwrite=overwrite, progress=progress
+            )
+        )
+
+
+def _existing_run_id(source_root: Path, source_hash: str, config: PreparationConfig) -> str | None:
+    expected_extraction = _frozen_extraction_config(config)
+    expected_translation = _frozen_translation_config(config)
+    matches: list[str] = []
+    other_runs: list[Path] = []
+    for run_dir in sorted(source_root.iterdir()):
+        if run_dir.is_symlink() or not (run_dir / "preparation.json").is_file():
+            continue
+        store = RunStore(run_dir)
+        try:
+            preparation = store.read_preparation()
+        except UnsupportedFormatError:
+            other_runs.append(run_dir)
+            continue
+        if preparation.source_hash != source_hash or preparation.run_id != run_dir.name:
+            raise IdentityMismatch(f"preparation identity differs from run directory: {run_dir}")
+        if (
+            preparation.extraction_config != expected_extraction
+            or preparation.translation_config != expected_translation
+        ):
+            other_runs.append(run_dir)
+            continue
+        terms, terms_hash = load_user_terms(
+            config.user_terms_path,
+            document_ids=preparation.document_hashes,
+            unit_ids=preparation.unit_documents,
+        )
+        if preparation.user_terms != terms or preparation.user_terms_hash != terms_hash:
+            other_runs.append(run_dir)
+            continue
+        store._trusted_preparation_documents()
+        matches.append(preparation.run_id)
+    if len(matches) > 1:
+        raise ValueError(f"multiple matching runs exist for this EPUB; use resume with one work directory: {matches}")
+    if matches:
+        return matches[0]
+    if other_runs:
+        raise ValueError(
+            "existing run has a different frozen configuration; use the original options or a new work root"
+        )
+    return None
+
+
+def _completed_run_outcome(work_dir: Path, output: Path) -> RunOutcome | None:
+    publish_path = work_dir / "publish.json"
+    if not publish_path.is_file():
+        return None
+    store = RunStore(work_dir)
+    plan = store.read_bookplan()
+    versions = {unit_id: store.read_unit(unit_id).revision for unit_id in plan.unit_ids}
+    published = recover_publication(
+        publish_path,
+        plan_fingerprint=canonical_hash(plan),
+        version_vector=versions,
+    )
+    if published is None or Path(str(published["target_path"])).resolve() != output.resolve():
+        return None
+    result = _record(
+        RunOutcome(
+            "completed",
+            work_dir,
+            "publication",
+            accepted_units=plan.required_unit_count,
+            required_units=plan.required_unit_count,
+            output_path=output,
+            output_sha256=str(published["target_hash"]),
         )
     )
+    assert result.report_path is not None
+    report = strict_json_loads(result.report_path.read_bytes())
+    http = report.get("http") if isinstance(report, dict) else None
+    attempts = http.get("actual_attempts") if isinstance(http, dict) else None
+    if type(attempts) is not int:
+        raise ValueError("completed run report did not contain HTTP accounting")
+    return replace(result, http_attempts=attempts)
 
 
 def resume_book(
@@ -155,6 +252,8 @@ def resume_book(
     if (add_unit_http and not retry_units) or (add_check_http and not retry_checks):
         raise ValueError("Unit/check budget additions require explicit target IDs")
     preparation = store.read_preparation()
+    if work_dir.name != preparation.run_id or work_dir.parent.name != preparation.source_hash:
+        raise IdentityMismatch("resume work directory does not match its frozen run identity")
     source = work_dir / preparation.source_path
     check_output(source, output, overwrite=overwrite)
     extraction = preparation.extraction_config
@@ -168,19 +267,20 @@ def resume_book(
         max_output_tokens=output_tokens,
     )
     checker = checker_for_source(source, epubcheck)
-    _authorize_resume_actions(
-        store,
-        retry_units=retry_units,
-        add_unit_http=add_unit_http,
-        add_run_http=add_run_http,
-        retry_checks=retry_checks,
-        add_check_http=add_check_http,
-        repair_file=repair_file,
-        authorization_id=authorization_id,
-    )
-    return asyncio.run(
-        _advance_work_dir(work_dir, output, checker, model=model, overwrite=overwrite, progress=progress)
-    )
+    with AtomicStore(work_dir.parent).lock(blocking=False):
+        _authorize_resume_actions(
+            store,
+            retry_units=retry_units,
+            add_unit_http=add_unit_http,
+            add_run_http=add_run_http,
+            retry_checks=retry_checks,
+            add_check_http=add_check_http,
+            repair_file=repair_file,
+            authorization_id=authorization_id,
+        )
+        return asyncio.run(
+            _advance_work_dir(work_dir, output, checker, model=model, overwrite=overwrite, progress=progress)
+        )
 
 
 def _authorize_resume_actions(

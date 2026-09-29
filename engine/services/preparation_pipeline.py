@@ -30,6 +30,7 @@ from engine.schemas.contracts import (
 from engine.services.atomic_store import IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.term_freeze import ResolutionDecision, freeze_terminology, prepare_candidate_pool
+from engine.services.term_inputs import load_user_terms
 from engine.services.term_planning import plan_term_extraction
 from engine.services.term_resolution import TermResolutionRunner
 from engine.services.term_runner import TermRunner
@@ -350,11 +351,18 @@ def _p1(
         if preparation_path.exists():
             store = RunStore(root)
             preparation = store.read_preparation()
+            terms, terms_hash = load_user_terms(
+                config.user_terms_path,
+                document_ids=preparation.document_hashes,
+                unit_ids=preparation.unit_documents,
+            )
             if (
                 preparation.source_hash != source_hash
                 or preparation.run_id != config.run_id
                 or preparation.extraction_config != _frozen_extraction_config(config)
                 or preparation.translation_config != _frozen_translation_config(config)
+                or preparation.user_terms != terms
+                or preparation.user_terms_hash != terms_hash
             ):
                 raise IdentityMismatch("resume configuration differs from the committed P1 inputs")
             return store, preparation, _sha256(preparation_path)

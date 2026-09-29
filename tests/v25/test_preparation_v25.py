@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 import engine.epub.preparation as preparation_module
+import engine.services.preparation_pipeline as pipeline_module
 from engine.agents.runtime import PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.epub.validation import EpubCheckResult
 from engine.item.extractor import extract_document
+from engine.services.atomic_store import IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION, plan_term_extraction
 from tests.v23.book_factory import make_epub
@@ -168,6 +170,18 @@ def test_p1_freezes_the_provider_model_id_without_credentials(tmp_path: Path) ->
     assert config["provider"] == "cr_proxy"
     assert config["model"] == settings.CR_PROXY_MODEL
     assert not any("key" in name.casefold() for name in config)
+
+
+def test_p1_reuse_rejects_changed_user_terms(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub")
+    terms = tmp_path / "terms.json"
+    terms.write_text('{"RAM":"内存"}')
+    config = PreparationConfig(run_id="same-run", user_terms_path=terms)
+    prepare_book(source, tmp_path / "work", config, StubChecker())
+    terms.write_text('{"RAM":"随机存取存储器"}')
+
+    with pytest.raises(IdentityMismatch, match="resume configuration differs"):
+        pipeline_module._p1(source, tmp_path / "work", config, StubChecker())
 
 
 def test_p1_resolves_derived_navigation_before_immutable_document_write(tmp_path: Path) -> None:

@@ -1,11 +1,16 @@
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from engine import cli
+from engine.epub.preparation import prepare_book
+from engine.services.atomic_store import AtomicStore, StoreLocked
 from engine.services.coherence import load_budget_overrides
+from tests.v23.book_factory import make_epub
 from tests.v25.test_orchestrator import ready_store
+from tests.v25.test_preparation_v25 import StubChecker
 
 
 def test_translate_command_routes_only_through_preparation_pipeline(
@@ -39,6 +44,149 @@ def test_translate_command_routes_only_through_preparation_pipeline(
     assert captured["config"].translation_config["target_language"] == "zh-Hans"
 
 
+def test_repeating_translate_command_reuses_the_same_prepared_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    work_root = tmp_path / "work"
+    seen_run_ids: list[str | None] = []
+    checker = StubChecker()
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: checker)
+
+    async def advance(actual_source, output, actual_work_root, config, actual_checker, **_kwargs):
+        seen_run_ids.append(config.run_id)
+        if len(seen_run_ids) == 1:
+            prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
+            return cli.RunOutcome("paused", prepared.work_dir, "terms")
+        return cli.RunOutcome("paused", first.work_dir, "terms")
+
+    monkeypatch.setattr(cli, "_advance_source", advance)
+    first = cli.translate_book(source, work_root=work_root)
+    second = cli.translate_book(source, work_root=work_root)
+
+    assert first.work_dir == second.work_dir
+    assert seen_run_ids == [None, first.work_dir.name]
+
+
+def test_translate_refuses_to_restart_paid_work_with_changed_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    work_root = tmp_path / "work"
+    checker = StubChecker()
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: checker)
+
+    async def advance(actual_source, output, actual_work_root, config, actual_checker, **_kwargs):
+        prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
+        return cli.RunOutcome("paused", prepared.work_dir, "terms")
+
+    monkeypatch.setattr(cli, "_advance_source", advance)
+    cli.translate_book(source, work_root=work_root)
+
+    with pytest.raises(ValueError, match="different frozen configuration"):
+        cli.translate_book(source, work_root=work_root, context_tokens=8192)
+
+
+def test_translate_refuses_changed_user_terms_without_repeating_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    terms = tmp_path / "terms.json"
+    terms.write_text('{"data":"数据"}')
+    checker = StubChecker()
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: checker)
+
+    async def advance(actual_source, output, actual_work_root, config, actual_checker, **_kwargs):
+        prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
+        return cli.RunOutcome("paused", prepared.work_dir, "terms")
+
+    monkeypatch.setattr(cli, "_advance_source", advance)
+    cli.translate_book(source, work_root=tmp_path / "work", glossary=terms)
+    terms.write_text('{"data":"资料"}')
+
+    with pytest.raises(ValueError, match="different frozen configuration"):
+        cli.translate_book(source, work_root=tmp_path / "work", glossary=terms)
+
+
+def test_same_source_execution_lock_prevents_concurrent_translate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    source_root = tmp_path / "work" / hashlib.sha256(source.read_bytes()).hexdigest()
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: object())
+
+    with AtomicStore(source_root).lock(blocking=False), pytest.raises(StoreLocked):
+        cli.translate_book(source, work_root=tmp_path / "work")
+
+
+def test_resume_and_translate_share_the_source_execution_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work_dir = tmp_path / "source-hash" / "run-id"
+    work_dir.mkdir(parents=True)
+    (work_dir / "source.epub").write_bytes(b"fixture")
+    preparation = SimpleNamespace(
+        run_id=work_dir.name,
+        source_hash=work_dir.parent.name,
+        source_path="source.epub",
+        extraction_config={"provider": "agnes", "model": "frozen-model", "max_output_tokens": 128},
+    )
+    monkeypatch.setattr(cli, "RunStore", lambda *_: SimpleNamespace(read_preparation=lambda: preparation))
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id="frozen-model"))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: object())
+
+    with AtomicStore(work_dir.parent).lock(blocking=False), pytest.raises(StoreLocked):
+        cli.resume_book(work_dir, output=tmp_path / "target.epub")
+
+
+def test_translate_refuses_ambiguous_compatible_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    work_root = tmp_path / "work"
+    checker = StubChecker()
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: checker)
+    saved_config = None
+
+    async def advance(actual_source, output, actual_work_root, config, actual_checker, **_kwargs):
+        nonlocal saved_config
+        saved_config = config
+        prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
+        return cli.RunOutcome("paused", prepared.work_dir, "terms")
+
+    monkeypatch.setattr(cli, "_advance_source", advance)
+    cli.translate_book(source, work_root=work_root)
+    assert saved_config is not None
+    from dataclasses import replace
+
+    prepare_book(source, work_root, replace(saved_config, run_id="another-run"), checker)
+    with pytest.raises(ValueError, match="multiple matching runs"):
+        cli.translate_book(source, work_root=work_root)
+
+
+def test_translate_ignores_preparation_without_a_committed_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    work_root = tmp_path / "work"
+    abandoned = work_root / hashlib.sha256(source.read_bytes()).hexdigest() / "interrupted-p1"
+    abandoned.mkdir(parents=True)
+    (abandoned / "source.epub").write_bytes(source.read_bytes())
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: object())
+    seen: list[str | None] = []
+
+    async def advance(_source, _output, _work_root, config, _checker, **_kwargs):
+        seen.append(config.run_id)
+        return cli.RunOutcome("paused", abandoned, "terms")
+
+    monkeypatch.setattr(cli, "_advance_source", advance)
+    cli.translate_book(source, work_root=work_root)
+    assert seen == [None]
+
+
 def test_resume_uses_frozen_model_and_snapshot_without_user_term_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -46,6 +194,8 @@ def test_resume_uses_frozen_model_and_snapshot_without_user_term_file(
     work_dir.mkdir()
     (work_dir / "source.epub").write_bytes(b"fixture")
     preparation = SimpleNamespace(
+        run_id=work_dir.name,
+        source_hash=work_dir.parent.name,
         source_path="source.epub",
         extraction_config={"provider": "agnes", "model": "frozen-model", "max_output_tokens": 128},
     )
