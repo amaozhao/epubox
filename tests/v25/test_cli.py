@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from engine import cli
+from engine.services.coherence import load_budget_overrides
+from tests.v25.test_orchestrator import ready_store
 
 
 def test_translate_command_routes_only_through_preparation_pipeline(
@@ -77,3 +79,61 @@ def test_outcome_report_is_derived_from_the_same_work_directory(tmp_path: Path, 
     assert result.report_path == tmp_path / "report.json"
     assert calls[0][0] == tmp_path
     assert calls[0][1]["status"] == "needs_attention"
+
+
+def test_bad_manual_target_cannot_grant_run_budget(tmp_path: Path) -> None:
+    store, _, _ = ready_store(tmp_path)
+    limits_path = store._path("checks", "run-limits")
+    with pytest.raises(ValueError, match="unknown retry Unit"):
+        cli._authorize_resume_actions(
+            store,
+            retry_units=("ghost",),
+            add_unit_http=6,
+            add_run_http=100,
+            retry_checks=(),
+            add_check_http=0,
+            repair_file=None,
+            authorization_id="invalid-unit",
+        )
+    assert not limits_path.exists()
+
+
+def test_stale_repair_cannot_grant_run_budget(tmp_path: Path) -> None:
+    store, unit, _ = ready_store(tmp_path)
+    repair = tmp_path / "stale.json"
+    repair.write_text('{"unit_id":"' + unit.unit_id + '","base_revision":5,"plan_epoch":0,"target":"中文"}')
+    with pytest.raises(ValueError, match="stale"):
+        cli._authorize_resume_actions(
+            store,
+            retry_units=(),
+            add_unit_http=0,
+            add_run_http=100,
+            retry_checks=(),
+            add_check_http=0,
+            repair_file=repair,
+            authorization_id="invalid-repair",
+        )
+    assert not store._path("checks", "run-limits").exists()
+
+
+def test_same_manual_authorization_replay_does_not_add_budget_twice(tmp_path: Path) -> None:
+    store, _, _ = ready_store(tmp_path)
+
+    def authorize(amount: int) -> None:
+        cli._authorize_resume_actions(
+            store,
+            retry_units=(),
+            add_unit_http=0,
+            add_run_http=amount,
+            retry_checks=(),
+            add_check_http=0,
+            repair_file=None,
+            authorization_id="approval-1",
+        )
+
+    authorize(6)
+    authorize(6)
+    assert load_budget_overrides(store)["add_run_http"] == 6
+    with pytest.raises(ValueError, match="different resume action"):
+        authorize(7)
+    assert load_budget_overrides(store)["add_run_http"] == 6

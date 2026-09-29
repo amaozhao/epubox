@@ -67,6 +67,8 @@ def test_resume_cli_forwards_explicit_retry_and_budget_targets(tmp_path: Path, m
             "d1",
             "--add-check-http",
             "3",
+            "--authorization-id",
+            "manual-1",
         ],
     )
 
@@ -75,6 +77,7 @@ def test_resume_cli_forwards_explicit_retry_and_budget_targets(tmp_path: Path, m
     assert captured["add_unit_http"] == captured["add_run_http"] == 6
     assert captured["retry_checks"] == ("d1",)
     assert captured["add_check_http"] == 3
+    assert captured["authorization_id"] == "manual-1"
 
 
 def test_plan_resume_cli_only_previews_old_format(tmp_path: Path) -> None:

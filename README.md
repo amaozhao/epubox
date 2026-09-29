@@ -46,6 +46,21 @@ python main.py resume ./work/<source_hash>/<run_id> --output ./book-zh-Hans.epub
 
 续跑使用工作目录中的 `source.epub`、`preparation.json`、`glossary.json`、`documents/`、`units/` 和 `requests/`，不要求原用户词表文件仍存在。它扫描完整任务清单，复用成功的术语窗口与已接受译文，只处理未完成项。准备阶段先提交 `parsed_ready`，术语冻结后才创建 ready 的 `bookplan.json`；没有 BookPlan 不表示之前没有付费请求。
 
+先只读查看恢复动作，不产生模型调用或改动文件：
+
+```bash
+python main.py plan-resume ./work/<source_hash>/<run_id>
+```
+
+自动次数已耗尽时，可明确指定需要重开的 Unit 和新增额度；同一授权重复执行不会重复加额：
+
+```bash
+python main.py resume ./work/<source_hash>/<run_id> --output ./book-zh-Hans.epub \
+  --retry-unit <unit_id> --add-unit-http 6 --add-run-http 6 --authorization-id repair-001
+```
+
+校对修订可用 `--repair-file ./repairs.json` 导入包含 `unit_id`、当前 `base_revision`、`plan_epoch` 和完整 `target`（长 Unit 使用完整 `targets` 映射）的 JSON。章节检查问题用 `--retry-check <document_id> --add-check-http 3` 明确重开。额度追加保留既有请求计数；坏 ID 或过期修订会在加额前拒绝。
+
 状态只有 `completed`、`paused`、`needs_attention`、`failed`。只有 `completed` 且本次 EPUBCheck、结构/资源校验与发布均通过，才返回成功退出码和正式输出路径。未完成运行保留 JSON 进度，不发布混有失败片段的草稿。旧 HTML 或旧 JSON checkpoint 不会混入本轮协议；需为原书创建新运行。
 
 ## 开发验证

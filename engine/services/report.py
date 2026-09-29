@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from engine.schemas.v25 import JsonValue, canonical_json_bytes
+from engine.schemas.v25 import JsonValue, UnitRecord, canonical_hash, canonical_json_bytes
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.store_v25 import StoreV25
 
@@ -63,7 +63,10 @@ def write_report(
         "reason": reason,
         "source_units": len(preparation.unit_documents),
         "required_units": book.required_unit_count if book is not None else None,
-        "accepted_units": sum(record.accepted_revision == record.revision for record in records.values()),
+        "accepted_units": sum(
+            record.accepted_revision == record.revision or _current_derived(record, records)
+            for record in records.values()
+        ),
         "pending_items": sum(
             item.status in {"pending", "in_flight", "retry_wait"}
             for record in records.values()
@@ -108,3 +111,22 @@ def write_report(
 
 
 __all__ = ["write_report"]
+
+
+def _current_derived(record: UnitRecord, records: dict[str, UnitRecord]) -> bool:
+    derived = record.derived
+    if derived is None or derived.get("state") != "valid":
+        return False
+    source_id = derived.get("source_unit_id")
+    if not isinstance(source_id, str):
+        return False
+    source = records.get(source_id)
+    target = derived.get("target")
+    return (
+        source is not None
+        and source.accepted_revision == source.revision
+        and source.accepted_target_hash == derived.get("source_target_hash")
+        and source.revision == derived.get("source_revision")
+        and isinstance(target, str)
+        and derived.get("target_hash") == canonical_hash(target)
+    )

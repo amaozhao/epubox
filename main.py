@@ -66,6 +66,7 @@ def resume(
     add_run_http: int = typer.Option(0, "--add-run-http", min=0),
     retry_check: list[str] = typer.Option([], "--retry-check"),
     add_check_http: int = typer.Option(0, "--add-check-http", min=0),
+    authorization_id: str | None = typer.Option(None, "--authorization-id"),
 ) -> None:
     try:
         result = resume_book(
@@ -80,6 +81,7 @@ def resume(
             add_run_http=add_run_http,
             retry_checks=tuple(retry_check),
             add_check_http=add_check_http,
+            authorization_id=authorization_id,
         )
     except Exception as error:
         typer.echo(f"续跑未完成：{error}", err=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -16,8 +17,17 @@ from engine.epub.checker import checker_for_source
 from engine.epub.preparation_v25 import PreparationConfig
 from engine.epub.publication import publish_book
 from engine.item.planner_v25 import PLANNER_VERSION
-from engine.orchestrator import TranslationRunResult, import_repair_file, retry_failed_units, run_translation
-from engine.schemas.v25 import JsonValue
+from engine.orchestrator import (
+    TranslationRunResult,
+    import_repair_file,
+    retry_failed_units,
+    run_translation,
+    validate_repair_file,
+    validate_retry_failed_units,
+)
+from engine.schemas.v25 import JsonValue, canonical_hash, canonical_json_bytes, strict_json_loads
+from engine.services.atomic_store import safe_id
+from engine.services.coherence import _read as read_coherence_record
 from engine.services.coherence import add_http_budget, retry_document_check
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.report import write_report
@@ -132,13 +142,14 @@ def resume_book(
     retry_checks: tuple[str, ...] = (),
     add_check_http: int = 0,
     repair_file: Path | None = None,
+    authorization_id: str | None = None,
 ) -> RunOutcome:
     """Resume only the saved source and run identities, without the original user term file."""
     work_dir = work_dir.resolve(strict=True)
     store = StoreV25(work_dir)
-    if any(value < 0 for value in (add_unit_http, add_run_http, add_check_http)):
+    if any(type(value) is not int or value < 0 for value in (add_unit_http, add_run_http, add_check_http)):
         raise ValueError("HTTP budget additions must be non-negative")
-    if add_unit_http and not retry_units or add_check_http and not retry_checks:
+    if (add_unit_http and not retry_units) or (add_check_http and not retry_checks):
         raise ValueError("Unit/check budget additions require explicit target IDs")
     preparation = store.read_preparation()
     source = work_dir / preparation.source_path
@@ -154,22 +165,115 @@ def resume_book(
         max_output_tokens=output_tokens,
     )
     checker = checker_for_source(source, epubcheck)
-    if add_run_http:
-        add_http_budget(store, add_run_http=add_run_http)
+    _authorize_resume_actions(
+        store,
+        retry_units=retry_units,
+        add_unit_http=add_unit_http,
+        add_run_http=add_run_http,
+        retry_checks=retry_checks,
+        add_check_http=add_check_http,
+        repair_file=repair_file,
+        authorization_id=authorization_id,
+    )
     return asyncio.run(
-        _advance_work_dir(
-            work_dir,
-            output,
-            checker,
-            model=model,
-            overwrite=overwrite,
-            progress=progress,
-            retry_units=retry_units,
-            add_unit_http=add_unit_http,
-            retry_checks=retry_checks,
-            add_check_http=add_check_http,
-            repair_file=repair_file,
+        _advance_work_dir(work_dir, output, checker, model=model, overwrite=overwrite, progress=progress)
+    )
+
+
+def _authorize_resume_actions(
+    store: StoreV25,
+    *,
+    retry_units: tuple[str, ...],
+    add_unit_http: int,
+    add_run_http: int,
+    retry_checks: tuple[str, ...],
+    add_check_http: int,
+    repair_file: Path | None,
+    authorization_id: str | None,
+) -> None:
+    if not any((retry_units, add_unit_http, add_run_http, retry_checks, add_check_http, repair_file)):
+        return
+    preparation = store.read_preparation()
+    repair_hash = hashlib.sha256(repair_file.read_bytes()).hexdigest() if repair_file is not None else None
+    action = {
+        "run_id": preparation.run_id,
+        "retry_units": sorted(set(retry_units)),
+        "retry_checks": sorted(set(retry_checks)),
+        "add_unit_http": add_unit_http,
+        "add_run_http": add_run_http,
+        "add_check_http": add_check_http,
+        "repair_hash": repair_hash,
+    }
+    action_hash = canonical_hash(action)
+    identity = safe_id(authorization_id or f"auto-{action_hash[:24]}")
+    marker = store.root / "checks" / "manual-actions" / f"{identity}.json"
+    with store.lock():
+        if marker.exists():
+            saved = strict_json_loads(marker.read_bytes())
+            if not isinstance(saved, dict) or saved.get("action_hash") != action_hash:
+                raise ValueError("authorization_id was already used for a different resume action")
+            return
+        book_path = store.root / "bookplan.json"
+        if retry_units or retry_checks or repair_file is not None:
+            if not book_path.exists():
+                raise ValueError("Unit/check retry and repair require a ready BookPlan")
+            book = store.read_bookplan()
+            for unit_id in retry_units:
+                safe_id(unit_id)
+                if unit_id not in book.unit_ids:
+                    raise ValueError(f"unknown retry Unit: {unit_id}")
+                store.read_unit(unit_id)
+            if retry_units:
+                validate_retry_failed_units(store, retry_units, add_unit_http=add_unit_http)
+            for document_id in retry_checks:
+                safe_id(document_id)
+                if document_id not in book.document_hashes:
+                    raise ValueError(f"unknown retry Document: {document_id}")
+                check = read_coherence_record(store._path("checks", document_id))
+                if check.get("document_id") != document_id:
+                    raise ValueError(f"coherence check identity mismatch: {document_id}")
+            if repair_file is not None:
+                try:
+                    validate_repair_file(store, repair_file)
+                except ValueError:
+                    if not _repair_already_applied(store, repair_file):
+                        raise
+        add_http_budget(
+            store,
+            authorization_id=identity,
+            action_context_hash=action_hash,
+            add_run_http=add_run_http,
+            add_unit_http={unit_id: add_unit_http for unit_id in retry_units} if add_unit_http else {},
+            add_check_http={document_id: add_check_http for document_id in retry_checks} if add_check_http else {},
         )
+        if repair_file is not None and not _repair_already_applied(store, repair_file):
+            import_repair_file(store, repair_file)
+        if retry_units:
+            retry_failed_units(store, retry_units)
+        for document_id in retry_checks:
+            retry_document_check(store, document_id)
+        store._base.atomic_write_bytes(
+            marker, canonical_json_bytes({"format": "epubox-action-1", "action_hash": action_hash})
+        )
+
+
+def _repair_already_applied(store: StoreV25, path: Path) -> bool:
+    raw = strict_json_loads(path.read_bytes())
+    if not isinstance(raw, dict):
+        return False
+    unit_id = raw.get("unit_id")
+    if not isinstance(unit_id, str):
+        return False
+    record = store.read_unit(unit_id)
+    base = raw.get("base_revision")
+    if type(base) is not int or record.revision != base + 1 or record.plan_epoch != raw.get("plan_epoch"):
+        return False
+    targets = raw.get("targets")
+    if targets is None and isinstance(raw.get("target"), str) and len(record.items) == 1:
+        targets = {next(iter(record.items)): raw["target"]}
+    return isinstance(targets, dict) and all(
+        item_id in record.items and record.items[item_id].target_projection == target
+        for item_id, target in targets.items()
     )
 
 
@@ -200,27 +304,8 @@ async def _advance_work_dir(
     model: object,
     overwrite: bool,
     progress: ProgressCallback | None = None,
-    retry_units: tuple[str, ...] = (),
-    add_unit_http: int = 0,
-    retry_checks: tuple[str, ...] = (),
-    add_check_http: int = 0,
-    repair_file: Path | None = None,
 ) -> RunOutcome:
     prepared = await resume_preparation(work_dir, checker, model=model, progress=_preparation_progress(progress))
-    if prepared.status != "paused" and (retry_units or retry_checks or repair_file is not None):
-        store = StoreV25(work_dir)
-        if add_unit_http or add_check_http:
-            add_http_budget(
-                store,
-                add_unit_http={unit_id: add_unit_http for unit_id in retry_units},
-                add_check_http={document_id: add_check_http for document_id in retry_checks},
-            )
-        if repair_file is not None:
-            import_repair_file(store, repair_file)
-        if retry_units:
-            retry_failed_units(store, retry_units)
-        for document_id in retry_checks:
-            retry_document_check(store, document_id)
     return await _finish(
         prepared.status, prepared.phase, prepared.work_dir, output, checker, model, overwrite, progress
     )

@@ -98,4 +98,8 @@ def test_one_pipeline_reaches_verified_epub_with_fake_model(tmp_path: Path, monk
     assert result.status == "completed"
     assert output.is_file() and result.output_sha256
     assert result.report_path and result.report_path.is_file()
+    report = json.loads(result.report_path.read_text())
+    assert report["status"] == "completed"
+    assert report["accepted_units"] == report["required_units"]
+    assert set(report["coherence_by_document"].values()) == {"valid"}
     assert "translate" in calls and "review" in calls
