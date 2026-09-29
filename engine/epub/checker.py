@@ -73,15 +73,12 @@ def _known_epubcheck_54_nav_errors(source: Path, errors: tuple[str, ...]) -> boo
     location = re.compile(rf"/{re.escape(nav_path)}\((\d+),\d+\)")
     for error in errors:
         match = location.search(error)
-        if (
-            "ERROR(RSC-005):" not in error
-            or 'attribute "aria-labelledby" not allowed here' not in error
-            or match is None
-        ):
+        attribute = re.search(r'attribute "(aria-label|aria-labelledby)" not allowed here', error)
+        if "ERROR(RSC-005):" not in error or attribute is None or match is None:
             return False
         line_number = int(match.group(1))
         if not 1 <= line_number <= len(nav_lines) or not re.search(
-            r"<nav\b[^>]*\baria-labelledby\s*=", nav_lines[line_number - 1]
+            rf"<nav\b[^>]*\b{re.escape(attribute.group(1))}\s*=", nav_lines[line_number - 1]
         ):
             return False
     return True

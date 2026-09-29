@@ -80,6 +80,50 @@ def test_known_54_navigation_error_uses_passing_53(tmp_path: Path) -> None:
     assert fallback.checked == [source]
 
 
+def test_mixed_navigation_aria_label_errors_use_passing_53(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    nav = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body>\n'
+        '<nav aria-label="contents"/>\n'
+        '<nav aria-labelledby="landmarks"/>\n'
+        '<nav aria-label="pages"/></body></html>'
+    )
+    make_epub(source, nav=nav)
+    errors = tuple(
+        f"ERROR(RSC-005): /tmp/book.epub/OEBPS/navigation.xhtml({line},28): "
+        f'Error while parsing file: attribute "{attribute}" not allowed here'
+        for line, attribute in ((2, "aria-label"), (3, "aria-labelledby"), (4, "aria-label"))
+    )
+    primary = StubChecker(EpubCheckResult(("/tools/epubcheck-5.4.0/epubcheck.jar",), 1, errors=errors))
+    fallback = StubChecker(EpubCheckResult(("5.3",), 0))
+    with (
+        patch("engine.epub.checker.checker_command", return_value=primary),
+        patch("engine.epub.checker._portable_checker", return_value=fallback),
+    ):
+        assert checker_for_source(source) is fallback
+    assert primary.checked == [source]
+    assert fallback.checked == [source]
+
+
+def test_non_navigation_aria_error_does_not_use_fallback(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    make_epub(
+        source,
+        nav='<html xmlns="http://www.w3.org/1999/xhtml"><body>\n<p aria-label="ordinary">Text</p></body></html>',
+    )
+    error = (
+        "ERROR(RSC-005): /tmp/book.epub/OEBPS/navigation.xhtml(2,28): "
+        'Error while parsing file: attribute "aria-label" not allowed here'
+    )
+    primary = StubChecker(EpubCheckResult(("/tools/epubcheck-5.4.0/epubcheck.jar",), 1, errors=(error,)))
+    with (
+        patch("engine.epub.checker.checker_command", return_value=primary),
+        patch("engine.epub.checker._portable_checker") as fallback,
+    ):
+        assert checker_for_source(source) is primary
+    fallback.assert_not_called()
+
+
 def test_mixed_errors_do_not_fall_back(tmp_path: Path) -> None:
     source = tmp_path / "book.epub"
     make_epub(source)
