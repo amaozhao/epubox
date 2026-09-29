@@ -28,15 +28,17 @@ async def test_terms_response_is_journaled_before_attempt_succeeds() -> None:
     def finish(_request_id, _attempt_id, *, state, **_fields):
         events.append(state)
 
-    def persist(request_id: str, attempt_id: str, envelope: dict[str, object]):
-        assert request_id == "request-1" and attempt_id
+    def persist(stage: str, request_id: str, attempt_id: str, envelope: dict[str, object]):
+        assert (
+            stage in {"terms", "translate"} and request_id == f"request-{1 if stage == 'terms' else 2}" and attempt_id
+        )
         assert envelope == {
             "raw": '{"items":[]}',
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
             "finish_reason": "length",
             "metadata": {"response_id": "response-1", "finish_reason": "length"},
         }
-        events.append("persisted")
+        events.append(f"persisted:{stage}")
 
     runtime = ModelRuntime(
         transport=transport,
@@ -55,7 +57,14 @@ async def test_terms_response_is_journaled_before_attempt_succeeds() -> None:
         {"request_id": "request-2", "item_ids": ["item-2"], "output_tokens": 10},
     )
 
-    assert events == ["sent", "persisted", "succeeded", "sent", "succeeded"]
+    assert events == [
+        "sent",
+        "persisted:terms",
+        "succeeded",
+        "sent",
+        "persisted:translate",
+        "succeeded",
+    ]
 
 
 def test_term_response_journal_rejects_corruption_and_cross_attempt_replay(tmp_path) -> None:

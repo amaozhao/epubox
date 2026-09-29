@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from engine.schemas.contracts import JsonValue, UnitRecord, canonical_hash, canonical_json_bytes
+from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS
+from engine.schemas.contracts import JsonValue, UnitRecord, Usage, canonical_hash, canonical_json_bytes
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.store import RunStore
 
@@ -35,8 +36,43 @@ def write_report(
     requests = tuple(store.read_request(path.stem) for path in sorted((store.root / "requests").glob("*.json")))
     attempts = tuple(attempt for request in requests for attempt in request.attempts)
     actual = tuple(attempt for attempt in attempts if attempt.state != "reserved")
-    known_usages = tuple(attempt.usage for attempt in actual if attempt.usage is not None)
+    usage_by_attempt: dict[tuple[str, str], Usage] = {}
+    journal_recovered_usage_attempts = 0
+    for request in requests:
+        for attempt in request.attempts:
+            if attempt.state == "reserved":
+                continue
+            usage = attempt.usage
+            if usage is None:
+                response = store.read_model_response(request.stage, request.request_id, attempt.attempt_id)
+                if response is not None and response.usage is not None:
+                    usage = Usage(
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        known_cost=response.usage.known_cost,
+                    )
+                    journal_recovered_usage_attempts += 1
+            if usage is not None:
+                usage_by_attempt[(request.request_id, attempt.attempt_id)] = usage
+    known_usages = tuple(usage_by_attempt.values())
     known_costs = tuple(usage.known_cost for usage in known_usages if usage.known_cost is not None)
+    by_stage: dict[str, JsonValue] = {}
+    for stage in sorted({request.stage for request in requests}):
+        stage_requests = tuple(request for request in requests if request.stage == stage)
+        stage_attempts = tuple(
+            attempt for request in stage_requests for attempt in request.attempts if attempt.state != "reserved"
+        )
+        stage_usages = tuple(
+            usage_by_attempt[(request.request_id, attempt.attempt_id)]
+            for request in stage_requests
+            for attempt in request.attempts
+            if (request.request_id, attempt.attempt_id) in usage_by_attempt
+        )
+        by_stage[stage] = {
+            "actual_attempts": len(stage_attempts),
+            "max_items_per_request": max((len(request.item_ids) for request in stage_requests), default=0),
+            "max_known_input_tokens": max((usage.input_tokens for usage in stage_usages), default=0),
+        }
     extraction_records = (
         tuple(store.read_extraction(item.item_id) for item in term_plan.items) if term_plan is not None else ()
     )
@@ -78,8 +114,29 @@ def write_report(
             "reserved_attempts": len(attempts) - len(actual),
             "known_input_tokens": sum(usage.input_tokens for usage in known_usages),
             "known_output_tokens": sum(usage.output_tokens for usage in known_usages),
+            "journal_recovered_usage_attempts": journal_recovered_usage_attempts,
+            "max_known_input_tokens": max((usage.input_tokens for usage in known_usages), default=0),
+            "max_preflight_input_bound": max(
+                (attempt.reservation.get("estimated_input_tokens", 0) for attempt in attempts), default=0
+            ),
+            "max_rendered_utf8_bytes": max(
+                (attempt.reservation.get("rendered_input_bytes", 0) for attempt in attempts), default=0
+            ),
+            "input_budget_algorithm_version": max(
+                (attempt.reservation.get("input_budget_algorithm_version", 0) for attempt in attempts), default=0
+            ),
+            "preflight_limit_kind": "conservative_local_bound_not_provider_exact",
+            "input_limit_violations": sum(usage.input_tokens > MAX_MODEL_INPUT_TOKENS for usage in known_usages),
+            "by_stage": by_stage,
             "known_cost": sum(known_costs) if known_costs else None,
             "known_cost_attempts": len(known_costs),
+        },
+        "json_paths": {
+            "documents": str(store.root / "documents"),
+            "units": str(store.root / "units"),
+            "requests": str(store.root / "requests"),
+            "glossary": str(store.root / "glossary.json"),
+            "report": str(store.root / "report.json"),
         },
         "terminology": {
             "planned_windows": len(term_plan.items) if term_plan is not None else 0,

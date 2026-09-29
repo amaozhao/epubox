@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import traceback
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from engine.agents.models import build_run_model
-from engine.agents.runtime import PROMPT_VERSION, TERM_PROMPT_VERSION
+from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.checker import checker_for_source
 from engine.epub.preparation import (
@@ -39,7 +40,7 @@ from engine.schemas.contracts import (
     canonical_json_bytes,
     strict_json_loads,
 )
-from engine.services.atomic_store import AtomicStore, IdentityMismatch, safe_id
+from engine.services.atomic_store import AtomicStore, IdentityMismatch, StoreLocked, safe_id
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.coherence import add_http_budget, retry_document_check
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
@@ -126,6 +127,7 @@ def translate_book(
     extraction_config: dict[str, JsonValue] = {
         "strategy": TERM_PLANNER_VERSION,
         "prompt_version": TERM_PROMPT_VERSION,
+        "resolution_protocol_version": RESOLUTION_PROTOCOL_VERSION,
         "provider": provider,
         "model": model_id,
         "target_language": "zh-Hans",
@@ -146,6 +148,8 @@ def translate_book(
             completed = _completed_run_outcome(resumable_work_dir, output)
             if completed is not None:
                 return completed
+        else:
+            config = replace(config, run_id=uuid.uuid4().hex)
         check_output(source, output, overwrite=overwrite)
         model = build_run_model(provider, model_id, max_output_tokens=max_output_tokens)
         checker = checker_for_source(source, epubcheck)
@@ -190,7 +194,10 @@ def _existing_run_id(
             and preparation.translation_config == expected_translation
         )
         legacy_terms = _legacy_frozen_term_run(store, preparation, expected_extraction, expected_translation)
-        if not exact_match and not legacy_terms:
+        legacy_resolution = _legacy_resolution_protocol_run(
+            preparation.extraction_config, expected_extraction, preparation.translation_config, expected_translation
+        )
+        if not exact_match and not legacy_terms and not legacy_resolution:
             other_runs.append(run_dir)
             continue
         terms, terms_hash = load_user_terms(
@@ -265,11 +272,29 @@ def _legacy_frozen_term_run(
     return (
         preparation.extraction_config.get("prompt_version") == PROMPT_VERSION
         and expected_extraction.get("prompt_version") == TERM_PROMPT_VERSION
-        and {k: v for k, v in preparation.extraction_config.items() if k != "prompt_version"}
-        == {k: v for k, v in expected_extraction.items() if k != "prompt_version"}
+        and _without_term_versions(preparation.extraction_config) == _without_term_versions(expected_extraction)
         and preparation.translation_config == expected_translation
         and (store.root / "bookplan.json").is_file()
     )
+
+
+def _legacy_resolution_protocol_run(
+    actual_extraction: Mapping[str, JsonValue],
+    expected_extraction: Mapping[str, JsonValue],
+    actual_translation: Mapping[str, JsonValue],
+    expected_translation: Mapping[str, JsonValue],
+) -> bool:
+    return (
+        "resolution_protocol_version" not in actual_extraction
+        and expected_extraction.get("resolution_protocol_version") == RESOLUTION_PROTOCOL_VERSION
+        and {k: v for k, v in expected_extraction.items() if k != "resolution_protocol_version"}
+        == dict(actual_extraction)
+        and actual_translation == expected_translation
+    )
+
+
+def _without_term_versions(config: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    return {k: v for k, v in config.items() if k not in {"prompt_version", "resolution_protocol_version"}}
 
 
 def _superseded_empty_term_run(
@@ -282,8 +307,7 @@ def _superseded_empty_term_run(
     if (
         preparation.extraction_config.get("prompt_version") != PROMPT_VERSION
         or expected_extraction.get("prompt_version") != TERM_PROMPT_VERSION
-        or {k: v for k, v in preparation.extraction_config.items() if k != "prompt_version"}
-        != {k: v for k, v in expected_extraction.items() if k != "prompt_version"}
+        or _without_term_versions(preparation.extraction_config) != _without_term_versions(expected_extraction)
         or preparation.translation_config != expected_translation
         or (store.root / "publish.json").exists()
         or not (store.root / "bookplan.json").exists()
@@ -507,9 +531,16 @@ async def _advance_source(
     overwrite: bool,
     progress: ProgressCallback | None = None,
 ) -> RunOutcome:
-    prepared = await prepare_translation(
-        source, work_root, config, checker, model=model, progress=_preparation_progress(progress)
-    )
+    try:
+        prepared = await prepare_translation(
+            source, work_root, config, checker, model=model, progress=_preparation_progress(progress)
+        )
+    except StoreLocked:
+        raise
+    except Exception as error:
+        if config.run_id is not None:
+            _record_internal_failure(work_root / _sha256_file(source) / safe_id(config.run_id), "preparation", error)
+        raise
     return await _finish(
         prepared.status, prepared.phase, prepared.work_dir, output, checker, model, overwrite, progress
     )
@@ -524,7 +555,13 @@ async def _advance_work_dir(
     overwrite: bool,
     progress: ProgressCallback | None = None,
 ) -> RunOutcome:
-    prepared = await resume_preparation(work_dir, checker, model=model, progress=_preparation_progress(progress))
+    try:
+        prepared = await resume_preparation(work_dir, checker, model=model, progress=_preparation_progress(progress))
+    except StoreLocked:
+        raise
+    except Exception as error:
+        _record_internal_failure(work_dir, "preparation", error)
+        raise
     return await _finish(
         prepared.status, prepared.phase, prepared.work_dir, output, checker, model, overwrite, progress
     )
@@ -546,7 +583,11 @@ async def _finish(
         return _record(
             RunOutcome("failed", work_dir, phase, reason=f"unknown preparation status: {preparation_status}")
         )
-    translated: TranslationRunResult = await run_translation(work_dir, model=model, progress=progress)
+    try:
+        translated: TranslationRunResult = await run_translation(work_dir, model=model, progress=progress)
+    except Exception as error:
+        _record_internal_failure(work_dir, "translation", error)
+        raise
     store = RunStore(work_dir)
     count = store.read_bookplan().required_unit_count
     if translated.status != "translated":
@@ -561,7 +602,11 @@ async def _finish(
                 reason=translated.reason,
             )
         )
-    published = publish_book(store, output, checker, overwrite=overwrite)
+    try:
+        published = publish_book(store, output, checker, overwrite=overwrite)
+    except Exception as error:
+        _record_internal_failure(work_dir, "publication", error)
+        raise
     return _record(
         RunOutcome(
             "completed",
@@ -586,6 +631,24 @@ def _record(outcome: RunOutcome) -> RunOutcome:
         reason=outcome.reason,
     )
     return replace(outcome, report_path=report)
+
+
+def _record_internal_failure(work_dir: Path, phase: str, error: Exception) -> None:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        AtomicStore.atomic_write_bytes(work_dir / "internal-error.txt", traceback.format_exc().encode())
+        _record(RunOutcome("failed", work_dir, phase, reason=f"{type(error).__name__}: {error}"))
+    except Exception as reporting_error:  # noqa: BLE001 - preserve the original failure
+        fallback = {
+            "format": "epubox-failure-report-1",
+            "status": "failed",
+            "phase": phase,
+            "reason": f"{type(error).__name__}: {error}",
+            "work_dir": str(work_dir),
+            "report_incomplete": True,
+        }
+        AtomicStore.atomic_write_bytes(work_dir / "report.json", canonical_json_bytes(fallback))
+        error.add_note(f"full diagnostic report unavailable: {reporting_error}")
 
 
 def _preparation_progress(progress: ProgressCallback | None) -> Callable[[PreparationProgress], None] | None:

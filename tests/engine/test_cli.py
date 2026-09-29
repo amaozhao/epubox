@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,6 +13,46 @@ from engine.services.coherence import load_budget_overrides
 from tests.engine.epub.book_factory import make_epub
 from tests.engine.epub.test_preparation import StubChecker
 from tests.engine.test_orchestrator import ready_store
+
+
+@pytest.mark.asyncio
+async def test_internal_translation_error_keeps_a_failed_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _, _ = ready_store(tmp_path)
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("unexpected translation bug")
+
+    monkeypatch.setattr(cli, "run_translation", broken)
+    with pytest.raises(RuntimeError, match="unexpected translation bug"):
+        await cli._finish("ready", "translation", store.root, tmp_path / "out.epub", object(), object(), False)
+
+    report = json.loads((store.root / "report.json").read_text())
+    assert report["status"] == "failed"
+    assert "RuntimeError: unexpected translation bug" in (store.root / "internal-error.txt").read_text()
+
+
+def test_internal_preparation_error_keeps_a_failed_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    work_root = tmp_path / "work"
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: object())
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("unexpected preparation bug")
+
+    monkeypatch.setattr(cli, "prepare_translation", broken)
+    with pytest.raises(RuntimeError, match="unexpected preparation bug"):
+        cli.translate_book(source, work_root=work_root)
+
+    run_dir = next(
+        path for path in (work_root / hashlib.sha256(source.read_bytes()).hexdigest()).iterdir() if path.is_dir()
+    )
+    report = json.loads((run_dir / "report.json").read_text())
+    assert report["status"] == "failed"
+    assert report["phase"] == "preparation"
+    assert "RuntimeError: unexpected preparation bug" in (run_dir / "internal-error.txt").read_text()
 
 
 def test_translate_command_routes_only_through_preparation_pipeline(
@@ -42,6 +83,7 @@ def test_translate_command_routes_only_through_preparation_pipeline(
     assert captured["source"] == source.resolve()
     assert captured["config"].auto_extract is True
     assert captured["config"].extraction_config["model"] == model.id
+    assert captured["config"].extraction_config["resolution_protocol_version"] == "epubox-term-resolution-2"
     assert captured["config"].translation_config["target_language"] == "zh-Hans"
 
 
@@ -67,7 +109,7 @@ def test_repeating_translate_command_reuses_the_same_prepared_run(
     second = cli.translate_book(source, work_root=work_root)
 
     assert first.work_dir == second.work_dir
-    assert seen_run_ids == [None, first.work_dir.name]
+    assert seen_run_ids == [first.work_dir.name, first.work_dir.name]
 
 
 def test_translate_command_resumes_frozen_bookplan_without_reentering_p1_or_provider(
@@ -223,7 +265,7 @@ def test_translate_ignores_preparation_without_a_committed_plan(
 
     monkeypatch.setattr(cli, "_advance_source", advance)
     cli.translate_book(source, work_root=work_root)
-    assert seen == [None]
+    assert len(seen) == 1 and seen[0] is not None and seen[0] != abandoned.name
 
 
 def test_resume_uses_frozen_model_and_snapshot_without_user_term_file(
@@ -446,3 +488,45 @@ def test_valid_v25_2_bookplan_resumes_with_v25_3_term_prompt_without_new_run(
     monkeypatch.setattr(cli, "load_user_terms", lambda *_args, **_kwargs: (("useful-term",), "terms-hash"))
 
     assert cli._existing_run_id(source_root, source_hash, cli.PreparationConfig()) == "old-run"
+
+
+def test_existing_run_without_resolution_protocol_resumes_as_v1() -> None:
+    actual = {"prompt_version": "epubox-v25-3", "model": "same"}
+    expected = actual | {"resolution_protocol_version": "epubox-term-resolution-2"}
+    translation = {"prompt_version": "epubox-v25-2", "model": "same"}
+
+    assert cli._legacy_resolution_protocol_run(actual, expected, translation, translation)
+
+
+def test_existing_v1_resolution_run_is_selected_by_the_same_translate_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_hash = "c" * 64
+    source_root = tmp_path / source_hash
+    run_dir = source_root / "v1-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "preparation.json").write_text("{}")
+    actual_extraction = {"prompt_version": "epubox-v25-3", "model": "same"}
+    expected_extraction = actual_extraction | {"resolution_protocol_version": "epubox-term-resolution-2"}
+    translation = {"prompt_version": "epubox-v25-2", "model": "same"}
+    preparation = SimpleNamespace(
+        source_hash=source_hash,
+        run_id="v1-run",
+        extraction_config=actual_extraction,
+        translation_config=translation,
+        user_terms=(),
+        user_terms_hash="terms-hash",
+        document_hashes={},
+        unit_documents={},
+    )
+    store = SimpleNamespace(
+        root=run_dir,
+        read_preparation=lambda: preparation,
+        _trusted_preparation_documents=lambda: None,
+    )
+    monkeypatch.setattr(cli, "RunStore", lambda _path: store)
+    monkeypatch.setattr(cli, "_frozen_extraction_config", lambda _config: expected_extraction)
+    monkeypatch.setattr(cli, "_frozen_translation_config", lambda _config: translation)
+    monkeypatch.setattr(cli, "load_user_terms", lambda *_args, **_kwargs: ((), "terms-hash"))
+
+    assert cli._existing_run_id(source_root, source_hash, cli.PreparationConfig()) == "v1-run"

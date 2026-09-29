@@ -58,7 +58,9 @@ from engine.services.term_planning import plan_term_extraction
 ModelT = TypeVar("ModelT", bound=BaseModel)
 USER_TERMS_FORMAT = "epubox-user-terms-1"
 TERM_RESPONSE_FORMAT = "epubox-term-response-2"
-_MAX_TERM_RESPONSE_BYTES = 4 * 1024 * 1024
+MODEL_RESPONSE_FORMAT = "epubox-model-response-1"
+_MAX_MODEL_RESPONSE_BYTES = 4 * 1024 * 1024
+type ModelResponseStage = Literal["terms", "resolution", "translate", "review", "coherence"]
 
 
 class UserTermsFile(BaseModel):
@@ -68,7 +70,7 @@ class UserTermsFile(BaseModel):
     terms: tuple[UserTerm, ...] = ()
 
 
-class TermResponseUsage(BaseModel):
+class ModelResponseUsage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     input_tokens: int = Field(ge=0)
@@ -77,12 +79,12 @@ class TermResponseUsage(BaseModel):
     known_cost: float | None = Field(default=None, ge=0)
 
 
-class TermResponseEnvelope(BaseModel):
+class ModelResponseEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     raw: str
     finish_reason: str | None = None
-    usage: TermResponseUsage | None = None
+    usage: ModelResponseUsage | None = None
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
 
@@ -93,9 +95,9 @@ class _TermResponseFile(BaseModel):
     request_id: str = Field(min_length=1)
     attempt_id: str = Field(min_length=1)
     wire_hash: str = Field(min_length=1)
-    response: TermResponseEnvelope
+    response: ModelResponseEnvelope
     response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    response_size: int = Field(ge=0, le=_MAX_TERM_RESPONSE_BYTES)
+    response_size: int = Field(ge=0, le=_MAX_MODEL_RESPONSE_BYTES)
 
     @model_validator(mode="after")
     def validate_response(self) -> _TermResponseFile:
@@ -103,6 +105,31 @@ class _TermResponseFile(BaseModel):
         if len(encoded) != self.response_size or hashlib.sha256(encoded).hexdigest() != self.response_sha256:
             raise ValueError("term response size or hash mismatch")
         return self
+
+
+class _ModelResponseFile(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    format: Literal["epubox-model-response-1"] = MODEL_RESPONSE_FORMAT
+    stage: ModelResponseStage
+    request_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
+    wire_hash: str = Field(min_length=1)
+    response: ModelResponseEnvelope
+    response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    response_size: int = Field(ge=0, le=_MAX_MODEL_RESPONSE_BYTES)
+
+    @model_validator(mode="after")
+    def validate_response(self) -> _ModelResponseFile:
+        encoded = canonical_json_bytes(self.response)
+        if len(encoded) != self.response_size or hashlib.sha256(encoded).hexdigest() != self.response_sha256:
+            raise ValueError("model response size or hash mismatch")
+        return self
+
+
+# Compatibility names used by the terminology runner and existing checkpoints.
+TermResponseUsage = ModelResponseUsage
+TermResponseEnvelope = ModelResponseEnvelope
 
 
 class RunStore:
@@ -769,10 +796,15 @@ class RunStore:
     def _term_response_path(self, request_id: str, attempt_id: str) -> Path:
         return self.root / "glossary" / "responses" / safe_id(request_id) / f"{safe_id(attempt_id)}.json"
 
-    def _term_response_identity(self, request_id: str, attempt_id: str) -> RequestManifest:
+    def _model_response_path(self, stage: ModelResponseStage, request_id: str, attempt_id: str) -> Path:
+        if stage == "terms":
+            return self._term_response_path(request_id, attempt_id)
+        return self.root / "responses" / stage / safe_id(request_id) / f"{safe_id(attempt_id)}.json"
+
+    def _model_response_identity(self, stage: ModelResponseStage, request_id: str, attempt_id: str) -> RequestManifest:
         manifest = self.read_request(request_id)
-        if manifest.stage != "terms":
-            raise IdentityMismatch("raw response journal is restricted to terminology requests")
+        if manifest.stage != stage:
+            raise IdentityMismatch(f"model response stage {stage} does not match request stage {manifest.stage}")
         if not any(attempt.attempt_id == attempt_id for attempt in manifest.attempts):
             raise IdentityMismatch(f"unknown attempt: {attempt_id}")
         return manifest
@@ -784,41 +816,69 @@ class RunStore:
         except Exception as error:
             raise CorruptRecord(f"invalid {path}: {error}") from error
 
-    def save_term_response(self, request_id: str, attempt_id: str, envelope: Mapping[str, object]) -> None:
-        response = TermResponseEnvelope.model_validate(envelope)
+    @staticmethod
+    def _read_model_response_file(path: Path) -> _ModelResponseFile:
+        try:
+            return _ModelResponseFile.model_validate_json(path.read_bytes())
+        except Exception as error:
+            raise CorruptRecord(f"invalid {path}: {error}") from error
+
+    def save_model_response(
+        self,
+        stage: ModelResponseStage,
+        request_id: str,
+        attempt_id: str,
+        envelope: Mapping[str, object],
+    ) -> None:
+        response = ModelResponseEnvelope.model_validate(envelope)
         encoded = canonical_json_bytes(response)
-        if len(encoded) > _MAX_TERM_RESPONSE_BYTES:
-            raise ValueError("term response exceeds the journal size limit")
-        path = self._term_response_path(request_id, attempt_id)
+        if len(encoded) > _MAX_MODEL_RESPONSE_BYTES:
+            raise ValueError("model response exceeds the journal size limit")
+        path = self._model_response_path(stage, request_id, attempt_id)
         with self.lock():
-            manifest = self._term_response_identity(request_id, attempt_id)
-            record = _TermResponseFile(
-                request_id=request_id,
-                attempt_id=attempt_id,
-                wire_hash=manifest.wire_hash,
-                response=response,
-                response_sha256=hashlib.sha256(encoded).hexdigest(),
-                response_size=len(encoded),
-            )
+            manifest = self._model_response_identity(stage, request_id, attempt_id)
+            fields = {
+                "request_id": request_id,
+                "attempt_id": attempt_id,
+                "wire_hash": manifest.wire_hash,
+                "response": response,
+                "response_sha256": hashlib.sha256(encoded).hexdigest(),
+                "response_size": len(encoded),
+            }
+            record: _TermResponseFile | _ModelResponseFile
+            record = _TermResponseFile(**fields) if stage == "terms" else _ModelResponseFile(stage=stage, **fields)
             if path.exists():
-                if self._read_term_response_file(path) == record:
+                existing = (
+                    self._read_term_response_file(path) if stage == "terms" else self._read_model_response_file(path)
+                )
+                if existing == record:
                     return
-                raise StaleWrite(f"immutable term response already exists: {request_id}/{attempt_id}")
+                label = "term" if stage == "terms" else "model"
+                raise StaleWrite(f"immutable {label} response already exists: {request_id}/{attempt_id}")
             self._atomic_write(path, record)
 
-    def read_term_response(self, request_id: str, attempt_id: str) -> TermResponseEnvelope | None:
-        path = self._term_response_path(request_id, attempt_id)
+    def read_model_response(
+        self, stage: ModelResponseStage, request_id: str, attempt_id: str
+    ) -> ModelResponseEnvelope | None:
+        manifest = self._model_response_identity(stage, request_id, attempt_id)
+        path = self._model_response_path(stage, request_id, attempt_id)
         if not path.exists():
             return None
-        manifest = self._term_response_identity(request_id, attempt_id)
-        record = self._read_term_response_file(path)
+        record = self._read_term_response_file(path) if stage == "terms" else self._read_model_response_file(path)
         if (
             record.request_id != request_id
             or record.attempt_id != attempt_id
             or record.wire_hash != manifest.wire_hash
+            or (isinstance(record, _ModelResponseFile) and record.stage != stage)
         ):
-            raise IdentityMismatch("term response identity does not match its request attempt")
+            raise IdentityMismatch("model response identity does not match its request attempt")
         return record.response
+
+    def save_term_response(self, request_id: str, attempt_id: str, envelope: Mapping[str, object]) -> None:
+        self.save_model_response("terms", request_id, attempt_id, envelope)
+
+    def read_term_response(self, request_id: str, attempt_id: str) -> TermResponseEnvelope | None:
+        return self.read_model_response("terms", request_id, attempt_id)
 
     def reserve_attempt(self, request_id: str, attempt: Attempt) -> RequestManifest:
         if attempt.state != "reserved":
@@ -878,8 +938,12 @@ class RunStore:
 
 
 __all__ = [
+    "MODEL_RESPONSE_FORMAT",
     "TERM_RESPONSE_FORMAT",
     "USER_TERMS_FORMAT",
+    "ModelResponseEnvelope",
+    "ModelResponseStage",
+    "ModelResponseUsage",
     "RunStore",
     "TermResponseEnvelope",
     "TermResponseUsage",

@@ -45,6 +45,14 @@ class ReviewValidation:
     unknown: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ResolutionValidation:
+    accepted: dict[str, dict[str, Any]]
+    errors: dict[str, str]
+    missing: tuple[str, ...]
+    unknown: tuple[str, ...]
+
+
 def _root(raw: str | bytes, protocol: str, request_id: str) -> list[Any]:
     value = strict_loads(raw)
     if not isinstance(value, dict) or set(value) != {"protocol", "request_id", "items"}:
@@ -182,8 +190,72 @@ def validate_resolution_response(
         value["decision"] == "select" and len(selected) != 1
     ):
         raise ProtocolError("resolution decision and selection disagree")
-    _short_text(value["reason"], "reason", 2000)
+    try:
+        _short_text(value["reason"], "reason", 2000)
+    except ValueError as error:
+        raise ProtocolError(str(error)) from error
     return value
+
+
+def validate_resolution_batch_response(
+    raw: str | bytes,
+    request_id: str,
+    expected_groups: Mapping[str, tuple[set[str], set[str]]],
+) -> ResolutionValidation:
+    """Validate each v2 conflict decision independently so one bad group cannot discard its peers."""
+    items = _root(raw, "epubox-term-resolution-2", request_id)
+    normalized = [
+        (
+            {
+                **item,
+                **({"unexpected_item_id": True} if "item_id" in item else {}),
+                "item_id": item.get("group_id"),
+            }
+            if isinstance(item, dict)
+            else item
+        )
+        for item in items
+    ]
+    candidates, errors, unknown, _ = _collect_items(normalized, set(expected_groups))
+    accepted: dict[str, dict[str, Any]] = {}
+    for group_id, item in candidates.items():
+        item.pop("item_id", None)
+        required = {"group_id", "decision", "selected_candidate_ids", "reason"}
+        if frozenset(item) not in {frozenset(required), frozenset(required | {"restricted_unit_ids"})}:
+            errors[group_id] = "resolution item has missing or unknown fields"
+            continue
+        decision = item.get("decision")
+        selected = item.get("selected_candidate_ids")
+        restricted = item.get("restricted_unit_ids", [])
+        candidate_ids, allowed_unit_ids = expected_groups[group_id]
+        if decision not in {"select", "defer"}:
+            errors[group_id] = "invalid resolution decision"
+        elif (
+            not isinstance(selected, list)
+            or any(not isinstance(value, str) for value in selected)
+            or len(selected) != len(set(selected))
+            or not set(selected).issubset(candidate_ids)
+            or not isinstance(restricted, list)
+            or any(not isinstance(value, str) for value in restricted)
+            or len(restricted) != len(set(restricted))
+            or not set(restricted).issubset(allowed_unit_ids)
+        ):
+            errors[group_id] = "resolution selection exceeds request scope"
+        elif (decision == "defer" and (selected or restricted)) or (decision == "select" and len(selected) != 1):
+            errors[group_id] = "resolution decision and selection disagree"
+        else:
+            try:
+                _short_text(item.get("reason"), "reason", 2000)
+            except ValueError as error:
+                errors[group_id] = str(error)
+                continue
+            accepted[group_id] = item
+    return ResolutionValidation(
+        accepted,
+        errors,
+        tuple(sorted(set(expected_groups) - set(candidates) - set(errors))),
+        unknown,
+    )
 
 
 def validate_review_response(

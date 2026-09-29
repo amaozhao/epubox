@@ -11,10 +11,14 @@ from uuid import uuid4
 
 from engine.agents.protocol import ProtocolError, validate_coherence_response, validate_translation_response
 from engine.agents.runtime import (
+    MAX_MODEL_INPUT_TOKENS,
     PROMPT_VERSION,
+    InputBudgetError,
+    MalformedEnvelopeError,
     ModelRuntime,
     RequestError,
     RuntimePaused,
+    model_input_budget,
     request_messages,
     wire_hash,
 )
@@ -60,6 +64,10 @@ from engine.services.store import RunStore
 
 
 class TranslationPaused(RuntimeError):
+    pass
+
+
+class _DocumentCoherenceBudgetExhausted(RequestError):
     pass
 
 
@@ -161,13 +169,22 @@ class TranslationEngine:
             model_max_output_tokens=self.output_tokens,
             reserve_attempt=self._reserve,
             finish_attempt=self._finish,
+            persist_response=self.store.save_model_response,
+            prior_input_limit_breach=max(
+                (
+                    attempt.usage.input_tokens
+                    for request in self._request_cache.values()
+                    for attempt in request.attempts
+                    if attempt.usage is not None and attempt.usage.input_tokens > MAX_MODEL_INPUT_TOKENS
+                ),
+                default=None,
+            ),
         )
         self.predicted_http_requests = 2 * max(
             max((len(record.items) for record in self.records.values()), default=0),
             (sum(len(record.items) for record in self.records.values()) + self.max_batch_items - 1)
             // self.max_batch_items,
         )
-        self._recover_in_flight()
 
     def _rebuild_journal(self) -> None:
         self._request_cache = {
@@ -249,7 +266,9 @@ class TranslationEngine:
                 check_additions = self.budget_overrides.get("add_check_http", {})
                 extra = check_additions.get(document_id, 0) if isinstance(check_additions, dict) else 0
                 if spent >= int(self.checks[document_id]["http_limit"]) + int(extra):
-                    raise RequestError(f"document coherence HTTP budget exhausted: {document_id}", attempts=0)
+                    raise _DocumentCoherenceBudgetExhausted(
+                        f"document coherence HTTP budget exhausted: {document_id}", attempts=0
+                    )
                 manifest = self.store.reserve_attempt(
                     request_id, Attempt.model_validate(attempt.model_dump(mode="python"))
                 )
@@ -330,6 +349,123 @@ class TranslationEngine:
             if changed:
                 self._save(record, items=items)
 
+    def _journaled_response(self, manifest: RequestManifest) -> Any | None:
+        for attempt in reversed(manifest.attempts):
+            response = self.store.read_model_response(manifest.stage, manifest.request_id, attempt.attempt_id)
+            if response is None or attempt.state not in {"sent", "unknown", "succeeded"}:
+                continue
+            if attempt.state != "succeeded":
+                usage = response.usage
+                self._finish(
+                    manifest.request_id,
+                    attempt.attempt_id,
+                    state="succeeded",
+                    usage=None
+                    if usage is None
+                    else Usage(
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        known_cost=usage.known_cost,
+                    ),
+                    metadata=dict(response.metadata),
+                )
+            if response.usage is not None and response.usage.input_tokens > MAX_MODEL_INPUT_TOKENS:
+                self.runtime._actual_input_limit_breached = response.usage.input_tokens
+            return response
+        return None
+
+    def _replay_item_responses(self) -> None:
+        for manifest in tuple(self._request_cache.values()):
+            if manifest.stage not in {"translate", "review"}:
+                continue
+            stage: Literal["translate", "review"] = "translate" if manifest.stage == "translate" else "review"
+            jobs: list[_Job] = []
+            for item_id in manifest.item_ids:
+                unit_ids = manifest.item_unit_ids.get(item_id, ())
+                if len(unit_ids) != 1:
+                    continue
+                record = self.records.get(unit_ids[0])
+                item = record.items.get(item_id) if record is not None else None
+                if item is not None and item.status == ItemStatus.IN_FLIGHT and item.request_id == manifest.request_id:
+                    jobs.append(_Job(stage, unit_ids[0], item_id))
+            if not jobs:
+                continue
+            response = self._journaled_response(manifest)
+            if response is None:
+                continue
+            if response.finish_reason == "length":
+                self._mark_truncated_batch(manifest, tuple(jobs), response.raw)
+                continue
+            try:
+                self._apply_response(manifest, tuple(jobs), response.raw)
+            except ProtocolError as error:
+                for job in jobs:
+                    self._fail_item(self.records[job.unit_id], job.item_id, job.stage, str(error), retry=True)
+
+    def _replay_coherence_responses(self, document_id: str, check: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        pending = {
+            str(item["item_id"]): item
+            for item in (window_payload(window, self.records) for window in pending_windows(check))
+        }
+        revised = False
+        for manifest in tuple(self._request_cache.values()):
+            if manifest.stage != "coherence" or not set(manifest.item_ids).intersection(pending):
+                continue
+            if set(manifest.unit_document_ids.values()) != {document_id}:
+                continue
+            current_ids = tuple(item_id for item_id in manifest.item_ids if item_id in pending)
+            if not current_ids or any(
+                self.records[unit_id].revision != revision or self.records[unit_id].accepted_revision != revision
+                for unit_id, revision in manifest.revisions.items()
+            ):
+                continue
+            response = self._journaled_response(manifest)
+            if response is None:
+                continue
+            if response.finish_reason == "length":
+                truncated = [pending[item_id] for item_id in current_ids]
+                if len(truncated) == 1:
+                    item_id = current_ids[0]
+                    check = save_window_result(
+                        self.store,
+                        check,
+                        item_id,
+                        [
+                            {
+                                "code": "coherence_request_failed",
+                                "severity": "major",
+                                "message": "model response was truncated",
+                            }
+                        ],
+                    )
+                    pending.pop(item_id, None)
+                else:
+                    midpoint = len(truncated) // 2
+                    check = self._save_coherence_splits(
+                        check,
+                        manifest.request_id,
+                        (truncated[:midpoint], truncated[midpoint:]),
+                    )
+                continue
+            allowed = {item_id: set(manifest.item_unit_ids[item_id]) for item_id in current_ids}
+            try:
+                parsed = validate_coherence_response(response.raw, manifest.request_id, allowed)
+            except ProtocolError:
+                continue
+            for item_id in current_ids:
+                result = parsed.accepted.get(item_id)
+                item = pending[item_id]
+                if result is None or manifest.input_hashes.get(item_id) != canonical_hash(item):
+                    continue
+                issues = [dict(issue) for issue in result["issues"]]
+                check = save_window_result(self.store, check, item_id, issues)
+                pending.pop(item_id, None)
+                affected = tuple(str(value) for value in result["unit_ids"])
+                if any(issue.get("severity") in {"major", "critical"} for issue in issues) and affected:
+                    revised |= self._schedule_coherence_revision(document_id, affected, issues)
+        self.checks[document_id] = check
+        return check, revised
+
     async def run(self) -> TranslationRunResult:
         with self.store.lock(blocking=False):
             return await self._run_locked()
@@ -338,6 +474,8 @@ class TranslationEngine:
         paused_reason: str | None = None
         try:
             self._prepare_checks()
+            self._replay_item_responses()
+            self._recover_in_flight()
             self._emit_progress("translation", "running")
             while not paused_reason:
                 while True:
@@ -379,18 +517,50 @@ class TranslationEngine:
         if initial and not self._hard_run_limit:
             self.run_limit += sum(int(check["http_limit"]) for check in self.checks.values())
         if initial:
-            windows = sum(len(check["windows"]) for check in self.checks.values())
-            self.predicted_http_requests += (windows + self.max_batch_items - 1) // self.max_batch_items
+            self.predicted_http_requests += sum(
+                len(self._pack_coherence_items([window_payload(window, self.records) for window in check["windows"]]))
+                for check in self.checks.values()
+            )
 
     async def _run_coherence(self) -> tuple[str | None, bool]:
         self._prepare_checks()
         revised = False
         for document_id in self.book.document_hashes:
             check = self.checks[document_id]
+            check, replayed_revision = self._replay_coherence_responses(document_id, check)
+            revised |= replayed_revision
             items = [window_payload(window, self.records) for window in pending_windows(check)]
-            for batch in self._pack_coherence_items(items):
+            batches = list(self._pack_pending_coherence_items(check, items))
+            while batches:
+                batch = batches.pop(0)
                 pending_batch = tuple(batch)
+                probe_payload = {
+                    "protocol": "epubox-coherence-1",
+                    "request_id": "co-" + "0" * 32,
+                    "items": pending_batch,
+                }
+                input_tokens = model_input_budget("coherence", probe_payload)["estimated_input_tokens"]
+                if input_tokens > self._coherence_input_limit():
+                    item = pending_batch[0]
+                    item_id = str(item["item_id"])
+                    check = save_window_result(
+                        self.store,
+                        check,
+                        item_id,
+                        [
+                            {
+                                "code": "coherence_input_oversized",
+                                "severity": "major",
+                                "message": (
+                                    f"coherence input exceeds {self._coherence_input_limit()} tokens: {input_tokens}"
+                                ),
+                            }
+                        ],
+                    )
+                    self.checks[document_id] = check
+                    continue
                 revisions: list[tuple[tuple[str, ...], list[dict[str, JsonValue]]]] = []
+                split_batches: list[tuple[dict[str, Any], ...]] = []
                 for content_attempt in range(2):
                     request_id = "co-" + uuid4().hex
                     payload = {
@@ -445,6 +615,7 @@ class TranslationEngine:
                     self._request_cache[request_id] = manifest
                     encoded = json.dumps(request_messages("coherence", payload), ensure_ascii=False, sort_keys=True)
                     batch_error = ""
+                    document_budget_error: str | None = None
                     try:
                         response = await self.runtime.invoke(
                             "coherence",
@@ -456,14 +627,61 @@ class TranslationEngine:
                                 "output_tokens": output_tokens,
                             },
                         )
+                        if response.get("finish_reason") == "length":
+                            if len(pending_batch) > 1:
+                                midpoint = len(pending_batch) // 2
+                                split_batches = [pending_batch[:midpoint], pending_batch[midpoint:]]
+                                check = self._save_coherence_splits(
+                                    check,
+                                    request_id,
+                                    tuple(split_batches),
+                                )
+                                break
+                            raise ProtocolError("model response was truncated")
                         parsed = validate_coherence_response(
                             response["raw"], request_id, {item_id: set(ids) for item_id, ids in item_units.items()}
                         )
-                    except (RuntimePaused, TranslationPaused, RequestError) as error:
+                    except (RuntimePaused, TranslationPaused) as error:
                         return str(error), revised
+                    except InputBudgetError as error:
+                        parsed = None
+                        batch_error = str(error)
+                    except MalformedEnvelopeError as error:
+                        parsed = None
+                        batch_error = str(error)
+                    except _DocumentCoherenceBudgetExhausted as error:
+                        parsed = None
+                        document_budget_error = str(error)
+                        batch_error = str(error)
+                    except RequestError as error:
+                        if (
+                            error.status_code is None
+                            or not 400 <= error.status_code < 500
+                            or error.status_code in {401, 402, 403, 429}
+                        ):
+                            return str(error), revised
+                        parsed = None
+                        batch_error = str(error)
                     except ProtocolError as error:
                         parsed = None
                         batch_error = str(error)
+
+                    if document_budget_error is not None:
+                        for item in pending_batch:
+                            check = save_window_result(
+                                self.store,
+                                check,
+                                str(item["item_id"]),
+                                [
+                                    {
+                                        "code": "coherence_request_failed",
+                                        "severity": "major",
+                                        "message": document_budget_error[:2000],
+                                    }
+                                ],
+                            )
+                            self.checks[document_id] = check
+                        break
 
                     failed: list[dict[str, Any]] = []
                     failure_messages: dict[str, str] = {}
@@ -506,6 +724,8 @@ class TranslationEngine:
                         ]
                         check = save_window_result(self.store, check, item_id, issues)
                         self.checks[document_id] = check
+                if split_batches:
+                    batches[0:0] = split_batches
                 for affected, issues in revisions:
                     revised |= self._schedule_coherence_revision(document_id, affected, issues)
         return None, revised
@@ -515,11 +735,11 @@ class TranslationEngine:
         current: list[dict[str, Any]] = []
         for item in items:
             candidate = [*current, item]
-            payload = {"protocol": "epubox-coherence-1", "request_id": "co-budget", "items": candidate}
-            tokens = count_tokens(json.dumps(request_messages("coherence", payload), ensure_ascii=False))
+            payload = {"protocol": "epubox-coherence-1", "request_id": "co-" + "0" * 32, "items": candidate}
+            tokens = model_input_budget("coherence", payload)["estimated_input_tokens"]
             if current and (
-                len(candidate) > self.max_batch_items
-                or tokens + self.output_tokens + self.planner_config.safety_margin > self.planner_config.context_tokens
+                tokens > self._coherence_input_limit()
+                or self._coherence_min_output_tokens(candidate) > self.output_tokens
             ):
                 batches.append(tuple(current))
                 current = [item]
@@ -528,6 +748,50 @@ class TranslationEngine:
         if current:
             batches.append(tuple(current))
         return tuple(batches)
+
+    @staticmethod
+    def _coherence_min_output_tokens(items: Sequence[dict[str, Any]]) -> int:
+        response = {
+            "protocol": "epubox-coherence-1",
+            "request_id": "co-" + "0" * 32,
+            "items": [{"item_id": str(item["item_id"]), "unit_ids": [], "issues": []} for item in items],
+        }
+        return count_tokens(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
+
+    def _pack_pending_coherence_items(
+        self, check: Mapping[str, Any], items: Sequence[dict[str, Any]]
+    ) -> tuple[tuple[dict[str, Any], ...], ...]:
+        split_ids = check.get("pending_splits", {})
+        if not isinstance(split_ids, dict):
+            split_ids = {}
+        forced: dict[str, list[dict[str, Any]]] = {}
+        ordinary: list[dict[str, Any]] = []
+        for item in items:
+            split_id = split_ids.get(str(item["item_id"]))
+            if isinstance(split_id, str):
+                forced.setdefault(split_id, []).append(item)
+            else:
+                ordinary.append(item)
+        return (*[tuple(group) for group in forced.values()], *self._pack_coherence_items(ordinary))
+
+    def _save_coherence_splits(
+        self,
+        check: Mapping[str, Any],
+        request_id: str,
+        groups: Sequence[Sequence[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        split_ids = dict(check.get("pending_splits", {}))
+        for index, group in enumerate(groups):
+            for item in group:
+                split_ids[str(item["item_id"])] = f"{request_id}:{index}"
+        updated = save_document_check(self.store, dict(check) | {"pending_splits": split_ids})
+        self.checks[str(check["document_id"])] = updated
+        return updated
+
+    def _coherence_input_limit(self) -> int:
+        if self.runtime.tpm is None:
+            return MAX_MODEL_INPUT_TOKENS
+        return min(MAX_MODEL_INPUT_TOKENS, self.runtime.tpm - self.output_tokens)
 
     def _schedule_coherence_revision(
         self,
@@ -942,9 +1206,19 @@ class TranslationEngine:
                         self._fail_item(self.records[job.unit_id], job.item_id, stage, str(error), retry=False)
                     continue
                 staged.append(job)
+            forced: dict[str, list[_Job]] = {}
+            ordinary: list[_Job] = []
+            for job in staged:
+                failure = self.records[job.unit_id].items[job.item_id].failure or {}
+                split_id = failure.get("split_id") if failure.get("code") == "truncated_batch" else None
+                if isinstance(split_id, str):
+                    forced.setdefault(split_id, []).append(job)
+                else:
+                    ordinary.append(job)
+            result.extend(tuple(group) for group in forced.values())
             chunks: list[list[_Job]] = []
             current: list[_Job] = []
-            for job in staged:
+            for job in ordinary:
                 if len(current) >= self.max_batch_items:
                     chunks.append(current)
                     current = []
@@ -965,7 +1239,53 @@ class TranslationEngine:
                 result.extend(tuple(by_id[str(item["item_id"])] for item in group) for group in groups)
         return result
 
+    def _mark_truncated_batch(self, manifest: RequestManifest, jobs: tuple[_Job, ...], raw: str | bytes) -> None:
+        try:
+            self._apply_response(manifest, jobs, raw)
+        except ProtocolError:
+            pass
+        pending = [
+            job
+            for job in jobs
+            if self.records[job.unit_id].items[job.item_id].status in {ItemStatus.IN_FLIGHT, ItemStatus.RETRY_WAIT}
+        ]
+        if len(pending) == 1:
+            job = pending[0]
+            self._fail_item(
+                self.records[job.unit_id],
+                job.item_id,
+                job.stage,
+                "model response was truncated",
+                retry=False,
+            )
+            return
+        if not pending:
+            return
+        midpoint = len(pending) // 2
+        for index, group in enumerate((pending[:midpoint], pending[midpoint:])):
+            for job in group:
+                self._fail_item(
+                    self.records[job.unit_id],
+                    job.item_id,
+                    job.stage,
+                    "model response was truncated; retrying a smaller batch",
+                    retry=True,
+                )
+                record = self.records[job.unit_id]
+                item = record.items[job.item_id]
+                if item.status != ItemStatus.RETRY_WAIT:
+                    continue
+                failure = dict(item.failure or {}) | {
+                    "code": "truncated_batch",
+                    "split_id": f"{manifest.request_id}:{index}",
+                }
+                self._save(
+                    record, items=dict(record.items) | {job.item_id: item.model_copy(update={"failure": failure})}
+                )
+
     async def _run_batch(self, jobs: tuple[_Job, ...]) -> None:
+        if not jobs:
+            return
         stage = jobs[0].stage
         request_id = "tx-" + uuid4().hex
         items = [self._payload_item(job) for job in jobs]
@@ -979,7 +1299,28 @@ class TranslationEngine:
         output_tokens = recommended_output_tokens(
             items, self.planner_config, stage="translation" if stage == "translate" else "review"
         )
+        input_tokens = model_input_budget(stage, payload)["estimated_input_tokens"]
+        if input_tokens > MAX_MODEL_INPUT_TOKENS:
+            if len(jobs) > 1:
+                midpoint = len(jobs) // 2
+                await self._run_batch(jobs[:midpoint])
+                await self._run_batch(jobs[midpoint:])
+            else:
+                job = next(iter(jobs))
+                self._fail_item(
+                    self.records[job.unit_id],
+                    job.item_id,
+                    stage,
+                    f"model input exceeds {MAX_MODEL_INPUT_TOKENS} tokens: {input_tokens}",
+                    retry=False,
+                )
+            return
         if output_tokens > self.output_tokens:
+            if len(jobs) > 1:
+                midpoint = len(jobs) // 2
+                await self._run_batch(jobs[:midpoint])
+                await self._run_batch(jobs[midpoint:])
+                return
             upgraded: set[str] = set()
             for job in jobs:
                 if job.unit_id not in upgraded and self._upgrade_cut_plan(
@@ -1026,9 +1367,10 @@ class TranslationEngine:
                 },
             )
             if response.get("finish_reason") == "length":
-                raise ProtocolError("model response was truncated")
+                self._mark_truncated_batch(manifest, jobs, response["raw"])
+                return
             self._apply_response(manifest, jobs, response["raw"])
-        except (ProtocolError, RequestError) as error:
+        except (ProtocolError, MalformedEnvelopeError, RequestError) as error:
             for job in jobs:
                 retry = not isinstance(error, RequestError) or error.attempts > 0
                 self._fail_item(self.records[job.unit_id], job.item_id, stage, str(error), retry=retry)

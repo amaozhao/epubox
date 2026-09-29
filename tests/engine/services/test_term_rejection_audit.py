@@ -19,27 +19,29 @@ def test_exhausted_evidence_rejections_remain_auditable(tmp_path) -> None:
 
     async def transport(_kind, payload):
         nonlocal calls
-        item = payload["items"][0]
-        calls += item["item_id"] == target_item
-        view = item["views"][0]
-        candidates = (
-            [
-                {
-                    "source": view["text"].split()[0],
-                    "target": "术语",
-                    "category": "term",
-                    "evidence": [{"view_id": "sv-unknown", "source_quote": view["text"]}],
-                }
-            ]
-            if item["item_id"] == target_item
-            else []
-        )
+        response_items = []
+        for item in payload["items"]:
+            calls += item["item_id"] == target_item
+            _view_id, view_text = next(iter(item["views"].items()))
+            candidates = (
+                [
+                    {
+                        "source": view_text.split()[0],
+                        "target": "术语",
+                        "category": "term",
+                        "evidence": [{"view_id": "sv-unknown", "source_quote": view_text}],
+                    }
+                ]
+                if item["item_id"] == target_item
+                else []
+            )
+            response_items.append({"item_id": item["item_id"], "candidates": candidates})
         return {
             "raw": json.dumps(
                 {
                     "protocol": "epubox-terms-1",
                     "request_id": payload["request_id"],
-                    "items": [{"item_id": item["item_id"], "candidates": candidates}],
+                    "items": response_items,
                 }
             ),
             "usage": {"input_tokens": 1, "output_tokens": 1},
@@ -67,27 +69,29 @@ def test_schema_rejection_survives_retry_freeze_and_report(tmp_path, retry_empty
 
     async def transport(_kind, payload):
         nonlocal calls
-        item = payload["items"][0]
-        candidates = []
-        if item["item_id"] == target_item and (calls == 0 or not retry_empty):
-            view = item["views"][0]
-            candidates = [
-                {
-                    "source": "Memory",
-                    "target": "内存",
-                    "category": "term",
-                    "evidence": [{"view_id": view["view_id"], "source_quote": view["text"]}],
-                    "unexpected": True,
-                }
-            ]
-        if item["item_id"] == target_item:
-            calls += 1
+        response_items = []
+        for item in payload["items"]:
+            candidates = []
+            if item["item_id"] == target_item and (calls == 0 or not retry_empty):
+                view_id, view_text = next(iter(item["views"].items()))
+                candidates = [
+                    {
+                        "source": "Memory",
+                        "target": "内存",
+                        "category": "term",
+                        "evidence": [{"view_id": view_id, "source_quote": view_text}],
+                        "unexpected": True,
+                    }
+                ]
+            if item["item_id"] == target_item:
+                calls += 1
+            response_items.append({"item_id": item["item_id"], "candidates": candidates})
         return {
             "raw": json.dumps(
                 {
                     "protocol": "epubox-terms-1",
                     "request_id": payload["request_id"],
-                    "items": [{"item_id": item["item_id"], "candidates": candidates}],
+                    "items": response_items,
                 }
             ),
             "usage": {"input_tokens": 1, "output_tokens": 1},

@@ -14,11 +14,16 @@ from engine.agents.protocol import (
     validate_translation_response,
 )
 from engine.agents.runtime import (
+    MAX_MODEL_INPUT_TOKENS,
     PROMPT_VERSION,
+    InputBudgetError,
+    MalformedEnvelopeError,
     ModelRuntime,
     ProviderError,
     RequestError,
     RuntimePaused,
+    Stage,
+    model_input_budget,
     request_messages,
     wire_hash,
 )
@@ -50,13 +55,23 @@ class MemoryJournal:
         self.requests[request_id] = request.model_copy(update={"attempts": attempts})
 
 
-def payload(kind: str, request_id: str = "r1") -> dict:
+def payload(kind: Stage, request_id: str = "r1") -> dict:
     protocols = {
+        "terms": "epubox-terms-1",
+        "resolution": "epubox-term-resolution-2",
         "translate": "epubox-text-1",
         "review": "epubox-review-2",
         "coherence": "epubox-coherence-1",
     }
     return {"protocol": protocols[kind], "request_id": request_id, "items": []}
+
+
+def payload_with_estimated_input(kind: Stage, size: int, request_id: str = "r1") -> dict:
+    request_payload = payload(kind, request_id) | {"padding": ""}
+    base = model_input_budget(kind, request_payload)["estimated_input_tokens"]
+    request_payload["padding"] = "x" * (size - base)
+    assert model_input_budget(kind, request_payload)["estimated_input_tokens"] == size
+    return request_payload
 
 
 def context(request_id: str = "r1", **values) -> dict:
@@ -91,6 +106,20 @@ def test_request_messages_are_budgetable_and_wire_hash_is_deterministic():
     assert "source_markup" not in json.dumps(messages)
     assert wire_hash("translate", first) == wire_hash("translate", second)
     assert wire_hash("translate", first, 10) != wire_hash("translate", first, 20)
+
+
+def test_resolution_v2_prompt_is_batched_while_v1_wire_remains_supported():
+    v2 = request_messages("resolution", payload("resolution"))
+    assert "epubox-term-resolution-2" in v2[0]["content"]
+    assert '"items"' in v2[0]["content"]
+
+    v1_payload = {
+        "protocol": "epubox-term-resolution-1",
+        "request_id": "r1",
+        "group_id": "g1",
+    }
+    v1 = request_messages("resolution", v1_payload)
+    assert "same request_id and group_id" in v1[0]["content"]
 
 
 def test_review_prompt_shows_no_change_without_target_and_preserves_literal_markup_text():
@@ -310,6 +339,206 @@ async def test_runtime_reserves_before_each_http_and_retries_transport_twice():
     assert result["usage"]["total_tokens"] == 6
     assert len(calls) == len(reserved) == 3
     assert [attempt.reservation["attempt_number"] for attempt in reserved] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["terms", "resolution", "translate", "review", "coherence"])
+async def test_all_stages_reject_50001_input_tokens_before_reservation_or_http(stage):
+    calls: list[str] = []
+    reserved: list[Attempt] = []
+
+    async def transport(kind, request_payload):
+        calls.append(kind)
+        return {"raw": "{}"}
+
+    runtime = ModelRuntime(
+        transport=transport,
+        reserve_attempt=lambda _request_id, attempt: reserved.append(attempt),
+        model_max_output_tokens=100,
+    )
+    with pytest.raises(InputBudgetError) as raised:
+        await runtime.invoke(stage, payload_with_estimated_input(stage, 50_001), context())
+
+    assert raised.value.attempts == 0
+    assert raised.value.estimated_tokens == 50_001
+    assert calls == reserved == []
+
+
+@pytest.mark.asyncio
+async def test_boundary_dispatch_separates_input_output_and_stops_after_provider_reports_overage():
+    store = MemoryJournal()
+    store.write_request(
+        RequestManifest(
+            request_id="r1",
+            stage="translate",
+            unit_ids=("u1",),
+            item_ids=("i1",),
+            plan_epochs={"u1": 0},
+            revisions={"u1": 1},
+            input_hashes={"u1": "input"},
+            wire_hash="wire",
+        )
+    )
+    calls = 0
+
+    async def transport(kind, request_payload):
+        nonlocal calls
+        calls += 1
+        return {"raw": "{}", "usage": {"input_tokens": 50_001, "output_tokens": 3}}
+
+    runtime = ModelRuntime(
+        transport=transport,
+        reserve_attempt=store.reserve_attempt,
+        finish_attempt=store.finish_attempt,
+        model_max_output_tokens=100,
+    )
+    await runtime.invoke(
+        "translate",
+        payload_with_estimated_input("translate", MAX_MODEL_INPUT_TOKENS),
+        context(item_ids=["i1"], estimated_tokens=123, output_tokens=10),
+    )
+
+    attempt = store.read_request("r1").attempts[0]
+    assert attempt.state == "succeeded"
+    assert attempt.usage is not None and attempt.usage.input_tokens == 50_001
+    assert attempt.reservation["estimated_tokens"] == 123
+    assert attempt.reservation["estimated_input_tokens"] == 50_000
+    assert attempt.reservation["rendered_input_bytes"] == 49_744
+    assert attempt.reservation["input_wrapper_headroom_bytes"] == 256
+    assert attempt.reservation["input_budget_algorithm_version"] == 1
+    assert attempt.reservation["cl100k_input_tokens"] < 50_000
+    assert attempt.reservation["reserved_output_tokens"] == 10
+    assert attempt.reservation["estimated_tpm_tokens"] == 50_010
+    with pytest.raises(RuntimePaused, match="future dispatch is stopped"):
+        await runtime.invoke("translate", payload("translate", "r2"), context("r2"))
+    assert calls == 1
+
+    restarted = ModelRuntime(
+        transport=transport,
+        model_max_output_tokens=100,
+        prior_input_limit_breach=50_001,
+    )
+    with pytest.raises(RuntimePaused, match="future dispatch is stopped"):
+        await restarted.invoke("review", payload("review", "r3"), context("r3"))
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_actual_overage_stops_request_waiting_for_rate_capacity_before_reservation():
+    second_waiting = asyncio.Event()
+    release_second = asyncio.Event()
+    transport_calls = 0
+    reserved: list[Attempt] = []
+
+    class GatedRuntime(ModelRuntime):
+        rate_calls = 0
+
+        async def _reserve_rate_capacity(self, estimated_tokens: int) -> None:
+            self.rate_calls += 1
+            if self.rate_calls == 2:
+                second_waiting.set()
+                await release_second.wait()
+
+    async def transport(kind, request_payload):
+        nonlocal transport_calls
+        transport_calls += 1
+        await second_waiting.wait()
+        return {"raw": "{}", "usage": {"input_tokens": 50_001, "output_tokens": 1}}
+
+    runtime = GatedRuntime(
+        transport=transport,
+        reserve_attempt=lambda _request_id, attempt: reserved.append(attempt),
+        max_inflight=2,
+        model_max_output_tokens=100,
+    )
+    first = asyncio.create_task(runtime.invoke("translate", payload("translate", "r1"), context("r1")))
+    second = asyncio.create_task(runtime.invoke("review", payload("review", "r2"), context("r2")))
+    await first
+    release_second.set()
+    with pytest.raises(RuntimePaused, match="future dispatch is stopped"):
+        await second
+
+    assert transport_calls == 1
+    assert len(reserved) == 1
+
+
+@pytest.mark.asyncio
+async def test_every_stage_persists_response_before_attempt_succeeds():
+    events: list[tuple[str, str]] = []
+
+    async def transport(kind, request_payload):
+        return {"raw": "{}"}
+
+    def persist(stage, request_id, attempt_id, envelope):
+        assert attempt_id and envelope["raw"] == "{}"
+        events.append((stage, f"persist:{request_id}"))
+
+    def finish(request_id, _attempt_id, *, state, **_fields):
+        events.append((state, request_id))
+
+    runtime = ModelRuntime(
+        transport=transport,
+        finish_attempt=finish,
+        persist_response=persist,
+        model_max_output_tokens=100,
+    )
+    stages: tuple[Stage, ...] = ("terms", "resolution", "translate", "review", "coherence")
+    for index, stage in enumerate(stages):
+        request_id = f"r{index}"
+        await runtime.invoke(stage, payload(stage, request_id), context(request_id, item_ids=[f"i{index}"]))
+
+    for index, stage in enumerate(stages):
+        request_id = f"r{index}"
+        assert events[index * 3 : index * 3 + 3] == [
+            ("sent", request_id),
+            (stage, f"persist:{request_id}"),
+            ("succeeded", request_id),
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        None,
+        [],
+        {"raw": 1},
+        {"raw": "{}", "usage": 42},
+        {"raw": "{}", "finish_reason": 3},
+        {"raw": "{}", "metadata": []},
+    ],
+)
+async def test_malformed_provider_envelope_finalizes_failed_attempt(envelope):
+    store = MemoryJournal()
+    store.write_request(
+        RequestManifest(
+            request_id="r1",
+            stage="translate",
+            unit_ids=("u1",),
+            item_ids=("i1",),
+            plan_epochs={"u1": 0},
+            revisions={"u1": 1},
+            input_hashes={"u1": "input"},
+            wire_hash="wire",
+        )
+    )
+
+    async def transport(kind, request_payload):
+        return envelope
+
+    runtime = ModelRuntime(
+        transport=transport,
+        reserve_attempt=store.reserve_attempt,
+        finish_attempt=store.finish_attempt,
+        model_max_output_tokens=100,
+    )
+    with pytest.raises(MalformedEnvelopeError, match="malformed response envelope") as raised:
+        await runtime.invoke("translate", payload("translate"), context(item_ids=["i1"]))
+
+    attempt = store.read_request("r1").attempts[0]
+    assert raised.value.attempts == 1
+    assert attempt.state == "failed"
+    assert attempt.error == "provider returned a malformed response envelope"
 
 
 @pytest.mark.asyncio
@@ -714,13 +943,13 @@ async def test_provider_error_redacts_only_the_exact_configured_api_key(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_partial_provider_usage_remains_unknown_instead_of_becoming_zero():
+async def test_partial_provider_usage_is_a_malformed_envelope():
     async def transport(kind, request_payload):
         return {"raw": "{}", "usage": {"prompt_tokens": 4}}
 
     runtime = ModelRuntime(transport=transport, model_max_output_tokens=100)
-    result = await runtime.invoke("translate", payload("translate"), context())
-    assert result["usage"] is None
+    with pytest.raises(MalformedEnvelopeError):
+        await runtime.invoke("translate", payload("translate"), context())
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from engine.agents.runtime import PROMPT_VERSION, TERM_PROMPT_VERSION
+from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
 from engine.epub.derived_bindings import resolve_derived_navigation
@@ -214,6 +214,10 @@ def _frozen_extraction_config(config: PreparationConfig) -> dict[str, JsonValue]
     if provider not in {"agnes", "cr_proxy"}:
         raise ValueError(f"unsupported terminology provider: {provider!r}")
     extraction["provider"] = provider
+    resolution_protocol = extraction.get("resolution_protocol_version", RESOLUTION_PROTOCOL_VERSION)
+    if resolution_protocol != RESOLUTION_PROTOCOL_VERSION:
+        raise ValueError(f"unsupported terminology resolution protocol: {resolution_protocol!r}")
+    extraction["resolution_protocol_version"] = resolution_protocol
     default_model = settings.AGNES_MODEL if provider == "agnes" else settings.CR_PROXY_MODEL
     model = extraction.get("model", config.translation_config.get("model", default_model))
     translation_language = config.translation_config.get("target_language", "zh-Hans")

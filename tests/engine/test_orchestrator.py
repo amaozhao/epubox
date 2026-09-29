@@ -6,7 +6,8 @@ from typing import Any, cast
 
 import pytest
 
-from engine.agents.runtime import ProviderError
+import engine.orchestrator as orchestrator_module
+from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS, ProviderError
 from engine.epub.preparation import PreparationConfig
 from engine.epub.publication import _accepted_target, publish_book
 from engine.item.inline import plain_text
@@ -121,6 +122,9 @@ class PartialBatchTransport:
         coherence_always_empty: bool = False,
         coherence_omit_once: bool = False,
         coherence_pause_once: bool = False,
+        coherence_request_failures: int = 0,
+        coherence_malformed_once: bool = False,
+        coherence_length_once: bool = False,
         title_target: str | None = None,
     ):
         self.calls: list[tuple[str, tuple[str, ...]]] = []
@@ -130,6 +134,9 @@ class PartialBatchTransport:
         self.coherence_always_empty = coherence_always_empty
         self.coherence_omit_once = coherence_omit_once
         self.coherence_pause_once = coherence_pause_once
+        self.coherence_request_failures = coherence_request_failures
+        self.coherence_malformed_once = coherence_malformed_once
+        self.coherence_length_once = coherence_length_once
         self.coherence_omitted: str | None = None
         self.title_target = title_target
 
@@ -160,6 +167,12 @@ class PartialBatchTransport:
                 )
             }
         if stage == "coherence":
+            if self.coherence_malformed_once:
+                self.coherence_malformed_once = False
+                return {"raw": 1}
+            if self.coherence_request_failures:
+                self.coherence_request_failures -= 1
+                raise ProviderError("invalid coherence request", status_code=400)
             if self.coherence_pause_once:
                 self.coherence_pause_once = False
                 raise ProviderError("account paused", status_code=401)
@@ -174,7 +187,7 @@ class PartialBatchTransport:
                 self.coherence_omitted = included.pop(1)["item_id"]
             blocking = self.coherence_major_once
             self.coherence_major_once = False
-            return {
+            response = {
                 "raw": json.dumps(
                     {
                         "protocol": "epubox-coherence-1",
@@ -198,6 +211,10 @@ class PartialBatchTransport:
                     }
                 )
             }
+            if self.coherence_length_once:
+                self.coherence_length_once = False
+                response["finish_reason"] = "length"
+            return response
         return {
             "raw": json.dumps(
                 {
@@ -226,6 +243,29 @@ class PartialBatchTransport:
         }
 
 
+class TruncatedOnceTransport:
+    def __init__(self, stage: str, *, input_tokens: int | None = None):
+        self.stage = stage
+        self.input_tokens = input_tokens
+        self.truncated = False
+        self.base = PartialBatchTransport()
+        self.base.omitted = "disabled"
+
+    @property
+    def calls(self):
+        return self.base.calls
+
+    async def __call__(self, stage: str, payload: dict):
+        response = await self.base(stage, payload)
+        if self.input_tokens is not None:
+            response = dict(response) | {"usage": {"input_tokens": self.input_tokens, "output_tokens": 1}}
+            self.input_tokens = None
+        if stage == self.stage and not self.truncated:
+            self.truncated = True
+            response = dict(response) | {"raw": "{", "finish_reason": "length"}
+        return response
+
+
 def ready_store(tmp_path):
     store, unit = _frozen_store(tmp_path)
     record = store.save_unit(_unit_record(store, unit))
@@ -233,10 +273,20 @@ def ready_store(tmp_path):
     return store, unit, record
 
 
-async def ready_batch_store(tmp_path, run_id: str = "batch-run") -> RunStore:
+async def ready_batch_store(
+    tmp_path,
+    run_id: str = "batch-run",
+    documents: dict[str, str] | None = None,
+    tpm: int | None = None,
+) -> RunStore:
     source = make_epub(
         tmp_path / f"{run_id}.epub",
-        {"chapter.xhtml": "<div><p>First item.</p></div><div><p>Second item.</p></div><div><p>Third item.</p></div>"},
+        documents
+        or {
+            "chapter.xhtml": (
+                "<div><p>First item.</p></div><div><p>Second item.</p></div><div><p>Third item.</p></div>"
+            )
+        },
     )
     prepared = await prepare_translation(
         source,
@@ -257,6 +307,7 @@ async def ready_batch_store(tmp_path, run_id: str = "batch-run") -> RunStore:
                 "context_tokens": 32_768,
                 "max_output_tokens": 8192,
                 "max_batch_items": 64,
+                **({"tpm": tpm} if tpm is not None else {}),
             },
         ),
         StubChecker(),
@@ -713,6 +764,135 @@ async def test_coherence_partial_batch_retries_only_the_missing_window(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_coherence_packs_more_than_eight_small_windows_in_one_http(tmp_path) -> None:
+    chapter = "".join(f"<div><p>Item {index}.</p></div>" for index in range(11))
+    store = await ready_batch_store(
+        tmp_path,
+        "coherence-large-batch",
+        {"chapter.xhtml": chapter},
+    )
+    transport = PartialBatchTransport()
+    transport.omitted = "disabled"
+
+    result = await TranslationEngine(store, transport=transport).run()
+    coherence_calls = [ids for stage, ids in transport.calls if stage == "coherence"]
+
+    assert result.status == "translated"
+    assert len(coherence_calls) == 1
+    assert len(coherence_calls[0]) > 8
+
+
+@pytest.mark.asyncio
+async def test_coherence_budget_splits_before_manifest_and_transport(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chapter = "".join(f"<div><p>Item {index}.</p></div>" for index in range(8))
+    store = await ready_batch_store(tmp_path, "coherence-budget-split", {"chapter.xhtml": chapter})
+    transport = PartialBatchTransport()
+    transport.omitted = "disabled"
+    original = orchestrator_module.model_input_budget
+    engine = TranslationEngine(store, transport=transport)
+    coherence_limit = engine._coherence_input_limit()
+
+    def budget(stage, payload):
+        result = original(stage, payload)
+        if stage == "coherence" and len(payload["items"]) > 3:
+            return result | {"estimated_input_tokens": coherence_limit + 1}
+        return result
+
+    monkeypatch.setattr(orchestrator_module, "model_input_budget", budget)
+    result = await engine.run()
+    coherence_calls = [ids for stage, ids in transport.calls if stage == "coherence"]
+    manifests = [
+        store.read_request(path.stem)
+        for path in (store.root / "requests").glob("*.json")
+        if store.read_request(path.stem).stage == "coherence"
+    ]
+
+    assert result.status == "translated"
+    assert coherence_limit == MAX_MODEL_INPUT_TOKENS
+    assert len(coherence_calls) > 1
+    assert all(len(ids) <= 3 for ids in coherence_calls)
+    assert all(len(manifest.item_ids) <= 3 for manifest in manifests)
+
+
+@pytest.mark.asyncio
+async def test_coherence_budget_reserves_output_only_when_tpm_is_configured(tmp_path) -> None:
+    store = await ready_batch_store(tmp_path, "coherence-tpm", tpm=40_000)
+    engine = TranslationEngine(store, transport=PartialBatchTransport())
+
+    assert engine._coherence_input_limit() == 40_000 - engine.output_tokens
+
+
+@pytest.mark.asyncio
+async def test_coherence_minimum_output_splits_before_manifest_and_transport(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chapter = "".join(f"<div><p>Item {index}.</p></div>" for index in range(8))
+    store = await ready_batch_store(tmp_path, "coherence-output-split", {"chapter.xhtml": chapter})
+    transport = PartialBatchTransport()
+    transport.omitted = "disabled"
+    engine = TranslationEngine(store, transport=transport)
+    original = engine._coherence_min_output_tokens
+
+    monkeypatch.setattr(
+        engine,
+        "_coherence_min_output_tokens",
+        lambda items: engine.output_tokens + 1 if len(items) > 3 else original(items),
+    )
+    result = await engine.run()
+    coherence_calls = [ids for stage, ids in transport.calls if stage == "coherence"]
+    manifests = [
+        store.read_request(path.stem)
+        for path in (store.root / "requests").glob("*.json")
+        if store.read_request(path.stem).stage == "coherence"
+    ]
+
+    assert result.status == "translated"
+    assert len(coherence_calls) > 1
+    assert all(len(ids) <= 3 for ids in coherence_calls)
+    assert all(len(manifest.item_ids) <= 3 for manifest in manifests)
+
+
+@pytest.mark.asyncio
+async def test_truncated_coherence_batch_is_bisected(tmp_path) -> None:
+    chapter = "".join(f"<div><p>Item {index}.</p></div>" for index in range(7))
+    store = await ready_batch_store(tmp_path, "coherence-length", {"chapter.xhtml": chapter})
+    transport = PartialBatchTransport(coherence_length_once=True)
+    transport.omitted = "disabled"
+
+    result = await TranslationEngine(store, transport=transport).run()
+    coherence_calls = [ids for stage, ids in transport.calls if stage == "coherence"]
+
+    assert result.status == "translated"
+    assert len(coherence_calls) == 3
+    assert len(coherence_calls[0]) > 1
+    assert set(coherence_calls[1]).isdisjoint(coherence_calls[2])
+    assert set(coherence_calls[1]) | set(coherence_calls[2]) == set(coherence_calls[0])
+
+
+@pytest.mark.asyncio
+async def test_failed_coherence_document_does_not_stop_later_document(tmp_path) -> None:
+    documents = {
+        "one.xhtml": "<div><p>One.</p></div><div><p>Two.</p></div><div><p>Three.</p></div>",
+        "two.xhtml": "<div><p>Four.</p></div><div><p>Five.</p></div><div><p>Six.</p></div>",
+    }
+    store = await ready_batch_store(tmp_path, "coherence-later-document", documents)
+    transport = PartialBatchTransport(coherence_request_failures=2)
+    transport.omitted = "disabled"
+    engine = TranslationEngine(store, transport=transport)
+
+    result = await engine.run()
+    coherence_calls = [ids for stage, ids in transport.calls if stage == "coherence"]
+    checks = list(engine.checks.values())
+
+    assert result.status == "needs_attention"
+    assert len(coherence_calls) == 3
+    assert len({item_id for ids in coherence_calls for item_id in ids}) > len(coherence_calls[0])
+    assert {check["status"] for check in checks} == {"needs_attention", "valid"}
+
+
+@pytest.mark.asyncio
 async def test_coherence_marks_major_only_after_the_repair_response_is_still_bad(tmp_path) -> None:
     store = await ready_batch_store(tmp_path, "coherence-final-bad")
     transport = PartialBatchTransport(coherence_always_empty=True)
@@ -747,6 +927,41 @@ async def test_coherence_transport_pause_keeps_windows_pending_for_resume(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_coherence_request_failure_is_bounded_to_its_windows(tmp_path) -> None:
+    store = await ready_batch_store(tmp_path, "coherence-request-failure")
+    transport = PartialBatchTransport(coherence_request_failures=2)
+    transport.omitted = "disabled"
+    engine = TranslationEngine(store, transport=transport)
+    result = await engine.run()
+    checks = [check for check in engine.checks.values() if check["windows"]]
+    window_count = sum(len(check["windows"]) for check in checks)
+
+    assert result.status == "needs_attention"
+    assert window_count > 1
+    assert sum(stage == "coherence" for stage, _ in transport.calls) == 2
+    assert checks and all(check["status"] == "needs_attention" for check in checks)
+    assert all(len(check["checks"]) == len(check["windows"]) for check in checks)
+    assert all(
+        issue["code"] == "coherence_request_failed"
+        for check in checks
+        for result in check["checks"].values()
+        for issue in result["issues"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_coherence_envelope_is_retried_locally(tmp_path) -> None:
+    store = await ready_batch_store(tmp_path, "coherence-malformed")
+    transport = PartialBatchTransport(coherence_malformed_once=True)
+    transport.omitted = "disabled"
+
+    result = await TranslationEngine(store, transport=transport).run()
+
+    assert result.status == "translated"
+    assert sum(stage == "coherence" for stage, _ in transport.calls) >= 2
+
+
+@pytest.mark.asyncio
 async def test_one_oversized_item_does_not_upgrade_or_fail_its_batch_siblings(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -771,6 +986,257 @@ async def test_one_oversized_item_does_not_upgrade_or_fail_its_batch_siblings(
     assert normal_ids.issubset(planned_ids)
     assert store.read_unit(bad.unit_id).items[bad.item_id].status == ItemStatus.NEEDS_ATTENTION
     assert all(store.read_unit(job.unit_id).items[job.item_id].status == ItemStatus.PENDING for job in jobs[1:])
+
+
+@pytest.mark.asyncio
+async def test_input_budget_splits_before_request_persistence_or_transport(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = await ready_batch_store(tmp_path, "input-split")
+    transport = PartialBatchTransport()
+    transport.omitted = "disabled"
+    engine = TranslationEngine(store, transport=transport)
+    jobs = tuple(engine._ready_jobs()[:2])
+    original = orchestrator_module.model_input_budget
+
+    def budget(stage, payload):
+        result = original(stage, payload)
+        return result | {
+            "estimated_input_tokens": MAX_MODEL_INPUT_TOKENS + 1
+            if len(payload["items"]) > 1
+            else result["estimated_input_tokens"]
+        }
+
+    monkeypatch.setattr(orchestrator_module, "model_input_budget", budget)
+    await engine._run_batch(jobs)
+
+    assert [ids for stage, ids in transport.calls if stage == "translate"] == [
+        (jobs[0].item_id,),
+        (jobs[1].item_id,),
+    ]
+    manifests = [store.read_request(path.stem) for path in (store.root / "requests").glob("*.json")]
+    assert len(manifests) == 2
+    assert all(len(manifest.item_ids) == 1 for manifest in manifests)
+
+
+@pytest.mark.asyncio
+async def test_single_oversized_input_needs_attention_without_request_or_transport(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = await ready_batch_store(tmp_path, "input-single")
+    transport = PartialBatchTransport()
+    engine = TranslationEngine(store, transport=transport)
+    job = engine._ready_jobs()[0]
+    monkeypatch.setattr(
+        orchestrator_module,
+        "model_input_budget",
+        lambda stage, payload: {
+            "algorithm_version": 1,
+            "cl100k_tokens": 1,
+            "rendered_utf8_bytes": 1,
+            "wrapper_headroom_bytes": 1,
+            "estimated_input_tokens": MAX_MODEL_INPUT_TOKENS + 1,
+        },
+    )
+
+    await engine._run_batch((job,))
+
+    assert transport.calls == []
+    assert not list((store.root / "requests").glob("*.json"))
+    assert store.read_unit(job.unit_id).items[job.item_id].status == ItemStatus.NEEDS_ATTENTION
+
+
+@pytest.mark.asyncio
+async def test_journaled_translation_is_replayed_after_crash_without_second_transport(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, unit, _ = ready_store(tmp_path)
+    engine = TranslationEngine(store, transport=ScriptedTransport())
+    monkeypatch.setattr(
+        engine,
+        "_apply_response",
+        lambda manifest, jobs, raw: (_ for _ in ()).throw(StoreError("crash after response journal")),
+    )
+
+    failed = await engine.run()
+    assert failed.status == "failed"
+    assert next(iter(store.read_unit(unit.unit_id).items.values())).status == ItemStatus.IN_FLIGHT
+
+    resumed_transport = ScriptedTransport()
+    resumed = await TranslationEngine(store, transport=resumed_transport).run()
+
+    assert resumed.status == "translated"
+    assert all(stage != "translate" for stage, _ in resumed_transport.calls)
+
+
+@pytest.mark.asyncio
+async def test_journaled_review_is_replayed_after_crash_without_second_transport(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _, _ = ready_store(tmp_path)
+    engine = TranslationEngine(store, transport=ScriptedTransport())
+    original = engine._apply_response
+
+    def crash_on_review(manifest, jobs, raw):
+        if manifest.stage == "review":
+            raise StoreError("crash after review journal")
+        return original(manifest, jobs, raw)
+
+    monkeypatch.setattr(engine, "_apply_response", crash_on_review)
+    failed = await engine.run()
+    assert failed.status == "failed"
+
+    resumed_transport = ScriptedTransport()
+    resumed = await TranslationEngine(store, transport=resumed_transport).run()
+
+    assert resumed.status == "translated"
+    assert all(stage not in {"translate", "review"} for stage, _ in resumed_transport.calls)
+
+
+@pytest.mark.asyncio
+async def test_journaled_coherence_is_replayed_after_crash_without_second_transport(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = await ready_batch_store(tmp_path, "coherence-journal")
+    first_transport = PartialBatchTransport()
+    first_transport.omitted = "disabled"
+    engine = TranslationEngine(store, transport=first_transport)
+    original = orchestrator_module.save_window_result
+    failed_once = False
+
+    def crash_after_journal(*args, **kwargs):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise StoreError("crash after coherence journal")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator_module, "save_window_result", crash_after_journal)
+    failed = await engine.run()
+    assert failed.status == "failed"
+    monkeypatch.setattr(orchestrator_module, "save_window_result", original)
+
+    resumed_transport = PartialBatchTransport()
+    resumed_transport.omitted = "disabled"
+    resumed = await TranslationEngine(store, transport=resumed_transport).run()
+
+    assert resumed.status == "translated"
+    assert all(stage != "coherence" for stage, _ in resumed_transport.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["translate", "review"])
+async def test_truncated_text_batch_is_retried_as_smaller_batches(tmp_path, stage: str) -> None:
+    store = await ready_batch_store(tmp_path, f"{stage}-length")
+    transport = TruncatedOnceTransport(stage)
+
+    result = await TranslationEngine(store, transport=transport).run()
+    calls = [ids for called_stage, ids in transport.calls if called_stage == stage]
+
+    assert result.status == "translated"
+    assert len(calls[0]) > 1
+    assert all(len(ids) < len(calls[0]) for ids in calls[1:])
+    assert set().union(*(set(ids) for ids in calls[1:])) == set(calls[0])
+
+
+@pytest.mark.asyncio
+async def test_singleton_truncated_translation_needs_attention(tmp_path) -> None:
+    store, unit, _ = ready_store(tmp_path)
+    transport = TruncatedOnceTransport("translate")
+
+    result = await TranslationEngine(store, transport=transport).run()
+    item = next(iter(store.read_unit(unit.unit_id).items.values()))
+
+    assert result.status == "needs_attention"
+    assert item.status == ItemStatus.NEEDS_ATTENTION
+    assert [stage for stage, _ in transport.calls] == ["translate"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["translate", "review", "coherence"])
+async def test_truncated_journal_replays_persisted_split_before_new_http(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    store = await ready_batch_store(tmp_path, f"{stage}-length-journal")
+    transport = TruncatedOnceTransport(stage)
+    original = store.save_model_response
+    crashed = False
+
+    def save_then_crash(saved_stage, request_id, attempt_id, envelope):
+        nonlocal crashed
+        original(saved_stage, request_id, attempt_id, envelope)
+        if saved_stage == stage and not crashed:
+            crashed = True
+            raise StoreError("crash after truncated response journal")
+
+    monkeypatch.setattr(store, "save_model_response", save_then_crash)
+    failed = await TranslationEngine(store, transport=transport).run()
+    assert failed.status == "failed"
+    original_size = len(next(ids for called_stage, ids in transport.calls if called_stage == stage))
+    monkeypatch.setattr(store, "save_model_response", original)
+
+    resumed_transport = PartialBatchTransport()
+    resumed_transport.omitted = "disabled"
+    resumed = await TranslationEngine(store, transport=resumed_transport).run()
+    calls = [ids for called_stage, ids in resumed_transport.calls if called_stage == stage]
+
+    assert resumed.status == "translated"
+    assert calls
+    assert all(len(ids) < original_size for ids in calls)
+
+
+@pytest.mark.asyncio
+async def test_replayed_actual_input_over_limit_pauses_before_new_dispatch(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = await ready_batch_store(tmp_path, "journal-input-over-limit")
+    transport = TruncatedOnceTransport("never", input_tokens=MAX_MODEL_INPUT_TOKENS + 1)
+    original = store.save_model_response
+    crashed = False
+
+    def save_then_crash(stage, request_id, attempt_id, envelope):
+        nonlocal crashed
+        original(stage, request_id, attempt_id, envelope)
+        if stage == "translate" and not crashed:
+            crashed = True
+            raise StoreError("crash before attempt usage was applied")
+
+    monkeypatch.setattr(store, "save_model_response", save_then_crash)
+    failed = await TranslationEngine(store, transport=transport).run()
+    assert failed.status == "failed"
+    monkeypatch.setattr(store, "save_model_response", original)
+
+    resumed_transport = PartialBatchTransport()
+    resumed = await TranslationEngine(store, transport=resumed_transport).run()
+
+    assert resumed.status == "paused"
+    assert resumed_transport.calls == []
+
+
+@pytest.mark.asyncio
+async def test_document_coherence_budget_exhaustion_is_local(tmp_path) -> None:
+    documents = {
+        "one.xhtml": "<div><p>One.</p></div><div><p>Two.</p></div><div><p>Three.</p></div>",
+        "two.xhtml": "<div><p>Four.</p></div><div><p>Five.</p></div><div><p>Six.</p></div>",
+    }
+    store = await ready_batch_store(tmp_path, "coherence-document-budget", documents)
+    transport = PartialBatchTransport()
+    transport.omitted = "disabled"
+    engine = TranslationEngine(store, transport=transport)
+    engine._prepare_checks()
+    first_id = next(key for key, check in engine.checks.items() if check["windows"])
+    engine.checks[first_id] = orchestrator_module.save_document_check(
+        store,
+        dict(engine.checks[first_id]) | {"http_limit": 0},
+    )
+
+    result = await engine.run()
+    coherence_calls = [ids for called_stage, ids in transport.calls if called_stage == "coherence"]
+
+    assert result.status == "needs_attention"
+    assert len(coherence_calls) == 1
+    assert engine.checks[first_id]["status"] == "needs_attention"
+    assert any(check["status"] == "valid" for key, check in engine.checks.items() if key != first_id)
 
 
 @pytest.mark.asyncio

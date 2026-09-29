@@ -29,7 +29,12 @@ def config(*, auto_extract: bool = True, user_terms_path: Path | None = None) ->
             "target_language": "zh-Hans",
             "max_primary_chars": 200,
         },
-        translation_config={"target_language": "zh-Hans", "model": "fake", "context_tokens": 4096},
+        translation_config={
+            "target_language": "zh-Hans",
+            "model": "fake",
+            "context_tokens": 4096,
+            "max_output_tokens": 512,
+        },
     )
 
 
@@ -122,30 +127,35 @@ def test_term_and_resolution_transports_feed_one_frozen_glossary(tmp_path: Path)
         plan_path = next((tmp_path / "work").rglob("glossary/plan.json"))
         store = RunStore(plan_path.parents[1])
         assert len(list((store.root / "glossary" / "extraction").glob("*.json"))) == len(store.read_term_plan().items)
-        item = payload["items"][0]
-        view = next((value for value in item["views"] if "Memory" in value["text"]), item["views"][0])
-        candidates = (
-            [
-                {
-                    "source": "Memory",
-                    "target": target,
-                    "category": "term",
-                    "aliases": [],
-                    "scope_hint": "document",
-                    "note": "",
-                    "evidence": [{"view_id": view["view_id"], "source_quote": view["text"]}],
-                }
-                for target in ("内存", "记忆")
-            ]
-            if "Memory" in view["text"]
-            else []
-        )
+        response_items = []
+        for item in payload["items"]:
+            view_id, view_text = next(
+                ((view_id, text) for view_id, text in item["views"].items() if "Memory" in text),
+                next(iter(item["views"].items())),
+            )
+            candidates = (
+                [
+                    {
+                        "source": "Memory",
+                        "target": target,
+                        "category": "term",
+                        "aliases": [],
+                        "scope_hint": "document",
+                        "note": "",
+                        "evidence": [{"view_id": view_id, "source_quote": view_text}],
+                    }
+                    for target in ("内存", "记忆")
+                ]
+                if "Memory" in view_text
+                else []
+            )
+            response_items.append({"item_id": item["item_id"], "candidates": candidates})
         return {
             "raw": json.dumps(
                 {
                     "protocol": "epubox-terms-1",
                     "request_id": payload["request_id"],
-                    "items": [{"item_id": item["item_id"], "candidates": candidates}],
+                    "items": response_items,
                 }
             ),
             "usage": {"input_tokens": 1, "output_tokens": 1},
@@ -154,18 +164,21 @@ def test_term_and_resolution_transports_feed_one_frozen_glossary(tmp_path: Path)
     async def resolution(kind, payload):
         calls.append(kind)
         assert not next((tmp_path / "work").rglob("bookplan.json"), None)
-        chosen = next(
-            candidate["candidate_id"] for candidate in payload["candidates"] if candidate["target"] == "内存"
-        )
+        group = payload["items"][0]
+        chosen = next(candidate["candidate_id"] for candidate in group["candidates"] if candidate["target"] == "内存")
         return {
             "raw": json.dumps(
                 {
-                    "protocol": "epubox-term-resolution-1",
+                    "protocol": "epubox-term-resolution-2",
                     "request_id": payload["request_id"],
-                    "group_id": payload["group_id"],
-                    "decision": "select",
-                    "selected_candidate_ids": [chosen],
-                    "reason": "Technical memory sense.",
+                    "items": [
+                        {
+                            "group_id": group["group_id"],
+                            "decision": "select",
+                            "selected_candidate_ids": [chosen],
+                            "reason": "Technical memory sense.",
+                        }
+                    ],
                 }
             ),
             "usage": {"input_tokens": 1, "output_tokens": 1},
@@ -204,13 +217,12 @@ def test_successful_term_retry_closes_despite_an_earlier_unknown_attempt(tmp_pat
         calls += 1
         if calls == 1:
             raise ProviderError("provider timed out after dispatch")
-        item = payload["items"][0]
         return {
             "raw": json.dumps(
                 {
                     "protocol": "epubox-terms-1",
                     "request_id": payload["request_id"],
-                    "items": [{"item_id": item["item_id"], "candidates": []}],
+                    "items": [{"item_id": item["item_id"], "candidates": []} for item in payload["items"]],
                 }
             ),
             "usage": {"input_tokens": 1, "output_tokens": 1},
@@ -238,28 +250,30 @@ def test_all_rejected_terms_freeze_with_disclosed_local_gaps(tmp_path: Path, fai
     async def bad_terms(_kind, payload):
         nonlocal calls
         calls += 1
-        item = payload["items"][0]
-        view = item["views"][0]
+        response_items = []
+        for item in payload["items"]:
+            _view_id, view_text = next(iter(item["views"].items()))
+            response_items.append(
+                {
+                    "item_id": item["item_id"],
+                    "candidates": [
+                        {
+                            "source": view_text.split()[0],
+                            "target": "术语",
+                            "category": "term",
+                            "evidence": []
+                            if failure == "schema"
+                            else [{"view_id": "sv-unknown", "source_quote": view_text}],
+                        }
+                    ],
+                }
+            )
         return {
             "raw": json.dumps(
                 {
                     "protocol": "epubox-terms-1",
                     "request_id": payload["request_id"],
-                    "items": [
-                        {
-                            "item_id": item["item_id"],
-                            "candidates": [
-                                {
-                                    "source": view["text"].split()[0],
-                                    "target": "术语",
-                                    "category": "term",
-                                    "evidence": []
-                                    if failure == "schema"
-                                    else [{"view_id": "sv-unknown", "source_quote": view["text"]}],
-                                }
-                            ],
-                        }
-                    ],
+                    "items": response_items,
                 }
             ),
             "usage": {"input_tokens": 1, "output_tokens": 1},
@@ -304,13 +318,12 @@ def test_paused_terms_leave_no_pool_or_bookplan_and_resume_from_json(
     monkeypatch.setattr(TermRunner, "run", original_run)
 
     async def empty_terms(_kind, payload):
-        item = payload["items"][0]
         return {
             "raw": json.dumps(
                 {
                     "protocol": "epubox-terms-1",
                     "request_id": payload["request_id"],
-                    "items": [{"item_id": item["item_id"], "candidates": []}],
+                    "items": [{"item_id": item["item_id"], "candidates": []} for item in payload["items"]],
                 }
             ),
             "usage": {"input_tokens": 1, "output_tokens": 1},
