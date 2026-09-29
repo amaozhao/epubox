@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from engine.services.report import write_report
-from tests.v25.test_store import _prepare
+from tests.engine.services.test_store import _prepare
 
 
 def test_paused_preparation_report_does_not_invent_book_or_cost(tmp_path: Path) -> None:

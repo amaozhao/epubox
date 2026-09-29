@@ -24,7 +24,7 @@ from engine.schemas.contracts import (
 from engine.services.atomic_store import IdentityMismatch, StaleWrite
 from engine.services.store import RunStore
 from engine.services.term_freeze import freeze_terminology
-from tests.v25.test_store import _prepare, _write_term_plan
+from tests.engine.services.test_store import _prepare, _write_term_plan
 
 
 def _frozen_store(tmp_path: Path) -> tuple[RunStore, Unit]:

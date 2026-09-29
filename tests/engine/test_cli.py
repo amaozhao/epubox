@@ -9,9 +9,9 @@ from engine import cli
 from engine.epub.preparation import prepare_book
 from engine.services.atomic_store import AtomicStore, StoreLocked
 from engine.services.coherence import load_budget_overrides
-from tests.v23.book_factory import make_epub
-from tests.v25.test_orchestrator import ready_store
-from tests.v25.test_preparation_v25 import StubChecker
+from tests.engine.epub.book_factory import make_epub
+from tests.engine.epub.test_preparation import StubChecker
+from tests.engine.test_orchestrator import ready_store
 
 
 def test_translate_command_routes_only_through_preparation_pipeline(

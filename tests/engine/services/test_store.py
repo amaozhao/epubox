@@ -33,8 +33,8 @@ from engine.schemas.contracts import (
 from engine.services.atomic_store import CorruptRecord, IdentityMismatch, StaleWrite, StoreLocked
 from engine.services.store import RunStore
 from engine.services.term_planning import plan_term_extraction
-from tests.v23.book_factory import make_epub
-from tests.v25.test_contracts import make_document
+from tests.engine.epub.book_factory import make_epub
+from tests.engine.schemas.test_contracts import make_document
 
 _SOURCE_MARKUP = "<html><body><p>The process uses RAM.</p></body></html>"
 _EXTRACTION_CONFIG: dict[str, JsonValue] = {

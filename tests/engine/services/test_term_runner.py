@@ -13,8 +13,8 @@ from engine.services.preparation_pipeline import resume_preparation
 from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION, plan_term_extraction
 from engine.services.term_runner import TermRunner
-from tests.v23.book_factory import make_epub
-from tests.v25.test_preparation_v25 import StubChecker
+from tests.engine.epub.book_factory import make_epub
+from tests.engine.epub.test_preparation import StubChecker
 
 
 def _prepare(tmp_path: Path, **extraction_overrides: int) -> tuple[RunStore, tuple[str, ...]]:

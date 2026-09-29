@@ -16,7 +16,7 @@ from engine.item.extractor import extract_document
 from engine.services.atomic_store import IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION, plan_term_extraction
-from tests.v23.book_factory import make_epub
+from tests.engine.epub.book_factory import make_epub
 
 
 class StubChecker:

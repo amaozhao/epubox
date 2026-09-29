@@ -8,7 +8,7 @@ from engine.schemas.contracts import TermExtractionRecord
 from engine.services.term_candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
 from engine.services.term_freeze import prepare_candidate_pool
 from engine.services.term_resolution import TermResolutionRunner
-from tests.v25.test_term_runner import _prepare
+from tests.engine.services.test_term_runner import _prepare
 
 
 def test_one_bounded_resolution_selects_only_existing_candidate(tmp_path: Path) -> None:
