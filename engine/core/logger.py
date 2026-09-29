@@ -1,7 +1,6 @@
 import logging
 import os
 import sys
-from typing import Optional
 
 from agno.utils.log import configure_agno_logging
 
@@ -24,7 +23,7 @@ def setup_agno_logging():
     )
 
 
-def _create_logger(name: str, level: Optional[str] = None) -> logging.Logger:
+def _create_logger(name: str, level: str | None = None) -> logging.Logger:
     """创建配置好的日志记录器"""
     logger = logging.getLogger(name)
 
@@ -85,7 +84,7 @@ def _create_logger(name: str, level: Optional[str] = None) -> logging.Logger:
     return logger
 
 
-def get_logger(name: str, level: Optional[str] = None) -> logging.Logger:
+def get_logger(name: str, level: str | None = None) -> logging.Logger:
     """获取配置好的应用程序日志记录器（用于非 Agno 组件）"""
     return _create_logger(name, level)
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any
 
 from agno.models.openai.like import OpenAILike
 from agno.models.response import ModelResponse
@@ -67,12 +67,12 @@ class StreamingOpenAILike(OpenAILike):
 
     def invoke(
         self,
-        messages: List,
+        messages: list,
         assistant_message: Any,
-        response_format: Optional[Union[Dict, Type[BaseModel]]] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
-        run_response: Optional[Any] = None,
+        response_format: dict | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: Any | None = None,
         compress_tool_results: bool = False,
     ) -> ModelResponse:
         aggregated = ModelResponse()
@@ -90,12 +90,12 @@ class StreamingOpenAILike(OpenAILike):
 
     async def ainvoke(
         self,
-        messages: List,
+        messages: list,
         assistant_message: Any,
-        response_format: Optional[Union[Dict, Type[BaseModel]]] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
-        run_response: Optional[Any] = None,
+        response_format: dict | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: Any | None = None,
         compress_tool_results: bool = False,
     ) -> ModelResponse:
         aggregated = ModelResponse()

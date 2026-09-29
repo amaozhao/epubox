@@ -3,7 +3,7 @@ Configuration settings for the Epubox application.
 """
 
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import PositiveInt
 from pydantic_settings import BaseSettings
@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # OpenAI 配置
     OPENAI_API_KEY: str = "your-api-key-here"
-    OPENAI_API_BASE: Optional[str] = None
+    OPENAI_API_BASE: str | None = None
     OPENAI_MODEL: str = "gpt-4o"
 
     # Agnes 配置
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_FORMAT: Literal["json", "console"] = "json"
-    LOG_FILE: Optional[Path] = Path("./logs/engine.log")
+    LOG_FILE: Path | None = Path("./logs/engine.log")
     JSON_LOGS: bool = True
 
     model_config = {
