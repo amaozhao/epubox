@@ -176,7 +176,7 @@ async def _advance(
             lambda: _term_progress(store, term_plan),
         )
         term_status = term_result.status
-        if term_result.status == "paused" or _has_unsettled_term_attempts(store):
+        if term_result.status == "paused":
             return PreparationPipelineResult("paused", "terms", store.root, preparation.run_id, term_result.status)
         records = {item.item_id: store.read_extraction(item.item_id) for item in term_plan.items}
         pool_path = store.root / "glossary" / "candidates.json"
@@ -415,15 +415,6 @@ def _stored_decisions(groups) -> tuple[ResolutionDecision, ...]:
             )
         )
     return tuple(decisions)
-
-
-def _has_unsettled_term_attempts(store: RunStore) -> bool:
-    return any(
-        request.stage in {"terms", "resolution"}
-        and any(attempt.state in {"sent", "unknown"} for attempt in request.attempts)
-        for path in (store.root / "requests").glob("*.json")
-        for request in (store.read_request(path.stem),)
-    )
 
 
 async def _with_progress(

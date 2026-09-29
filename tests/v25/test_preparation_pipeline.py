@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import engine.services.preparation_pipeline as pipeline_module
+from engine.agents.runtime import ProviderError
 from engine.epub.preparation import PreparationConfig
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.store import RunStore
@@ -165,6 +166,41 @@ def test_term_and_resolution_transports_feed_one_frozen_glossary(tmp_path: Path)
     assert any(event.phase == "resolution" and event.planned == 1 for event in progress)
     assert progress[-1].phase == "ready" and progress[-1].pending == 0
     assert progress[-1].http_attempts == len(calls)
+
+
+def test_successful_term_retry_closes_despite_an_earlier_unknown_attempt(tmp_path: Path) -> None:
+    calls = 0
+
+    async def terms(_kind, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ProviderError("provider timed out after dispatch")
+        item = payload["items"][0]
+        return {
+            "raw": json.dumps(
+                {
+                    "protocol": "epubox-terms-1",
+                    "request_id": payload["request_id"],
+                    "items": [{"item_id": item["item_id"], "candidates": []}],
+                }
+            ),
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    result = asyncio.run(
+        prepare_translation(source_book(tmp_path), tmp_path / "work", config(), StubChecker(), term_transport=terms)
+    )
+    store = RunStore(result.work_dir)
+    attempts = [
+        attempt.state
+        for path in (store.root / "requests").glob("*.json")
+        for attempt in store.read_request(path.stem).attempts
+    ]
+
+    assert "unknown" in attempts and "succeeded" in attempts
+    assert result.status == "ready" and result.phase == "ready"
+    assert store.read_glossary().extraction_status == "closed"
 
 
 def test_paused_terms_leave_no_pool_or_bookplan_and_resume_from_json(
