@@ -709,12 +709,21 @@ class TranslationEngine:
                 for item in record.items.values()
             )
         )
+        items = tuple(item for record in self.records.values() for item in record.items.values())
         self.progress(
             {
                 "phase": phase,
                 "execution_state": execution_state,
                 "accepted_units": accepted,
                 "required_units": self.book.required_unit_count,
+                "translated_items": sum(item.target_projection is not None for item in items),
+                "reviewed_items": sum(item.status == ItemStatus.REVIEWED for item in items),
+                "required_items": len(items),
+                "retrying_items": sum(item.status == ItemStatus.RETRY_WAIT for item in items),
+                "waiting_derived_units": sum(
+                    record.derived is not None and record.derived.get("state") == "blocked_dependency"
+                    for record in self.records.values()
+                ),
                 "pending_items": pending,
                 "needs_attention_units": attention,
                 "http_attempts": result.http_attempts if result is not None else self._actual_http_total,
@@ -1477,7 +1486,7 @@ def _journal_spent_for_unit(store: RunStore, unit_id: str) -> int:
 
 def _record_needs_attention(record: UnitRecord) -> bool:
     if record.derived is not None:
-        return record.derived.get("state") != "valid"
+        return False
     return record.cut_plan is None or any(item.status == ItemStatus.NEEDS_ATTENTION for item in record.items.values())
 
 

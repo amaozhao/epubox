@@ -22,6 +22,7 @@ from engine.services.atomic_store import StoreError
 from engine.services.preparation_pipeline import prepare_translation
 from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION
+from main import _progress_printer
 from tests.v23.book_factory import make_epub
 from tests.v25.test_preparation_v25 import StubChecker
 from tests.v25.test_store_v07 import _bookplan, _frozen_store, _unit_record
@@ -348,6 +349,62 @@ async def test_translation_review_manifest_and_resume_are_one_v25_path(tmp_path)
     no_calls = ScriptedTransport()
     again = await TranslationEngine(store, transport=no_calls).run()
     assert again.status == "translated" and no_calls.calls == []
+
+
+def test_live_progress_separates_translated_items_from_waiting_navigation(tmp_path, capsys) -> None:
+    store, unit, _ = ready_store(tmp_path)
+    reports: list[dict] = []
+    printer = _progress_printer()
+
+    def progress(report: dict) -> None:
+        reports.append(report)
+        printer(report)
+
+    engine = TranslationEngine(store, transport=ScriptedTransport(), progress=progress)
+    record = engine.records[unit.unit_id]
+    item_id, item = next(iter(record.items.items()))
+    target = "该进程使用内存。"
+    engine.records[unit.unit_id] = record.model_copy(
+        update={
+            "items": {
+                item_id: item.model_copy(
+                    update={
+                        "status": ItemStatus.LOCAL_VALID,
+                        "target_projection": target,
+                        "target_hash": canonical_hash(target),
+                    }
+                )
+            }
+        }
+    )
+    engine.records["nav"] = UnitRecord(
+        unit_id="nav",
+        document_id="navigation",
+        source_hash="source",
+        derived={"state": "blocked_dependency", "source_unit_id": unit.unit_id},
+    )
+    engine.book = engine.book.model_copy(update={"required_unit_count": 2})
+
+    engine._emit_progress("translation", "running")
+
+    assert reports[0]["translated_items"] == 1
+    assert reports[0]["reviewed_items"] == 0
+    assert reports[0]["waiting_derived_units"] == 1
+    assert reports[0]["needs_attention_units"] == 0
+    assert "初译=1/1" in capsys.readouterr().out
+
+    engine.records[unit.unit_id] = engine.records[unit.unit_id].model_copy(
+        update={
+            "items": {
+                item_id: engine.records[unit.unit_id]
+                .items[item_id]
+                .model_copy(update={"status": ItemStatus.NEEDS_ATTENTION})
+            }
+        }
+    )
+    engine._emit_progress("translation", "stopped")
+    assert reports[-1]["needs_attention_units"] == 1
+    assert "局部问题=1" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio

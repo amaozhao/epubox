@@ -4,7 +4,7 @@
 # ruff: noqa: B008
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import typer
 
@@ -134,6 +134,35 @@ def _progress_printer():
         failed = report.get("failed", report.get("needs_attention_units", 0))
         attempts = report.get("http_attempts", 0)
         if any(type(value) is not int for value in (planned, succeeded, failed, attempts)):
+            return
+        details = tuple(
+            report.get(key)
+            for key in (
+                "translated_items",
+                "reviewed_items",
+                "required_items",
+                "retrying_items",
+                "waiting_derived_units",
+            )
+        )
+        if all(type(value) is int for value in details):
+            translated, reviewed, required_items, retrying, waiting = cast(tuple[int, int, int, int, int], details)
+            key = (
+                phase,
+                succeeded * 20 // max(1, planned),
+                translated * 20 // max(1, required_items),
+                reviewed * 20 // max(1, required_items),
+                failed,
+                attempts // 50,
+                report.get("execution_state"),
+            )
+            if key != last:
+                last = key
+                typer.echo(
+                    f"{phase}: 接受={succeeded}/{planned} 单元，初译={translated}/{required_items} 项，"
+                    f"校对={reviewed}/{required_items} 项，导航待依赖={waiting}，重试中={retrying}，"
+                    f"局部问题={failed}，累计HTTP={attempts}"
+                )
             return
         bucket = succeeded * 20 // max(1, planned)
         key = (phase, bucket, failed, attempts // 50, report.get("execution_state"))
