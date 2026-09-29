@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from engine.item.extractor import validate_source_relations
 from engine.item.inline import events_to_projection, parse_projection
-from engine.item.planner import _atomize, _range_stacks, _segment_events
+from engine.item.planner import MAX_SOURCE_TOKENS, _atomize, _range_stacks, _segment_events, source_token_count
 from engine.item.source_views import validate_source_views
 from engine.item.unit_planner import build_context_index, initial_derived_navigation, plan_unit
 from engine.schemas.contracts import (
@@ -438,6 +438,10 @@ class RunStore:
             expected_events = _segment_events(atoms, stacks, segment.source_start, segment.source_end)
             if segment.source_projection != events_to_projection(expected_events):
                 raise IdentityMismatch(f"CutPlan segment does not reconstruct source: {segment.segment_id}")
+            if source_token_count(segment.source_projection) > MAX_SOURCE_TOKENS:
+                raise IdentityMismatch(
+                    f"CutPlan segment exceeds {MAX_SOURCE_TOKENS} source tokens: {segment.segment_id}"
+                )
             if segment.virtual_boundaries != tuple(event.value for event in expected_events if event.virtual):
                 raise IdentityMismatch(f"CutPlan virtual boundaries are invalid: {segment.segment_id}")
             if not set(segment.selected_term_ids).issubset(term_ids):

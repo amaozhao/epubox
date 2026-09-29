@@ -25,9 +25,13 @@ class PlanningError(ValueError):
     """A Unit cannot be represented within the configured request limits."""
 
 
+MAX_SOURCE_TOKENS = 1200
+
+
 @dataclass(frozen=True, slots=True)
 class PlannerConfig:
     context_tokens: int
+    max_source_tokens: int = MAX_SOURCE_TOKENS
     max_input_tokens: int | None = None
     max_output_tokens: int = 2048
     review_output_tokens: int = 768
@@ -40,6 +44,7 @@ class PlannerConfig:
     def __post_init__(self) -> None:
         integer_fields = (
             self.context_tokens,
+            self.max_source_tokens,
             self.max_output_tokens,
             self.review_output_tokens,
             self.safety_margin,
@@ -53,6 +58,8 @@ class PlannerConfig:
             raise ValueError("planner token limits must be positive")
         if self.target_ratio <= 0:
             raise ValueError("target_ratio must be positive")
+        if self.max_source_tokens > MAX_SOURCE_TOKENS:
+            raise ValueError(f"source fragment limit cannot exceed {MAX_SOURCE_TOKENS} tokens")
         if self.review_output_tokens > self.max_output_tokens:
             raise ValueError("review output reserve cannot exceed the provider output limit")
 
@@ -168,6 +175,8 @@ def validate_cut_plan(unit: Unit, plan: CutPlan) -> None:
             raise PlanningError(f"segment events do not match source range: {segment.segment_id}")
         if segment.source_projection != events_to_projection(segment.events):
             raise PlanningError(f"segment projection does not match events: {segment.segment_id}")
+        if source_token_count(segment.source_projection) > MAX_SOURCE_TOKENS:
+            raise PlanningError(f"segment exceeds source token limit: {segment.segment_id}")
         if segment.virtual_boundaries != tuple(event.value for event in segment.events if event.virtual):
             raise PlanningError(f"segment virtual boundaries do not match events: {segment.segment_id}")
         expected = _make_segment(
@@ -537,6 +546,8 @@ def recommended_output_tokens(
 
 
 def _fits_projection(unit: Unit, projection: str, config: PlannerConfig, item_id: str) -> bool:
+    if source_token_count(projection) > config.max_source_tokens:
+        return False
     item = {
         "item_id": item_id,
         "source_projection": projection,
@@ -573,6 +584,11 @@ def _count_tokens(text: str) -> int:
     if tokenizer is not None:
         return len(tokenizer.encode(text))
     return max(1, len(text.encode("utf-8")))
+
+
+def source_token_count(projection: str) -> int:
+    """Count the exact projected source with a conservative offline fallback."""
+    return _count_tokens(projection)
 
 
 def _coherence_lane(unit: Unit) -> tuple[str, ...] | None:

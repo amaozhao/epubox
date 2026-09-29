@@ -16,7 +16,13 @@ from engine.core.quality import find_degenerate_translation
 from engine.core.tokens import count_tokens
 from engine.epub.assembly import derive_navigation_projection
 from engine.item.inline import Event, events_to_projection, parse_projection, plain_text, validate_projection
-from engine.item.planner import PlannerConfig, batch_request, recommended_output_tokens
+from engine.item.planner import (
+    MAX_SOURCE_TOKENS,
+    PlannerConfig,
+    batch_request,
+    recommended_output_tokens,
+    source_token_count,
+)
 from engine.item.unit_planner import build_context, build_context_index, plan_unit
 from engine.schemas.contracts import (
     Attempt,
@@ -1033,6 +1039,8 @@ class TranslationEngine:
         record = self.records[job.unit_id]
         unit = self.units[job.unit_id]
         segment = _segment(record, job.item_id)
+        if source_token_count(segment.source_projection) > MAX_SOURCE_TOKENS:
+            raise IdentityMismatch(f"source Segment exceeds {MAX_SOURCE_TOKENS} tokens: {segment.segment_id}")
         context = build_context(
             unit,
             self.documents[unit.document_id],
@@ -1648,6 +1656,7 @@ def _planner_config(config: Mapping[str, JsonValue]) -> PlannerConfig:
     output = _positive_int(config.get("max_output_tokens"), 2048)
     return PlannerConfig(
         context_tokens=context,
+        max_source_tokens=_positive_int(config.get("max_source_tokens"), MAX_SOURCE_TOKENS),
         max_input_tokens=_optional_positive_int(config.get("max_input_tokens")),
         max_output_tokens=output,
         review_output_tokens=_positive_int(config.get("review_output_tokens"), min(768, output)),

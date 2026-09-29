@@ -12,7 +12,7 @@ import regex
 
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name
 from engine.item.inline import parse_projection, plain_text
-from engine.item.planner import PlannerConfig, validate_cut_plan
+from engine.item.planner import MAX_SOURCE_TOKENS, PlannerConfig, validate_cut_plan
 from engine.item.planner import plan_unit as plan_projection_segments
 from engine.schemas import source_internal
 from engine.schemas.contracts import (
@@ -668,6 +668,7 @@ def _planner_config(config: Mapping[str, JsonValue]) -> PlannerConfig:
     output = _integer(config, "max_output_tokens", 2048)
     return PlannerConfig(
         context_tokens=context,
+        max_source_tokens=_integer(config, "max_source_tokens", MAX_SOURCE_TOKENS),
         max_input_tokens=_optional_integer(config, "max_input_tokens"),
         max_output_tokens=output,
         review_output_tokens=_integer(config, "review_output_tokens", min(768, output)),

@@ -16,6 +16,7 @@ from engine.core.config import settings
 from engine.epub.checker import checker_for_source
 from engine.epub.preparation import PreparationConfig
 from engine.epub.publication import publish_book
+from engine.item.planner import MAX_SOURCE_TOKENS
 from engine.item.unit_planner import PLANNER_VERSION
 from engine.orchestrator import (
     TranslationRunResult,
@@ -105,6 +106,7 @@ def translate_book(
         "model": model_id,
         "planner_version": PLANNER_VERSION,
         "context_tokens": context_tokens,
+        "max_source_tokens": MAX_SOURCE_TOKENS,
         "max_output_tokens": max_output_tokens,
         "run_http_limit": http_limit,
         "concurrency": concurrency,
