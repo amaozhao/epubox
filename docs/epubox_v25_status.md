@@ -5,12 +5,12 @@
 | 任务 | 当前状态 | 已有证据/下一门槛 |
 |---|---|---|
 | V00 | 完成 | 起点全库 616 passed；主文/计划提交 `497be82`；新分支建立 |
-| V01 | 公开入口与共享能力完成，物理删除待 V12 | `generate-glossary`、旧兼容 CLI 参数移除；token/装配/质量函数已迁中性模块，提交 `9e6c264`；装配与质量迁移独立 review APPROVE。旧 orchestrator/workflow/Parser/Builder 仍在仓库，尚不能写“只剩新代码” |
+| V01/V12（旧HTML链） | 物理删除完成 | `generate-glossary`、旧兼容 CLI 参数移除；共享token/装配/质量函数先迁移；旧 orchestrator/workflow/Parser/Builder/DomChunker/GlossaryExtractor 与专属测试已由 `a5414bc` 物理删除，旧专用依赖同步移除 |
 | V02 | 完成 | `13ee40a` 定义 -3/request-2/术语契约，独立复核 APPROVE；后续按真实书空槽位与只读上下文扩充契约，`171b017`、`0844f1d` 已提交 |
-| V03 | Store/用户输入已实现，独立复核中 | 标准化用户规则 `31428f7`；新 Store P1/P2/P3 协议无 building BookPlan，发现的计划漏覆盖、冻结后篡改等反例已修；待最新复核后提交 |
-| V04 | P1 源解析与术语窗口已实现，关系/身份边界复核中 | `198afb6` 源视图重放、`171b017` v2.5 适配；真实书无模型 P1：25 DocumentPlan、6736 Unit、6785 SourceTextView，bookplan.json 不存在。长视图窗口、阅读关系和上下文来源正在收紧，未宣称整个 V04 完成 |
-| V05—V13 | 按依赖推进 | `2340e18` 严格术语协议、`5b56e1b` 同一计费入口；提取 runner 和候选/冻结仍在验证，不跳过真实模型/阅读/人评证据门槛 |
+| V03/V04 | 确定性准备已实现，末轮复核中 | `31428f7` 用户规则、`e564232` Store/P1、`d9ff5b9` 冻结源关系与有界窗口；指定实书无模型 P1→P2：25 DocumentPlan、6736 Unit、6785 主视图、175 术语窗口、G=1110，plan持久化成功，bookplan.json 尚不存在 |
+| V05—V07 | 术语调用/冻结/Unit计划代码已实现，端到端集成中 | `2340e18` 严格协议、`ca8be2a` 非failfast提取、`cad73ac` 候选冻结、`818a890` 冲突核对、`6fc9f88` 按Unit选词；模拟传输验证，无真实付费调用 |
+| V08—V13 | 正文单一路径、CLI、出版和最终验收进行中 | 正文执行器/出版迁入唯一Store进行中；当前CLI仍指向较早JSON执行器，**不能声称唯一新流程已可运行**；不跳过真实模型/阅读/人评证据门槛 |
 
-当前不运行真实 v2.5 术语模型调用，也不把 v2.3 的无词表运行冒充新流程。最近一次 v2.5 定向回归 **84 passed**，Pyright **0 errors**；独立审查仍在处理术语上下文/范围/配置身份反例。旧 `engine/item/chunker.py` 有 26 项原有 Ruff 债务，V12 物理删除后再核对全仓；不为清理临时旧文件改写旧行为。
+当前不运行真实术语模型调用，也不把现有无词表CLI冒充新流程。旧HTML链移除后完整保留测试 **302 passed**、Pyright **0 errors**，全仓代码Ruff已清至0；正文执行/CLI/出版尚未最终切换。磁盘格式号仍用于显式拒绝旧checkpoint，不代表有多条翻译逻辑。
 
 旧 HTML checkpoint 与旧 v2.3 -1/-2 磁盘记录不混用新协议；V02/V03/V10 将把可定位的 `unsupported-format`、准备期和冻结期恢复处理接入正式 Store/CLI。
