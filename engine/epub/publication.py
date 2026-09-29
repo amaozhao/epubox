@@ -38,6 +38,7 @@ from engine.schemas.v25 import (
     Unit,
     UnitRecord,
     canonical_hash,
+    strict_json_loads,
 )
 from engine.services.store_v25 import StoreV25
 
@@ -240,6 +241,8 @@ def publish_book(
         document = store.read_document(document_id, expected_hash=expected_hash)
         if document.format != DOCUMENT_FORMAT:
             raise TypeError(f"publication requires {DOCUMENT_FORMAT}")
+        if not identity:
+            _validate_document_coherence(store, document, records)
         document_targets: dict[str, str] = {}
         for unit in document.units:
             if identity:
@@ -377,6 +380,116 @@ def _accepted_target(store: StoreV25, plan: BookPlan, record: UnitRecord, *, pla
         ):
             return None
     return target
+
+
+def _validate_document_coherence(
+    store: StoreV25,
+    document: DocumentPlan,
+    records: Mapping[str, UnitRecord],
+) -> None:
+    path = store.root / "checks" / f"{document.document_id}.json"
+    if not path.is_file():
+        raise EpubValidationError("missing_coherence_check", f"Missing coherence check: {document.document_id}")
+    try:
+        check = strict_json_loads(path.read_bytes())
+    except (OSError, TypeError, ValueError) as error:
+        raise EpubValidationError(
+            "invalid_coherence_check", f"Invalid coherence check: {document.document_id}"
+        ) from error
+    if not isinstance(check, dict) or check.get("format") != "epubox-check-3":
+        raise EpubValidationError("invalid_coherence_check", f"Invalid coherence check: {document.document_id}")
+    expected_hash = canonical_hash({key: value for key, value in check.items() if key != "record_hash"})
+    if check.get("record_hash") != expected_hash or check.get("document_id") != document.document_id:
+        raise EpubValidationError("invalid_coherence_check", f"Coherence hash mismatch: {document.document_id}")
+    windows = check.get("windows")
+    expected_windows = _coherence_windows(document, records)
+    if windows != expected_windows:
+        raise EpubValidationError("stale_coherence_windows", f"Coherence windows changed: {document.document_id}")
+    participants = {
+        unit_id
+        for window in expected_windows
+        for unit_id in _string_list(window.get("unit_ids"), "coherence window unit_ids")
+    }
+    expected_versions = {unit_id: records[unit_id].revision for unit_id in sorted(participants)}
+    if check.get("candidate_versions") != expected_versions:
+        raise EpubValidationError("stale_coherence_versions", f"Coherence versions are stale: {document.document_id}")
+    completed = check.get("checks")
+    window_ids = {str(window["item_id"]) for window in expected_windows}
+    if check.get("status") != "valid" or not isinstance(completed, dict) or set(completed) != window_ids:
+        raise EpubValidationError("incomplete_coherence_check", f"Coherence is incomplete: {document.document_id}")
+    issues: list[Mapping[str, object]] = []
+    for result in completed.values():
+        if not isinstance(result, dict):
+            raise EpubValidationError("invalid_coherence_check", f"Invalid window result: {document.document_id}")
+        raw_issues = result.get("issues")
+        if not isinstance(raw_issues, list):
+            raise EpubValidationError("invalid_coherence_check", f"Invalid window result: {document.document_id}")
+        for issue in raw_issues:
+            if not isinstance(issue, dict):
+                raise EpubValidationError("invalid_coherence_check", f"Invalid window issues: {document.document_id}")
+            issues.append(issue)
+    if check.get("issues") != issues or any(issue.get("severity") in {"major", "critical"} for issue in issues):
+        raise EpubValidationError("blocking_coherence_issue", f"Coherence has blocking issues: {document.document_id}")
+
+
+def _coherence_windows(
+    document: DocumentPlan,
+    records: Mapping[str, UnitRecord],
+) -> list[dict[str, object]]:
+    windows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    units = {unit.unit_id: unit for unit in document.units}
+    for boundary in document.boundaries:
+        edges = boundary.get("relation_edges")
+        if not isinstance(edges, list):
+            continue
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            left, right, kind = edge.get("from_unit_id"), edge.get("to_unit_id"), edge.get("kind")
+            if not all(isinstance(value, str) and value for value in (left, right, kind)):
+                continue
+            assert isinstance(left, str) and isinstance(right, str) and isinstance(kind, str)
+            item_id = "cw-" + canonical_hash([document.document_id, left, right, kind])[:24]
+            if item_id in seen or left not in units or right not in units:
+                continue
+            seen.add(item_id)
+            windows.append(
+                {
+                    "item_id": item_id,
+                    "unit_ids": [left, right],
+                    "source": [
+                        _snippet(units[left].source_projection, tail=True),
+                        _snippet(units[right].source_projection),
+                    ],
+                    "kind": kind,
+                }
+            )
+    for unit in document.units:
+        record = records.get(unit.unit_id)
+        if record is None or record.cut_plan is None:
+            continue
+        for index, (left, right) in enumerate(zip(record.cut_plan.segments, record.cut_plan.segments[1:])):
+            windows.append(
+                {
+                    "item_id": "cw-" + canonical_hash([document.document_id, unit.unit_id, "seam", index])[:24],
+                    "unit_ids": [unit.unit_id],
+                    "source": [_snippet(left.source_projection, tail=True), _snippet(right.source_projection)],
+                    "kind": "segment_seam",
+                    "segment_item_ids": [left.item_id, right.item_id],
+                }
+            )
+    return windows
+
+
+def _string_list(value: object, label: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise EpubValidationError("invalid_coherence_check", f"{label} must be a string list")
+    return value
+
+
+def _snippet(value: str, *, tail: bool = False, limit: int = 800) -> str:
+    return value[-limit:] if tail else value[:limit]
 
 
 def verify_staged_epub(

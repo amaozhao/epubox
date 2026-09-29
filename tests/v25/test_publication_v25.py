@@ -21,6 +21,7 @@ from engine.schemas.v25 import (
     UnitRecord,
     canonical_hash,
 )
+from engine.services.coherence import pending_windows, prepare_document_check, save_window_result
 from engine.services.store_v25 import StoreV25
 from tests.v23.book_factory import make_epub
 
@@ -221,6 +222,17 @@ def _review_manifests(plan: BookPlan, records: dict[str, UnitRecord]) -> dict[st
     return manifests
 
 
+def _coherence_checks(store: StoreV25, documents, records: dict[str, UnitRecord]):
+    checks = {}
+    for document in documents.values():
+        check = prepare_document_check(store, document, records)
+        for window in pending_windows(check):
+            check = save_window_result(store, check, str(window["item_id"]), ())
+        assert check["status"] == "valid"
+        checks[document.document_id] = check
+    return checks
+
+
 def test_v25_assembly_identity_and_accepted_projection_use_the_same_source_template(tmp_path: Path) -> None:
     _, _, _, documents = _prepared(tmp_path)
     document = next(document for document in documents.values() if document.resource.path.endswith("chapter.xhtml"))
@@ -259,6 +271,7 @@ def test_publish_book_uses_only_v25_bookplan_documents_and_current_accepted_reco
     initial_plans[heading.unit_id] = records[heading.unit_id].cut_plan.plan_hash
     plan = plan.model_copy(update={"initial_unit_plans": initial_plans})
     manifests = _review_manifests(plan, records)
+    _coherence_checks(store, documents, records)
     monkeypatch.setattr(store, "read_bookplan", lambda: plan)
     monkeypatch.setattr(store, "read_unit", lambda unit_id: records[unit_id])
     monkeypatch.setattr(store, "read_request", lambda request_id: manifests[request_id])
@@ -304,6 +317,7 @@ def test_publication_rejects_unaccepted_v25_record_and_legacy_store(
 ) -> None:
     _, store, plan, documents = _prepared(tmp_path)
     records = _accepted_records(documents)
+    _coherence_checks(store, documents, records)
     rejected_id = plan.unit_ids[0]
     records[rejected_id] = records[rejected_id].model_copy(
         update={"accepted_revision": None, "accepted_target_hash": None}
@@ -334,6 +348,7 @@ def test_publication_rejects_record_changed_during_package_verification(
     _, store, plan, documents = _prepared(tmp_path)
     records = _accepted_records(documents)
     manifests = _review_manifests(plan, records)
+    _coherence_checks(store, documents, records)
     changed_id = plan.unit_ids[0]
     reads: dict[str, int] = {}
 
@@ -371,6 +386,7 @@ def test_long_unit_requires_every_segment_review_manifest(tmp_path: Path, monkey
     initial_plans[unit.unit_id] = records[unit.unit_id].cut_plan.plan_hash
     plan = plan.model_copy(update={"initial_unit_plans": initial_plans})
     manifests = _review_manifests(plan, records)
+    _coherence_checks(store, documents, records)
     loaded_requests: list[str] = []
 
     def read_request(request_id: str):
@@ -390,3 +406,56 @@ def test_long_unit_requires_every_segment_review_manifest(tmp_path: Path, monkey
     }
     assert len(expected_requests) == len(records[unit.unit_id].items)
     assert expected_requests.issubset(loaded_requests)
+
+
+def test_formal_publication_requires_current_complete_nonblocking_coherence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, store, plan, documents = _prepared(tmp_path)
+    records = _accepted_records(documents)
+    manifests = _review_manifests(plan, records)
+    monkeypatch.setattr(store, "read_bookplan", lambda: plan)
+    monkeypatch.setattr(store, "read_unit", lambda unit_id: records[unit_id])
+    monkeypatch.setattr(store, "read_request", lambda request_id: manifests[request_id])
+
+    with pytest.raises(EpubValidationError, match="Missing coherence"):
+        publish_book(store, tmp_path / "missing-check.epub", StubChecker())
+
+    checks = _coherence_checks(store, documents, records)
+    document_id = next(document_id for document_id, check in checks.items() if check["windows"])
+    path = store.root / "checks" / f"{document_id}.json"
+
+    def write_check(check: dict[str, Any]) -> None:
+        value = dict(check)
+        value["record_hash"] = canonical_hash({key: item for key, item in value.items() if key != "record_hash"})
+        store._atomic_write(path, value)
+
+    write_check(dict(checks[document_id]) | {"format": "epubox-check-2"})
+    with pytest.raises(EpubValidationError, match="Invalid coherence"):
+        publish_book(store, tmp_path / "old-check.epub", StubChecker())
+
+    stale = dict(checks[document_id])
+    assert isinstance(stale["candidate_versions"], dict)
+    stale["candidate_versions"] = {unit_id: revision + 1 for unit_id, revision in stale["candidate_versions"].items()}
+    write_check(stale)
+    with pytest.raises(EpubValidationError, match="versions are stale"):
+        publish_book(store, tmp_path / "stale-check.epub", StubChecker())
+
+    incomplete = dict(checks[document_id])
+    assert isinstance(incomplete["checks"], dict)
+    incomplete["checks"] = dict(incomplete["checks"])
+    incomplete["checks"].pop(next(iter(incomplete["checks"])))
+    write_check(incomplete)
+    with pytest.raises(EpubValidationError, match="incomplete"):
+        publish_book(store, tmp_path / "incomplete-check.epub", StubChecker())
+
+    blocking = dict(checks[document_id])
+    assert isinstance(blocking["checks"], dict)
+    blocking["checks"] = dict(blocking["checks"])
+    first_window = next(iter(blocking["checks"]))
+    issue = {"code": "continuity", "severity": "major", "message": "broken"}
+    blocking["checks"][first_window] = {"issues": [issue]}
+    blocking["issues"] = [issue]
+    write_check(blocking)
+    with pytest.raises(EpubValidationError, match="blocking issues"):
+        publish_book(store, tmp_path / "blocking-check.epub", StubChecker())
