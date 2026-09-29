@@ -14,7 +14,7 @@ uv sync --extra dev
 
 默认使用 `.env` 中的 `AGNES_API_KEY`、`AGNES_BASE_URL`、`AGNES_MODEL`。`--provider proxy` 使用对应的 CR proxy 配置。模型 ID 与提示配置会冻结在本轮运行记录中；续跑不会改用另一个模型。
 
-可通过 `EPUBCHECK_COMMAND='java -jar /absolute/path/epubcheck.jar'` 或 `--epubcheck-command` 指定检查器。开发工作区的 `.tools/epubcheck/` 也会自动发现。源书有真实 ERROR/FATAL、词表输入不合法或输出路径不安全时，不会发起模型请求。
+可通过 `EPUBCHECK_COMMAND='java -jar /absolute/path/epubcheck.jar'` 或 `--epubcheck-command` 指定检查器。未显式指定时，开发工作区优先使用已验证的 `.tools/epubcheck/epubcheck-5.3.0/`；没有该版本时才选其他内置版本，均无时使用系统命令。源书有 ERROR/FATAL、词表输入不合法或输出路径不安全时，不会发起模型请求。
 
 ## 一个命令翻译整本书
 

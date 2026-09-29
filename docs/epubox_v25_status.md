@@ -12,6 +12,8 @@
 
 用户指定的 Leadership EPUB 使用经源 EPUBCheck 修复后的源快照、按正式命令默认的 32768 上下文预算做**无模型**全书结构基准：25 份 DocumentPlan、6785 个主 SourceTextView（与合并前相同）、5777 个 Unit（合并前 6736）、320 个复合 Unit 容纳 1279 段，5045 个可发送 Segment、732 个派生导航 Unit、0 个未规划普通 Unit、0 次 HTTP。组合 Unit 和 Segment 的源投影最高均为 1154 token，低于 1200 的硬上限；BookPlan 状态 `ready`。25 份文档 identity 装配后，EPUBCheck 为 0 fatal、0 error、0 warning；输出 SHA256 `08819aaf629a73f6dcd4834debf317704087de42d0610ff62e263443d0ae10a6`。运行资料位于 `work/v25-benchmark/.../leadership-maximal-same-parent-final/`（已忽略，不纳入提交）。其余段落多数独处于列表项、表格单元格或不同容器，按用户确认的同容器范围不再合并；短 Unit 可由 Batch 合并发送，但仍是各自独立的源位置记录。
 
+`not-just-another-model-ai-development-enterprise.epub` 的源校验暴露本机 EPUBCheck 5.4.0 对导航 `<nav>` ARIA 属性的三处版本差异；同一源书在 5.3.0 下 0 error/0 warning。默认检查器现固定优先选择已验证的内置 5.3.0，不再按错误文本特判回退。该书无模型 P1—P4 基准：32 份 DocumentPlan、5228 个 Unit、4545 个 Segment、最大源片段 1168 token、0 个未规划普通 Unit、0 次 HTTP，BookPlan `ready`。32 份文档 identity 装配后 EPUBCheck 0 error/0 warning；输出 SHA256 `d5f527f1d020838f299f94342a49c0c11d8ebb59ebc5beeb1cad3b3eab8144c8`。运行资料位于 `work/v25-preflight/.../not-just-another-model-preflight/`（已忽略，不纳入提交）。这证明结构处理和发布前校验，不代表该书已有译文。
+
 该书两段真实摘录此前已按同一复合 Unit 投影协议走完单命令模型翻译：9/9 Unit 接受（其中 1 个 Unit 含 2 个段落）、12 次 HTTP、正式 EPUB 经 EPUBCheck 5.4.0 检查为 0 fatal、0 error、0 warning；输出 SHA256 `68baaf69f2c78097845e51b0f5a505a6b30be0dc885706b38ea1e5446e8313a2`。这是摘录验收，不是整书译文质量结论；`reader_check=not_run`。
 
-最新全库验证：**271 passed**，Pyright **0 errors**，Ruff check/format 通过。段落合并、跨组合尾部保留及表头上下文方向修正经独立代码复核 **APPROVE**。仍需完成 Leadership 整书真实模型翻译、逐项语义抽查、阅读器检查和用户人评，才能给出完整质量结论。
+最新全库验证：**262 passed**，Pyright **0 errors**，Ruff check/format 通过。段落合并、跨组合尾部保留及表头上下文方向修正经独立代码复核 **APPROVE**。仍需完成实书整本真实模型翻译、逐项语义抽查、阅读器检查和用户人评，才能给出完整质量结论。
