@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 from pathlib import Path
 
-from engine.epub.preparation_v25 import PreparationConfig
+from engine.epub.preparation import PreparationConfig
 from engine.services.preparation_pipeline import prepare_translation
 from engine.services.resume_plan import plan_resume
 from tests.v23.book_factory import make_epub

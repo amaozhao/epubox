@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from engine.item.planner_v25 import build_context_index, plan_unit_v25
-from engine.schemas.v25 import (
+from engine.item.unit_planner import build_context_index, plan_unit
+from engine.schemas.contracts import (
     Attempt,
     BookPlan,
     CutPlan,
@@ -22,12 +22,12 @@ from engine.schemas.v25 import (
     segment_hash,
 )
 from engine.services.atomic_store import IdentityMismatch, StaleWrite
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 from engine.services.term_freeze import freeze_terminology
 from tests.v25.test_store import _prepare, _write_term_plan
 
 
-def _frozen_store(tmp_path: Path) -> tuple[StoreV25, Unit]:
+def _frozen_store(tmp_path: Path) -> tuple[RunStore, Unit]:
     store, preparation = _prepare(tmp_path)
     plan = _write_term_plan(store, preparation)
     records = {
@@ -58,7 +58,7 @@ def _frozen_store(tmp_path: Path) -> tuple[StoreV25, Unit]:
 
 
 def _unit_record(
-    store: StoreV25, unit: Unit, *, end_delta: int = 0, selected_terms: tuple[str, ...] = ()
+    store: RunStore, unit: Unit, *, end_delta: int = 0, selected_terms: tuple[str, ...] = ()
 ) -> UnitRecord:
     preparation = store.read_preparation()
     document = store.read_document(unit.document_id)
@@ -67,7 +67,7 @@ def _unit_record(
     assert isinstance(context_chars, int)
     reading_edges = tuple(zip(preparation.reading_order, preparation.reading_order[1:], strict=False))
     context_index = build_context_index(documents, reading_edges, context_chars)
-    initialized = plan_unit_v25(
+    initialized = plan_unit(
         unit,
         document,
         store.read_glossary(),
@@ -110,7 +110,7 @@ def _unit_record(
     )
 
 
-def _bookplan(store: StoreV25, record: UnitRecord) -> BookPlan:
+def _bookplan(store: RunStore, record: UnitRecord) -> BookPlan:
     preparation = store.read_preparation()
     freeze = store.read_freeze()
     return BookPlan(

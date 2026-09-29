@@ -8,11 +8,11 @@ from typing import Any, cast
 import pytest
 
 from engine.epub.assembly import assemble_document, derive_navigation_projection
-from engine.epub.preparation_v25 import PreparationConfig, prepare_book
+from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.epub.publication import publish_book, recover_publication, validate_assembled_document
 from engine.epub.validation import EpubCheckResult, EpubValidationError
-from engine.item.planner_v25 import plan_unit_v25
-from engine.schemas.v25 import (
+from engine.item.unit_planner import plan_unit
+from engine.schemas.contracts import (
     Attempt,
     BookPlan,
     GlossarySnapshot,
@@ -22,7 +22,7 @@ from engine.schemas.v25 import (
     canonical_hash,
 )
 from engine.services.coherence import pending_windows, prepare_document_check, save_window_result
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 from tests.v23.book_factory import make_epub
 
 
@@ -46,7 +46,7 @@ def _prepared(
         PreparationConfig(run_id="publish-v25", translation_config={"target_language": "zh-Hans"}),
         StubChecker(),
     )
-    store = StoreV25(prepared.work_dir)
+    store = RunStore(prepared.work_dir)
     preparation = store.read_preparation()
     ordered_documents = (
         *preparation.reading_order,
@@ -118,7 +118,7 @@ def _planned_record(document, unit, target: str, *, context_tokens: int = 8192, 
         extraction_status="not_required",
         warnings=("No terminology required.",),
     )
-    initialized = plan_unit_v25(
+    initialized = plan_unit(
         unit,
         document,
         glossary,
@@ -224,7 +224,7 @@ def _review_manifests(plan: BookPlan, records: dict[str, UnitRecord]) -> dict[st
     return manifests
 
 
-def _coherence_checks(store: StoreV25, documents, records: dict[str, UnitRecord]):
+def _coherence_checks(store: RunStore, documents, records: dict[str, UnitRecord]):
     checks = {}
     for document in documents.values():
         check = prepare_document_check(store, document, records)
@@ -340,7 +340,7 @@ def test_publication_rejects_unaccepted_v25_record_and_legacy_store(
     monkeypatch.setattr(store, "read_request", lambda request_id: old_manifests[request_id])
     with pytest.raises(EpubValidationError, match="not currently accepted"):
         publish_book(store, tmp_path / "review-1.epub", StubChecker())
-    with pytest.raises(TypeError, match="StoreV25"):
+    with pytest.raises(TypeError, match="RunStore"):
         publish_book(cast(Any, object()), tmp_path / "legacy.epub", StubChecker())
 
 

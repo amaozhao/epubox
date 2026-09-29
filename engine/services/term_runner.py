@@ -11,7 +11,7 @@ from engine.agents.protocol import ProtocolError
 from engine.agents.runtime import PROMPT_VERSION, ModelRuntime, RequestError, RuntimePaused, wire_hash
 from engine.agents.term_protocol import validate_terms_response
 from engine.core.tokens import count_tokens
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     Attempt,
     ExtractionItem,
     RequestManifest,
@@ -19,7 +19,7 @@ from engine.schemas.v25 import (
     Usage,
 )
 from engine.services.coherence import load_budget_overrides
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 
 
 class TermBudgetPaused(RuntimeError):
@@ -38,7 +38,7 @@ class TermRunResult:
 class TermRunner:
     """One writer owns extraction records; HTTP attempts are durable before dispatch."""
 
-    def __init__(self, store: StoreV25, *, model: Any = None, transport: Any = None):
+    def __init__(self, store: RunStore, *, model: Any = None, transport: Any = None):
         self.store = store
         self.preparation = store.read_preparation()
         self.plan = store.read_term_plan()

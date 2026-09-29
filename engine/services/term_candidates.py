@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from itertools import pairwise
 from typing import Literal
 
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     DocumentPlan,
     ExtractionItem,
     SourceRef,

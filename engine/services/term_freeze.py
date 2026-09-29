@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     CandidatePool,
     DocumentPlan,
     FreezeIntent,

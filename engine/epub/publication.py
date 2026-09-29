@@ -28,7 +28,7 @@ from engine.epub.validation import (
     validate_internal_references,
 )
 from engine.item.inline import plain_text, projection_identities, validate_projection
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     BOOK_FORMAT,
     DOCUMENT_FORMAT,
     BookPlan,
@@ -40,7 +40,7 @@ from engine.schemas.v25 import (
     canonical_hash,
     strict_json_loads,
 )
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 
 _TRANSLATABLE_ATTRIBUTES = {"alt", "title", "aria-label", "aria-description"}
 _XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
@@ -216,7 +216,7 @@ def stage_epub(
 
 
 def publish_book(
-    store: StoreV25,
+    store: RunStore,
     output_path: Path,
     checker: object,
     *,
@@ -224,8 +224,8 @@ def publish_book(
     identity: bool = False,
 ) -> dict[str, object]:
     """Publish only trusted v2.5 source plans and current accepted UnitRecord targets."""
-    if not isinstance(store, StoreV25):
-        raise TypeError("publication requires StoreV25")
+    if not isinstance(store, RunStore):
+        raise TypeError("publication requires RunStore")
     plan = store.read_bookplan()
     if plan.format != BOOK_FORMAT:
         raise TypeError(f"publication requires {BOOK_FORMAT}")
@@ -331,7 +331,7 @@ def publish_book(
     }
 
 
-def _accepted_target(store: StoreV25, plan: BookPlan, record: UnitRecord, *, planned: bool) -> str | None:
+def _accepted_target(store: RunStore, plan: BookPlan, record: UnitRecord, *, planned: bool) -> str | None:
     target = record.candidate
     if target is None or record.accepted_revision != record.revision:
         return None
@@ -391,7 +391,7 @@ def _accepted_target(store: StoreV25, plan: BookPlan, record: UnitRecord, *, pla
 
 
 def _derived_navigation_target(
-    store: StoreV25,
+    store: RunStore,
     plan: BookPlan,
     document: DocumentPlan,
     unit: Unit,
@@ -444,7 +444,7 @@ def _derived_navigation_target(
 
 
 def _validate_document_coherence(
-    store: StoreV25,
+    store: RunStore,
     document: DocumentPlan,
     records: Mapping[str, UnitRecord],
 ) -> None:

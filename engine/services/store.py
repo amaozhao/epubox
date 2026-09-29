@@ -1,4 +1,4 @@
-"""Crash-safe storage for the v2.5 preparation and terminology gates."""
+"""Crash-safe storage and identity gates for one translation run."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
-from engine.item.extractor_v25 import validate_source_relations
+from engine.item.extractor import validate_source_relations
 from engine.item.inline import events_to_projection, parse_projection
 from engine.item.planner import _atomize, _range_stacks, _segment_events
-from engine.item.planner_v25 import build_context_index, initial_derived_navigation, plan_unit_v25
 from engine.item.source_views import validate_source_views
-from engine.schemas.v25 import (
+from engine.item.unit_planner import build_context_index, initial_derived_navigation, plan_unit
+from engine.schemas.contracts import (
     BOOK_FORMAT,
     CANDIDATES_FORMAT,
     DOCUMENT_FORMAT,
@@ -65,7 +65,7 @@ class UserTermsFile(BaseModel):
     terms: tuple[UserTerm, ...] = ()
 
 
-class StoreV25:
+class RunStore:
     """Persist P1-P3 without requiring a translation-ready BookPlan.
 
     V07 owns Unit/BookPlan writes and must call ``validate_cut_plan_coverage``
@@ -586,7 +586,7 @@ class StoreV25:
                 if record.cut_plan is not None:
                     if expected_derived is not None or record.derived is not None:
                         raise IdentityMismatch(f"derived Unit has a model CutPlan: {unit_id}")
-                    expected = plan_unit_v25(
+                    expected = plan_unit(
                         unit,
                         document,
                         glossary,
@@ -775,4 +775,4 @@ class StoreV25:
             raise IdentityMismatch(f"unknown attempt: {attempt_id}")
 
 
-__all__ = ["USER_TERMS_FORMAT", "StoreV25", "UserTermsFile"]
+__all__ = ["USER_TERMS_FORMAT", "RunStore", "UserTermsFile"]

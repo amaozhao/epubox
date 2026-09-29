@@ -49,7 +49,7 @@ def test_resume_uses_frozen_model_and_snapshot_without_user_term_file(
         source_path="source.epub",
         extraction_config={"provider": "agnes", "model": "frozen-model", "max_output_tokens": 128},
     )
-    monkeypatch.setattr(cli, "StoreV25", lambda *_: SimpleNamespace(read_preparation=lambda: preparation))
+    monkeypatch.setattr(cli, "RunStore", lambda *_: SimpleNamespace(read_preparation=lambda: preparation))
     monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id="frozen-model"))
     monkeypatch.setattr(cli, "checker_for_source", lambda *_args: object())
     called = []
@@ -67,7 +67,7 @@ def test_resume_uses_frozen_model_and_snapshot_without_user_term_file(
 
 def test_outcome_report_is_derived_from_the_same_work_directory(tmp_path: Path, monkeypatch) -> None:
     calls = []
-    monkeypatch.setattr(cli, "StoreV25", lambda root: SimpleNamespace(root=root))
+    monkeypatch.setattr(cli, "RunStore", lambda root: SimpleNamespace(root=root))
 
     def fake_report(store, **fields):
         calls.append((store.root, fields))

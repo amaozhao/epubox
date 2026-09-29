@@ -5,15 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from engine.schemas.v25 import JsonValue, UnitRecord, canonical_hash, canonical_json_bytes
+from engine.schemas.contracts import JsonValue, UnitRecord, canonical_hash, canonical_json_bytes
 from engine.services.coherence import _read as read_coherence_record
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 
 type Outcome = Literal["completed", "paused", "needs_attention", "failed"]
 
 
 def write_report(
-    store: StoreV25,
+    store: RunStore,
     *,
     status: Outcome,
     phase: str,

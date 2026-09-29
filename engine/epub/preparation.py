@@ -1,4 +1,4 @@
-"""Deterministic P1 preparation for the v2.5 pipeline."""
+"""Deterministic source preparation for the translation pipeline."""
 
 from __future__ import annotations
 
@@ -15,11 +15,11 @@ from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
 from engine.epub.derived_bindings import resolve_derived_navigation
 from engine.epub.validation import EpubChecker, PackageInventory, ZipLimits, inspect_epub
-from engine.item.extractor import select_primary_title
-from engine.item.extractor_v25 import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
-from engine.schemas.v25 import JsonValue, PreparationPlan
+from engine.item.extractor import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
+from engine.item.structural_extractor import select_primary_title
+from engine.schemas.contracts import JsonValue, PreparationPlan
 from engine.services.atomic_store import AtomicStore
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 from engine.services.term_inputs import load_user_terms
 from engine.services.term_planning import TERM_PLANNER_VERSION
 
@@ -79,7 +79,7 @@ def prepare_book(
         temporary_snapshot.unlink(missing_ok=True)
         raise
 
-    store = StoreV25(work_dir)
+    store = RunStore(work_dir)
     with store.lock(blocking=False):
         inventory = inspect_epub(snapshot, source_hash, checker=checker, limits=config.zip_limits)
         documents = []

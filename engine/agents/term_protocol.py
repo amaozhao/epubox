@@ -158,7 +158,7 @@ def validate_resolution_response(
     return value
 
 
-def validate_review_response_v25(
+def validate_review_response(
     raw: str | bytes,
     request_id: str,
     expected_items: Mapping[str, Mapping[str, Any]],

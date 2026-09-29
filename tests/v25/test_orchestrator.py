@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 
 from engine.agents.runtime import ProviderError
-from engine.epub.preparation_v25 import PreparationConfig
+from engine.epub.preparation import PreparationConfig
 from engine.epub.publication import _accepted_target, publish_book
 from engine.item.inline import plain_text
 from engine.orchestrator import (
@@ -17,10 +17,10 @@ from engine.orchestrator import (
     validate_repair_file,
     validate_retry_failed_units,
 )
-from engine.schemas.v25 import ItemStatus, Unit, UnitRecord, canonical_hash
+from engine.schemas.contracts import ItemStatus, Unit, UnitRecord, canonical_hash
 from engine.services.atomic_store import StoreError
 from engine.services.preparation_pipeline import prepare_translation
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION
 from tests.v23.book_factory import make_epub
 from tests.v25.test_preparation_v25 import StubChecker
@@ -206,7 +206,7 @@ def ready_store(tmp_path):
     return store, unit, record
 
 
-async def ready_batch_store(tmp_path, run_id: str = "batch-run") -> StoreV25:
+async def ready_batch_store(tmp_path, run_id: str = "batch-run") -> RunStore:
     source = make_epub(
         tmp_path / f"{run_id}.epub",
         {"chapter.xhtml": "<p>First item.</p><p>Second item.</p><p>Third item.</p>"},
@@ -234,10 +234,10 @@ async def ready_batch_store(tmp_path, run_id: str = "batch-run") -> StoreV25:
         ),
         StubChecker(),
     )
-    return StoreV25(prepared.work_dir)
+    return RunStore(prepared.work_dir)
 
 
-async def ready_derived_store(tmp_path, run_id: str = "derived-run") -> tuple[StoreV25, dict]:
+async def ready_derived_store(tmp_path, run_id: str = "derived-run") -> tuple[RunStore, dict]:
     source = make_epub(
         tmp_path / f"{run_id}.epub",
         {"chapter.xhtml": "<h1>Chapter 1</h1><p>Independent body.</p>"},
@@ -265,7 +265,7 @@ async def ready_derived_store(tmp_path, run_id: str = "derived-run") -> tuple[St
         ),
         StubChecker(),
     )
-    store = StoreV25(prepared.work_dir)
+    store = RunStore(prepared.work_dir)
     preparation = store.read_preparation()
     binding = next(
         binding
@@ -686,7 +686,7 @@ async def test_long_unit_accepts_segment_reviews_from_multiple_manifests(tmp_pat
         ),
         StubChecker(),
     )
-    store = StoreV25(prepared.work_dir)
+    store = RunStore(prepared.work_dir)
     transport = PartialBatchTransport()
     transport.omitted = "disabled"
     engine = TranslationEngine(store, transport=transport)
@@ -749,7 +749,7 @@ async def test_coherence_major_issue_gets_one_unit_revision_and_full_rereview(tm
         ),
         StubChecker(),
     )
-    store = StoreV25(prepared.work_dir)
+    store = RunStore(prepared.work_dir)
     transport = PartialBatchTransport(coherence_major_once=True)
     transport.omitted = "disabled"
     result = await TranslationEngine(store, transport=transport).run()

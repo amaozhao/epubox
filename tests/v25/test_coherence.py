@@ -4,8 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from engine.item.extractor_v25 import extract_document
-from engine.schemas.v25 import UnitRecord, canonical_hash
+from engine.item.extractor import extract_document
+from engine.schemas.contracts import UnitRecord, canonical_hash
 from engine.services.coherence import (
     add_http_budget,
     load_budget_overrides,
@@ -14,7 +14,7 @@ from engine.services.coherence import (
     retry_document_check,
     save_window_result,
 )
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 
 
 def accepted_records(document):
@@ -38,7 +38,7 @@ def test_windows_freeze_budget_block_dependencies_and_keep_later_results(tmp_pat
         "<p>First.</p><p>Second.</p><p>Third.</p></body></html>"
     )
     document = extract_document(markup, "chapter.xhtml", "source-sha")
-    store = StoreV25(tmp_path)
+    store = RunStore(tmp_path)
     records = accepted_records(document)
     missing_id = next(unit.unit_id for unit in document.units if "Second" in unit.source_projection)
     records[missing_id] = records[missing_id].model_copy(
@@ -88,18 +88,18 @@ def test_windows_freeze_budget_block_dependencies_and_keep_later_results(tmp_pat
 
 def test_budget_authorization_is_idempotent_atomic_and_payload_bound(tmp_path) -> None:
     def add_once() -> dict:
-        return add_http_budget(StoreV25(tmp_path), authorization_id="approval-1", add_run_http=3)
+        return add_http_budget(RunStore(tmp_path), authorization_id="approval-1", add_run_http=3)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = tuple(pool.map(lambda _: add_once(), range(2)))
 
     assert {value["add_run_http"] for value in results} == {3}
-    assert load_budget_overrides(StoreV25(tmp_path))["add_run_http"] == 3
+    assert load_budget_overrides(RunStore(tmp_path))["add_run_http"] == 3
     with pytest.raises(ValueError, match="different HTTP budget action"):
-        add_http_budget(StoreV25(tmp_path), authorization_id="approval-1", add_run_http=4)
+        add_http_budget(RunStore(tmp_path), authorization_id="approval-1", add_run_http=4)
     with pytest.raises(ValueError, match="different HTTP budget action"):
         add_http_budget(
-            StoreV25(tmp_path),
+            RunStore(tmp_path),
             authorization_id="approval-1",
             action_context_hash="different-repair-file",
             add_run_http=3,

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from engine.schemas.v25 import canonical_hash
+from engine.schemas.contracts import canonical_hash
 from engine.services.term_inputs import load_user_terms
 
 

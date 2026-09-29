@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from engine.item.extractor import extract_document
 from engine.item.source_views import SourceViewError, derive_source_views, validate_source_views
-from engine.schemas.v23 import DocumentPlan
-from engine.schemas.v25 import (
+from engine.item.structural_extractor import extract_document
+from engine.schemas.contracts import (
     DocumentPlan as V25DocumentPlan,
 )
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     NodeRecord,
     RegistryEntry,
     ResourceRecord,
@@ -18,6 +17,7 @@ from engine.schemas.v25 import (
     canonical_hash,
     source_view_hash_payload,
 )
+from engine.schemas.source_internal import DocumentPlan
 
 
 def _plan(body: str) -> DocumentPlan:

@@ -1,4 +1,4 @@
-"""Pure frozen-glossary selection and initial v2.5 Unit planning."""
+"""Pure frozen-glossary selection and Unit cut planning."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ import regex
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name
 from engine.item.inline import parse_projection, plain_text
 from engine.item.planner import PlannerConfig, validate_cut_plan
-from engine.item.planner import plan_unit as plan_unit_v23
-from engine.schemas import v23
-from engine.schemas.v25 import (
+from engine.item.planner import plan_unit as plan_projection_segments
+from engine.schemas import source_internal
+from engine.schemas.contracts import (
     CutPlan,
     DocumentPlan,
     FrozenTerm,
@@ -185,7 +185,7 @@ def build_context(
     return _context_payload(unit, index.ranges_by_unit.get(unit.unit_id, ()))
 
 
-def plan_unit_v25(
+def plan_unit(
     unit: Unit,
     document: DocumentPlan,
     glossary: GlossarySnapshot,
@@ -218,7 +218,7 @@ def plan_unit_v25(
     temporary_logical_hash = canonical_hash(
         {"version": PLANNER_VERSION, "unit_id": unit.unit_id, "source_projection": unit.source_projection}
     )
-    legacy_unit = v23.Unit(
+    legacy_unit = source_internal.Unit(
         unit_id=unit.unit_id,
         document_id=unit.document_id,
         kind=unit.kind,
@@ -226,7 +226,7 @@ def plan_unit_v25(
         node_key=unit.node_key,
         slot_ids=unit.slot_ids,
         registry={
-            ref_id: v23.RegistryEntry.model_validate(entry.model_dump(mode="python"))
+            ref_id: source_internal.RegistryEntry.model_validate(entry.model_dump(mode="python"))
             for ref_id, entry in unit.registry.items()
         },
         context={"source_context": json.dumps(unit_selection.context, ensure_ascii=False, sort_keys=True)},
@@ -235,7 +235,7 @@ def plan_unit_v25(
         region=unit.region,
         logical_hash=temporary_logical_hash,
     )
-    legacy_plan = plan_unit_v23(legacy_unit, planner_config, epoch=epoch)
+    legacy_plan = plan_projection_segments(legacy_unit, planner_config, epoch=epoch)
     validate_cut_plan(legacy_unit, legacy_plan)
 
     segments: list[Segment] = []
@@ -710,6 +710,6 @@ __all__ = [
     "build_context",
     "build_context_index",
     "initial_derived_navigation",
-    "plan_unit_v25",
+    "plan_unit",
     "select_terms",
 ]

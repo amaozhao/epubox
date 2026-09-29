@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from engine.item.extractor import extract_document as extract_document_v23
-from engine.item.extractor_v25 import extract_document, validate_source_relations
+from engine.item.extractor import extract_document, validate_source_relations
 from engine.item.source_views import validate_source_views
-from engine.schemas.v25 import DOCUMENT_FORMAT, DocumentPlan
+from engine.item.structural_extractor import extract_document as extract_structure
+from engine.schemas.contracts import DOCUMENT_FORMAT, DocumentPlan
 
 
 def _source(body: str) -> str:
@@ -39,7 +39,7 @@ def test_adapter_preserves_source_plan_and_adds_replayable_views() -> None:
     source = _source(
         '<p>Use pro<em>cess</em>or <code>run()</code> safely.<img src="chart.png" alt="System chart"/></p>'
     )
-    old = extract_document_v23(source, "OPS/chapter.xhtml", "source-sha")
+    old = extract_structure(source, "OPS/chapter.xhtml", "source-sha")
     document = extract_document(source, "OPS/chapter.xhtml", "source-sha")
 
     assert isinstance(document, DocumentPlan)

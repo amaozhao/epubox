@@ -3,7 +3,6 @@ from typing import Literal
 import pytest
 
 from engine.core.styles import ReorderPolicy, scan_css, scan_inline_style, scan_stylesheets, selector_policy
-from engine.item.extractor import extract_document
 from engine.item.inline import (
     Event,
     ProjectionError,
@@ -26,7 +25,8 @@ from engine.item.planner import (
     recommended_output_tokens,
     validate_cut_plan,
 )
-from engine.schemas.v23 import (
+from engine.item.structural_extractor import extract_document
+from engine.schemas.source_internal import (
     DocumentPlan,
     ItemRecord,
     JsonValue,

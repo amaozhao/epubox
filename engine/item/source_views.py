@@ -1,4 +1,4 @@
-"""Deterministic natural-language views over persisted v2.3 source plans."""
+"""Deterministic natural-language views over structural source extraction."""
 
 from __future__ import annotations
 
@@ -6,16 +6,15 @@ from dataclasses import dataclass
 from typing import cast
 
 from engine.item.inline import ProjectionError, validate_projection
-from engine.schemas.v23 import DocumentPlan, SourceSlot, Unit
-from engine.schemas.v25 import (
-    DocumentPlan as V25DocumentPlan,
-)
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
+    DocumentPlan,
     SourceRef,
     SourceTextView,
     canonical_hash,
     source_view_hash_payload,
 )
+from engine.schemas.source_internal import DocumentPlan as ExtractedDocument
+from engine.schemas.source_internal import SourceSlot, Unit
 
 SOURCE_VIEW_RULE_VERSION = "epubox-source-view-1"
 
@@ -46,8 +45,8 @@ class _OwnedFragment:
     domain_node_key: str
 
 
-def derive_source_views(document: DocumentPlan) -> SourceViewDerivation:
-    """Build v2.5 source views without reparsing XML or changing source ownership."""
+def derive_source_views(document: ExtractedDocument) -> SourceViewDerivation:
+    """Build source views without reparsing XML or changing source ownership."""
 
     views: dict[str, SourceTextView] = {}
     unit_views: dict[str, tuple[str, ...]] = {}
@@ -65,10 +64,10 @@ def derive_source_views(document: DocumentPlan) -> SourceViewDerivation:
     return SourceViewDerivation(views, unit_views, tuple(gaps))
 
 
-def validate_source_views(document: V25DocumentPlan) -> None:
+def validate_source_views(document: DocumentPlan) -> None:
     """Replay source views from frozen slots/projections; self-consistent hashes are insufficient."""
 
-    expected = derive_source_views(cast(DocumentPlan, document))
+    expected = derive_source_views(cast(ExtractedDocument, document))
     if document.source_views != expected.source_views:
         raise SourceViewError("persisted source_views do not match frozen source slots and projections")
     actual_unit_views = {unit.unit_id: unit.source_view_ids for unit in document.units}
@@ -77,7 +76,7 @@ def validate_source_views(document: V25DocumentPlan) -> None:
 
 
 def _derive_unit_views(
-    document: DocumentPlan, unit: Unit
+    document: ExtractedDocument, unit: Unit
 ) -> tuple[tuple[SourceTextView, ...], tuple[SourceViewGap, ...]]:
     fragments = _owned_fragments(document, unit)
     fragment_index = 0
@@ -172,7 +171,7 @@ def _derive_unit_views(
     return tuple(views), tuple(gaps)
 
 
-def _owned_fragments(document: DocumentPlan, unit: Unit) -> tuple[_OwnedFragment, ...]:
+def _owned_fragments(document: ExtractedDocument, unit: Unit) -> tuple[_OwnedFragment, ...]:
     fragments: list[_OwnedFragment] = []
     listed = set(unit.slot_ids)
     node_by_path = {node.element_path: node.node_key for node in document.nodes.values()}

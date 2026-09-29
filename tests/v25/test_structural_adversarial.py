@@ -10,7 +10,7 @@ from engine.core.styles import ReorderPolicy, scan_css, scan_stylesheets
 from engine.epub.assembly import assemble_document
 from engine.epub.publication import stage_epub, validate_assembled_document, verify_staged_epub
 from engine.epub.validation import EpubCheckResult, EpubValidationError, inspect_epub
-from engine.item.extractor_v25 import extract_document
+from engine.item.extractor import extract_document
 from engine.item.inline import ProjectionError, validate_projection
 from tests.v23.book_factory import make_epub
 

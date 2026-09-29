@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from engine.item.extractor_v25 import extract_document
-from engine.schemas.v25 import ExtractionItem, TermScope, UserTerm
+from engine.item.extractor import extract_document
+from engine.schemas.contracts import ExtractionItem, TermScope, UserTerm
 from engine.services.term_candidates import (
     CandidateProposal,
     EvidenceProposal,

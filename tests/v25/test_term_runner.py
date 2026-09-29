@@ -4,16 +4,16 @@ import asyncio
 import json
 from pathlib import Path
 
-from engine.epub.preparation_v25 import PreparationConfig, prepare_book
-from engine.schemas.v25 import Attempt, RequestManifest, TermExtractionRecord
-from engine.services.store_v25 import StoreV25
+from engine.epub.preparation import PreparationConfig, prepare_book
+from engine.schemas.contracts import Attempt, RequestManifest, TermExtractionRecord
+from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION, plan_term_extraction
 from engine.services.term_runner import TermRunner
 from tests.v23.book_factory import make_epub
 from tests.v25.test_preparation_v25 import StubChecker
 
 
-def _prepare(tmp_path: Path, **extraction_overrides: int) -> tuple[StoreV25, tuple[str, ...]]:
+def _prepare(tmp_path: Path, **extraction_overrides: int) -> tuple[RunStore, tuple[str, ...]]:
     source = make_epub(
         tmp_path / "source.epub",
         {
@@ -37,7 +37,7 @@ def _prepare(tmp_path: Path, **extraction_overrides: int) -> tuple[StoreV25, tup
         ),
         StubChecker(),
     )
-    store = StoreV25(prepared.work_dir)
+    store = RunStore(prepared.work_dir)
     prep = store.read_preparation()
     ids = (*prep.reading_order, *(item for item in prep.document_hashes if item not in prep.reading_order))
     plan = plan_term_extraction(

@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from itertools import pairwise
 
-from engine.item.extractor_v25 import extract_document
-from engine.schemas.v25 import (
+from engine.item.extractor import extract_document
+from engine.schemas.contracts import (
     DocumentPlan,
     ExtractionItem,
     NodeRecord,

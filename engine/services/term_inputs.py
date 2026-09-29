@@ -6,7 +6,7 @@ from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     TermScope,
     UserTerm,
     canonical_hash,

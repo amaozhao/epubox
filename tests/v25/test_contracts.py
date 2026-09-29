@@ -5,7 +5,7 @@ import math
 import pytest
 from pydantic import ValidationError
 
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     DOCUMENT_FORMAT,
     FREEZE_FORMAT,
     REQUEST_FORMAT,

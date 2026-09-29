@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from engine.epub.derived_bindings import resolve_derived_navigation
-from engine.item.extractor_v25 import extract_document
+from engine.item.extractor import extract_document
 
 
 def _document(markup: str, path: str):

@@ -11,14 +11,14 @@ from uuid import uuid4
 
 from engine.agents.protocol import ProtocolError, validate_coherence_response, validate_translation_response
 from engine.agents.runtime import ModelRuntime, RequestError, RuntimePaused, request_messages, wire_hash
-from engine.agents.term_protocol import validate_review_response_v25
+from engine.agents.term_protocol import validate_review_response
 from engine.core.quality import find_degenerate_translation
 from engine.core.tokens import count_tokens
 from engine.epub.assembly import derive_navigation_projection
 from engine.item.inline import Event, events_to_projection, parse_projection, plain_text, validate_projection
 from engine.item.planner import PlannerConfig, batch_request, recommended_output_tokens
-from engine.item.planner_v25 import build_context, build_context_index, plan_unit_v25
-from engine.schemas.v25 import (
+from engine.item.unit_planner import build_context, build_context_index, plan_unit
+from engine.schemas.contracts import (
     Attempt,
     DocumentPlan,
     FrozenTerm,
@@ -43,7 +43,7 @@ from engine.services.coherence import (
     save_window_result,
     window_payload,
 )
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 
 
 class TranslationPaused(RuntimeError):
@@ -73,7 +73,7 @@ class TranslationEngine:
 
     def __init__(
         self,
-        store: StoreV25,
+        store: RunStore,
         *,
         model: Any = None,
         transport: Any = None,
@@ -573,7 +573,7 @@ class TranslationEngine:
         if record.cut_plan is None or record.plan_epoch >= 1 or record.counters.get("replan_attempts", 0) >= 1:
             return False
         unit = self.units[unit_id]
-        initialized = plan_unit_v25(
+        initialized = plan_unit(
             unit,
             self.documents[unit.document_id],
             self.glossary,
@@ -1110,7 +1110,7 @@ class TranslationEngine:
             }
             for job in jobs
         }
-        parsed = validate_review_response_v25(raw, manifest.request_id, expected)
+        parsed = validate_review_response(raw, manifest.request_id, expected)
         for job in jobs:
             if job.item_id not in parsed.accepted:
                 message = parsed.errors.get(job.item_id, "review item missing")
@@ -1314,10 +1314,10 @@ async def run_translation(
     transport: Any = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> TranslationRunResult:
-    return await TranslationEngine(StoreV25(work_dir), model=model, transport=transport, progress=progress).run()
+    return await TranslationEngine(RunStore(work_dir), model=model, transport=transport, progress=progress).run()
 
 
-def retry_failed_units(store: StoreV25, unit_ids: Sequence[str]) -> tuple[UnitRecord, ...]:
+def retry_failed_units(store: RunStore, unit_ids: Sequence[str]) -> tuple[UnitRecord, ...]:
     """Explicitly reactivate selected failures without resetting counters."""
     with store.lock():
         validate_retry_failed_units(store, unit_ids)
@@ -1344,7 +1344,7 @@ def retry_failed_units(store: StoreV25, unit_ids: Sequence[str]) -> tuple[UnitRe
 
 
 def validate_retry_failed_units(
-    store: StoreV25,
+    store: RunStore,
     unit_ids: Sequence[str],
     *,
     add_unit_http: int = 0,
@@ -1362,13 +1362,13 @@ def validate_retry_failed_units(
             raise ValueError(f"Unit HTTP budget remains exhausted: {unit_id}")
 
 
-def import_repair_file(store: StoreV25, path: Path | str) -> UnitRecord:
+def import_repair_file(store: RunStore, path: Path | str) -> UnitRecord:
     """Import one complete version-bound target and require the normal review gate."""
     repaired = validate_repair_file(store, path)
     return store.save_unit(repaired, expected_record_version=repaired.record_version - 1)
 
 
-def validate_repair_file(store: StoreV25, path: Path | str) -> UnitRecord:
+def validate_repair_file(store: RunStore, path: Path | str) -> UnitRecord:
     """Validate a repair and return the proposed record without writing it."""
     value = strict_json_loads(Path(path).read_bytes())
     if not isinstance(value, dict):
@@ -1434,7 +1434,7 @@ def _unit_limit(record: UnitRecord) -> int:
     return record.counters.get("unit_http_limit", 24 * max(1, planned))
 
 
-def _journal_spent_for_unit(store: StoreV25, unit_id: str) -> int:
+def _journal_spent_for_unit(store: RunStore, unit_id: str) -> int:
     return sum(
         len(request.attempts)
         for path in (store.root / "requests").glob("*.json")

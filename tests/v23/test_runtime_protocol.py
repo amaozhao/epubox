@@ -22,8 +22,8 @@ from engine.agents.runtime import (
     request_messages,
     wire_hash,
 )
-from engine.agents.term_protocol import validate_review_response_v25
-from engine.schemas.v23 import Attempt, RequestManifest
+from engine.agents.term_protocol import validate_review_response
+from engine.schemas.source_internal import Attempt, RequestManifest
 
 
 class MemoryJournal:
@@ -166,17 +166,17 @@ def test_review_enforces_all_checks_applicability_and_decision_target_rules():
         ],
     }
     expected = {"a": {"base_revision": 3, "terminology_applicable": False, "bindings_applicable": True}}
-    assert validate_review_response_v25(json.dumps(base), "r2", expected).errors == {}
+    assert validate_review_response(json.dumps(base), "r2", expected).errors == {}
 
     base["items"][0]["checks"]["bindings"] = "uncertain"
-    assert validate_review_response_v25(json.dumps(base), "r2", expected).errors["a"].startswith("blocking check")
+    assert validate_review_response(json.dumps(base), "r2", expected).errors["a"].startswith("blocking check")
 
     base["items"][0]["decision"] = "replace"
     base["items"][0]["target"] = "完整新目标"
-    assert validate_review_response_v25(json.dumps(base), "r2", expected).errors == {}
+    assert validate_review_response(json.dumps(base), "r2", expected).errors == {}
 
     base["items"][0]["decision"] = "needs_attention"
-    assert "target is forbidden" in validate_review_response_v25(json.dumps(base), "r2", expected).errors["a"]
+    assert "target is forbidden" in validate_review_response(json.dumps(base), "r2", expected).errors["a"]
 
 
 @pytest.mark.parametrize(
@@ -209,7 +209,7 @@ def test_review_non_string_enums_are_local_item_errors(field, value, message):
     else:
         item[field] = value
     raw = json.dumps({"protocol": "epubox-review-2", "request_id": "r", "items": [item]})
-    result = validate_review_response_v25(
+    result = validate_review_response(
         raw,
         "r",
         {"a": {"base_revision": 1, "terminology_applicable": False, "bindings_applicable": False}},
@@ -233,7 +233,7 @@ def test_review_unknown_item_fields_are_rejected_locally():
         "confidence": 1,
     }
     raw = json.dumps({"protocol": "epubox-review-2", "request_id": "r", "items": [item]})
-    result = validate_review_response_v25(
+    result = validate_review_response(
         raw,
         "r",
         {"a": {"base_revision": 1, "terminology_applicable": False, "bindings_applicable": False}},
@@ -257,7 +257,7 @@ def test_review_no_change_rejects_target_null_instead_of_treating_it_as_omitted(
         "target": None,
     }
     raw = json.dumps({"protocol": "epubox-review-2", "request_id": "r", "items": [item]})
-    result = validate_review_response_v25(
+    result = validate_review_response(
         raw,
         "r",
         {"a": {"base_revision": 1, "terminology_applicable": False, "bindings_applicable": False}},

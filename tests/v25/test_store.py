@@ -9,7 +9,7 @@ import pytest
 
 import engine.services.atomic_store as base_store_module
 from engine.item.source_views import SOURCE_VIEW_RULE_VERSION, SourceViewError
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     Attempt,
     CandidatePool,
     FreezeIntent,
@@ -29,7 +29,7 @@ from engine.schemas.v25 import (
     term_plan_hash,
 )
 from engine.services.atomic_store import CorruptRecord, IdentityMismatch, StaleWrite, StoreLocked
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 from engine.services.term_planning import plan_term_extraction
 from tests.v23.book_factory import make_epub
 from tests.v25.test_contracts import make_document
@@ -46,7 +46,7 @@ _EXTRACTION_CONFIG: dict[str, JsonValue] = {
 
 def _try_lock(root: str, queue: multiprocessing.Queue[bool]) -> None:
     try:
-        with StoreV25(root).lock(blocking=False):
+        with RunStore(root).lock(blocking=False):
             queue.put(True)
     except StoreLocked:
         queue.put(False)
@@ -57,9 +57,9 @@ def _prepare(
     terms: tuple[UserTerm, ...] = (),
     *,
     extraction_config: dict[str, JsonValue] | None = None,
-) -> tuple[StoreV25, PreparationPlan]:
+) -> tuple[RunStore, PreparationPlan]:
     source_hash = _write_source_snapshot(tmp_path)
-    store = StoreV25(tmp_path)
+    store = RunStore(tmp_path)
     document = _trusted_document(source_hash)
     document_hash = store.write_document(document)
     user_terms_hash = canonical_hash(terms)
@@ -106,13 +106,13 @@ def _write_source_snapshot(tmp_path: Path) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _write_term_plan(store: StoreV25, preparation: PreparationPlan) -> TermExtractionPlan:
+def _write_term_plan(store: RunStore, preparation: PreparationPlan) -> TermExtractionPlan:
     plan = _expected_term_plan(store, preparation)
     store.write_term_plan(plan)
     return plan
 
 
-def _expected_term_plan(store: StoreV25, preparation: PreparationPlan) -> TermExtractionPlan:
+def _expected_term_plan(store: RunStore, preparation: PreparationPlan) -> TermExtractionPlan:
     ordered_ids = (
         *preparation.reading_order,
         *(document_id for document_id in preparation.document_hashes if document_id not in preparation.reading_order),
@@ -159,18 +159,18 @@ def test_store_replays_source_views_before_accepting_a_document(tmp_path: Path) 
     bad = document.model_copy(update={"source_views": {original.view_id: forged}})
 
     with pytest.raises(SourceViewError, match="do not match frozen"):
-        StoreV25(tmp_path).write_document(bad)
+        RunStore(tmp_path).write_document(bad)
 
 
 @pytest.mark.parametrize("record_id", ("../escape", "nested/name", ".", ".."))
 def test_atomic_store_rejects_unsafe_record_ids(tmp_path: Path, record_id: str) -> None:
     with pytest.raises(ValueError, match="unsafe record id"):
-        StoreV25(tmp_path)._path("documents", record_id)
+        RunStore(tmp_path)._path("documents", record_id)
 
 
 def test_preparation_is_last_commit_and_rejects_partial_or_changed_inventory(tmp_path: Path) -> None:
     source_hash = _write_source_snapshot(tmp_path)
-    store = StoreV25(tmp_path)
+    store = RunStore(tmp_path)
     document = _trusted_document(source_hash)
     document_hash = store.write_document(document)
     store.write_user_terms(())

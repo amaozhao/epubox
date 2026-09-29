@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from engine.epub.preparation_v25 import PreparationConfig, _frozen_extraction_config, prepare_book
+from engine.epub.preparation import PreparationConfig, _frozen_extraction_config, prepare_book
 from engine.item.planner import PlanningError
-from engine.item.planner_v25 import build_context_index, initial_derived_navigation, plan_unit_v25
-from engine.schemas.v25 import (
+from engine.item.unit_planner import build_context_index, initial_derived_navigation, plan_unit
+from engine.schemas.contracts import (
     BookPlan,
     DocumentPlan,
     GlossarySnapshot,
@@ -23,7 +23,7 @@ from engine.schemas.v25 import (
     canonical_hash,
 )
 from engine.services.atomic_store import IdentityMismatch
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 from engine.services.term_freeze import ResolutionDecision, freeze_terminology, prepare_candidate_pool
 from engine.services.term_planning import plan_term_extraction
 from engine.services.term_resolution import TermResolutionRunner
@@ -91,7 +91,7 @@ async def resume_preparation(
 ) -> PreparationPipelineResult:
     """Resume P2-P4 using only the committed P1 snapshot and JSON inputs."""
     _ = checker
-    store = StoreV25(work_dir)
+    store = RunStore(work_dir)
     preparation = store.read_preparation()
     return await _advance(
         store,
@@ -106,7 +106,7 @@ async def resume_preparation(
 
 
 async def _advance(
-    store: StoreV25,
+    store: RunStore,
     preparation: PreparationPlan,
     preparation_hash: str,
     *,
@@ -254,7 +254,7 @@ async def _advance(
                             derived=derived,
                         )
                     else:
-                        initialized = plan_unit_v25(
+                        initialized = plan_unit(
                             unit,
                             document,
                             glossary,
@@ -336,14 +336,14 @@ async def _advance(
 
 def _p1(
     source: Path, work_root: Path, config: PreparationConfig, checker: object
-) -> tuple[StoreV25, PreparationPlan, str]:
+) -> tuple[RunStore, PreparationPlan, str]:
     source = source.resolve(strict=True)
     source_hash = _sha256(source)
     if config.run_id:
         root = work_root / source_hash / config.run_id
         preparation_path = root / "preparation.json"
         if preparation_path.exists():
-            store = StoreV25(root)
+            store = RunStore(root)
             preparation = store.read_preparation()
             if (
                 preparation.source_hash != source_hash
@@ -354,12 +354,12 @@ def _p1(
                 raise IdentityMismatch("resume configuration differs from the committed P1 inputs")
             return store, preparation, _sha256(preparation_path)
     prepared = prepare_book(source, work_root, config, checker)
-    store = StoreV25(prepared.work_dir)
+    store = RunStore(prepared.work_dir)
     preparation = store.read_preparation()
     return store, preparation, _sha256(store.root / "preparation.json")
 
 
-def _documents(store: StoreV25, preparation: PreparationPlan) -> tuple[DocumentPlan, ...]:
+def _documents(store: RunStore, preparation: PreparationPlan) -> tuple[DocumentPlan, ...]:
     ordered = (
         *preparation.reading_order,
         *(document_id for document_id in preparation.document_hashes if document_id not in preparation.reading_order),
@@ -370,7 +370,7 @@ def _documents(store: StoreV25, preparation: PreparationPlan) -> tuple[DocumentP
     )
 
 
-def _initialize_extraction_records(store: StoreV25, plan: TermExtractionPlan) -> None:
+def _initialize_extraction_records(store: RunStore, plan: TermExtractionPlan) -> None:
     for item in plan.items:
         path = store._path("glossary/extraction", item.item_id)
         if path.exists():
@@ -404,7 +404,7 @@ def _stored_decisions(groups) -> tuple[ResolutionDecision, ...]:
     return tuple(decisions)
 
 
-def _has_unsettled_term_attempts(store: StoreV25) -> bool:
+def _has_unsettled_term_attempts(store: RunStore) -> bool:
     return any(
         request.stage in {"terms", "resolution"}
         and any(attempt.state in {"sent", "unknown"} for attempt in request.attempts)
@@ -434,7 +434,7 @@ async def _with_progress(
     return await task
 
 
-def _term_progress(store: StoreV25, plan: TermExtractionPlan) -> PreparationProgress:
+def _term_progress(store: RunStore, plan: TermExtractionPlan) -> PreparationProgress:
     records = [
         store.read_extraction(item.item_id)
         for item in plan.items
@@ -452,7 +452,7 @@ def _term_progress(store: StoreV25, plan: TermExtractionPlan) -> PreparationProg
     )
 
 
-def _resolution_progress(store: StoreV25) -> PreparationProgress:
+def _resolution_progress(store: RunStore) -> PreparationProgress:
     pool = store.read_candidate_pool()
     succeeded = sum(group.get("decision") == "select" for group in pool.conflict_groups)
     failed = sum(group.get("decision") == "defer" for group in pool.conflict_groups)
@@ -466,7 +466,7 @@ def _resolution_progress(store: StoreV25) -> PreparationProgress:
     )
 
 
-def _http_attempts(store: StoreV25) -> int:
+def _http_attempts(store: RunStore) -> int:
     return sum(
         attempt.state != "reserved"
         for path in (store.root / "requests").glob("*.json")

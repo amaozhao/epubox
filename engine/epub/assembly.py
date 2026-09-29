@@ -8,7 +8,7 @@ from lxml import etree  # type: ignore[attr-defined]
 
 from engine.core.markup import element_path, find_by_element_path, parse_xml_safely, serialize_xml
 from engine.item.inline import events_to_projection, parse_projection, plain_text, validate_projection
-from engine.schemas.v25 import DOCUMENT_FORMAT, DocumentPlan, RegistryEntry, Unit
+from engine.schemas.contracts import DOCUMENT_FORMAT, DocumentPlan, RegistryEntry, Unit
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from engine.schemas.v25 import TermExtractionRecord
+from engine.schemas.contracts import TermExtractionRecord
 from engine.services.term_candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
 from engine.services.term_freeze import prepare_candidate_pool
 from engine.services.term_resolution import TermResolutionRunner

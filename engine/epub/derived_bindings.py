@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 from engine.item.inline import parse_projection, plain_text
-from engine.schemas.v25 import DOCUMENT_FORMAT, DocumentPlan, Unit
+from engine.schemas.contracts import DOCUMENT_FORMAT, DocumentPlan, Unit
 
 
 def resolve_derived_navigation(documents: Sequence[DocumentPlan]) -> tuple[DocumentPlan, ...]:

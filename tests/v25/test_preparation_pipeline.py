@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 import engine.services.preparation_pipeline as pipeline_module
-from engine.epub.preparation_v25 import PreparationConfig
+from engine.epub.preparation import PreparationConfig
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION
 from engine.services.term_runner import TermRunner, TermRunResult
 from tests.v23.book_factory import make_epub
@@ -47,7 +47,7 @@ def test_disabled_extraction_reaches_ready_only_after_freeze_and_every_unit(tmp_
         )
     )
 
-    store = StoreV25(result.work_dir)
+    store = RunStore(result.work_dir)
     plan = store.read_bookplan()
     assert result.status == "ready"
     assert result.phase == "ready"
@@ -91,7 +91,7 @@ def test_term_and_resolution_transports_feed_one_frozen_glossary(tmp_path: Path)
         calls.append(kind)
         assert not next((tmp_path / "work").rglob("bookplan.json"), None)
         plan_path = next((tmp_path / "work").rglob("glossary/plan.json"))
-        store = StoreV25(plan_path.parents[1])
+        store = RunStore(plan_path.parents[1])
         assert len(list((store.root / "glossary" / "extraction").glob("*.json"))) == len(store.read_term_plan().items)
         item = payload["items"][0]
         view = next((value for value in item["views"] if "Memory" in value["text"]), item["views"][0])
@@ -154,13 +154,13 @@ def test_term_and_resolution_transports_feed_one_frozen_glossary(tmp_path: Path)
         )
     )
 
-    glossary = StoreV25(result.work_dir).read_glossary()
+    glossary = RunStore(result.work_dir).read_glossary()
     assert result.status == "ready"
     assert calls[-1] == "resolution"
     assert calls.count("resolution") == 1
     assert calls.count("terms") >= 1
     assert [(term.source, term.target) for term in glossary.terms] == [("Memory", "内存")]
-    assert StoreV25(result.work_dir).read_candidate_pool().extraction_status == "closed"
+    assert RunStore(result.work_dir).read_candidate_pool().extraction_status == "closed"
     assert progress[0].phase == "terms" and progress[0].planned > 0
     assert any(event.phase == "resolution" and event.planned == 1 for event in progress)
     assert progress[-1].phase == "ready" and progress[-1].pending == 0
@@ -243,7 +243,7 @@ def test_freeze_intent_replays_glossary_without_source_term_file_or_model(tmp_pa
         )
     )
     assert resumed.status == "ready"
-    assert StoreV25(resumed.work_dir).read_glossary().terms[0].target == "内存"
+    assert RunStore(resumed.work_dir).read_glossary().terms[0].target == "内存"
 
 
 def test_local_term_failures_close_with_gaps_but_still_commit_p4(tmp_path: Path) -> None:
@@ -259,7 +259,7 @@ def test_local_term_failures_close_with_gaps_but_still_commit_p4(tmp_path: Path)
             term_transport=invalid,
         )
     )
-    store = StoreV25(result.work_dir)
+    store = RunStore(result.work_dir)
     assert result.status == "needs_attention"
     assert result.term_status == "closed_with_gaps"
     assert store.read_bookplan() == result.bookplan
@@ -270,15 +270,15 @@ def test_closed_pool_resumes_freeze_commit_without_model_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = source_book(tmp_path)
-    original = StoreV25.write_freeze
+    original = RunStore.write_freeze
     failed_root: Path | None = None
 
-    def interrupted(store: StoreV25, _freeze):
+    def interrupted(store: RunStore, _freeze):
         nonlocal failed_root
         failed_root = store.root
         raise OSError("injected freeze write interruption")
 
-    monkeypatch.setattr(StoreV25, "write_freeze", interrupted)
+    monkeypatch.setattr(RunStore, "write_freeze", interrupted)
     with pytest.raises(OSError, match="injected freeze"):
         asyncio.run(
             prepare_translation(
@@ -289,10 +289,10 @@ def test_closed_pool_resumes_freeze_commit_without_model_calls(
             )
         )
     assert failed_root is not None
-    store = StoreV25(failed_root)
+    store = RunStore(failed_root)
     assert store.read_candidate_pool().extraction_status == "disabled"
     assert not (failed_root / "glossary" / "freeze.json").exists()
-    monkeypatch.setattr(StoreV25, "write_freeze", original)
+    monkeypatch.setattr(RunStore, "write_freeze", original)
 
     async def forbidden(*_):
         raise AssertionError("closed pool resume must not call a model")

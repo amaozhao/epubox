@@ -5,16 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from engine.schemas.v25 import DocumentPlan, JsonValue, UnitRecord, canonical_hash, strict_json_loads
+from engine.schemas.contracts import DocumentPlan, JsonValue, UnitRecord, canonical_hash, strict_json_loads
 from engine.services.atomic_store import CorruptRecord
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 
 CHECK_FORMAT = "epubox-check-3"
 LIMITS_FORMAT = "epubox-run-limits-1"
 
 
 def prepare_document_check(
-    store: StoreV25,
+    store: RunStore,
     document: DocumentPlan,
     records: Mapping[str, UnitRecord],
 ) -> dict[str, Any]:
@@ -100,7 +100,7 @@ def window_payload(window: Mapping[str, Any], records: Mapping[str, UnitRecord])
 
 
 def save_window_result(
-    store: StoreV25,
+    store: RunStore,
     check: Mapping[str, Any],
     item_id: str,
     issues: Sequence[Mapping[str, JsonValue]],
@@ -118,7 +118,7 @@ def save_window_result(
     return save_document_check(store, updated)
 
 
-def save_document_check(store: StoreV25, check: Mapping[str, Any]) -> dict[str, Any]:
+def save_document_check(store: RunStore, check: Mapping[str, Any]) -> dict[str, Any]:
     value = dict(check)
     value["record_hash"] = None
     value["record_hash"] = canonical_hash({key: item for key, item in value.items() if key != "record_hash"})
@@ -126,7 +126,7 @@ def save_document_check(store: StoreV25, check: Mapping[str, Any]) -> dict[str, 
     return value
 
 
-def load_budget_overrides(store: StoreV25) -> dict[str, Any]:
+def load_budget_overrides(store: RunStore) -> dict[str, Any]:
     path = store._path("checks", "run-limits")
     if not path.exists():
         return {
@@ -155,7 +155,7 @@ def load_budget_overrides(store: StoreV25) -> dict[str, Any]:
 
 
 def add_http_budget(
-    store: StoreV25,
+    store: RunStore,
     *,
     authorization_id: str,
     action_context_hash: str = "",
@@ -211,7 +211,7 @@ def add_http_budget(
         return updated
 
 
-def retry_document_check(store: StoreV25, document_id: str) -> dict[str, Any]:
+def retry_document_check(store: RunStore, document_id: str) -> dict[str, Any]:
     path = store._path("checks", document_id)
     if not path.exists():
         raise FileNotFoundError(path)

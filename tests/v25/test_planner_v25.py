@@ -3,16 +3,16 @@ from __future__ import annotations
 import regex
 
 from engine.epub.derived_bindings import resolve_derived_navigation
-from engine.item.extractor_v25 import extract_document
+from engine.item.extractor import extract_document
 from engine.item.inline import parse_projection
-from engine.item.planner_v25 import (
+from engine.item.unit_planner import (
     build_context,
     build_context_index,
     initial_derived_navigation,
-    plan_unit_v25,
+    plan_unit,
     select_terms,
 )
-from engine.schemas.v25 import FrozenTerm, GlossarySnapshot, TermScope, canonical_hash
+from engine.schemas.contracts import FrozenTerm, GlossarySnapshot, TermScope, canonical_hash
 
 
 def source(*paragraphs: str) -> str:
@@ -148,8 +148,8 @@ def test_context_scope_uses_the_context_view_owner_and_hints_are_read_only() -> 
     assert without_context.context["views"] == []
     assert without_context.context_hash != selection.context_hash
     config = {"target_language": "zh-Hans", "context_tokens": 8192, "max_output_tokens": 2048}
-    planned = plan_unit_v25(cache_unit, document, glossary(*terms), config)
-    planned_without = plan_unit_v25(cache_unit, without_relations, glossary(*terms), config)
+    planned = plan_unit(cache_unit, document, glossary(*terms), config)
+    planned_without = plan_unit(cache_unit, without_relations, glossary(*terms), config)
     assert planned.cut_plan.segments[0].context_hash == selection.context_hash
     assert planned.logical_hash != planned_without.logical_hash
 
@@ -234,7 +234,7 @@ def test_explicit_reading_edge_adds_bounded_cross_document_context_and_identity(
     assert selection.context["views"][0]["text"].endswith("memoryTail")
 
     config = {"target_language": "zh-Hans", "context_tokens": 8192, "max_output_tokens": 2048}
-    planned = plan_unit_v25(
+    planned = plan_unit(
         right_unit,
         right,
         glossary(scoped),
@@ -244,7 +244,7 @@ def test_explicit_reading_edge_adds_bounded_cross_document_context_and_identity(
         context_chars=40,
         context_index=index,
     )
-    without_edge = plan_unit_v25(
+    without_edge = plan_unit(
         right_unit,
         right,
         glossary(scoped),
@@ -262,7 +262,7 @@ def test_more_than_fifty_matching_terms_are_never_truncated() -> None:
     unit = paragraph(document, "term0")
     snapshot = glossary(*(frozen_term(f"t-{index:02d}", word) for index, word in enumerate(words)))
     selection = select_terms(unit, document, snapshot)
-    planned = plan_unit_v25(
+    planned = plan_unit(
         unit,
         document,
         snapshot,
@@ -290,10 +290,10 @@ def test_initial_cut_plan_reuses_event_safe_splitting_and_hashes_frozen_inputs()
         "max_output_tokens": 256,
         "review_output_tokens": 160,
     }
-    first = plan_unit_v25(unit, document, snapshot, config)
-    second = plan_unit_v25(unit, document, snapshot, config)
-    upgraded = plan_unit_v25(unit, document, snapshot, config, epoch=1)
-    stricter = plan_unit_v25(unit, document, snapshot, config, epoch=1, planning_target_ratio=3.2)
+    first = plan_unit(unit, document, snapshot, config)
+    second = plan_unit(unit, document, snapshot, config)
+    upgraded = plan_unit(unit, document, snapshot, config, epoch=1)
+    stricter = plan_unit(unit, document, snapshot, config, epoch=1, planning_target_ratio=3.2)
 
     assert first == second
     assert upgraded.logical_hash == first.logical_hash
@@ -312,8 +312,8 @@ def test_initial_cut_plan_reuses_event_safe_splitting_and_hashes_frozen_inputs()
     assert all(
         first.items[segment.item_id].context_hash == segment.context_hash for segment in first.cut_plan.segments
     )
-    assert plan_unit_v25(unit, document, snapshot, config | {"model": "model-b"}).logical_hash != first.logical_hash
+    assert plan_unit(unit, document, snapshot, config | {"model": "model-b"}).logical_hash != first.logical_hash
     assert (
-        plan_unit_v25(unit, document, snapshot.model_copy(update={"freeze_id": "freeze-2"}), config).logical_hash
+        plan_unit(unit, document, snapshot.model_copy(update={"freeze_id": "freeze-2"}), config).logical_hash
         != first.logical_hash
     )

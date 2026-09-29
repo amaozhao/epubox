@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     BOOK_FORMAT,
     PREPARATION_FORMAT,
     TERM_PLAN_FORMAT,

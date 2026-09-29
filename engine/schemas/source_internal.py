@@ -1,4 +1,4 @@
-"""Versioned on-disk contracts for the v2.3 translation engine."""
+"""Internal structural extraction and projection-planning value objects."""
 
 from __future__ import annotations
 

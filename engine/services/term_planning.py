@@ -11,7 +11,7 @@ from typing import Literal
 import regex
 
 from engine.core.markup import UnsafeMarkupError, find_by_element_path, parse_xml_safely, qname_local_name
-from engine.schemas.v25 import (
+from engine.schemas.contracts import (
     DocumentPlan,
     ExtractionItem,
     JsonValue,

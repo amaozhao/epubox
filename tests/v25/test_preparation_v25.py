@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-import engine.epub.preparation_v25 as preparation_module
+import engine.epub.preparation as preparation_module
 from engine.core.config import settings
-from engine.epub.preparation_v25 import PreparationConfig, prepare_book
+from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.epub.validation import EpubCheckResult
-from engine.item.extractor_v25 import extract_document
-from engine.services.store_v25 import StoreV25
+from engine.item.extractor import extract_document
+from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION, plan_term_extraction
 from tests.v23.book_factory import make_epub
 
@@ -42,7 +42,7 @@ def test_p1_snapshots_complete_source_inventory_and_commits_parsed_ready_last(tm
         checker,
     )
 
-    store = StoreV25(prepared.work_dir)
+    store = RunStore(prepared.work_dir)
     loaded = store.read_preparation()
     expected_paths = set(prepared.inventory.documents) | {
         prepared.inventory.opf_path,
@@ -178,7 +178,7 @@ def test_p1_resolves_derived_navigation_before_immutable_document_write(tmp_path
     )
     config = PreparationConfig(run_id="derived-navigation")
     first = prepare_book(source, tmp_path / "work", config, StubChecker())
-    store = StoreV25(first.work_dir)
+    store = RunStore(first.work_dir)
     documents = [store.read_document(document_id) for document_id in first.preparation.document_hashes]
     derived = [
         binding

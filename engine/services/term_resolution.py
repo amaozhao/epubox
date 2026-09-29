@@ -11,8 +11,8 @@ from engine.agents.protocol import ProtocolError
 from engine.agents.runtime import RequestError, RuntimePaused, wire_hash
 from engine.agents.term_protocol import validate_resolution_response
 from engine.core.tokens import count_tokens
-from engine.schemas.v25 import JsonValue, RequestManifest
-from engine.services.store_v25 import StoreV25
+from engine.schemas.contracts import JsonValue, RequestManifest
+from engine.services.store import RunStore
 from engine.services.term_freeze import ResolutionDecision
 from engine.services.term_runner import TermBudgetPaused, TermRunner
 
@@ -27,7 +27,7 @@ class ResolutionResult:
 
 
 class TermResolutionRunner:
-    def __init__(self, store: StoreV25, *, model: Any = None, transport: Any = None):
+    def __init__(self, store: RunStore, *, model: Any = None, transport: Any = None):
         self.term_runner = TermRunner(store, model=model, transport=transport)
         self.store = store
         self.pool = store.read_candidate_pool()

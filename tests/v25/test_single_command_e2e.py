@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine import cli
-from engine.epub.preparation_v25 import PreparationConfig
+from engine.epub.preparation import PreparationConfig
 from engine.epub.validation import EpubCheckResult
 from engine.item.inline import Event, events_to_projection, parse_projection
 from engine.orchestrator import run_translation

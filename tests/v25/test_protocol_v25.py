@@ -6,7 +6,7 @@ from engine.agents.protocol import ProtocolError
 from engine.agents.runtime import Stage, request_messages
 from engine.agents.term_protocol import (
     validate_resolution_response,
-    validate_review_response_v25,
+    validate_review_response,
     validate_terms_response,
 )
 
@@ -104,7 +104,7 @@ def test_review_keeps_major_issue_when_optional_suggestion_is_bad() -> None:
         "term_suggestions": [{"source": "memory", "target": "内存", "category": "term", "evidence": []}],
     }
     raw = json.dumps({"protocol": "epubox-review-2", "request_id": "r1", "items": [item]})
-    result = validate_review_response_v25(raw, "r1", {"i1": {"base_revision": 1}})
+    result = validate_review_response(raw, "r1", {"i1": {"base_revision": 1}})
     assert result.accepted["i1"]["issues"] == item["issues"]
     assert result.accepted["i1"]["term_suggestions"] == []
     assert result.rejected_suggestions["i1"]

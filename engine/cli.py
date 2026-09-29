@@ -14,9 +14,9 @@ from engine.agents.models import build_run_model
 from engine.agents.runtime import PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.checker import checker_for_source
-from engine.epub.preparation_v25 import PreparationConfig
+from engine.epub.preparation import PreparationConfig
 from engine.epub.publication import publish_book
-from engine.item.planner_v25 import PLANNER_VERSION
+from engine.item.unit_planner import PLANNER_VERSION
 from engine.orchestrator import (
     TranslationRunResult,
     import_repair_file,
@@ -25,13 +25,13 @@ from engine.orchestrator import (
     validate_repair_file,
     validate_retry_failed_units,
 )
-from engine.schemas.v25 import JsonValue, canonical_hash, canonical_json_bytes, strict_json_loads
+from engine.schemas.contracts import JsonValue, canonical_hash, canonical_json_bytes, strict_json_loads
 from engine.services.atomic_store import safe_id
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.coherence import add_http_budget, retry_document_check
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.report import write_report
-from engine.services.store_v25 import StoreV25
+from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION
 
 type RunStatus = Literal["completed", "paused", "needs_attention", "failed"]
@@ -146,7 +146,7 @@ def resume_book(
 ) -> RunOutcome:
     """Resume only the saved source and run identities, without the original user term file."""
     work_dir = work_dir.resolve(strict=True)
-    store = StoreV25(work_dir)
+    store = RunStore(work_dir)
     if any(type(value) is not int or value < 0 for value in (add_unit_http, add_run_http, add_check_http)):
         raise ValueError("HTTP budget additions must be non-negative")
     if (add_unit_http and not retry_units) or (add_check_http and not retry_checks):
@@ -181,7 +181,7 @@ def resume_book(
 
 
 def _authorize_resume_actions(
-    store: StoreV25,
+    store: RunStore,
     *,
     retry_units: tuple[str, ...],
     add_unit_http: int,
@@ -257,7 +257,7 @@ def _authorize_resume_actions(
         )
 
 
-def _repair_already_applied(store: StoreV25, path: Path) -> bool:
+def _repair_already_applied(store: RunStore, path: Path) -> bool:
     raw = strict_json_loads(path.read_bytes())
     if not isinstance(raw, dict):
         return False
@@ -328,7 +328,7 @@ async def _finish(
             RunOutcome("failed", work_dir, phase, reason=f"unknown preparation status: {preparation_status}")
         )
     translated: TranslationRunResult = await run_translation(work_dir, model=model, progress=progress)
-    store = StoreV25(work_dir)
+    store = RunStore(work_dir)
     count = store.read_bookplan().required_unit_count
     if translated.status != "translated":
         return _record(
@@ -359,7 +359,7 @@ async def _finish(
 
 def _record(outcome: RunOutcome) -> RunOutcome:
     report = write_report(
-        StoreV25(outcome.work_dir),
+        RunStore(outcome.work_dir),
         status=outcome.status,
         phase=outcome.phase,
         output_path=outcome.output_path,
