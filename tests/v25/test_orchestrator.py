@@ -246,7 +246,7 @@ async def ready_batch_store(tmp_path, run_id: str = "batch-run") -> RunStore:
             extraction_config={
                 "auto_extract": False,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-2",
+                "prompt_version": "epubox-v25-3",
                 "model": "fake",
                 "target_language": "zh-Hans",
             },
@@ -277,7 +277,7 @@ async def ready_derived_store(tmp_path, run_id: str = "derived-run") -> tuple[Ru
             extraction_config={
                 "auto_extract": False,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-2",
+                "prompt_version": "epubox-v25-3",
                 "model": "fake",
                 "target_language": "zh-Hans",
             },
@@ -764,7 +764,7 @@ async def test_long_unit_accepts_segment_reviews_from_multiple_manifests(tmp_pat
             extraction_config={
                 "auto_extract": False,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-2",
+                "prompt_version": "epubox-v25-3",
                 "model": "fake",
                 "target_language": "zh-Hans",
             },
@@ -828,7 +828,7 @@ async def test_coherence_major_issue_gets_one_unit_revision_and_full_rereview(tm
             extraction_config={
                 "auto_extract": False,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-2",
+                "prompt_version": "epubox-v25-3",
                 "model": "fake",
                 "target_language": "zh-Hans",
             },

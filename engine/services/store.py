@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from engine.item.extractor import validate_source_relations
 from engine.item.inline import events_to_projection, parse_projection
@@ -51,11 +52,13 @@ from engine.schemas.contracts import (
     validate_cut_plan_coverage,
     validate_term_scopes,
 )
-from engine.services.atomic_store import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite
+from engine.services.atomic_store import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite, safe_id
 from engine.services.term_planning import plan_term_extraction
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 USER_TERMS_FORMAT = "epubox-user-terms-1"
+TERM_RESPONSE_FORMAT = "epubox-term-response-2"
+_MAX_TERM_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
 class UserTermsFile(BaseModel):
@@ -63,6 +66,43 @@ class UserTermsFile(BaseModel):
 
     format: Literal["epubox-user-terms-1"] = USER_TERMS_FORMAT
     terms: tuple[UserTerm, ...] = ()
+
+
+class TermResponseUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+    known_cost: float | None = Field(default=None, ge=0)
+
+
+class TermResponseEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    raw: str
+    finish_reason: str | None = None
+    usage: TermResponseUsage | None = None
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class _TermResponseFile(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    format: Literal["epubox-term-response-2"] = TERM_RESPONSE_FORMAT
+    request_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
+    wire_hash: str = Field(min_length=1)
+    response: TermResponseEnvelope
+    response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    response_size: int = Field(ge=0, le=_MAX_TERM_RESPONSE_BYTES)
+
+    @model_validator(mode="after")
+    def validate_response(self) -> _TermResponseFile:
+        encoded = canonical_json_bytes(self.response)
+        if len(encoded) != self.response_size or hashlib.sha256(encoded).hexdigest() != self.response_sha256:
+            raise ValueError("term response size or hash mismatch")
+        return self
 
 
 class RunStore:
@@ -726,6 +766,60 @@ class RunStore:
     def read_request(self, request_id: str) -> RequestManifest:
         return self._read_contract(self._path("requests", request_id), RequestManifest, REQUEST_FORMAT)
 
+    def _term_response_path(self, request_id: str, attempt_id: str) -> Path:
+        return self.root / "glossary" / "responses" / safe_id(request_id) / f"{safe_id(attempt_id)}.json"
+
+    def _term_response_identity(self, request_id: str, attempt_id: str) -> RequestManifest:
+        manifest = self.read_request(request_id)
+        if manifest.stage != "terms":
+            raise IdentityMismatch("raw response journal is restricted to terminology requests")
+        if not any(attempt.attempt_id == attempt_id for attempt in manifest.attempts):
+            raise IdentityMismatch(f"unknown attempt: {attempt_id}")
+        return manifest
+
+    @staticmethod
+    def _read_term_response_file(path: Path) -> _TermResponseFile:
+        try:
+            return _TermResponseFile.model_validate_json(path.read_bytes())
+        except Exception as error:
+            raise CorruptRecord(f"invalid {path}: {error}") from error
+
+    def save_term_response(self, request_id: str, attempt_id: str, envelope: Mapping[str, object]) -> None:
+        response = TermResponseEnvelope.model_validate(envelope)
+        encoded = canonical_json_bytes(response)
+        if len(encoded) > _MAX_TERM_RESPONSE_BYTES:
+            raise ValueError("term response exceeds the journal size limit")
+        path = self._term_response_path(request_id, attempt_id)
+        with self.lock():
+            manifest = self._term_response_identity(request_id, attempt_id)
+            record = _TermResponseFile(
+                request_id=request_id,
+                attempt_id=attempt_id,
+                wire_hash=manifest.wire_hash,
+                response=response,
+                response_sha256=hashlib.sha256(encoded).hexdigest(),
+                response_size=len(encoded),
+            )
+            if path.exists():
+                if self._read_term_response_file(path) == record:
+                    return
+                raise StaleWrite(f"immutable term response already exists: {request_id}/{attempt_id}")
+            self._atomic_write(path, record)
+
+    def read_term_response(self, request_id: str, attempt_id: str) -> TermResponseEnvelope | None:
+        path = self._term_response_path(request_id, attempt_id)
+        if not path.exists():
+            return None
+        manifest = self._term_response_identity(request_id, attempt_id)
+        record = self._read_term_response_file(path)
+        if (
+            record.request_id != request_id
+            or record.attempt_id != attempt_id
+            or record.wire_hash != manifest.wire_hash
+        ):
+            raise IdentityMismatch("term response identity does not match its request attempt")
+        return record.response
+
     def reserve_attempt(self, request_id: str, attempt: Attempt) -> RequestManifest:
         if attempt.state != "reserved":
             raise ValueError("new attempts must be reserved before dispatch")
@@ -783,4 +877,11 @@ class RunStore:
             raise IdentityMismatch(f"unknown attempt: {attempt_id}")
 
 
-__all__ = ["USER_TERMS_FORMAT", "RunStore", "UserTermsFile"]
+__all__ = [
+    "TERM_RESPONSE_FORMAT",
+    "USER_TERMS_FORMAT",
+    "RunStore",
+    "TermResponseEnvelope",
+    "TermResponseUsage",
+    "UserTermsFile",
+]

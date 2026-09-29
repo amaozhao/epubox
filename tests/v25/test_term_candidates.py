@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from engine.item.extractor import extract_document
-from engine.schemas.contracts import ExtractionItem, TermScope, UserTerm
+from engine.schemas.contracts import ExtractionItem, TermExtractionRecord, TermScope, UserTerm
 from engine.services.term_candidates import (
     CandidateProposal,
     EvidenceProposal,
@@ -66,6 +66,42 @@ def test_valid_evidence_binds_cross_format_quote_to_exact_source_ranges() -> Non
         == "Use processor scheduling safely."
     )
     assert result.diagnostics == ()
+
+
+def test_rejected_unknown_view_is_auditable_but_cannot_become_proposed() -> None:
+    document = _document()
+    view = _paragraph_views(document)[0]
+    item = _item(document, view.view_id)
+    result = validate_candidate_proposals(
+        document,
+        item,
+        (
+            CandidateProposal(
+                source="processor",
+                target="处理器",
+                category="term",
+                evidence=(EvidenceProposal("sv-unknown", "processor"),),
+            ),
+        ),
+    )
+    record_data = {
+        "item_id": item.item_id,
+        "document_id": item.document_id,
+        "view_ids": item.view_ids,
+        "extraction_input_hash": item.extraction_input_hash,
+        "status": "succeeded_with_rejections",
+        "candidates": result.candidates,
+    }
+    record = TermExtractionRecord.model_validate(record_data)
+    assert record.candidates[0].status == "rejected_evidence"
+    try:
+        TermExtractionRecord.model_validate(
+            record_data | {"candidates": (result.candidates[0].model_copy(update={"status": "proposed"}),)}
+        )
+    except ValueError as error:
+        assert "unknown extraction view" in str(error)
+    else:
+        raise AssertionError("unknown evidence was promoted to a usable candidate")
 
 
 def test_bad_evidence_and_word_boundary_reject_only_the_bad_candidates() -> None:

@@ -29,6 +29,7 @@ def translate(
     concurrency: int = typer.Option(2, "--concurrency", min=1),
     epubcheck: str | None = typer.Option(None, "--epubcheck-command"),
     overwrite: bool = typer.Option(False, "--overwrite"),
+    repair_terms: bool = typer.Option(False, "--repair-terms"),
 ) -> None:
     if language.lower().replace("_", "-") not in {"chinese", "zh", "zh-cn", "zh-hans", "simplified chinese"}:
         raise typer.BadParameter("目前仅支持译为简体中文（zh-Hans）")
@@ -46,6 +47,7 @@ def translate(
             concurrency=concurrency,
             epubcheck=epubcheck,
             overwrite=overwrite,
+            repair_terms=repair_terms,
             progress=_progress_printer(),
         )
     except Exception as error:

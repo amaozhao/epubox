@@ -86,6 +86,9 @@ def write_report(
             "succeeded_windows": sum(
                 record.status in {"succeeded", "succeeded_with_rejections"} for record in extraction_records
             ),
+            "succeeded_with_rejections_windows": sum(
+                record.status == "succeeded_with_rejections" for record in extraction_records
+            ),
             "failed_windows": sum(
                 record.status in {"failed_exhausted", "unplannable"} for record in extraction_records
             ),
@@ -93,6 +96,12 @@ def write_report(
                 record.status in {"pending", "in_flight", "retry_wait"} for record in extraction_records
             ),
             "candidate_count": len(pool.candidates) if pool is not None else 0,
+            "rejected_candidate_count": (
+                sum(candidate.status in {"rejected_evidence", "rejected_schema"} for candidate in pool.candidates)
+                + len(pool.rejections)
+                if pool is not None
+                else 0
+            ),
             "frozen_term_count": len(glossary.terms) if glossary is not None else 0,
             "extraction_status": glossary.extraction_status
             if glossary is not None

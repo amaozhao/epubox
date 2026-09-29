@@ -503,6 +503,18 @@ class TermCandidate(FrozenModel):
         return self
 
 
+class TermCandidateRejection(FrozenModel):
+    rejection_id: str = Field(min_length=1)
+    extraction_item_id: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    candidate_index: int = Field(ge=0)
+    status: Literal["rejected_schema"] = "rejected_schema"
+    reason: str = Field(min_length=1, max_length=2000)
+    source: str | None = Field(default=None, min_length=1, max_length=500)
+    target: str | None = Field(default=None, min_length=1, max_length=500)
+    category: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class ExtractionItem(FrozenModel):
     item_id: str = Field(min_length=1)
     document_id: str = Field(min_length=1)
@@ -570,6 +582,7 @@ class TermExtractionRecord(FrozenModel):
         "unplannable",
     ] = "pending"
     candidates: tuple[TermCandidate, ...] = ()
+    rejections: tuple[TermCandidateRejection, ...] = ()
     diagnostics: tuple[dict[str, JsonValue], ...] = ()
     request_ids: tuple[str, ...] = ()
     counters: dict[str, int] = Field(default_factory=dict)
@@ -586,8 +599,21 @@ class TermExtractionRecord(FrozenModel):
         for candidate in self.candidates:
             if candidate.extraction_item_id != self.item_id:
                 raise ValueError("candidate belongs to another extraction item")
-            if not {evidence.view_id for evidence in candidate.evidence}.issubset(self.view_ids):
+            if any(
+                evidence.view_id not in self.view_ids
+                and (
+                    candidate.status not in {"rejected_evidence", "rejected_schema"}
+                    or evidence.evidence_check != "rejected"
+                )
+                for evidence in candidate.evidence
+            ):
                 raise ValueError("candidate evidence references an unknown extraction view")
+        if any(rejection.extraction_item_id != self.item_id for rejection in self.rejections):
+            raise ValueError("candidate rejection belongs to another extraction item")
+        if any(rejection.request_id not in self.request_ids for rejection in self.rejections):
+            raise ValueError("candidate rejection references an unknown request")
+        if len({rejection.rejection_id for rejection in self.rejections}) != len(self.rejections):
+            raise ValueError("candidate rejection IDs must be unique")
         return self
 
 
@@ -599,6 +625,7 @@ class CandidatePool(FrozenModel):
     record_version: int = Field(default=0, ge=0)
     extraction_status: Literal["open", "closed", "closed_with_gaps", "disabled", "not_required"] = "open"
     candidates: tuple[TermCandidate, ...] = ()
+    rejections: tuple[TermCandidateRejection, ...] = ()
     conflict_groups: tuple[dict[str, JsonValue], ...] = ()
     consumed_response_ids: tuple[str, ...] = ()
     record_hash: str | None = None
@@ -607,11 +634,22 @@ class CandidatePool(FrozenModel):
     def validate_candidates(self) -> CandidatePool:
         if len({candidate.candidate_id for candidate in self.candidates}) != len(self.candidates):
             raise ValueError("candidate IDs must be unique")
+        if len({rejection.rejection_id for rejection in self.rejections}) != len(self.rejections):
+            raise ValueError("candidate rejection IDs must be unique")
+        if any(rejection.request_id not in self.consumed_response_ids for rejection in self.rejections):
+            raise ValueError("candidate rejection references an unconsumed response")
         if self.extraction_status != "open" and any(candidate.status == "proposed" for candidate in self.candidates):
             raise ValueError("closed candidate pools cannot contain proposed candidates")
         if self.record_hash is not None and self.record_hash != candidate_pool_record_hash(self):
             raise ValueError("candidate pool record_hash does not match its canonical payload")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_compatible(self, handler: Any) -> Any:
+        data = handler(self)
+        if not self.rejections:
+            data.pop("rejections", None)
+        return data
 
 
 class FrozenTerm(TermRule):
@@ -1338,6 +1376,7 @@ __all__ = [
     "SourceSlot",
     "SourceTextView",
     "TermCandidate",
+    "TermCandidateRejection",
     "TermEvidence",
     "TermExtractionPlan",
     "TermExtractionRecord",

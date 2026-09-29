@@ -21,9 +21,19 @@ _CATEGORIES = {"term", "person", "organization", "product", "abbreviation", "oth
 class TermsValidation:
     accepted: dict[str, tuple[dict[str, Any], ...]]
     rejected_candidates: dict[str, tuple[str, ...]]
+    schema_rejections: dict[str, tuple[SchemaCandidateRejection, ...]]
     errors: dict[str, str]
     missing: tuple[str, ...]
     unknown: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SchemaCandidateRejection:
+    candidate_index: int
+    reason: str
+    source: str | None = None
+    target: str | None = None
+    category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +99,7 @@ def validate_terms_response(raw: str | bytes, request_id: str, expected_item_ids
     candidates, errors, unknown, _ = _collect_items(items, expected_item_ids)
     accepted: dict[str, tuple[dict[str, Any], ...]] = {}
     rejected: dict[str, tuple[str, ...]] = {}
+    structured: dict[str, tuple[SchemaCandidateRejection, ...]] = {}
     for item_id, item in candidates.items():
         if set(item) != {"item_id", "candidates"} or not isinstance(item["candidates"], list):
             errors[item_id] = "term item must contain exactly item_id and candidates array"
@@ -98,21 +109,38 @@ def validate_terms_response(raw: str | bytes, request_id: str, expected_item_ids
             continue
         valid: list[dict[str, Any]] = []
         bad: list[str] = []
+        bad_entries: list[SchemaCandidateRejection] = []
         for index, candidate in enumerate(item["candidates"]):
             try:
                 valid.append(_candidate(candidate))
             except (ValueError, TypeError) as error:
                 bad.append(f"candidate {index}: {error}")
+                candidate_map = candidate if isinstance(candidate, dict) else {}
+                bad_entries.append(
+                    SchemaCandidateRejection(
+                        candidate_index=index,
+                        reason=str(error),
+                        source=_safe_rejected_field(candidate_map.get("source"), 500),
+                        target=_safe_rejected_field(candidate_map.get("target"), 500),
+                        category=_safe_rejected_field(candidate_map.get("category"), 100),
+                    )
+                )
         accepted[item_id] = tuple(valid)
         if bad:
             rejected[item_id] = tuple(bad)
+            structured[item_id] = tuple(bad_entries)
     return TermsValidation(
         accepted,
         rejected,
+        structured,
         errors,
         tuple(sorted(expected_item_ids - set(candidates) - set(errors))),
         unknown,
     )
+
+
+def _safe_rejected_field(value: Any, limit: int) -> str | None:
+    return value if isinstance(value, str) and value and len(value) <= limit and _valid_xml_text(value) else None
 
 
 def validate_resolution_response(

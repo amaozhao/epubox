@@ -1,6 +1,7 @@
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -67,6 +68,44 @@ def test_repeating_translate_command_reuses_the_same_prepared_run(
 
     assert first.work_dir == second.work_dir
     assert seen_run_ids == [None, first.work_dir.name]
+
+
+def test_translate_command_resumes_frozen_bookplan_without_reentering_p1_or_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"frozen source")
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    work_root = tmp_path / "work"
+    work_dir = work_root / source_hash / "legacy-run"
+    work_dir.mkdir(parents=True)
+    (work_dir / "bookplan.json").write_text("{}")
+    provider_calls = 0
+
+    class ForbiddenModel:
+        async def ainvoke(self, *_args, **_kwargs):
+            nonlocal provider_calls
+            provider_calls += 1
+            raise AssertionError("provider must not be called while routing the frozen BookPlan")
+
+    async def forbidden_preparation(*_args, **_kwargs):
+        raise AssertionError("a frozen BookPlan must not re-enter P1")
+
+    async def resume(actual_work_dir, *_args, **_kwargs):
+        assert actual_work_dir == work_dir
+        return cli.RunOutcome("paused", actual_work_dir, "translation")
+
+    monkeypatch.setattr(cli, "_existing_run_id", lambda *_args, **_kwargs: "legacy-run")
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: ForbiddenModel())
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: object())
+    monkeypatch.setattr(cli, "prepare_translation", forbidden_preparation)
+    monkeypatch.setattr(cli, "_advance_work_dir", resume)
+
+    result = cli.translate_book(source, work_root=work_root)
+
+    assert result.work_dir == work_dir
+    assert result.phase == "translation"
+    assert provider_calls == 0
 
 
 def test_translate_refuses_to_restart_paid_work_with_changed_configuration(
@@ -287,3 +326,123 @@ def test_same_manual_authorization_replay_does_not_add_budget_twice(tmp_path: Pa
     with pytest.raises(ValueError, match="different resume action"):
         authorize(7)
     assert load_budget_overrides(store)["add_run_http"] == 6
+
+
+def test_only_known_empty_term_freeze_can_be_superseded(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "bookplan.json").touch()
+    old_extraction = {"prompt_version": "epubox-v25-2", "model": "same"}
+    old_translation = {"prompt_version": "epubox-v25-2", "model": "same"}
+    preparation = SimpleNamespace(
+        extraction_config=old_extraction,
+        translation_config=old_translation,
+        user_terms=(),
+        user_terms_hash="terms-hash",
+        document_hashes={},
+        unit_documents={},
+    )
+    unit = SimpleNamespace(accepted_revision=None)
+    store = SimpleNamespace(
+        root=tmp_path,
+        read_bookplan=lambda: SimpleNamespace(unit_ids=("u1",)),
+        read_glossary=lambda: SimpleNamespace(terms=(), extraction_status="closed_with_gaps"),
+        read_candidate_pool=lambda: SimpleNamespace(candidates=()),
+        read_unit=lambda _id: unit,
+        read_term_plan=lambda: SimpleNamespace(items=(SimpleNamespace(item_id="te1"),)),
+        read_extraction=lambda _id: SimpleNamespace(
+            status="succeeded_with_rejections",
+            candidates=(),
+            diagnostics=({"reason": "candidate 0: evidence must contain 1 to 64 citations"},),
+        ),
+    )
+    monkeypatch.setattr(cli, "load_user_terms", lambda *_args, **_kwargs: ((), "terms-hash"))
+    desired_extraction = old_extraction | {"prompt_version": "epubox-v25-3"}
+    desired_translation = old_translation
+
+    assert cli._superseded_empty_term_run(
+        cast(Any, store), preparation, desired_extraction, desired_translation, cli.PreparationConfig()
+    )
+    unit.accepted_revision = 0
+    assert not cli._superseded_empty_term_run(
+        cast(Any, store), preparation, desired_extraction, desired_translation, cli.PreparationConfig()
+    )
+
+
+def test_empty_term_repair_requires_opt_in_and_then_resumes_from_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_hash = "a" * 64
+    source_root = tmp_path / source_hash
+    old_run = source_root / "old-run"
+    old_run.mkdir(parents=True)
+    (old_run / "preparation.json").write_text("{}")
+    (old_run / "bookplan.json").write_text("{}")
+    preparation = SimpleNamespace(
+        source_hash=source_hash,
+        run_id="old-run",
+        extraction_config={"prompt_version": "epubox-v25-2"},
+        translation_config={"prompt_version": "epubox-v25-2"},
+        user_terms=(),
+        user_terms_hash="terms-hash",
+        document_hashes={},
+        unit_documents={},
+    )
+    store = SimpleNamespace(
+        root=old_run,
+        read_preparation=lambda: preparation,
+        read_glossary=lambda: {"terms": []},
+        _trusted_preparation_documents=lambda: None,
+    )
+    config = cli.PreparationConfig()
+    monkeypatch.setattr(cli, "RunStore", lambda _path: store)
+    monkeypatch.setattr(cli, "load_user_terms", lambda *_args, **_kwargs: ((), "terms-hash"))
+    monkeypatch.setattr(cli, "_frozen_extraction_config", lambda _config: {"prompt_version": "epubox-v25-3"})
+    monkeypatch.setattr(cli, "_frozen_translation_config", lambda _config: {"prompt_version": "epubox-v25-2"})
+    monkeypatch.setattr(cli, "_superseded_empty_term_run", lambda *_args: True)
+
+    with pytest.raises(ValueError, match="--repair-terms"):
+        cli._existing_run_id(source_root, source_hash, config)
+    assert not (source_root / "term-repair.json").exists()
+
+    replacement = cli._existing_run_id(source_root, source_hash, config, repair_terms=True)
+    marker = cli.strict_json_loads((source_root / "term-repair.json").read_bytes())
+    assert isinstance(marker, dict)
+    assert marker["old_run_id"] == "old-run"
+    assert marker["replacement_run_id"] == replacement
+    assert cli._existing_run_id(source_root, source_hash, config) == replacement
+
+
+def test_valid_v25_2_bookplan_resumes_with_v25_3_term_prompt_without_new_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_hash = "b" * 64
+    source_root = tmp_path / source_hash
+    old_run = source_root / "old-run"
+    old_run.mkdir(parents=True)
+    (old_run / "preparation.json").write_text("{}")
+    (old_run / "bookplan.json").write_text("{}")
+    old_extraction = {"prompt_version": "epubox-v25-2", "auto_extract": False, "model": "same"}
+    expected_extraction = old_extraction | {"prompt_version": "epubox-v25-3"}
+    translation = {"prompt_version": "epubox-v25-2", "model": "same"}
+    preparation = SimpleNamespace(
+        source_hash=source_hash,
+        run_id="old-run",
+        extraction_config=old_extraction,
+        translation_config=translation,
+        user_terms=("useful-term",),
+        user_terms_hash="terms-hash",
+        document_hashes={},
+        unit_documents={},
+    )
+    store = SimpleNamespace(
+        root=old_run,
+        read_preparation=lambda: preparation,
+        read_bookplan=lambda: SimpleNamespace(unit_ids=()),
+        read_glossary=lambda: SimpleNamespace(terms=("useful-term",), extraction_status="closed"),
+        _trusted_preparation_documents=lambda: None,
+    )
+    monkeypatch.setattr(cli, "RunStore", lambda _path: store)
+    monkeypatch.setattr(cli, "_frozen_extraction_config", lambda _config: expected_extraction)
+    monkeypatch.setattr(cli, "_frozen_translation_config", lambda _config: translation)
+    monkeypatch.setattr(cli, "load_user_terms", lambda *_args, **_kwargs: (("useful-term",), "terms-hash"))
+
+    assert cli._existing_run_id(source_root, source_hash, cli.PreparationConfig()) == "old-run"

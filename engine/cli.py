@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
 from engine.agents.models import build_run_model
-from engine.agents.runtime import PROMPT_VERSION
+from engine.agents.runtime import PROMPT_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.checker import checker_for_source
 from engine.epub.preparation import (
@@ -100,6 +101,7 @@ def translate_book(
     concurrency: int = 2,
     epubcheck: str | None = None,
     overwrite: bool = False,
+    repair_terms: bool = False,
     progress: ProgressCallback | None = None,
 ) -> RunOutcome:
     """Start and advance all durable gates with one user command."""
@@ -123,7 +125,7 @@ def translate_book(
     }
     extraction_config: dict[str, JsonValue] = {
         "strategy": TERM_PLANNER_VERSION,
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": TERM_PROMPT_VERSION,
         "provider": provider,
         "model": model_id,
         "target_language": "zh-Hans",
@@ -137,14 +139,22 @@ def translate_book(
     work_root = work_root.resolve()
     source_hash = _sha256_file(source)
     with AtomicStore(work_root / source_hash).lock(blocking=False):
-        if run_id := _existing_run_id(work_root / source_hash, source_hash, config):
+        resumable_work_dir = None
+        if run_id := _existing_run_id(work_root / source_hash, source_hash, config, repair_terms=repair_terms):
             config = replace(config, run_id=run_id)
-            completed = _completed_run_outcome(work_root / source_hash / run_id, output)
+            resumable_work_dir = work_root / source_hash / run_id
+            completed = _completed_run_outcome(resumable_work_dir, output)
             if completed is not None:
                 return completed
         check_output(source, output, overwrite=overwrite)
         model = build_run_model(provider, model_id, max_output_tokens=max_output_tokens)
         checker = checker_for_source(source, epubcheck)
+        if resumable_work_dir is not None and (resumable_work_dir / "bookplan.json").is_file():
+            return asyncio.run(
+                _advance_work_dir(
+                    resumable_work_dir, output, checker, model=model, overwrite=overwrite, progress=progress
+                )
+            )
         return asyncio.run(
             _advance_source(
                 source, output, work_root, config, checker, model=model, overwrite=overwrite, progress=progress
@@ -152,11 +162,18 @@ def translate_book(
         )
 
 
-def _existing_run_id(source_root: Path, source_hash: str, config: PreparationConfig) -> str | None:
+def _existing_run_id(
+    source_root: Path,
+    source_hash: str,
+    config: PreparationConfig,
+    *,
+    repair_terms: bool = False,
+) -> str | None:
     expected_extraction = _frozen_extraction_config(config)
     expected_translation = _frozen_translation_config(config)
     matches: list[str] = []
     other_runs: list[Path] = []
+    repairable_runs: list[tuple[RunStore, Any]] = []
     for run_dir in sorted(source_root.iterdir()):
         if run_dir.is_symlink() or not (run_dir / "preparation.json").is_file():
             continue
@@ -168,10 +185,12 @@ def _existing_run_id(source_root: Path, source_hash: str, config: PreparationCon
             continue
         if preparation.source_hash != source_hash or preparation.run_id != run_dir.name:
             raise IdentityMismatch(f"preparation identity differs from run directory: {run_dir}")
-        if (
-            preparation.extraction_config != expected_extraction
-            or preparation.translation_config != expected_translation
-        ):
+        exact_match = (
+            preparation.extraction_config == expected_extraction
+            and preparation.translation_config == expected_translation
+        )
+        legacy_terms = _legacy_frozen_term_run(store, preparation, expected_extraction, expected_translation)
+        if not exact_match and not legacy_terms:
             other_runs.append(run_dir)
             continue
         terms, terms_hash = load_user_terms(
@@ -183,16 +202,113 @@ def _existing_run_id(source_root: Path, source_hash: str, config: PreparationCon
             other_runs.append(run_dir)
             continue
         store._trusted_preparation_documents()
+        if legacy_terms and _superseded_empty_term_run(
+            store, preparation, expected_extraction, expected_translation, config
+        ):
+            repairable_runs.append((store, preparation))
+            continue
         matches.append(preparation.run_id)
     if len(matches) > 1:
         raise ValueError(f"multiple matching runs exist for this EPUB; use resume with one work directory: {matches}")
     if matches:
         return matches[0]
+    if len(repairable_runs) > 1:
+        raise ValueError("multiple empty-term runs require repair; use a separate work root")
+    if repairable_runs:
+        store, preparation = repairable_runs[0]
+        marker_path = source_root / "term-repair.json"
+        expected_marker = {
+            "format": "epubox-term-repair-1",
+            "source_hash": source_hash,
+            "old_run_id": preparation.run_id,
+            "old_glossary_hash": canonical_hash(store.read_glossary()),
+            "extraction_config_hash": canonical_hash(expected_extraction),
+            "translation_config_hash": canonical_hash(expected_translation),
+            "user_terms_hash": preparation.user_terms_hash,
+            "reason": "epubox-v25-2 rejected every automatic term candidate",
+        }
+        if marker_path.is_file():
+            marker = strict_json_loads(marker_path.read_bytes())
+            if not isinstance(marker, dict) or any(marker.get(key) != value for key, value in expected_marker.items()):
+                raise ValueError("term repair marker does not match this source, run, or frozen configuration")
+            replacement_run_id = marker.get("replacement_run_id")
+            if not isinstance(replacement_run_id, str):
+                raise ValueError("term repair marker has no replacement run identity")
+            return safe_id(replacement_run_id)
+        if not repair_terms:
+            raise ValueError(
+                "the existing epubox-v25-2 run rejected every automatic term candidate; "
+                "run this command once with --repair-terms to authorize a new terminology pass, "
+                "then ordinary translate commands will resume it"
+            )
+        replacement_run_id = uuid.uuid4().hex
+        AtomicStore.atomic_write_bytes(
+            marker_path,
+            canonical_json_bytes(expected_marker | {"replacement_run_id": replacement_run_id}),
+        )
+        return replacement_run_id
+    if repair_terms:
+        raise ValueError("--repair-terms requires an eligible epubox-v25-2 empty-term run")
     if other_runs:
         raise ValueError(
             "existing run has a different frozen configuration; use the original options or a new work root"
         )
     return None
+
+
+def _legacy_frozen_term_run(
+    store: RunStore,
+    preparation: Any,
+    expected_extraction: Mapping[str, JsonValue],
+    expected_translation: Mapping[str, JsonValue],
+) -> bool:
+    return (
+        preparation.extraction_config.get("prompt_version") == PROMPT_VERSION
+        and expected_extraction.get("prompt_version") == TERM_PROMPT_VERSION
+        and {k: v for k, v in preparation.extraction_config.items() if k != "prompt_version"}
+        == {k: v for k, v in expected_extraction.items() if k != "prompt_version"}
+        and preparation.translation_config == expected_translation
+        and (store.root / "bookplan.json").is_file()
+    )
+
+
+def _superseded_empty_term_run(
+    store: RunStore,
+    preparation: Any,
+    expected_extraction: Mapping[str, JsonValue],
+    expected_translation: Mapping[str, JsonValue],
+    config: PreparationConfig,
+) -> bool:
+    if (
+        preparation.extraction_config.get("prompt_version") != PROMPT_VERSION
+        or expected_extraction.get("prompt_version") != TERM_PROMPT_VERSION
+        or {k: v for k, v in preparation.extraction_config.items() if k != "prompt_version"}
+        != {k: v for k, v in expected_extraction.items() if k != "prompt_version"}
+        or preparation.translation_config != expected_translation
+        or (store.root / "publish.json").exists()
+        or not (store.root / "bookplan.json").exists()
+    ):
+        return False
+    terms, terms_hash = load_user_terms(
+        config.user_terms_path,
+        document_ids=preparation.document_hashes,
+        unit_ids=preparation.unit_documents,
+    )
+    if preparation.user_terms != terms or preparation.user_terms_hash != terms_hash:
+        return False
+    book = store.read_bookplan()
+    glossary = store.read_glossary()
+    if glossary.terms or glossary.extraction_status != "closed_with_gaps" or store.read_candidate_pool().candidates:
+        return False
+    if any(store.read_unit(unit_id).accepted_revision is not None for unit_id in book.unit_ids):
+        return False
+    return any(
+        record.status == "succeeded_with_rejections"
+        and not record.candidates
+        and any(str(diagnostic.get("reason", "")).startswith("candidate ") for diagnostic in record.diagnostics)
+        for item in store.read_term_plan().items
+        for record in (store.read_extraction(item.item_id),)
+    )
 
 
 def _completed_run_outcome(work_dir: Path, output: Path) -> RunOutcome | None:

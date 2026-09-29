@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from pathlib import Path
+
+import pytest
 
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.schemas.contracts import Attempt, RequestManifest, TermExtractionRecord
+from engine.services.preparation_pipeline import resume_preparation
 from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION, plan_term_extraction
 from engine.services.term_runner import TermRunner
@@ -29,7 +33,7 @@ def _prepare(tmp_path: Path, **extraction_overrides: int) -> tuple[RunStore, tup
             extraction_config={
                 "max_primary_chars": 100,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-2",
+                "prompt_version": "epubox-v25-3",
                 "model": "fake",
                 "target_language": "zh-Hans",
                 **extraction_overrides,
@@ -87,6 +91,175 @@ def test_failed_term_window_does_not_stop_later_windows_or_reset_on_resume(tmp_p
     resumed = asyncio.run(TermRunner(store, transport=transport).run())
     assert resumed == first
     assert len(calls) == spent
+
+
+@pytest.mark.parametrize("first_failure", ("schema", "source_evidence"))
+def test_all_rejected_candidates_trigger_feedback_retry_and_save_valid_evidence(
+    tmp_path: Path, first_failure: str
+) -> None:
+    store, item_ids = _prepare(tmp_path)
+    target_item = item_ids[0]
+    calls: Counter[str] = Counter()
+    feedback_seen = False
+
+    async def transport(_kind, payload):
+        nonlocal feedback_seen
+        item = payload["items"][0]
+        item_id = item["item_id"]
+        calls[item_id] += 1
+        candidates = []
+        if item_id == target_item:
+            view = item["views"][0]
+            source = view["text"].split()[0]
+            feedback_seen = calls[item_id] == 2 and bool(item.get("retry_feedback"))
+            candidates = [
+                {
+                    "source": source,
+                    "target": "术语",
+                    "category": "term",
+                    "aliases": [],
+                    "scope_hint": "document",
+                    "note": "",
+                    "evidence": (
+                        [] if first_failure == "schema" else [{"view_id": "sv-unknown", "source_quote": view["text"]}]
+                    )
+                    if calls[item_id] == 1
+                    else [{"view_id": view["view_id"], "source_quote": view["text"]}],
+                }
+            ]
+        return {
+            "raw": json.dumps(
+                {
+                    "protocol": "epubox-terms-1",
+                    "request_id": payload["request_id"],
+                    "items": [{"item_id": item_id, "candidates": candidates}],
+                }
+            ),
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    result = asyncio.run(TermRunner(store, transport=transport).run())
+    record = store.read_extraction(target_item)
+
+    assert result.status == "closed"
+    assert calls[target_item] == 2 and feedback_seen
+    assert record.status == "succeeded_with_rejections" and len(record.candidates) == 1
+    assert record.candidates[0].status == "proposed"
+    assert any(
+        entry.get("code") == f"rejected_{first_failure if first_failure == 'schema' else 'evidence'}"
+        for entry in record.diagnostics
+    )
+    assert all(entry.get("request_id") in record.request_ids for entry in record.diagnostics)
+
+
+def test_saved_term_response_replays_after_record_write_crash_without_new_http(tmp_path: Path, monkeypatch) -> None:
+    store, item_ids = _prepare(tmp_path)
+    items = {item.item_id: item for item in store.read_term_plan().items}
+    for item_id in item_ids[1:]:
+        item = items[item_id]
+        store.save_extraction(
+            TermExtractionRecord(
+                item_id=item_id,
+                document_id=item.document_id,
+                view_ids=item.view_ids,
+                extraction_input_hash=item.extraction_input_hash,
+                status="succeeded",
+            )
+        )
+    calls = 0
+
+    async def transport(_kind, payload):
+        nonlocal calls
+        calls += 1
+        item_id = payload["items"][0]["item_id"]
+        return {
+            "raw": json.dumps(
+                {
+                    "protocol": "epubox-terms-1",
+                    "request_id": payload["request_id"],
+                    "items": [{"item_id": item_id, "candidates": []}],
+                }
+            ),
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    runner = TermRunner(store, transport=transport)
+    monkeypatch.setattr(
+        runner,
+        "_accept_response",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("crash after response journal")),
+    )
+    with pytest.raises(RuntimeError, match="crash after response journal"):
+        asyncio.run(runner.run())
+    record = store.read_extraction(item_ids[0])
+    request_id = record.request_ids[0]
+    attempt = store.read_request(request_id).attempts[0]
+    assert record.status == "in_flight" and attempt.state == "succeeded"
+    assert store.read_term_response(request_id, attempt.attempt_id) is not None
+
+    async def forbidden(*_args):
+        raise AssertionError("journal replay must not call the provider")
+
+    resumed = asyncio.run(TermRunner(store, transport=forbidden).run())
+    assert resumed.status == "closed"
+    assert store.read_extraction(item_ids[0]).status == "succeeded"
+    assert calls == 1 and resumed.http_attempts == 1
+
+
+def test_journal_replay_finishes_a_sent_attempt_before_freeze(tmp_path: Path, monkeypatch) -> None:
+    store, item_ids = _prepare(tmp_path)
+    items = {item.item_id: item for item in store.read_term_plan().items}
+    for item_id in item_ids[1:]:
+        item = items[item_id]
+        store.save_extraction(
+            TermExtractionRecord(
+                item_id=item_id,
+                document_id=item.document_id,
+                view_ids=item.view_ids,
+                extraction_input_hash=item.extraction_input_hash,
+                status="succeeded",
+            )
+        )
+
+    async def transport(_kind, payload):
+        item_id = payload["items"][0]["item_id"]
+        return {
+            "raw": json.dumps(
+                {
+                    "protocol": "epubox-terms-1",
+                    "request_id": payload["request_id"],
+                    "items": [{"item_id": item_id, "candidates": []}],
+                }
+            ),
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "metadata": {"response_id": "term-replay-response"},
+        }
+
+    real_finish = store.finish_attempt
+
+    def interrupted_finish(*args, **kwargs):
+        if kwargs["state"] == "succeeded":
+            raise RuntimeError("crash before succeeded attempt was committed")
+        return real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(store, "finish_attempt", interrupted_finish)
+    with pytest.raises(RuntimeError, match="crash before succeeded"):
+        asyncio.run(TermRunner(store, transport=transport).run())
+    record = store.read_extraction(item_ids[0])
+    request_id = record.request_ids[0]
+    attempt = store.read_request(request_id).attempts[0]
+    assert attempt.state == "sent" and store.read_term_response(request_id, attempt.attempt_id) is not None
+
+    async def forbidden(*_args):
+        raise AssertionError("journal replay must not call the provider")
+
+    recovered = asyncio.run(resume_preparation(store.root, StubChecker(), term_transport=forbidden))
+    assert recovered.status == "ready"
+    recovered_attempt = store.read_request(request_id).attempts[0]
+    assert recovered_attempt.state == "succeeded"
+    assert recovered_attempt.usage is not None and recovered_attempt.usage.input_tokens == 1
+    assert recovered_attempt.metadata.get("response_id") == "term-replay-response"
+    assert store.read_bookplan().required_unit_count > 0
 
 
 def test_reserved_attempt_occupies_budget_without_claiming_an_http_call(tmp_path: Path) -> None:

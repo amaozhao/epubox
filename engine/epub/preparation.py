@@ -11,7 +11,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from engine.agents.runtime import PROMPT_VERSION
+from engine.agents.runtime import PROMPT_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
 from engine.epub.derived_bindings import resolve_derived_navigation
@@ -207,8 +207,8 @@ def _frozen_extraction_config(config: PreparationConfig) -> dict[str, JsonValue]
         raise ValueError(f"unsupported terminology extraction strategy: {strategy!r}")
     extraction["strategy"] = strategy
 
-    prompt_version = extraction.get("prompt_version", PROMPT_VERSION)
-    if prompt_version != PROMPT_VERSION:
+    prompt_version = extraction.get("prompt_version", TERM_PROMPT_VERSION)
+    if prompt_version != TERM_PROMPT_VERSION:
         raise ValueError(f"unsupported terminology prompt version: {prompt_version!r}")
     provider = extraction.get("provider", config.translation_config.get("provider", "agnes"))
     if provider not in {"agnes", "cr_proxy"}:

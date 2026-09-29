@@ -17,6 +17,7 @@ from engine.schemas.contracts import (
     JsonValue,
     SourceTextView,
     TermCandidate,
+    TermCandidateRejection,
     TermEvidence,
     TermExtractionPlan,
     TermExtractionRecord,
@@ -114,7 +115,7 @@ def freeze_terminology(
     )
     terms = _frozen_user_terms(user_terms) + _frozen_model_terms(ordered_candidates, scopes, unit_documents)
     terms = _with_source_frequency(tuple(sorted(terms, key=lambda term: term.term_id)), documents)
-    warnings = _warnings(extraction_status, ordered_candidates, conflict_groups, terms)
+    warnings = _warnings(extraction_status, ordered_candidates, pool.rejections, conflict_groups, terms)
     user_terms_hash = canonical_hash(user_terms)
     pool_hash = canonical_hash(pool)
     freeze_id = (
@@ -132,7 +133,7 @@ def freeze_terminology(
             }
         )[:24]
     )
-    coverage = _coverage(records, ordered_candidates, conflict_groups)
+    coverage = _coverage(records, ordered_candidates, pool.rejections, conflict_groups)
     payload = GlossaryPayload(
         source_hash=plan.source_hash,
         freeze_id=freeze_id,
@@ -197,8 +198,10 @@ def _validate_inputs(
             raise ValueError(f"extraction record identity mismatch: {item_id}")
         if item.document_id not in document_map:
             raise ValueError(f"extraction item references an unknown document: {item_id}")
-        if record.status in {"failed_exhausted", "unplannable"} and record.candidates:
-            raise ValueError(f"failed extraction item cannot retain candidates: {item_id}")
+        if record.status in {"failed_exhausted", "unplannable"} and any(
+            candidate.status not in {"rejected_evidence", "rejected_schema"} for candidate in record.candidates
+        ):
+            raise ValueError(f"failed extraction item cannot retain usable candidates: {item_id}")
 
 
 def _extraction_status(
@@ -305,6 +308,11 @@ def _candidate_pool(
         record_version=record_version,
         extraction_status=extraction_status,
         candidates=candidates,
+        rejections=tuple(
+            rejection
+            for item_id in sorted(records)
+            for rejection in sorted(records[item_id].rejections, key=lambda value: value.rejection_id)
+        ),
         conflict_groups=conflict_groups,
         consumed_response_ids=tuple(
             sorted(
@@ -476,6 +484,7 @@ def _units_scope(unit_ids: set[str], unit_documents: dict[str, str]) -> TermScop
 def _warnings(
     extraction_status: Literal["closed", "closed_with_gaps", "disabled", "not_required"],
     candidates: tuple[TermCandidate, ...],
+    rejections: tuple[TermCandidateRejection, ...],
     conflict_groups: tuple[dict[str, JsonValue], ...],
     terms: tuple[FrozenTerm, ...],
 ) -> tuple[str, ...]:
@@ -486,7 +495,7 @@ def _warnings(
         warnings.append("No extractable source views required terminology preparation.")
     elif extraction_status == "closed_with_gaps":
         warnings.append("Terminology extraction closed with local gaps.")
-    rejected = sum(candidate.status.startswith("rejected_") for candidate in candidates)
+    rejected = sum(candidate.status.startswith("rejected_") for candidate in candidates) + len(rejections)
     deferred = sum(candidate.status == "deferred_conflict" for candidate in candidates)
     deferred_aliases = sum(len(candidate.aliases) for candidate in candidates)
     if rejected:
@@ -503,6 +512,7 @@ def _warnings(
 def _coverage(
     records: dict[str, TermExtractionRecord],
     candidates: tuple[TermCandidate, ...],
+    rejections: tuple[TermCandidateRejection, ...],
     conflict_groups: tuple[dict[str, JsonValue], ...],
 ) -> dict[str, JsonValue]:
     return {
@@ -511,9 +521,11 @@ def _coverage(
             record.status in {"succeeded", "succeeded_with_rejections"} for record in records.values()
         ),
         "items_failed": sum(record.status in {"failed_exhausted", "unplannable"} for record in records.values()),
-        "candidates_total": len(candidates),
+        "candidates_total": len(candidates) + len(rejections),
         "candidates_adopted": sum(candidate.status == "adopted_preferred" for candidate in candidates),
-        "candidates_rejected": sum(candidate.status.startswith("rejected_") for candidate in candidates),
+        "candidates_rejected": sum(candidate.status.startswith("rejected_") for candidate in candidates)
+        + len(rejections),
+        "candidates_rejected_schema": len(rejections),
         "candidates_shadowed": sum(candidate.status == "shadowed_by_user" for candidate in candidates),
         "candidates_deferred": sum(candidate.status == "deferred_conflict" for candidate in candidates),
         "aliases_deferred": sum(len(candidate.aliases) for candidate in candidates),

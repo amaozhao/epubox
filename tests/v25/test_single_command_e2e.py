@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine import cli
-from engine.agents.runtime import PROMPT_VERSION, ProviderError
+from engine.agents.runtime import PROMPT_VERSION, TERM_PROMPT_VERSION, ProviderError
 from engine.epub.preparation import PreparationConfig
 from engine.epub.validation import EpubCheckResult
 from engine.item.inline import Event, events_to_projection, parse_projection
@@ -85,7 +85,7 @@ def test_one_pipeline_reaches_verified_epub_with_fake_model(tmp_path: Path, monk
         auto_extract=False,
         extraction_config={
             "strategy": TERM_PLANNER_VERSION,
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": TERM_PROMPT_VERSION,
             "provider": "agnes",
             "model": "fake",
             "target_language": "zh-Hans",

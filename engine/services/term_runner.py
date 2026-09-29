@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
 from engine.agents.protocol import ProtocolError
-from engine.agents.runtime import PROMPT_VERSION, ModelRuntime, RequestError, RuntimePaused, wire_hash
+from engine.agents.runtime import TERM_PROMPT_VERSION, ModelRuntime, RequestError, RuntimePaused, wire_hash
 from engine.agents.term_protocol import validate_terms_response
 from engine.core.tokens import count_tokens
 from engine.schemas.contracts import (
@@ -48,7 +49,7 @@ class TermRunner:
             for document_id, digest in self.preparation.document_hashes.items()
         }
         config = self.preparation.extraction_config
-        if config.get("prompt_version") != PROMPT_VERSION or config.get("target_language") != "zh-Hans":
+        if config.get("prompt_version") != TERM_PROMPT_VERSION or config.get("target_language") != "zh-Hans":
             raise ValueError("frozen terminology prompt or target language does not match this runtime")
         if not isinstance(config.get("model"), str) or not config["model"]:
             raise ValueError("frozen terminology model identity is missing")
@@ -69,6 +70,7 @@ class TermRunner:
             model_max_output_tokens=self.output_tokens,
             reserve_attempt=self._reserve,
             finish_attempt=self._finish,
+            persist_response=self.store.save_term_response,
         )
 
     def _requests(self) -> tuple[RequestManifest, ...]:
@@ -132,7 +134,7 @@ class TermRunner:
             expected_record_version=record.record_version,
         )
 
-    def _payload(self, item: ExtractionItem, request_id: str) -> dict[str, Any]:
+    def _payload(self, item: ExtractionItem, request_id: str, retry_feedback: tuple[str, ...] = ()) -> dict[str, Any]:
         document = self.documents[item.document_id]
         views = []
         for interval in item.primary_ranges:
@@ -172,9 +174,138 @@ class TermRunner:
                     "context": context,
                     "hints": [],
                     "user_terms": user_terms,
+                    **({"retry_feedback": list(retry_feedback)} if retry_feedback else {}),
                 }
             ],
         }
+
+    def _accept_response(
+        self, item: ExtractionItem, record: TermExtractionRecord, request_id: str, raw: str
+    ) -> TermExtractionRecord:
+        parsed = validate_terms_response(raw, request_id, {item.item_id})
+        if parsed.errors or parsed.missing or parsed.unknown:
+            raise ProtocolError(f"invalid term item response: {parsed.errors or parsed.missing or parsed.unknown}")
+        values = parsed.accepted[item.item_id]
+        rejected = parsed.rejected_candidates.get(item.item_id, ())
+        from engine.schemas.contracts import TermCandidateRejection, canonical_hash
+
+        schema_rejections = tuple(
+            TermCandidateRejection(
+                rejection_id=f"tcr-{canonical_hash({'item_id': item.item_id, 'request_id': request_id, 'candidate_index': entry.candidate_index})[:24]}",
+                extraction_item_id=item.item_id,
+                request_id=request_id,
+                candidate_index=entry.candidate_index,
+                reason=entry.reason,
+                source=entry.source,
+                target=entry.target,
+                category=entry.category,
+            )
+            for entry in parsed.schema_rejections.get(item.item_id, ())
+        )
+        merged_rejections = {
+            rejection.rejection_id: rejection for rejection in (*record.rejections, *schema_rejections)
+        }
+        rejections = tuple(merged_rejections[key] for key in sorted(merged_rejections))
+        if not values and rejected:
+            return self._save(
+                record,
+                status="retry_wait",
+                rejections=rejections,
+                diagnostics=(
+                    *record.diagnostics,
+                    *({"code": "rejected_schema", "reason": reason, "request_id": request_id} for reason in rejected),
+                ),
+                counters={
+                    "http_attempts": self._spent(item.item_id, actual=True),
+                    "reserved_attempts": self._spent(item.item_id),
+                },
+            )
+        from engine.services.term_candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
+
+        proposals = tuple(
+            CandidateProposal(
+                source=value["source"],
+                target=value["target"],
+                category=value["category"],
+                aliases=tuple(value["aliases"]),
+                scope_hint=value["scope_hint"],
+                note=value["note"],
+                evidence=tuple(EvidenceProposal(**citation) for citation in value["evidence"]),
+            )
+            for value in values
+        )
+        checked = validate_candidate_proposals(self.documents[item.document_id], item, proposals)
+        merged = {candidate.candidate_id: candidate for candidate in (*record.candidates, *checked.candidates)}
+        candidates = tuple(merged[candidate_id] for candidate_id in sorted(merged))
+        diagnostics = (
+            *record.diagnostics,
+            *(diagnostic | {"request_id": request_id} for diagnostic in checked.diagnostics),
+            *({"code": "rejected_schema", "reason": message, "request_id": request_id} for message in rejected),
+        )
+        if proposals and not any(candidate.status == "proposed" for candidate in checked.candidates):
+            return self._save(
+                record,
+                status="retry_wait",
+                candidates=candidates,
+                rejections=rejections,
+                diagnostics=diagnostics,
+                counters={
+                    "http_attempts": self._spent(item.item_id, actual=True),
+                    "reserved_attempts": self._spent(item.item_id),
+                },
+            )
+        return self._save(
+            record,
+            status="succeeded_with_rejections" if diagnostics else "succeeded",
+            candidates=candidates,
+            rejections=rejections,
+            diagnostics=diagnostics,
+            counters={
+                "http_attempts": self._spent(item.item_id, actual=True),
+                "reserved_attempts": self._spent(item.item_id),
+            },
+        )
+
+    def _replay_response(self, item: ExtractionItem, record: TermExtractionRecord) -> TermExtractionRecord:
+        if record.status != "in_flight" or not record.request_ids:
+            return record
+        request_id = record.request_ids[-1]
+        request = self.store.read_request(request_id)
+        for attempt in reversed(request.attempts):
+            response = self.store.read_term_response(request_id, attempt.attempt_id)
+            if response is None:
+                continue
+            if attempt.state in {"sent", "unknown"}:
+                usage = response.usage
+                self.store.finish_attempt(
+                    request_id,
+                    attempt.attempt_id,
+                    state="succeeded",
+                    usage=(
+                        Usage(
+                            input_tokens=usage.input_tokens,
+                            output_tokens=usage.output_tokens,
+                            known_cost=usage.known_cost,
+                        )
+                        if usage is not None
+                        else None
+                    ),
+                    finished_at=datetime.now(UTC).isoformat(),
+                    metadata=response.metadata,
+                )
+            elif attempt.state != "succeeded":
+                raise ValueError("journaled term response has an invalid attempt state")
+            try:
+                if response.finish_reason == "length":
+                    raise ProtocolError("term response was truncated")
+                return self._accept_response(item, record, request_id, response.raw)
+            except ProtocolError as error:
+                return self._save(
+                    record,
+                    status="retry_wait",
+                    diagnostics=(*record.diagnostics, {"reason": str(error), "request_id": request_id}),
+                )
+        return record
 
     async def run(self) -> TermRunResult:
         if not self.plan.auto_extract:
@@ -186,12 +317,17 @@ class TermRunner:
                 self._record(item)
         paused = False
         for item in self.plan.items:
-            record = self._record(item)
+            record = self._replay_response(item, self._record(item))
             if record.status in {"succeeded", "succeeded_with_rejections", "failed_exhausted", "unplannable"}:
                 continue
             while self._logical_calls(item.item_id) < 2 and self._spent(item.item_id) < item.http_limit:
                 request_id = f"tr-{uuid4().hex}"
-                payload = self._payload(item, request_id)
+                feedback = (
+                    tuple(str(entry.get("reason", "")) for entry in record.diagnostics[-3:])
+                    if record.status == "retry_wait"
+                    else ()
+                )
+                payload = self._payload(item, request_id, feedback)
                 encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
                 estimated_tokens = count_tokens(encoded) + self.output_tokens
                 tpm = _optional_positive_int(self.config.get("tpm"))
@@ -225,46 +361,9 @@ class TermRunner:
                     )
                     if response.get("finish_reason") == "length":
                         raise ProtocolError("term response was truncated")
-                    parsed = validate_terms_response(response["raw"], request_id, {item.item_id})
-                    if parsed.errors or parsed.missing or parsed.unknown:
-                        raise ProtocolError(
-                            f"invalid term item response: {parsed.errors or parsed.missing or parsed.unknown}"
-                        )
-                    from engine.services.term_candidates import (
-                        CandidateProposal,
-                        EvidenceProposal,
-                        validate_candidate_proposals,
-                    )
-
-                    proposals = tuple(
-                        CandidateProposal(
-                            source=value["source"],
-                            target=value["target"],
-                            category=value["category"],
-                            aliases=tuple(value["aliases"]),
-                            scope_hint=value["scope_hint"],
-                            note=value["note"],
-                            evidence=tuple(EvidenceProposal(**citation) for citation in value["evidence"]),
-                        )
-                        for value in parsed.accepted[item.item_id]
-                    )
-                    checked = validate_candidate_proposals(self.documents[item.document_id], item, proposals)
-                    current_rejections = (
-                        *checked.diagnostics,
-                        *({"reason": message} for message in parsed.rejected_candidates.get(item.item_id, ())),
-                    )
-                    diagnostics = (*record.diagnostics, *current_rejections)
-                    record = self._save(
-                        record,
-                        status="succeeded_with_rejections" if current_rejections else "succeeded",
-                        candidates=checked.candidates,
-                        diagnostics=diagnostics,
-                        counters={
-                            "http_attempts": self._spent(item.item_id, actual=True),
-                            "reserved_attempts": self._spent(item.item_id),
-                        },
-                    )
-                    break
+                    record = self._accept_response(item, record, request_id, response["raw"])
+                    if record.status != "retry_wait":
+                        break
                 except (TermBudgetPaused, RuntimePaused):
                     paused = True
                     record = self._save(record, status="pending")

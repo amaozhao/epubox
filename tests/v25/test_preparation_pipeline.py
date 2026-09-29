@@ -24,7 +24,7 @@ def config(*, auto_extract: bool = True, user_terms_path: Path | None = None) ->
         auto_extract=auto_extract,
         extraction_config={
             "strategy": TERM_PLANNER_VERSION,
-            "prompt_version": "epubox-v25-2",
+            "prompt_version": "epubox-v25-3",
             "model": "fake",
             "target_language": "zh-Hans",
             "max_primary_chars": 200,
@@ -229,6 +229,54 @@ def test_successful_term_retry_closes_despite_an_earlier_unknown_attempt(tmp_pat
     assert "unknown" in attempts and "succeeded" in attempts
     assert result.status == "ready" and result.phase == "ready"
     assert store.read_glossary().extraction_status == "closed"
+
+
+@pytest.mark.parametrize("failure", ("schema", "source_evidence"))
+def test_all_rejected_terms_freeze_with_disclosed_local_gaps(tmp_path: Path, failure: str) -> None:
+    calls = 0
+
+    async def bad_terms(_kind, payload):
+        nonlocal calls
+        calls += 1
+        item = payload["items"][0]
+        view = item["views"][0]
+        return {
+            "raw": json.dumps(
+                {
+                    "protocol": "epubox-terms-1",
+                    "request_id": payload["request_id"],
+                    "items": [
+                        {
+                            "item_id": item["item_id"],
+                            "candidates": [
+                                {
+                                    "source": view["text"].split()[0],
+                                    "target": "术语",
+                                    "category": "term",
+                                    "evidence": []
+                                    if failure == "schema"
+                                    else [{"view_id": "sv-unknown", "source_quote": view["text"]}],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    result = asyncio.run(
+        prepare_translation(
+            source_book(tmp_path), tmp_path / "work", config(), StubChecker(), term_transport=bad_terms
+        )
+    )
+
+    assert calls >= 2
+    assert result.status == "needs_attention" and result.phase == "ready"
+    assert (result.work_dir / "glossary" / "freeze.json").exists()
+    assert (result.work_dir / "bookplan.json").exists()
+    glossary = RunStore(result.work_dir).read_glossary()
+    assert glossary.extraction_status == "closed_with_gaps" and not glossary.terms
 
 
 def test_paused_terms_leave_no_pool_or_bookplan_and_resume_from_json(

@@ -8,7 +8,7 @@ import pytest
 
 import engine.epub.preparation as preparation_module
 import engine.services.preparation_pipeline as pipeline_module
-from engine.agents.runtime import PROMPT_VERSION
+from engine.agents.runtime import PROMPT_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.epub.validation import EpubCheckResult
@@ -39,7 +39,7 @@ def test_p1_snapshots_complete_source_inventory_and_commits_parsed_ready_last(tm
         PreparationConfig(
             run_id="run-1",
             user_terms_path=terms,
-            extraction_config={"prompt_version": PROMPT_VERSION},
+            extraction_config={"prompt_version": TERM_PROMPT_VERSION},
             translation_config={"target_language": "zh-Hans"},
         ),
         checker,
@@ -66,7 +66,7 @@ def test_p1_snapshots_complete_source_inventory_and_commits_parsed_ready_last(tm
     assert tuple(store.read_user_terms().terms) == loaded.user_terms
     assert loaded.user_terms[0].mode == "preferred"
     assert loaded.extraction_config == {
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": TERM_PROMPT_VERSION,
         "auto_extract": True,
         "strategy": TERM_PLANNER_VERSION,
         "provider": "agnes",
