@@ -8,7 +8,7 @@ from lxml import etree  # type: ignore[attr-defined]
 
 from engine.core.markup import element_path, find_by_element_path, parse_xml_safely, serialize_xml
 from engine.item.inline import plain_text, validate_projection
-from engine.schemas.v23 import DocumentPlan, Event, RegistryEntry, Unit
+from engine.schemas.v25 import DOCUMENT_FORMAT, DocumentPlan, RegistryEntry, Unit
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +54,7 @@ def _source_atom(
 
 
 def _render_events(
-    events: tuple[Event, ...],
+    events: tuple[object, ...],
     unit: Unit,
     source_nodes: Mapping[str, etree._Element],
     source_keys: Mapping[etree._Element, str],
@@ -64,11 +64,15 @@ def _render_events(
     fragment = etree.Element("epubox-fragment")
     stack = [fragment]
     for event in events:
-        if event.kind == "text":
-            _append_text(stack[-1], event.value)
+        kind = getattr(event, "kind", None)
+        value = getattr(event, "value", None)
+        if not isinstance(kind, str) or not isinstance(value, str):
+            raise TypeError("projection event is invalid")
+        if kind == "text":
+            _append_text(stack[-1], value)
             continue
 
-        marker = event.value
+        marker = value
         edge, ref = marker[0], marker[1:]
         entry = unit.registry[ref]
         if entry.kind == "b":
@@ -119,7 +123,7 @@ def _map_cloned_subtree(
 def _apply_content_unit(
     document: DocumentPlan,
     unit: Unit,
-    events: tuple[Event, ...],
+    events: tuple[object, ...],
     source_nodes: Mapping[str, etree._Element],
     source_keys: Mapping[etree._Element, str],
     target_nodes: dict[str, etree._Element],
@@ -157,6 +161,9 @@ def assemble_document(
     identity: bool = False,
 ) -> AssembledDocument:
     """Build XML from the immutable source template and accepted text projections."""
+
+    if document.format != DOCUMENT_FORMAT:
+        raise TypeError(f"assembly requires {DOCUMENT_FORMAT}")
 
     tree = parse_xml_safely(document.source_markup)
     source_tree = parse_xml_safely(document.source_markup)

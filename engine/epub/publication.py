@@ -28,8 +28,17 @@ from engine.epub.validation import (
     validate_internal_references,
 )
 from engine.item.inline import plain_text, projection_identities, validate_projection
-from engine.schemas.v23 import DocumentPlan, Event, SourceSlot, Unit, UnitRecord, canonical_hash, is_accepted
-from engine.services.store import Store
+from engine.schemas.v25 import (
+    BOOK_FORMAT,
+    DOCUMENT_FORMAT,
+    DocumentPlan,
+    ItemStatus,
+    SourceSlot,
+    Unit,
+    UnitRecord,
+    canonical_hash,
+)
+from engine.services.store_v25 import StoreV25
 
 _TRANSLATABLE_ATTRIBUTES = {"alt", "title", "aria-label", "aria-description"}
 _XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
@@ -60,6 +69,8 @@ def validate_assembled_document(
     changeset: Mapping[tuple[str, str], str] | Sequence[tuple[str, str]] = (),
 ) -> None:
     """Re-read actual XML and prove it consumes the immutable plan and accepted targets."""
+    if document.format != DOCUMENT_FORMAT:
+        raise TypeError(f"publication validation requires {DOCUMENT_FORMAT}")
     source_tree = parse_xml_safely(document.source_markup)
     actual_tree = parse_xml_safely(actual_markup)
     changed = set(changeset)
@@ -135,15 +146,19 @@ def validate_assembled_document(
             raise EpubValidationError("target_text_mismatch", f"Target text mismatch: {unit_id}")
 
 
-def _expected_unit_text(document: DocumentPlan, unit: Unit, events: Sequence[Event]) -> str:
+def _expected_unit_text(document: DocumentPlan, unit: Unit, events: Sequence[object]) -> str:
     parts: list[str] = []
     for event in events:
-        if event.kind == "text":
-            parts.append(event.value)
+        kind = getattr(event, "kind", None)
+        value = getattr(event, "value", None)
+        if not isinstance(kind, str) or not isinstance(value, str):
+            raise EpubValidationError("invalid_projection_event", "Projection event is invalid")
+        if kind == "text":
+            parts.append(value)
             continue
-        if not event.value.startswith("=x"):
+        if not value.startswith("=x"):
             continue
-        entry = unit.registry[event.value[1:]]
+        entry = unit.registry[value[1:]]
         slot_id = entry.hints.get("slot_id")
         if slot_id is None:
             continue
@@ -164,39 +179,6 @@ def _expected_unit_text(document: DocumentPlan, unit: Unit, events: Sequence[Eve
             raise EpubValidationError("invalid_slot_reference", f"Protected source range does not match: {slot_id}")
         parts.append(source_text)
     return "".join(parts)
-
-
-def _valid_derived_target(
-    document: DocumentPlan,
-    unit_id: str,
-    record: UnitRecord,
-    target: str,
-    records: Mapping[str, UnitRecord],
-) -> bool:
-    derived = getattr(record, "derived", None)
-    if not isinstance(derived, dict) or derived.get("state") != "valid" or derived.get("target") != target:
-        return False
-    source_id = str(derived.get("source_unit_id", ""))
-    source = records.get(source_id)
-    binding = next(
-        (
-            item
-            for item in document.derived_bindings
-            if str(item.get("unit_id", item.get("target_unit_id", ""))) == unit_id
-            and str(item.get("source_unit_id", "")) == source_id
-        ),
-        None,
-    )
-    if binding is None or source is None or not is_accepted(source):
-        return False
-    source_candidate = getattr(source, "candidate", None)
-    return bool(
-        isinstance(source_candidate, str)
-        and derived.get("source_revision") == getattr(source, "revision", None)
-        and derived.get("source_target_hash") == getattr(source, "target_hash", None)
-        and derived.get("target_hash") == canonical_hash(target)
-        and plain_text(target) == plain_text(source_candidate)
-    )
 
 
 def stage_epub(
@@ -232,26 +214,31 @@ def stage_epub(
 
 
 def publish_book(
-    store: Store,
-    targets: Mapping[str, str],
+    store: StoreV25,
     output_path: Path,
     checker: object,
     *,
     overwrite: bool = False,
     identity: bool = False,
 ) -> dict[str, object]:
-    """Assemble only current accepted targets, verify the real ZIP, then commit it."""
-    plan = store.read_bookplan(ready=True)
+    """Publish only trusted v2.5 source plans and current accepted UnitRecord targets."""
+    if not isinstance(store, StoreV25):
+        raise TypeError("publication requires StoreV25")
+    plan = store.read_bookplan()
+    if plan.format != BOOK_FORMAT:
+        raise TypeError(f"publication requires {BOOK_FORMAT}")
     snapshot = store.root / "source.epub"
     inventory = inspect_epub(snapshot, plan.source_hash, checker=checker)
     replacements: dict[str, bytes] = {}
     accepted_by_resource: dict[str, dict[str, str]] = {}
     version_vector: dict[str, int] = {}
-    records = {unit_id: store.load_unit(unit_id) for unit_id in plan.unit_ids}
+    records = {} if identity else {unit_id: store.read_unit(unit_id) for unit_id in plan.unit_ids}
     assembled_documents: dict[str, tuple[DocumentPlan, dict[str, str], dict[str, str]]] = {}
 
     for document_id, expected_hash in plan.document_hashes.items():
         document = store.read_document(document_id, expected_hash=expected_hash)
+        if document.format != DOCUMENT_FORMAT:
+            raise TypeError(f"publication requires {DOCUMENT_FORMAT}")
         document_targets: dict[str, str] = {}
         for unit in document.units:
             if identity:
@@ -259,14 +246,9 @@ def publish_book(
                 version_vector[unit.unit_id] = 0
                 continue
             record = records[unit.unit_id]
-            target = targets.get(unit.unit_id)
-            accepted = (
-                target is not None and is_accepted(record) and canonical_hash(target) == record.accepted_target_hash
-            )
-            derived = target is not None and _valid_derived_target(document, unit.unit_id, record, target, records)
-            if not accepted and not derived:
+            target = _accepted_target(record, planned=plan.initial_unit_plans[unit.unit_id] is not None)
+            if target is None:
                 raise EpubValidationError("unit_not_accepted", f"Unit is not currently accepted: {unit.unit_id}")
-            assert target is not None
             document_targets[unit.unit_id] = target
             version_vector[unit.unit_id] = record.revision
         assembled = assemble_document(document, document_targets, identity=identity)
@@ -296,6 +278,17 @@ def publish_book(
         checker=checker,
         expected_language=None if identity else "zh-Hans",
     )
+    if not identity:
+        for unit_id, record in records.items():
+            current = store.read_unit(unit_id)
+            if (
+                current != record
+                or _accepted_target(current, planned=plan.initial_unit_plans[unit_id] is not None) is None
+            ):
+                raise EpubValidationError(
+                    "unit_changed_during_publication",
+                    f"Unit changed while publication was being verified: {unit_id}",
+                )
     intent = publish_verified(
         staged_path,
         output_path,
@@ -304,7 +297,7 @@ def publish_book(
         plan_fingerprint=canonical_hash(plan),
         version_vector=version_vector,
         verification=verification,
-        forbidden_paths=(Path(plan.source_path), snapshot),
+        forbidden_paths=(Path(store.read_preparation().source_path), snapshot),
         overwrite=overwrite,
     )
     return {
@@ -313,6 +306,29 @@ def publish_book(
         "verification": verification.to_dict(),
         "publish": intent,
     }
+
+
+def _accepted_target(record: UnitRecord, *, planned: bool) -> str | None:
+    target = record.candidate
+    if target is None or record.accepted_revision != record.revision:
+        return None
+    target_hash = canonical_hash(target)
+    if record.accepted_target_hash != target_hash or record.unresolved_issues:
+        return None
+    if record.local_checks.get("passed") is not True or record.local_checks.get("target_hash") != target_hash:
+        return None
+    review = record.review
+    if (
+        review is None
+        or review.get("passed") is not True
+        or review.get("revision") != record.revision
+        or review.get("input_hash") != record.input_hash
+        or review.get("target_hash") != target_hash
+    ):
+        return None
+    if planned and (not record.items or any(item.status != ItemStatus.REVIEWED for item in record.items.values())):
+        return None
+    return target
 
 
 def verify_staged_epub(
