@@ -14,6 +14,7 @@ from engine.agents.runtime import ModelRuntime, RequestError, RuntimePaused, req
 from engine.agents.term_protocol import validate_review_response_v25
 from engine.core.quality import find_degenerate_translation
 from engine.core.tokens import count_tokens
+from engine.epub.assembly import derive_navigation_projection
 from engine.item.inline import Event, events_to_projection, parse_projection, plain_text, validate_projection
 from engine.item.planner import PlannerConfig, batch_request, recommended_output_tokens
 from engine.item.planner_v25 import build_context, build_context_index, plan_unit_v25
@@ -617,7 +618,7 @@ class TranslationEngine:
         return True
 
     def _outcome(self) -> tuple[Literal["translated", "needs_attention"], str | None]:
-        if all(record.accepted_revision is not None for record in self.records.values()) and all(
+        if all(self._unit_complete(record) for record in self.records.values()) and all(
             check.get("status") == "valid" for check in self.checks.values()
         ):
             return "translated", None
@@ -628,7 +629,7 @@ class TranslationEngine:
         return "needs_attention", None
 
     def _result(self, status: str, reason: str | None) -> TranslationRunResult:
-        accepted = sum(record.accepted_revision is not None for record in self.records.values())
+        accepted = sum(self._unit_complete(record) for record in self.records.values())
         attention = sum(_record_needs_attention(record) for record in self.records.values())
         pending = sum(
             item.status in {ItemStatus.PENDING, ItemStatus.IN_FLIGHT, ItemStatus.RETRY_WAIT}
@@ -645,9 +646,7 @@ class TranslationEngine:
             reason=reason,
         )
         final_phase = (
-            "coherence"
-            if all(record.accepted_revision is not None for record in self.records.values())
-            else "translation"
+            "coherence" if all(self._unit_complete(record) for record in self.records.values()) else "translation"
         )
         self._emit_progress(final_phase, "stopped", result=result)
         return result
@@ -664,7 +663,7 @@ class TranslationEngine:
         accepted = (
             result.accepted_units
             if result is not None
-            else sum(record.accepted_revision is not None for record in self.records.values())
+            else sum(self._unit_complete(record) for record in self.records.values())
         )
         attention = (
             result.needs_attention_units
@@ -690,6 +689,32 @@ class TranslationEngine:
                 "needs_attention_units": attention,
                 "http_attempts": result.http_attempts if result is not None else self._actual_http_total,
             }
+        )
+
+    def _unit_complete(self, record: UnitRecord) -> bool:
+        if record.derived is None:
+            return record.accepted_revision == record.revision
+        source_unit_id = record.derived.get("source_unit_id")
+        source = self.records.get(source_unit_id) if isinstance(source_unit_id, str) else None
+        if (
+            source is None
+            or source.accepted_revision != source.revision
+            or source.candidate is None
+            or source.accepted_target_hash != canonical_hash(source.candidate)
+            or record.derived.get("state") != "valid"
+            or record.derived.get("source_revision") != source.revision
+            or record.derived.get("source_target_hash") != source.accepted_target_hash
+        ):
+            return False
+        try:
+            target = derive_navigation_projection(self.units[record.unit_id], source.candidate)
+        except ValueError:
+            return False
+        return (
+            record.candidate is None
+            and record.accepted_revision is None
+            and record.derived.get("target") == target
+            and record.derived.get("target_hash") == canonical_hash(target)
         )
 
     def _advance_local_state(self) -> None:
@@ -805,13 +830,13 @@ class TranslationEngine:
                 )
             if not source_ready or source is None or source.candidate is None:
                 continue
-            target = plain_text(source.candidate)
+            target = derive_navigation_projection(self.units[unit_id], source.candidate)
             target_hash = canonical_hash(target)
             self._save(
                 record,
-                candidate=target,
-                accepted_revision=record.revision,
-                accepted_target_hash=target_hash,
+                candidate=None,
+                accepted_revision=None,
+                accepted_target_hash=None,
                 local_checks={
                     "passed": True,
                     "kind": "derived_navigation",

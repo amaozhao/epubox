@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from typing import Any, cast
 
 import pytest
 
 from engine.agents.runtime import ProviderError
 from engine.epub.preparation_v25 import PreparationConfig
-from engine.epub.publication import _accepted_target
+from engine.epub.publication import _accepted_target, publish_book
 from engine.item.inline import plain_text
 from engine.orchestrator import (
     TranslationEngine,
@@ -16,7 +17,7 @@ from engine.orchestrator import (
     validate_repair_file,
     validate_retry_failed_units,
 )
-from engine.schemas.v25 import ItemStatus, UnitRecord, canonical_hash
+from engine.schemas.v25 import ItemStatus, Unit, UnitRecord, canonical_hash
 from engine.services.atomic_store import StoreError
 from engine.services.preparation_pipeline import prepare_translation
 from engine.services.store_v25 import StoreV25
@@ -111,10 +112,11 @@ class ScriptedTransport:
 
 
 class PartialBatchTransport:
-    def __init__(self, *, coherence_major_once: bool = False):
+    def __init__(self, *, coherence_major_once: bool = False, title_target: str | None = None):
         self.calls: list[tuple[str, tuple[str, ...]]] = []
         self.omitted: str | None = None
         self.coherence_major_once = coherence_major_once
+        self.title_target = title_target
 
     async def __call__(self, stage: str, payload: dict):
         ids = tuple(item["item_id"] for item in payload["items"])
@@ -129,7 +131,15 @@ class PartialBatchTransport:
                     {
                         "protocol": "epubox-text-1",
                         "request_id": payload["request_id"],
-                        "items": [{"item_id": item["item_id"], "target": item["source"]} for item in included],
+                        "items": [
+                            {
+                                "item_id": item["item_id"],
+                                "target": self.title_target
+                                if self.title_target is not None and plain_text(item["source"]).strip() == "Chapter 1"
+                                else item["source"],
+                            }
+                            for item in included
+                        ],
                     },
                     ensure_ascii=False,
                 )
@@ -432,6 +442,16 @@ def test_derived_navigation_tracks_the_current_accepted_title_without_model_item
     engine.book = cast(Any, type("Book", (), {"unit_ids": ("title", "nav")})())
     engine.records = {"title": source, "nav": derived}
     engine.derived_bindings = {"nav": "title"}
+    engine.units = {
+        "nav": Unit(
+            unit_id="nav",
+            document_id="navigation",
+            kind="navigation",
+            source_projection="Source label",
+            node_key="n1",
+            slot_ids=("s1",),
+        )
+    }
 
     def save(record: UnitRecord, **updates) -> UnitRecord:
         saved = record.model_copy(update={"record_version": record.record_version + 1, **updates})
@@ -444,7 +464,8 @@ def test_derived_navigation_tracks_the_current_accepted_title_without_model_item
 
     assert first.items == {}
     assert first.cut_plan is None
-    assert first.accepted_revision == 0
+    assert first.candidate is None
+    assert first.accepted_revision is None
     assert first.derived == {
         "state": "valid",
         "source_unit_id": "title",
@@ -466,7 +487,7 @@ def test_derived_navigation_tracks_the_current_accepted_title_without_model_item
     revised = engine.records["nav"]
 
     assert revised.revision == 1
-    assert revised.accepted_revision == 1
+    assert revised.accepted_revision is None
     assert revised.derived is not None and revised.derived["target"] == "Revised title"
 
     engine.records["title"] = engine.records["title"].model_copy(
@@ -488,19 +509,25 @@ async def test_real_derived_navigation_uses_no_model_item_and_tracks_accepted_ti
         "state": "blocked_dependency",
         "source_unit_id": binding["source_unit_id"],
     }
-    transport = PartialBatchTransport()
+    transport = PartialBatchTransport(title_target="第一章")
     transport.omitted = "disabled"
 
     result = await TranslationEngine(store, transport=transport).run()
     derived = store.read_unit(derived_id)
-    source = store.read_unit(str(binding["source_unit_id"]))
 
     assert result.status == "translated"
     assert derived.derived is not None and derived.derived["state"] == "valid"
-    assert derived.candidate == plain_text(source.candidate or "")
-    assert derived.accepted_revision == derived.revision
+    assert derived.candidate is None and derived.accepted_revision is None
+    target = derived.derived["target"]
+    assert isinstance(target, str) and plain_text(target) == "第一章"
     requested_ids = {item_id for _, item_ids in transport.calls for item_id in item_ids}
     assert not requested_ids & set(initial.items)
+
+    output = tmp_path / "derived-output.epub"
+    published = publish_book(store, output, StubChecker())
+    assert published["path"] == str(output)
+    with zipfile.ZipFile(output) as archive:
+        assert "第一章" in archive.read("OEBPS/nav.xhtml").decode()
 
 
 @pytest.mark.asyncio
