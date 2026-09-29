@@ -17,8 +17,8 @@ from lxml import etree  # type: ignore[attr-defined]
 
 from engine.core.markup import element_path, parse_xml_safely, qname_local_name
 from engine.core.styles import ReorderPolicy, StyleIssue, StyleScan, scan_inline_style, scan_stylesheets
-from engine.core.tokens import count_tokens
 from engine.item.inline import Event, events_to_projection, parse_projection
+from engine.item.planner import MAX_SOURCE_TOKENS, source_token_count
 from engine.schemas.source_internal import (
     DocumentPlan,
     NodeRecord,
@@ -30,10 +30,8 @@ from engine.schemas.source_internal import (
     canonical_hash,
 )
 
-EXTRACTOR_VERSION = "epubox-extractor-5"
+EXTRACTOR_VERSION = "epubox-extractor-7"
 ADAPTER_VERSION = "epubox-xml-1"
-_MAX_GROUP_PARAGRAPHS = 8
-_MAX_GROUP_TEXT_TOKENS = 700
 
 _EPUB_TYPE = "{http://www.idpf.org/2007/ops}type"
 _XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
@@ -533,35 +531,32 @@ class _Extractor:
         index = 0
         while index < len(children):
             first = index
-            text_tokens = 0
             while index < len(children) and self._groupable_paragraph(children[index], translated):
-                paragraph_tokens = count_tokens("".join(children[index].itertext()))
-                if index > first and (
-                    index - first >= _MAX_GROUP_PARAGRAPHS or text_tokens + paragraph_tokens > _MAX_GROUP_TEXT_TOKENS
-                ):
-                    break
-                text_tokens += paragraph_tokens
                 index += 1
-            run = children[first:index]
-            after = children[first - 1] if first else None
-            before = children[index] if index < len(children) else None
-            lead = parent.text if after is None else after.tail
-            if (
-                len(run) > 1
-                and (after is None or isinstance(after.tag, str) and qname_local_name(after.tag) in _BLOCK_TAGS)
-                and (before is None or isinstance(before.tag, str) and qname_local_name(before.tag) in _BLOCK_TAGS)
-                and not (lead or "").strip()
-                and all(not (member.tail or "").strip() for member in run)
-                and self._make_region_unit(
-                    parent,
-                    after,
-                    before,
-                    translated,
-                    "paragraph_group",
-                    member_node_keys=tuple(self.node_keys[member] for member in run),
-                )
-            ):
-                grouped.update(run)
+            cursor = first
+            planned: list[tuple[int, int]] = []
+            while cursor + 1 < index:
+                longest = 0
+                low, high = cursor + 2, index
+                while low <= high:
+                    end = (low + high) // 2
+                    if self._paragraph_group(parent, children, cursor, end, translated, commit=False):
+                        longest = end
+                        low = end + 1
+                    else:
+                        high = end - 1
+                if longest:
+                    planned.append((cursor, longest))
+                    cursor = longest
+                else:
+                    cursor += 1
+            for group_index, (start, end) in enumerate(planned):
+                handoff_tail = group_index + 1 < len(planned) and planned[group_index + 1][0] == end
+                if not self._paragraph_group(
+                    parent, children, start, end, translated, commit=True, omit_final_tail=handoff_tail
+                ):
+                    raise ValueError("paragraph group changed between preview and commit")
+                grouped.update(children[start:end])
             if index == first:
                 index += 1
         blocks = [
@@ -572,6 +567,57 @@ class _Extractor:
             self._make_region_unit(parent, before, after, translated, self._kind(parent, virtual=True))
             before = after
         return grouped
+
+    def _paragraph_group(
+        self,
+        parent: etree._Element,
+        children: list[etree._Element],
+        start: int,
+        end: int,
+        translated: bool,
+        *,
+        commit: bool,
+        omit_final_tail: bool = False,
+    ) -> bool:
+        members = children[start:end]
+        after = children[start - 1] if start else None
+        before = children[end] if end < len(children) else None
+        lead = parent.text if after is None else after.tail
+        if (
+            len(members) < 2
+            or (
+                after is not None
+                and (not isinstance(after.tag, str) or qname_local_name(after.tag) not in _BLOCK_TAGS)
+            )
+            or (
+                before is not None
+                and (not isinstance(before.tag, str) or qname_local_name(before.tag) not in _BLOCK_TAGS)
+            )
+            or (lead or "").strip()
+            or any((member.tail or "").strip() for member in members)
+        ):
+            return False
+        keys = {self.node_keys[node] for member in members for node in member.iter() if isinstance(node.tag, str)}
+        # ponytail: scan local slots for previews; index by node only if thousand-paragraph XHTML files become common.
+        saved = {slot_id: list(slot.ranges) for slot_id, slot in self.slots.items() if slot.node_key in keys}
+        if lead_slot := self._leading_slot(parent, after):
+            saved[lead_slot.slot_id] = list(lead_slot.ranges)
+        made = self._make_region_unit(
+            parent,
+            after,
+            before,
+            translated,
+            "paragraph_group",
+            member_node_keys=tuple(self.node_keys[member] for member in members),
+            omit_final_tail=omit_final_tail,
+        )
+        fits = made and source_token_count(self.units[-1].source_projection) <= MAX_SOURCE_TOKENS
+        if not commit or not fits:
+            if made:
+                self.units.pop()
+            for slot_id, ranges in saved.items():
+                self.slots[slot_id].ranges = ranges
+        return fits
 
     def _groupable_paragraph(self, node: etree._Element, translated: bool) -> bool:
         return (
@@ -595,6 +641,7 @@ class _Extractor:
         kind: str,
         *,
         member_node_keys: tuple[str, ...] = (),
+        omit_final_tail: bool = False,
     ) -> bool:
         members = self._region_members(parent, after_node, before_node)
         lead_slot = self._leading_slot(parent, after_node)
@@ -626,7 +673,7 @@ class _Extractor:
                 self.node_keys[parent],
                 force_protected=not translated,
             )
-        for member in members:
+        for member_index, member in enumerate(members):
             if member is after_node or member is before_node:
                 continue
             self._emit_child(
@@ -640,7 +687,7 @@ class _Extractor:
                 translated,
                 paragraph_boundary=bool(member_node_keys),
             )
-            tail = self._tail_slot(member)
+            tail = None if omit_final_tail and member_index == len(members) - 1 else self._tail_slot(member)
             if tail is not None:
                 self._emit_slot(
                     tail,

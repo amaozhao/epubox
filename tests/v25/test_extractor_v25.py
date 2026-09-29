@@ -8,6 +8,7 @@ import pytest
 from engine.epub.assembly import assemble_document
 from engine.item.extractor import extract_document, validate_source_relations
 from engine.item.inline import ProjectionError, validate_projection
+from engine.item.planner import MAX_SOURCE_TOKENS, source_token_count
 from engine.item.source_views import validate_source_views
 from engine.item.structural_extractor import extract_document as extract_structure
 from engine.schemas.contracts import DOCUMENT_FORMAT, DocumentPlan
@@ -153,13 +154,39 @@ def test_grouping_stops_at_comments_and_translation_boundaries() -> None:
     assert source.split("<body>", 1)[1] in assemble_document(document, {}, identity=True).markup
 
 
-def test_long_paragraph_run_is_bounded_and_adjacent_groups_assemble_in_order() -> None:
+def test_short_paragraph_run_becomes_one_unit() -> None:
     source = _source("".join(f"<p>Paragraph {index} text.</p>" for index in range(20)))
     document = extract_document(source, "OPS/chapter.xhtml", "source-sha")
     groups = [unit for unit in document.units if unit.kind == "paragraph_group"]
 
-    assert [len(cast(list[str], unit.region["member_node_keys"])) for unit in groups] == [8, 8, 4]
+    assert [len(cast(list[str], unit.region["member_node_keys"])) for unit in groups] == [20]
     assert source.split("<body>", 1)[1] in assemble_document(document, {}, identity=True).markup
+
+
+def test_long_paragraph_run_uses_exact_source_projection_limit() -> None:
+    body = "\n".join(
+        f"<p>Paragraph {index}. " + "Technical words about systems. " * 12 + "</p>" for index in range(60)
+    )
+    source = _source(body)
+    document = extract_document(source, "OPS/chapter.xhtml", "source-sha")
+    groups = [unit for unit in document.units if unit.kind == "paragraph_group"]
+
+    assert len(groups) > 1
+    assert sum(len(cast(list[str], unit.region["member_node_keys"])) for unit in groups) == 60
+    assert all(source_token_count(unit.source_projection) <= MAX_SOURCE_TOKENS for unit in groups)
+    assert body in assemble_document(document, {}, identity=True).markup
+
+
+def test_group_singleton_group_preserves_intervening_newlines() -> None:
+    paragraphs = [f"<p>Opening paragraph {index}.</p>" for index in range(5)]
+    paragraphs.append("<p>" + "word " * 1300 + "</p>")
+    paragraphs.extend(f"<p>Closing paragraph {index}.</p>" for index in range(5))
+    body = "\n".join(paragraphs)
+    document = extract_document(_source(body), "OPS/chapter.xhtml", "source-sha")
+
+    assert sum(unit.kind == "paragraph_group" for unit in document.units) == 2
+    assert sum(unit.kind == "paragraph" for unit in document.units) == 1
+    assert body in assemble_document(document, {}, identity=True).markup
 
 
 def test_paragraph_group_cannot_hide_a_following_heading_by_erasing_its_boundary() -> None:

@@ -24,7 +24,7 @@ python main.py translate ./book.epub
 
 默认输出到源书旁的 `book-zh-Hans.epub`，运行资料保存在 `work/<source_hash>/<run_id>/`。默认自动提取术语；`--glossary ./terms.json` 可以同时提供用户规则，不会关闭自动发现。需要调整时可用 `--output`、`--work-root`、`--provider`、`--context-tokens`、`--max-output-tokens`、`--concurrency` 和 `--http-limit`。只有明确传入 `--no-auto-extract` 才跳过自动术语调用；此选项主要用于确定性测试，不降低正文校对要求。
 
-同一容器内连续、可翻译的正文段落会合成一个 Unit，每组最多 8 段、约 700 token 源文字；标题、列表、表格、注释和不可翻译内容保持结构边界。每段仍有独立的源文视图，段落顺序不能被模型改动。Unit 是有源位置和结构归属的任务；Segment 才是模型看到的源文片段，一个 Unit 太长时会切成多个 Segment。**每个 Segment 的源投影硬上限为 1200 token**，超长内容必须安全切分，无法安全切分只挂起该 Unit。Batch 可把多个独立 Segment 放进一次 HTTP 请求；提示、术语和只读上下文不计入这个源片段上限，但仍受模型请求的整体预算约束。
+同一容器内连续、可翻译的正文段落会按实际源投影尽量合成一个 Unit，直到下一段会使该 Unit 超过 1200 源 token；标题、列表、表格、注释和不可翻译内容保持结构边界。每段仍有独立的源文视图，段落顺序不能被模型改动。Unit 是有源位置和结构归属的任务；Segment 才是模型看到的源文片段，一个 Unit 若因模型整体预算仍过长，会再切成多个 Segment。**每个 Segment 的源投影硬上限为 1200 token**，无法安全切分只挂起该 Unit。Batch 可把多个独立 Segment 放进一次 HTTP 请求；提示、术语和只读上下文不计入这个源片段上限，但仍受模型请求的整体预算约束。
 
 用户词表支持简单映射，默认是软性偏好：
 
