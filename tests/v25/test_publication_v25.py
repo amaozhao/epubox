@@ -13,9 +13,11 @@ from engine.epub.publication import publish_book, recover_publication, validate_
 from engine.epub.validation import EpubCheckResult, EpubValidationError
 from engine.item.planner_v25 import plan_unit_v25
 from engine.schemas.v25 import (
+    Attempt,
     BookPlan,
     GlossarySnapshot,
     ItemStatus,
+    RequestManifest,
     UnitRecord,
     canonical_hash,
 )
@@ -86,7 +88,15 @@ def _accepted_records(documents, *, translated_heading: str | None = None):
                 accepted_revision=1,
                 accepted_target_hash=target_hash,
                 local_checks={"passed": True, "target_hash": target_hash},
-                review={"passed": True, "revision": 1, "input_hash": None, "target_hash": target_hash},
+                review={
+                    "protocol": "epubox-review-2",
+                    "request_id": f"review-{unit.unit_id}",
+                    "plan_epoch": 0,
+                    "passed": True,
+                    "revision": 1,
+                    "input_hash": None,
+                    "target_hash": target_hash,
+                },
             )
     return records
 
@@ -132,12 +142,59 @@ def _planned_record(document, unit, target: str):
         accepted_target_hash=target_hash,
         local_checks={"passed": True, "target_hash": target_hash},
         review={
+            "protocol": "epubox-review-2",
+            "request_id": f"review-{unit.unit_id}",
+            "plan_epoch": initialized.cut_plan.plan_epoch,
             "passed": True,
             "revision": 1,
             "input_hash": initialized.input_hash,
             "target_hash": target_hash,
         },
     )
+
+
+def _review_manifests(plan: BookPlan, records: dict[str, UnitRecord]) -> dict[str, RequestManifest]:
+    manifests = {}
+    for unit_id, record in records.items():
+        request_id = f"review-{unit_id}"
+        item_ids = tuple(record.items) or (request_id,)
+        target_hash = canonical_hash(record.candidate)
+        manifests[request_id] = RequestManifest(
+            request_id=request_id,
+            stage="review",
+            owner_kind="translation_item",
+            owner_id=item_ids[0],
+            item_ids=item_ids,
+            input_hashes={item_id: f"input-{item_id}" for item_id in item_ids},
+            wire_hash=f"wire-{unit_id}",
+            record_versions={unit_id: record.record_version},
+            item_unit_ids={item_id: (unit_id,) for item_id in item_ids},
+            unit_document_ids={unit_id: record.document_id},
+            plan_epochs={unit_id: record.plan_epoch},
+            revisions={unit_id: record.revision},
+            target_hashes={item_id: target_hash for item_id in item_ids},
+            glossary_file_sha256=plan.glossary_file_sha256,
+            freeze_id=plan.freeze_id,
+            term_ids_by_item={item_id: () for item_id in item_ids},
+            terms_hashes={
+                item_id: record.items[item_id].terms_hash if item_id in record.items else "terms"
+                for item_id in item_ids
+            },
+            context_hashes={
+                item_id: record.items[item_id].context_hash if item_id in record.items else "context"
+                for item_id in item_ids
+            },
+            attempts=(
+                Attempt(
+                    attempt_id=f"attempt-{unit_id}",
+                    affected_items=item_ids,
+                    state="succeeded",
+                    created_at="2026-09-29T00:00:00Z",
+                    finished_at="2026-09-29T00:00:01Z",
+                ),
+            ),
+        )
+    return manifests
 
 
 def test_v25_assembly_identity_and_accepted_projection_use_the_same_source_template(tmp_path: Path) -> None:
@@ -177,8 +234,10 @@ def test_publish_book_uses_only_v25_bookplan_documents_and_current_accepted_reco
     assert records[heading.unit_id].cut_plan is not None
     initial_plans[heading.unit_id] = records[heading.unit_id].cut_plan.plan_hash
     plan = plan.model_copy(update={"initial_unit_plans": initial_plans})
+    manifests = _review_manifests(plan, records)
     monkeypatch.setattr(store, "read_bookplan", lambda: plan)
     monkeypatch.setattr(store, "read_unit", lambda unit_id: records[unit_id])
+    monkeypatch.setattr(store, "read_request", lambda request_id: manifests[request_id])
     output = tmp_path / "translated.epub"
 
     result = publish_book(store, output, StubChecker())
@@ -225,11 +284,22 @@ def test_publication_rejects_unaccepted_v25_record_and_legacy_store(
     records[rejected_id] = records[rejected_id].model_copy(
         update={"accepted_revision": None, "accepted_target_hash": None}
     )
+    manifests = _review_manifests(plan, records)
     monkeypatch.setattr(store, "read_bookplan", lambda: plan)
     monkeypatch.setattr(store, "read_unit", lambda unit_id: records[unit_id])
+    monkeypatch.setattr(store, "read_request", lambda request_id: manifests[request_id])
 
     with pytest.raises(EpubValidationError, match="not currently accepted"):
         publish_book(store, tmp_path / "rejected.epub", StubChecker())
+    restored = _accepted_records(documents)
+    restored[rejected_id] = restored[rejected_id].model_copy(
+        update={"review": restored[rejected_id].review | {"protocol": "epubox-review-1"}}
+    )
+    old_manifests = _review_manifests(plan, restored)
+    monkeypatch.setattr(store, "read_unit", lambda unit_id: restored[unit_id])
+    monkeypatch.setattr(store, "read_request", lambda request_id: old_manifests[request_id])
+    with pytest.raises(EpubValidationError, match="not currently accepted"):
+        publish_book(store, tmp_path / "review-1.epub", StubChecker())
     with pytest.raises(TypeError, match="StoreV25"):
         publish_book(cast(Any, Store(tmp_path / "legacy")), tmp_path / "legacy.epub", StubChecker())
 
@@ -239,6 +309,7 @@ def test_publication_rejects_record_changed_during_package_verification(
 ) -> None:
     _, store, plan, documents = _prepared(tmp_path)
     records = _accepted_records(documents)
+    manifests = _review_manifests(plan, records)
     changed_id = plan.unit_ids[0]
     reads: dict[str, int] = {}
 
@@ -250,6 +321,7 @@ def test_publication_rejects_record_changed_during_package_verification(
 
     monkeypatch.setattr(store, "read_bookplan", lambda: plan)
     monkeypatch.setattr(store, "read_unit", read_unit)
+    monkeypatch.setattr(store, "read_request", lambda request_id: manifests[request_id])
 
     with pytest.raises(EpubValidationError, match="changed while publication"):
         publish_book(store, tmp_path / "stale.epub", StubChecker())

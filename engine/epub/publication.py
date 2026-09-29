@@ -31,6 +31,7 @@ from engine.item.inline import plain_text, projection_identities, validate_proje
 from engine.schemas.v25 import (
     BOOK_FORMAT,
     DOCUMENT_FORMAT,
+    BookPlan,
     DocumentPlan,
     ItemStatus,
     SourceSlot,
@@ -246,7 +247,12 @@ def publish_book(
                 version_vector[unit.unit_id] = 0
                 continue
             record = records[unit.unit_id]
-            target = _accepted_target(record, planned=plan.initial_unit_plans[unit.unit_id] is not None)
+            target = _accepted_target(
+                store,
+                plan,
+                record,
+                planned=plan.initial_unit_plans[unit.unit_id] is not None,
+            )
             if target is None:
                 raise EpubValidationError("unit_not_accepted", f"Unit is not currently accepted: {unit.unit_id}")
             document_targets[unit.unit_id] = target
@@ -283,7 +289,13 @@ def publish_book(
             current = store.read_unit(unit_id)
             if (
                 current != record
-                or _accepted_target(current, planned=plan.initial_unit_plans[unit_id] is not None) is None
+                or _accepted_target(
+                    store,
+                    plan,
+                    current,
+                    planned=plan.initial_unit_plans[unit_id] is not None,
+                )
+                is None
             ):
                 raise EpubValidationError(
                     "unit_changed_during_publication",
@@ -308,7 +320,7 @@ def publish_book(
     }
 
 
-def _accepted_target(record: UnitRecord, *, planned: bool) -> str | None:
+def _accepted_target(store: StoreV25, plan: BookPlan, record: UnitRecord, *, planned: bool) -> str | None:
     target = record.candidate
     if target is None or record.accepted_revision != record.revision:
         return None
@@ -320,6 +332,9 @@ def _accepted_target(record: UnitRecord, *, planned: bool) -> str | None:
     review = record.review
     if (
         review is None
+        or review.get("protocol") != "epubox-review-2"
+        or not isinstance(review.get("request_id"), str)
+        or review.get("plan_epoch") != record.plan_epoch
         or review.get("passed") is not True
         or review.get("revision") != record.revision
         or review.get("input_hash") != record.input_hash
@@ -327,6 +342,29 @@ def _accepted_target(record: UnitRecord, *, planned: bool) -> str | None:
     ):
         return None
     if planned and (not record.items or any(item.status != ItemStatus.REVIEWED for item in record.items.values())):
+        return None
+    try:
+        manifest = store.read_request(str(review["request_id"]))
+    except (FileNotFoundError, ValueError):
+        return None
+    participant_items = tuple(
+        item_id for item_id, unit_ids in manifest.item_unit_ids.items() if record.unit_id in unit_ids
+    )
+    if (
+        manifest.stage != "review"
+        or manifest.freeze_id != plan.freeze_id
+        or manifest.glossary_file_sha256 != plan.glossary_file_sha256
+        or manifest.plan_epochs.get(record.unit_id) != record.plan_epoch
+        or manifest.revisions.get(record.unit_id) != record.revision
+        or manifest.unit_document_ids.get(record.unit_id) != record.document_id
+        or not participant_items
+        or any(manifest.target_hashes.get(item_id) != target_hash for item_id in participant_items)
+        or (planned and set(participant_items) != set(record.items))
+        or not any(
+            attempt.state == "succeeded" and set(attempt.affected_items).intersection(participant_items)
+            for attempt in manifest.attempts
+        )
+    ):
         return None
     return target
 
