@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -14,6 +15,7 @@ from engine.schemas.v25 import (
     GlossaryPayload,
     GlossarySnapshot,
     JsonValue,
+    SourceTextView,
     TermCandidate,
     TermEvidence,
     TermExtractionPlan,
@@ -111,7 +113,7 @@ def freeze_terminology(
         additional_response_ids=resolution_response_ids,
     )
     terms = _frozen_user_terms(user_terms) + _frozen_model_terms(ordered_candidates, scopes, unit_documents)
-    terms = tuple(sorted(terms, key=lambda term: term.term_id))
+    terms = _with_source_frequency(tuple(sorted(terms, key=lambda term: term.term_id)), documents)
     warnings = _warnings(extraction_status, ordered_candidates, conflict_groups, terms)
     user_terms_hash = canonical_hash(user_terms)
     pool_hash = canonical_hash(pool)
@@ -377,6 +379,53 @@ def _frozen_model_terms(
             )
         )
     return tuple(terms)
+
+
+def _with_source_frequency(terms: tuple[FrozenTerm, ...], documents: Sequence[DocumentPlan]) -> tuple[FrozenTerm, ...]:
+    """Count only primary source text; overlapping spellings of one rule count once."""
+    views = tuple(
+        document.source_views[view_id]
+        for document in documents
+        for unit in document.units
+        for view_id in unit.source_view_ids
+        if document.source_views[view_id].view_kind == "primary"
+    )
+    by_document: dict[str, list[SourceTextView]] = {}
+    by_unit: dict[str, list[SourceTextView]] = {}
+    for view in views:
+        by_document.setdefault(view.document_id, []).append(view)
+        by_unit.setdefault(view.unit_id, []).append(view)
+    result: list[FrozenTerm] = []
+    for term in terms:
+        frequency = 0
+        applicable = (
+            views
+            if term.scope.kind == "book"
+            else tuple(view for document_id in term.scope.document_ids for view in by_document.get(document_id, ()))
+            if term.scope.kind == "documents"
+            else tuple(view for unit_id in term.scope.unit_ids for view in by_unit.get(unit_id, ()))
+        )
+        patterns = tuple(
+            re.compile(
+                (r"(?<!\w)" if spelling[0].isalnum() or spelling[0] == "_" else "")
+                + re.escape(spelling)
+                + (r"(?!\w)" if spelling[-1].isalnum() or spelling[-1] == "_" else ""),
+                re.IGNORECASE if term.match_policy == "casefold" else 0,
+            )
+            for spelling in (term.source, *term.aliases)
+        )
+        for view in applicable:
+            intervals: set[tuple[int, int]] = set()
+            for pattern in patterns:
+                for match in pattern.finditer(view.text):
+                    intervals.add(match.span())
+            previous_end = -1
+            for start, end in sorted(intervals, key=lambda value: (value[0], -(value[1] - value[0]))):
+                if start >= previous_end:
+                    frequency += 1
+                previous_end = max(previous_end, end)
+        result.append(term.model_copy(update={"frequency": frequency}))
+    return tuple(result)
 
 
 def _string_list(group: Mapping[str, object], key: str) -> tuple[str, ...]:

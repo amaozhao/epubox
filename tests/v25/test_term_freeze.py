@@ -129,6 +129,54 @@ def test_freeze_merges_same_sense_across_windows_only_in_frozen_term() -> None:
     )
 
 
+def test_frequency_counts_primary_source_once_across_overlapping_user_aliases() -> None:
+    document = _document("frequency", ("Memory memory Memory.",))
+    user = UserTerm(
+        term_id="ut-memory",
+        source="Memory",
+        target="内存",
+        aliases=("memory",),
+        match_policy="casefold",
+        scope=TermScope(kind="book"),
+    )
+    plan = _plan((document,), (user,))
+    records = _records(plan, (document,))
+    result = freeze_terminology(
+        plan,
+        records,
+        (user,),
+        _unit_documents((document,)),
+        (document,),
+        extraction_config_hash="extract-config",
+    )
+
+    term = result.glossary.terms[0]
+    assert term.frequency == 3
+    assert glossary_rules_hash((term,)) == glossary_rules_hash((term.model_copy(update={"frequency": 99}),))
+    assert canonical_hash(term) != canonical_hash(term.model_copy(update={"frequency": 99}))
+
+
+def test_frequency_merges_chain_of_overlapping_source_ranges() -> None:
+    document = _document("overlap", ("Symbols @#$%^&amp;*()!+ are used.",))
+    user = UserTerm(
+        term_id="ut-symbols",
+        source="@#$%^",
+        target="符号",
+        aliases=("%^&*()!", "()!+"),
+        scope=TermScope(kind="book"),
+    )
+    plan = _plan((document,), (user,))
+    result = freeze_terminology(
+        plan,
+        _records(plan, (document,)),
+        (user,),
+        _unit_documents((document,)),
+        (document,),
+        extraction_config_hash="extract-config",
+    )
+    assert result.glossary.terms[0].frequency == 1
+
+
 def test_unresolved_conflict_defers_all_candidates_and_resolution_selects_existing_target() -> None:
     document = _document("one", ("Memory allocation is fast.",))
     documents = (document,)
