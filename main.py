@@ -9,6 +9,7 @@ from typing import Any
 import typer
 
 from engine.cli import RunOutcome, resume_book, translate_book
+from engine.services.resume_plan import plan_resume
 
 app = typer.Typer()
 
@@ -59,6 +60,12 @@ def resume(
     output: Path = typer.Option(..., "--output", "-o"),
     epubcheck: str | None = typer.Option(None, "--epubcheck-command"),
     overwrite: bool = typer.Option(False, "--overwrite"),
+    repair_file: Path | None = typer.Option(None, "--repair-file", exists=True, dir_okay=False),
+    retry_unit: list[str] = typer.Option([], "--retry-unit"),
+    add_unit_http: int = typer.Option(0, "--add-unit-http", min=0),
+    add_run_http: int = typer.Option(0, "--add-run-http", min=0),
+    retry_check: list[str] = typer.Option([], "--retry-check"),
+    add_check_http: int = typer.Option(0, "--add-check-http", min=0),
 ) -> None:
     try:
         result = resume_book(
@@ -67,11 +74,31 @@ def resume(
             epubcheck=epubcheck,
             overwrite=overwrite,
             progress=_progress_printer(),
+            repair_file=repair_file,
+            retry_units=tuple(retry_unit),
+            add_unit_http=add_unit_http,
+            add_run_http=add_run_http,
+            retry_checks=tuple(retry_check),
+            add_check_http=add_check_http,
         )
     except Exception as error:
         typer.echo(f"续跑未完成：{error}", err=True)
         raise typer.Exit(1) from error
     _print_result(result)
+
+
+@app.command("plan-resume", help="只读查看工作目录的下一步动作，不发起模型请求。")
+def preview_resume(work_dir: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True)) -> None:
+    try:
+        preview = plan_resume(work_dir)
+    except Exception as error:
+        typer.echo(f"恢复预览失败：{error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(f"阶段：{preview.phase}；状态：{preview.status}")
+    for action in preview.actions:
+        typer.echo(f"下一步：{action}")
+    for reason in preview.reasons:
+        typer.echo(f"原因：{reason}")
 
 
 def _print_result(result: RunOutcome) -> None:

@@ -16,8 +16,9 @@ from engine.epub.checker import checker_for_source
 from engine.epub.preparation_v25 import PreparationConfig
 from engine.epub.publication import publish_book
 from engine.item.planner_v25 import PLANNER_VERSION
-from engine.orchestrator import TranslationRunResult, run_translation
+from engine.orchestrator import TranslationRunResult, import_repair_file, retry_failed_units, run_translation
 from engine.schemas.v25 import JsonValue
+from engine.services.coherence import add_http_budget, retry_document_check
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.report import write_report
 from engine.services.store_v25 import StoreV25
@@ -125,10 +126,20 @@ def resume_book(
     epubcheck: str | None = None,
     overwrite: bool = False,
     progress: ProgressCallback | None = None,
+    retry_units: tuple[str, ...] = (),
+    add_unit_http: int = 0,
+    add_run_http: int = 0,
+    retry_checks: tuple[str, ...] = (),
+    add_check_http: int = 0,
+    repair_file: Path | None = None,
 ) -> RunOutcome:
     """Resume only the saved source and run identities, without the original user term file."""
     work_dir = work_dir.resolve(strict=True)
     store = StoreV25(work_dir)
+    if any(value < 0 for value in (add_unit_http, add_run_http, add_check_http)):
+        raise ValueError("HTTP budget additions must be non-negative")
+    if add_unit_http and not retry_units or add_check_http and not retry_checks:
+        raise ValueError("Unit/check budget additions require explicit target IDs")
     preparation = store.read_preparation()
     source = work_dir / preparation.source_path
     check_output(source, output, overwrite=overwrite)
@@ -143,8 +154,22 @@ def resume_book(
         max_output_tokens=output_tokens,
     )
     checker = checker_for_source(source, epubcheck)
+    if add_run_http:
+        add_http_budget(store, add_run_http=add_run_http)
     return asyncio.run(
-        _advance_work_dir(work_dir, output, checker, model=model, overwrite=overwrite, progress=progress)
+        _advance_work_dir(
+            work_dir,
+            output,
+            checker,
+            model=model,
+            overwrite=overwrite,
+            progress=progress,
+            retry_units=retry_units,
+            add_unit_http=add_unit_http,
+            retry_checks=retry_checks,
+            add_check_http=add_check_http,
+            repair_file=repair_file,
+        )
     )
 
 
@@ -175,8 +200,27 @@ async def _advance_work_dir(
     model: object,
     overwrite: bool,
     progress: ProgressCallback | None = None,
+    retry_units: tuple[str, ...] = (),
+    add_unit_http: int = 0,
+    retry_checks: tuple[str, ...] = (),
+    add_check_http: int = 0,
+    repair_file: Path | None = None,
 ) -> RunOutcome:
     prepared = await resume_preparation(work_dir, checker, model=model, progress=_preparation_progress(progress))
+    if prepared.status != "paused" and (retry_units or retry_checks or repair_file is not None):
+        store = StoreV25(work_dir)
+        if add_unit_http or add_check_http:
+            add_http_budget(
+                store,
+                add_unit_http={unit_id: add_unit_http for unit_id in retry_units},
+                add_check_http={document_id: add_check_http for document_id in retry_checks},
+            )
+        if repair_file is not None:
+            import_repair_file(store, repair_file)
+        if retry_units:
+            retry_failed_units(store, retry_units)
+        for document_id in retry_checks:
+            retry_document_check(store, document_id)
     return await _finish(
         prepared.status, prepared.phase, prepared.work_dir, output, checker, model, overwrite, progress
     )

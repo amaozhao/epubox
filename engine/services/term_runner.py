@@ -8,8 +8,8 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from engine.agents.protocol import ProtocolError
-from engine.agents.term_protocol import validate_terms_response
 from engine.agents.runtime import PROMPT_VERSION, ModelRuntime, RequestError, RuntimePaused, wire_hash
+from engine.agents.term_protocol import validate_terms_response
 from engine.core.tokens import count_tokens
 from engine.schemas.v25 import (
     Attempt,
@@ -18,6 +18,7 @@ from engine.schemas.v25 import (
     TermExtractionRecord,
     Usage,
 )
+from engine.services.coherence import load_budget_overrides
 from engine.services.store_v25 import StoreV25
 
 
@@ -55,7 +56,10 @@ class TermRunner:
             raise ValueError("provider model differs from frozen terminology identity")
         self.config = config
         self.output_tokens = _positive_int(config.get("max_output_tokens"), 4096)
-        self.run_limit = _nonnegative_int(config.get("run_http_limit"), 0)
+        configured_limit = _nonnegative_int(config.get("run_http_limit"), 0)
+        self.run_limit = (configured_limit or self.plan.extraction_http_limit) + int(
+            load_budget_overrides(store)["add_run_http"]
+        )
         self.runtime = ModelRuntime(
             model=model,
             transport=transport,
@@ -91,9 +95,7 @@ class TermRunner:
         with self.store.lock():
             manifest = self.store.read_request(request_id)
             item_id = manifest.owner_id
-            if self._spent() >= self.plan.extraction_http_limit or (
-                self.run_limit and self._spent() >= self.run_limit
-            ):
+            if self._spent() >= self.plan.extraction_http_limit or self._spent() >= self.run_limit:
                 raise TermBudgetPaused("run terminology HTTP budget exhausted")
             if manifest.stage == "terms":
                 item = next(entry for entry in self.plan.items if entry.item_id == item_id)
