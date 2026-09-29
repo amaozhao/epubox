@@ -1,0 +1,40 @@
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+import main
+from engine.cli import RunOutcome
+
+
+def test_translate_cli_uses_one_pipeline_and_defaults_to_auto_terms(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    called = []
+
+    def fake_translate(path, **options):
+        called.append((path, options))
+        return RunOutcome("completed", tmp_path / "work", "publication", output_path=tmp_path / "out.epub")
+
+    monkeypatch.setattr(main, "translate_book", fake_translate)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 0, result.output
+    assert len(called) == 1
+    assert called[0][1]["auto_extract"] is True
+    assert "输出：" in result.output
+
+
+def test_resume_cli_reports_unfinished_run_as_nonzero(tmp_path: Path, monkeypatch) -> None:
+    work_dir = tmp_path / "run"
+    work_dir.mkdir()
+    monkeypatch.setattr(
+        main,
+        "resume_book",
+        lambda *_args, **_kwargs: RunOutcome(
+            "needs_attention", work_dir, "translation", reason="one item needs repair"
+        ),
+    )
+    result = CliRunner().invoke(main.app, ["resume", str(work_dir), "--output", str(tmp_path / "out.epub")])
+
+    assert result.exit_code == 1
+    assert "one item needs repair" in result.output

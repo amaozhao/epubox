@@ -41,8 +41,7 @@ def build_run_model(provider: str, model_id: str, *, max_output_tokens: int):
         model = build_fallback_model(max_completion_tokens=max_output_tokens)
     else:
         raise ValueError(f"unsupported model provider: {provider}")
-    value = key.get_secret_value() if hasattr(key, "get_secret_value") else key
-    if not value or value in {"sk-", "your-api-key-here"}:
+    if not key or key in {"sk-", "your-api-key-here"}:
         raise ValueError(f"{provider} API key is not configured")
     if model.id != model_id:
         raise ValueError("configured provider model differs from the frozen run identity")
