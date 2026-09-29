@@ -4,6 +4,7 @@ from typer.testing import CliRunner
 
 import main
 from engine.cli import RunOutcome
+from engine.services.atomic_store import StoreLocked
 
 
 def test_translate_cli_uses_one_pipeline_and_defaults_to_auto_terms(tmp_path: Path, monkeypatch) -> None:
@@ -22,6 +23,20 @@ def test_translate_cli_uses_one_pipeline_and_defaults_to_auto_terms(tmp_path: Pa
     assert len(called) == 1
     assert called[0][1]["auto_extract"] is True
     assert "输出：" in result.output
+
+
+def test_translate_cli_explains_active_same_book_run(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+
+    def locked(*_args, **_kwargs):
+        raise StoreLocked("run store is locked")
+
+    monkeypatch.setattr(main, "translate_book", locked)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert "已有翻译进程在运行" in result.output
 
 
 def test_resume_cli_reports_unfinished_run_as_nonzero(tmp_path: Path, monkeypatch) -> None:

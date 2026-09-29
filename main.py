@@ -9,6 +9,7 @@ from typing import Any
 import typer
 
 from engine.cli import RunOutcome, resume_book, translate_book
+from engine.services.atomic_store import StoreLocked
 from engine.services.resume_plan import plan_resume
 
 app = typer.Typer()
@@ -50,6 +51,9 @@ def translate(
             repair_terms=repair_terms,
             progress=_progress_printer(),
         )
+    except StoreLocked as error:
+        typer.echo("同一本书已有翻译进程在运行；请等它退出后，用相同命令继续。", err=True)
+        raise typer.Exit(1) from error
     except Exception as error:
         typer.echo(f"翻译未完成：{error}", err=True)
         raise typer.Exit(1) from error
