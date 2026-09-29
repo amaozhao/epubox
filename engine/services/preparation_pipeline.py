@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from engine.epub.preparation_v25 import PreparationConfig, _frozen_extraction_config, prepare_book
 from engine.item.planner import PlanningError
-from engine.item.planner_v25 import build_context_index, plan_unit_v25
+from engine.item.planner_v25 import build_context_index, initial_derived_navigation, plan_unit_v25
 from engine.schemas.v25 import (
     BookPlan,
     DocumentPlan,
@@ -245,25 +245,34 @@ async def _advance(
                 record = store.read_unit(unit.unit_id)
             else:
                 try:
-                    initialized = plan_unit_v25(
-                        unit,
-                        document,
-                        glossary,
-                        preparation.translation_config,
-                        documents=documents,
-                        reading_edges=reading_edges,
-                        context_chars=context_chars,
-                        context_index=context_index,
-                    )
-                    record = UnitRecord(
-                        unit_id=unit.unit_id,
-                        document_id=document.document_id,
-                        source_hash=preparation.source_hash,
-                        logical_hash=initialized.logical_hash,
-                        input_hash=initialized.input_hash,
-                        cut_plan=initialized.cut_plan,
-                        items=initialized.items,
-                    )
+                    derived = initial_derived_navigation(unit, document, documents=documents)
+                    if derived is not None:
+                        record = UnitRecord(
+                            unit_id=unit.unit_id,
+                            document_id=document.document_id,
+                            source_hash=preparation.source_hash,
+                            derived=derived,
+                        )
+                    else:
+                        initialized = plan_unit_v25(
+                            unit,
+                            document,
+                            glossary,
+                            preparation.translation_config,
+                            documents=documents,
+                            reading_edges=reading_edges,
+                            context_chars=context_chars,
+                            context_index=context_index,
+                        )
+                        record = UnitRecord(
+                            unit_id=unit.unit_id,
+                            document_id=document.document_id,
+                            source_hash=preparation.source_hash,
+                            logical_hash=initialized.logical_hash,
+                            input_hash=initialized.input_hash,
+                            cut_plan=initialized.cut_plan,
+                            items=initialized.items,
+                        )
                 except PlanningError as error:
                     local_gaps = True
                     record = UnitRecord(

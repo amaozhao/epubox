@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from engine.item.planner_v25 import plan_unit_v25
+from engine.item.planner_v25 import build_context_index, plan_unit_v25
 from engine.schemas.v25 import (
     Attempt,
     BookPlan,
@@ -65,14 +65,17 @@ def _unit_record(
     documents = {document_id: store.read_document(document_id) for document_id in preparation.document_hashes}
     context_chars = preparation.translation_config.get("context_chars", 400)
     assert isinstance(context_chars, int)
+    reading_edges = tuple(zip(preparation.reading_order, preparation.reading_order[1:], strict=False))
+    context_index = build_context_index(documents, reading_edges, context_chars)
     initialized = plan_unit_v25(
         unit,
         document,
         store.read_glossary(),
         preparation.translation_config,
         documents=documents,
-        reading_edges=tuple(zip(preparation.reading_order, preparation.reading_order[1:], strict=False)),
+        reading_edges=reading_edges,
         context_chars=context_chars,
+        context_index=context_index,
     )
     cut_plan = initialized.cut_plan
     items = initialized.items

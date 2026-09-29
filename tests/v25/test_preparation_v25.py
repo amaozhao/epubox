@@ -112,7 +112,7 @@ def test_p1_interruption_leaves_no_ready_marker_and_replays_deterministically(
     source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
     work_dir = work_root / source_hash / "resume-run"
     assert not (work_dir / "preparation.json").exists()
-    assert len(list((work_dir / "documents").glob("*.json"))) == 1
+    assert not list((work_dir / "documents").glob("*.json"))
     assert not (work_dir / "bookplan.json").exists()
 
     monkeypatch.setattr(preparation_module, "extract_document", extract_document)
@@ -166,3 +166,28 @@ def test_p1_freezes_the_provider_model_id_without_credentials(tmp_path: Path) ->
     assert config["provider"] == "cr_proxy"
     assert config["model"] == settings.CR_PROXY_MODEL
     assert not any("key" in name.casefold() for name in config)
+
+
+def test_p1_resolves_derived_navigation_before_immutable_document_write(tmp_path: Path) -> None:
+    source = make_epub(
+        tmp_path / "book.epub",
+        {
+            "chapter.xhtml": '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter 1</title></head>'
+            '<body><h1 id="chapter">Chapter 1</h1><p>Body.</p></body></html>'
+        },
+    )
+    config = PreparationConfig(run_id="derived-navigation")
+    first = prepare_book(source, tmp_path / "work", config, StubChecker())
+    store = StoreV25(first.work_dir)
+    documents = [store.read_document(document_id) for document_id in first.preparation.document_hashes]
+    derived = [
+        binding
+        for document in documents
+        for binding in document.derived_bindings
+        if binding.get("kind") == "derived_navigation"
+    ]
+
+    assert derived
+    original_hashes = first.preparation.document_hashes
+    resumed = prepare_book(source, tmp_path / "work", config, StubChecker())
+    assert resumed.preparation.document_hashes == original_hashes

@@ -152,6 +152,34 @@ def test_document_plan_is_source_only_and_rejects_old_format() -> None:
         parse_contract(old, DocumentPlan, DOCUMENT_FORMAT)
 
 
+def test_derived_unit_record_requires_exact_current_dependency_evidence() -> None:
+    pending = UnitRecord(
+        unit_id="nav",
+        document_id="toc",
+        source_hash="source",
+        derived={"state": "blocked_dependency", "source_unit_id": "title"},
+    )
+    target = "标题"
+    valid = pending.model_copy(
+        update={
+            "derived": {
+                "state": "valid",
+                "source_unit_id": "title",
+                "source_revision": 1,
+                "source_target_hash": "source-target-hash",
+                "target": target,
+                "target_hash": canonical_hash(target),
+            }
+        }
+    )
+    assert UnitRecord.model_validate(valid.model_dump(mode="python")).derived == valid.derived
+    assert valid.derived is not None
+    with pytest.raises(ValidationError, match="target hash"):
+        UnitRecord.model_validate(
+            valid.model_dump(mode="python") | {"derived": valid.derived | {"target_hash": "forged"}}
+        )
+
+
 def test_document_rejects_unknown_view_and_bad_hash() -> None:
     document = make_document()
     bad_unit = document.units[0].model_copy(update={"source_view_ids": ("missing",)})

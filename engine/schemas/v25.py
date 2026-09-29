@@ -858,6 +858,7 @@ class UnitRecord(FrozenModel):
     accepted_target_hash: str | None = None
     local_checks: dict[str, JsonValue] = Field(default_factory=dict)
     review: dict[str, JsonValue] | None = None
+    derived: dict[str, JsonValue] | None = None
     term_feedback: tuple[dict[str, JsonValue], ...] = ()
     unresolved_issues: tuple[dict[str, JsonValue], ...] = ()
     counters: dict[str, int] = Field(default_factory=dict)
@@ -869,6 +870,29 @@ class UnitRecord(FrozenModel):
             raise ValueError("logical_hash and input_hash must be present together")
         if (self.accepted_revision is None) != (self.accepted_target_hash is None):
             raise ValueError("accepted revision and hash must be present together")
+        if self.derived is not None:
+            state = self.derived.get("state")
+            required = (
+                {"state", "source_unit_id"}
+                if state == "blocked_dependency"
+                else {"state", "source_unit_id", "source_revision", "source_target_hash", "target", "target_hash"}
+                if state == "valid"
+                else None
+            )
+            if required is None or set(self.derived) != required or self.cut_plan is not None:
+                raise ValueError("derived Unit requires one exact dependency state and no CutPlan")
+            if not isinstance(self.derived["source_unit_id"], str) or not self.derived["source_unit_id"]:
+                raise ValueError("derived Unit requires source_unit_id")
+            if state == "valid" and (
+                type(self.derived["source_revision"]) is not int
+                or self.derived["source_revision"] < 0
+                or not isinstance(self.derived["source_target_hash"], str)
+                or not self.derived["source_target_hash"]
+                or not isinstance(self.derived["target"], str)
+                or not self.derived["target"]
+                or self.derived["target_hash"] != canonical_hash(self.derived["target"])
+            ):
+                raise ValueError("valid derived Unit requires current source revision and target hash")
         if self.accepted_revision is not None and self.accepted_revision > self.revision:
             raise ValueError("accepted_revision cannot exceed revision")
         if any(value < 0 for value in self.counters.values()):

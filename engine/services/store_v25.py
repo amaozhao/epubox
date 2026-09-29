@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from engine.item.extractor_v25 import validate_source_relations
 from engine.item.inline import events_to_projection, parse_projection
 from engine.item.planner import _atomize, _range_stacks, _segment_events
-from engine.item.planner_v25 import plan_unit_v25
+from engine.item.planner_v25 import build_context_index, initial_derived_navigation, plan_unit_v25
 from engine.item.source_views import validate_source_views
 from engine.schemas.v25 import (
     BOOK_FORMAT,
@@ -563,6 +563,7 @@ class StoreV25:
             )
             reading_edges = tuple(zip(preparation.reading_order, preparation.reading_order[1:], strict=False))
             context_chars = self._config_int(preparation.translation_config, "context_chars", 400)
+            context_index = build_context_index(documents, reading_edges, context_chars)
             if plan.unit_ids != expected_units or plan.required_unit_count != len(expected_units):
                 raise IdentityMismatch("BookPlan Unit inventory differs from DocumentPlans")
             disk_units = {entry.stem for entry in (self.root / "units").glob("*.json")}
@@ -579,9 +580,12 @@ class StoreV25:
                     raise IdentityMismatch(f"initial UnitRecord already contains translation state: {unit_id}")
                 if record.term_feedback:
                     raise IdentityMismatch(f"initial UnitRecord already contains term feedback: {unit_id}")
+                document = documents[record.document_id]
+                unit = next(unit for unit in document.units if unit.unit_id == unit_id)
+                expected_derived = initial_derived_navigation(unit, document, documents=documents)
                 if record.cut_plan is not None:
-                    document = documents[record.document_id]
-                    unit = next(unit for unit in document.units if unit.unit_id == unit_id)
+                    if expected_derived is not None or record.derived is not None:
+                        raise IdentityMismatch(f"derived Unit has a model CutPlan: {unit_id}")
                     expected = plan_unit_v25(
                         unit,
                         document,
@@ -590,6 +594,7 @@ class StoreV25:
                         documents=documents,
                         reading_edges=reading_edges,
                         context_chars=context_chars,
+                        context_index=context_index,
                     )
                     if (
                         record.logical_hash != expected.logical_hash
@@ -598,6 +603,16 @@ class StoreV25:
                         or record.items != expected.items
                     ):
                         raise IdentityMismatch(f"initial UnitRecord differs from frozen Unit plan: {unit_id}")
+                elif expected_derived is not None:
+                    if (
+                        record.derived != expected_derived
+                        or record.logical_hash is not None
+                        or record.input_hash is not None
+                        or record.items
+                    ):
+                        raise IdentityMismatch(f"initial derived Unit differs from frozen binding: {unit_id}")
+                elif record.derived is not None:
+                    raise IdentityMismatch(f"UnitRecord has an unfrozen derived binding: {unit_id}")
                 if any(
                     item.status != ItemStatus.PENDING
                     or item.target_projection is not None

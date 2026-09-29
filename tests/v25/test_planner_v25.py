@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import regex
 
+from engine.epub.derived_bindings import resolve_derived_navigation
 from engine.item.extractor_v25 import extract_document
 from engine.item.inline import parse_projection
-from engine.item.planner_v25 import plan_unit_v25, select_terms
+from engine.item.planner_v25 import (
+    build_context,
+    build_context_index,
+    initial_derived_navigation,
+    plan_unit_v25,
+    select_terms,
+)
 from engine.schemas.v25 import FrozenTerm, GlossarySnapshot, TermScope, canonical_hash
 
 
@@ -50,6 +57,23 @@ def glossary(*terms: FrozenTerm, freeze_id: str = "freeze-1") -> GlossarySnapsho
 
 def paragraph(document, contains: str):
     return next(unit for unit in document.units if unit.kind == "paragraph" and contains in unit.source_projection)
+
+
+def test_derived_navigation_initializes_as_a_dependency_without_model_items() -> None:
+    chapter = extract_document(source("<h1 id='intro'>Introduction</h1>"), "OPS/chapter.xhtml", "source-sha")
+    navigation = extract_document(
+        source("<nav><a href='chapter.xhtml#intro'>Introduction</a></nav>"),
+        "OPS/nav.xhtml",
+        "source-sha",
+    )
+    chapter, navigation = resolve_derived_navigation((chapter, navigation))
+    binding = next(value for value in navigation.derived_bindings if value.get("kind") == "derived_navigation")
+    unit = next(value for value in navigation.units if value.unit_id == binding["unit_id"])
+
+    assert initial_derived_navigation(unit, navigation, documents=(chapter, navigation)) == {
+        "state": "blocked_dependency",
+        "source_unit_id": binding["source_unit_id"],
+    }
 
 
 def test_selector_handles_symbol_boundaries_case_possessive_aliases_and_overlap() -> None:
@@ -98,11 +122,7 @@ def test_context_scope_uses_the_context_view_owner_and_hints_are_read_only() -> 
     )
     memory_unit = paragraph(document, "human memory")
     cache_unit = paragraph(document, "cache")
-    context_view_id = memory_unit.source_view_ids[0]
-    cache_unit = cache_unit.model_copy(update={"context_view_ids": (context_view_id,)})
-    document = document.model_copy(
-        update={"units": tuple(cache_unit if unit.unit_id == cache_unit.unit_id else unit for unit in document.units)}
-    )
+    assert cache_unit.context_view_ids == ()
     terms = (
         frozen_term("t-cache", "cache"),
         frozen_term("t-code", "C++", scope=TermScope(kind="units", unit_ids=(cache_unit.unit_id,))),
@@ -111,6 +131,7 @@ def test_context_scope_uses_the_context_view_owner_and_hints_are_read_only() -> 
     )
     selection = select_terms(cache_unit, document, glossary(*terms))
 
+    assert build_context(cache_unit, document) == selection.context
     assert selection.applicability == {
         "t-cache": "target",
         "t-code": "context",
@@ -122,6 +143,15 @@ def test_context_scope_uses_the_context_view_owner_and_hints_are_read_only() -> 
     target_memory = select_terms(memory_unit, document, glossary(terms[2]))
     assert context_memory.selected_term_ids == target_memory.selected_term_ids == ("t-memory",)
     assert context_memory.terms_hash != target_memory.terms_hash
+    without_relations = document.model_copy(update={"boundaries": ()})
+    without_context = select_terms(cache_unit, without_relations, glossary(*terms))
+    assert without_context.context["views"] == []
+    assert without_context.context_hash != selection.context_hash
+    config = {"target_language": "zh-Hans", "context_tokens": 8192, "max_output_tokens": 2048}
+    planned = plan_unit_v25(cache_unit, document, glossary(*terms), config)
+    planned_without = plan_unit_v25(cache_unit, without_relations, glossary(*terms), config)
+    assert planned.cut_plan.segments[0].context_hash == selection.context_hash
+    assert planned.logical_hash != planned_without.logical_hash
 
     split_document = extract_document(
         source("foo<code>x</code>bar"),
@@ -130,6 +160,100 @@ def test_context_scope_uses_the_context_view_owner_and_hints_are_read_only() -> 
     )
     split_unit = paragraph(split_document, "foo")
     assert select_terms(split_unit, split_document, glossary(frozen_term("t-cross", "foobar"))).terms == ()
+
+
+def test_frozen_narrative_table_header_and_footnote_edges_supply_bounded_context() -> None:
+    markup = (
+        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>'
+        '<p>Body reference<a epub:type="noteref" href="#n1">1</a>.</p>'
+        '<table><thead><tr><th id="metric" scope="col">Metric</th><th id="value" scope="col">Value</th>'
+        '</tr></thead><tbody><tr><td headers="metric">Latency</td><td headers="value">10 ms</td></tr>'
+        "</tbody></table>"
+        '<section epub:type="endnotes"><aside id="n1">Note one.</aside></section>'
+        "<p>After body.</p></body></html>"
+    )
+    document = extract_document(markup, "relations.xhtml", "source-sha")
+    empty = glossary()
+
+    def context_texts(text: str) -> set[str]:
+        unit = next(unit for unit in document.units if text in unit.source_projection)
+        selection = select_terms(unit, document, empty)
+        assert all(len(view["text"]) <= 400 and view["role"] == "context" for view in selection.context["views"])
+        return {view["text"] for view in selection.context["views"]}
+
+    assert context_texts("10 ms") == {"Value", "Latency"}
+    assert "Note one." in context_texts("Body reference")
+    assert any("Body reference" in text for text in context_texts("Note one."))
+    assert "." in context_texts("After body")
+
+    data_unit = next(unit for unit in document.units if "10 ms" in unit.source_projection)
+    header_unit = next(unit for unit in document.units if unit.source_projection == "Value")
+    table_terms = glossary(
+        frozen_term("t-header", "Value", scope=TermScope(kind="units", unit_ids=(header_unit.unit_id,))),
+        frozen_term("t-wrong-header", "Value", scope=TermScope(kind="units", unit_ids=(data_unit.unit_id,))),
+    )
+    assert select_terms(data_unit, document, table_terms).applicability == {"t-header": "context"}
+
+    body_unit = next(unit for unit in document.units if "Body reference" in unit.source_projection)
+    note_unit = next(unit for unit in document.units if "Note one." in unit.source_projection)
+    note_term = frozen_term("t-note", "Note one", scope=TermScope(kind="units", unit_ids=(note_unit.unit_id,)))
+    assert select_terms(body_unit, document, glossary(note_term)).applicability == {"t-note": "context"}
+
+
+def test_explicit_reading_edge_adds_bounded_cross_document_context_and_identity() -> None:
+    left = extract_document(
+        source(("prefix " * 80) + "memoryTail"),
+        "left.xhtml",
+        "source-sha",
+    )
+    right = extract_document(source("Next chapter."), "right.xhtml", "source-sha")
+    left_unit = paragraph(left, "memoryTail")
+    right_unit = paragraph(right, "Next chapter")
+    inventory = {left.document_id: left, right.document_id: right}
+    edges = ((left.document_id, right.document_id),)
+    index = build_context_index(inventory, edges, 40)
+    scoped = frozen_term(
+        "t-memory-tail",
+        "memoryTail",
+        scope=TermScope(kind="units", unit_ids=(left_unit.unit_id,)),
+    )
+
+    selection = select_terms(
+        right_unit,
+        right,
+        glossary(scoped),
+        documents=inventory,
+        reading_edges=edges,
+        context_chars=40,
+        context_index=index,
+    )
+    assert selection.applicability == {"t-memory-tail": "context"}
+    assert selection.context["views"][0]["document_id"] == left.document_id
+    assert selection.context["views"][0]["direction"] == "previous"
+    assert len(selection.context["views"][0]["text"]) <= 40
+    assert selection.context["views"][0]["text"].endswith("memoryTail")
+
+    config = {"target_language": "zh-Hans", "context_tokens": 8192, "max_output_tokens": 2048}
+    planned = plan_unit_v25(
+        right_unit,
+        right,
+        glossary(scoped),
+        config,
+        documents=inventory,
+        reading_edges=edges,
+        context_chars=40,
+        context_index=index,
+    )
+    without_edge = plan_unit_v25(
+        right_unit,
+        right,
+        glossary(scoped),
+        config,
+        documents=inventory,
+        context_chars=40,
+    )
+    assert planned.cut_plan.segments[0].context_hash == selection.context_hash
+    assert planned.logical_hash != without_edge.logical_hash
 
 
 def test_more_than_fifty_matching_terms_are_never_truncated() -> None:
@@ -168,8 +292,15 @@ def test_initial_cut_plan_reuses_event_safe_splitting_and_hashes_frozen_inputs()
     }
     first = plan_unit_v25(unit, document, snapshot, config)
     second = plan_unit_v25(unit, document, snapshot, config)
+    upgraded = plan_unit_v25(unit, document, snapshot, config, epoch=1)
+    stricter = plan_unit_v25(unit, document, snapshot, config, epoch=1, planning_target_ratio=3.2)
 
     assert first == second
+    assert upgraded.logical_hash == first.logical_hash
+    assert upgraded.cut_plan.plan_hash != first.cut_plan.plan_hash
+    assert upgraded.input_hash != first.input_hash
+    assert stricter.logical_hash == first.logical_hash
+    assert len(stricter.cut_plan.segments) > len(first.cut_plan.segments)
     assert len(first.cut_plan.segments) > 1
     event_count = sum(
         1 if event.kind == "marker" else len(regex.findall(r"\X", event.value))
