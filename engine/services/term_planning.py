@@ -97,7 +97,14 @@ def plan_term_extraction(
     items: list[ExtractionItem] = []
     for document in documents:
         primary = [view for view in ordered_views if view.document_id == document.document_id]
-        for group in _groups(primary, max_primary_chars, view_successors):
+        unit_lanes = _unit_lanes(document)
+        view_lanes: dict[str, Literal["narrative", "table", "note", "navigation", "independent"]] = {
+            view_id: unit_lanes[unit.unit_id]
+            for unit in document.units
+            for view_id in unit.source_view_ids
+            if view_id in document.source_views
+        }
+        for group in _groups(primary, max_primary_chars, view_lanes):
             primary_ids = tuple(dict.fromkeys(part.view.view_id for part in group))
             ranges = tuple({"view_id": part.view.view_id, "start": part.start, "end": part.end} for part in group)
             context_ranges = _context_ranges(
@@ -242,7 +249,9 @@ class _PrimaryRange:
 
 
 def _groups(
-    views: Sequence[SourceTextView], max_chars: int, successors: Mapping[str, tuple[str, ...]]
+    views: Sequence[SourceTextView],
+    max_chars: int,
+    view_lanes: Mapping[str, Literal["narrative", "table", "note", "navigation", "independent"]],
 ) -> tuple[tuple[_PrimaryRange, ...], ...]:
     groups: list[tuple[_PrimaryRange, ...]] = []
     current: list[_PrimaryRange] = []
@@ -253,7 +262,7 @@ def _groups(
             if current and (
                 size + part_size > max_chars
                 or any(existing.view.view_id == view.view_id for existing in current)
-                or view.view_id not in successors.get(current[-1].view.view_id, ())
+                or view_lanes[view.view_id] != view_lanes[current[-1].view.view_id]
             ):
                 groups.append(tuple(current))
                 current, size = [], 0

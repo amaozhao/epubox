@@ -39,7 +39,7 @@ def _plan(documents, user_terms=(), *, auto_extract: bool = True):
     ).plan
 
 
-def _candidate(document, item, source: str, target: str):
+def _candidate(document, item, source: str, target: str, *, aliases: tuple[str, ...] = ()):
     view = next(
         document.source_views[view_id] for view_id in item.view_ids if source in document.source_views[view_id].text
     )
@@ -51,6 +51,7 @@ def _candidate(document, item, source: str, target: str):
                 source=source,
                 target=target,
                 category="term",
+                aliases=aliases,
                 evidence=(EvidenceProposal(view.view_id, view.text),),
             ),
         ),
@@ -254,6 +255,33 @@ def test_closed_with_gaps_and_empty_closed_runs_have_explicit_warnings() -> None
     assert result.glossary.extraction_status == "closed_with_gaps"
     assert any("local gaps" in warning for warning in result.glossary.warnings)
     assert any("No valid terminology" in warning for warning in result.glossary.warnings)
+
+
+def test_unconfirmed_automatic_alias_is_reported_but_not_activated() -> None:
+    document = _document("one", ("Memory (RAM) allocation is fast.",))
+    documents = (document,)
+    plan = _plan(documents)
+    item = next(
+        item
+        for item in plan.items
+        if any("Memory" in document.source_views[view_id].text for view_id in item.view_ids)
+    )
+    candidate = _candidate(document, item, "Memory", "内存", aliases=("RAM",))
+    records = _records(plan, documents)
+    records[item.item_id] = records[item.item_id].model_copy(update={"candidates": (candidate,)})
+
+    result = freeze_terminology(
+        plan,
+        records,
+        (),
+        _unit_documents(documents),
+        documents,
+        extraction_config_hash="extract-config",
+    )
+
+    assert result.glossary.terms[0].aliases == ()
+    assert result.freeze_intent.coverage["aliases_deferred"] == 1
+    assert any("1 automatic alias" in warning for warning in result.glossary.warnings)
 
 
 def test_disabled_and_not_required_freeze_to_distinct_empty_snapshots() -> None:

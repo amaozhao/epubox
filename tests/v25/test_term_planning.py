@@ -156,6 +156,41 @@ def test_plan_covers_every_primary_view_once_with_stable_budget_and_identity() -
     assert first.plan.extraction_http_limit == 6 * len(first.plan.items) + 3 * 20
 
 
+def test_primary_transport_groups_disconnected_views_by_document_lane_and_budget() -> None:
+    source = document("d1", ("one", "two", "three")).model_copy(update={"boundaries": ()})
+    result = plan_term_extraction(
+        (source,),
+        (),
+        source_hash="source-sha",
+        preparation_hash="prep-sha",
+        extraction_identity=EXTRACTION_IDENTITY,
+        max_primary_chars=11,
+    )
+    assert [item.view_ids for item in result.plan.items] == [("v-d1-0", "v-d1-1", "v-d1-2")]
+    assert result.plan.items[0].context_refs == ()
+
+
+def test_primary_transport_keeps_narrative_table_note_and_navigation_in_separate_windows() -> None:
+    base = document("d1", ("body", "cell1", "cell2", "note", "nav"))
+    kinds = ("paragraph", "table_cell", "table_cell", "note", "navigation")
+    units = tuple(unit.model_copy(update={"kind": kind}) for unit, kind in zip(base.units, kinds, strict=True))
+    source = base.model_copy(update={"units": units, "boundaries": ()})
+    result = plan_term_extraction(
+        (source,),
+        (),
+        source_hash="source-sha",
+        preparation_hash="prep-sha",
+        extraction_identity=EXTRACTION_IDENTITY,
+        max_primary_chars=100,
+    )
+    assert [item.view_ids for item in result.plan.items] == [
+        ("v-d1-0",),
+        ("v-d1-1", "v-d1-2"),
+        ("v-d1-3",),
+        ("v-d1-4",),
+    ]
+
+
 def test_cross_document_context_requires_an_explicit_reading_edge() -> None:
     documents = (document("d1", ("one", "two")), document("d2", ("three",)))
     without_edge = plan_term_extraction(

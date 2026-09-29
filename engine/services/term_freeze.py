@@ -439,10 +439,13 @@ def _warnings(
         warnings.append("Terminology extraction closed with local gaps.")
     rejected = sum(candidate.status.startswith("rejected_") for candidate in candidates)
     deferred = sum(candidate.status == "deferred_conflict" for candidate in candidates)
+    deferred_aliases = sum(len(candidate.aliases) for candidate in candidates)
     if rejected:
         warnings.append(f"{rejected} terminology candidate(s) were rejected.")
     if deferred or any(group.get("status") == "deferred_conflict" for group in conflict_groups):
         warnings.append(f"{deferred} terminology candidate(s) remain deferred by conflict.")
+    if deferred_aliases:
+        warnings.append(f"{deferred_aliases} automatic alias proposal(s) remain unconfirmed and were not activated.")
     if not terms:
         warnings.append("No valid terminology rules were available to freeze.")
     return tuple(warnings)
@@ -464,6 +467,7 @@ def _coverage(
         "candidates_rejected": sum(candidate.status.startswith("rejected_") for candidate in candidates),
         "candidates_shadowed": sum(candidate.status == "shadowed_by_user" for candidate in candidates),
         "candidates_deferred": sum(candidate.status == "deferred_conflict" for candidate in candidates),
+        "aliases_deferred": sum(len(candidate.aliases) for candidate in candidates),
         "conflict_groups": len(conflict_groups),
     }
 
