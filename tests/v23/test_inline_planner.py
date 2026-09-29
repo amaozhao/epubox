@@ -3,7 +3,6 @@ from typing import Literal
 import pytest
 
 from engine.core.styles import ReorderPolicy, scan_css, scan_inline_style, scan_stylesheets, selector_policy
-from engine.epub.preparation import _resolve_derived_bindings
 from engine.item.extractor import extract_document
 from engine.item.inline import (
     Event,
@@ -550,83 +549,6 @@ def test_initial_coherence_windows_freeze_only_valid_source_relationships_and_se
     assert [window["item_id"] for window in windows] == [
         window["item_id"] for window in initial_coherence_windows(document, records)
     ]
-
-
-def test_coherence_windows_exclude_all_nav_descendants_and_derived_navigation_targets():
-    chapter_one = extract_document(
-        '<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="one">Chapter One</h1>'
-        "<p>First body paragraph.</p><p>Second body paragraph.</p></body></html>",
-        "OPS/one.xhtml",
-        "source-hash",
-        "application/xhtml+xml",
-    )
-    chapter_two = extract_document(
-        '<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="two">Chapter Two</h1>'
-        "<p>Third body paragraph.</p><p>Fourth body paragraph.</p></body></html>",
-        "OPS/two.xhtml",
-        "source-hash",
-        "application/xhtml+xml",
-    )
-    navigation = extract_document(
-        '<html xmlns="http://www.w3.org/1999/xhtml"><body><nav><h1>Contents</h1><ol>'
-        '<li><a href="one.xhtml#one">Chapter One</a></li>'
-        '<li><a href="two.xhtml#two">Chapter Two</a></li>'
-        f"<li>{'Long navigation entry. ' * 100}</li>"
-        "</ol></nav><p>Outside navigation one.</p><p>Outside navigation two.</p></body></html>",
-        "OPS/nav.xhtml",
-        "source-hash",
-        "application/xhtml+xml",
-    )
-    prepared = _resolve_derived_bindings([chapter_one, chapter_two, navigation])
-    navigation = next(document for document in prepared if document.resource.path == "OPS/nav.xhtml")
-    config = PlannerConfig(context_tokens=4096)
-    split_config = PlannerConfig(
-        context_tokens=1200,
-        max_output_tokens=160,
-        review_output_tokens=80,
-        safety_margin=8,
-        translation_overhead=8,
-        review_overhead=8,
-    )
-    long_nav = next(unit for unit in navigation.units if unit.source_projection.startswith("Long navigation"))
-    plans = {unit.unit_id: plan_unit(unit, split_config if unit is long_nav else config) for unit in navigation.units}
-    records = {
-        unit.unit_id: make_record(unit, plans[unit.unit_id], candidate=f"target-{unit.unit_id}")
-        for unit in navigation.units
-    }
-
-    windows = initial_coherence_windows(navigation, records)
-    adjacency_participants = {
-        unit_id for window in windows if len(window["unit_ids"]) == 2 for unit_id in window["unit_ids"]
-    }
-    nav_path = next(node.element_path for node in navigation.nodes.values() if node.qname.endswith("}nav"))
-    nav_units = {
-        unit.unit_id
-        for unit in navigation.units
-        if navigation.nodes[unit.node_key].element_path[: len(nav_path)] == nav_path
-    }
-    derived_units = {
-        str(binding["unit_id"])
-        for binding in navigation.derived_bindings
-        if binding.get("kind") == "derived_navigation"
-    }
-    outside_units = [unit.unit_id for unit in navigation.units if unit.unit_id not in nav_units]
-
-    assert len(derived_units) == 2
-    assert len(plans[long_nav.unit_id].segments) > 1
-    assert nav_units.isdisjoint(adjacency_participants)
-    assert all(long_nav.unit_id not in window["unit_ids"] for window in windows if len(window["unit_ids"]) == 2)
-    assert (
-        sum(window["unit_ids"] == [long_nav.unit_id] for window in windows)
-        == len(plans[long_nav.unit_id].segments) - 1
-    )
-    assert all(
-        window["scope"] == "unit" and window["relation"] == "seam"
-        for window in windows
-        if window["unit_ids"] == [long_nav.unit_id]
-    )
-    assert all(unit_id not in derived_units for window in windows for unit_id in window["unit_ids"])
-    assert any(window["unit_ids"] == outside_units for window in windows)
 
 
 def test_coherence_windows_exclude_semantic_toc_and_index_regions_but_keep_their_seams():

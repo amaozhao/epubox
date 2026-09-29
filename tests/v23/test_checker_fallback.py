@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from engine.cli_v23 import checker_for_source
+from engine.epub.checker import checker_for_source
 from engine.epub.validation import EpubCheckResult
 
 
@@ -58,8 +58,8 @@ def test_default_checker_is_retained_when_it_passes(tmp_path: Path) -> None:
     source.write_bytes(b"unused")
     primary = StubChecker(EpubCheckResult(("/tools/epubcheck-5.4.0/epubcheck.jar",), 0))
     with (
-        patch("engine.cli_v23.checker_command", return_value=primary),
-        patch("engine.cli_v23._portable_checker") as fallback,
+        patch("engine.epub.checker.checker_command", return_value=primary),
+        patch("engine.epub.checker._portable_checker") as fallback,
     ):
         assert checker_for_source(source) is primary
     assert primary.checked == [source]
@@ -72,8 +72,8 @@ def test_known_54_navigation_error_uses_passing_53(tmp_path: Path) -> None:
     primary = StubChecker(EpubCheckResult(("/tools/epubcheck-5.4.0/epubcheck.jar",), 1, errors=(nav_error(),)))
     fallback = StubChecker(EpubCheckResult(("5.3",), 0))
     with (
-        patch("engine.cli_v23.checker_command", return_value=primary),
-        patch("engine.cli_v23._portable_checker", return_value=fallback),
+        patch("engine.epub.checker.checker_command", return_value=primary),
+        patch("engine.epub.checker._portable_checker", return_value=fallback),
     ):
         assert checker_for_source(source) is fallback
     assert primary.checked == [source]
@@ -91,8 +91,8 @@ def test_mixed_errors_do_not_fall_back(tmp_path: Path) -> None:
         )
     )
     with (
-        patch("engine.cli_v23.checker_command", return_value=primary),
-        patch("engine.cli_v23._portable_checker") as fallback,
+        patch("engine.epub.checker.checker_command", return_value=primary),
+        patch("engine.epub.checker._portable_checker") as fallback,
     ):
         assert checker_for_source(source) is primary
     fallback.assert_not_called()
@@ -114,8 +114,8 @@ def test_unsafe_or_malformed_source_never_uses_fallback(tmp_path: Path, case: st
         make_epub(source, nav='<html>\n<nav aria-labelledby="toc">')
     primary = StubChecker(EpubCheckResult(("/tools/epubcheck-5.4.0/epubcheck.jar",), 1, errors=(nav_error(),)))
     with (
-        patch("engine.cli_v23.checker_command", return_value=primary),
-        patch("engine.cli_v23._portable_checker") as fallback,
+        patch("engine.epub.checker.checker_command", return_value=primary),
+        patch("engine.epub.checker._portable_checker") as fallback,
     ):
         assert checker_for_source(source) is primary
     fallback.assert_not_called()
@@ -125,8 +125,8 @@ def test_explicit_checker_is_never_probed_or_replaced(tmp_path: Path) -> None:
     source = tmp_path / "book.epub"
     explicit = StubChecker(EpubCheckResult(("custom",), 1, errors=(nav_error(),)))
     with (
-        patch("engine.cli_v23.checker_command", return_value=explicit),
-        patch("engine.cli_v23._portable_checker") as fallback,
+        patch("engine.epub.checker.checker_command", return_value=explicit),
+        patch("engine.epub.checker._portable_checker") as fallback,
     ):
         assert checker_for_source(source, "custom checker") is explicit
     assert explicit.checked == []
@@ -138,8 +138,8 @@ def test_environment_checker_is_never_probed_or_replaced(tmp_path: Path, monkeyp
     configured = StubChecker(EpubCheckResult(("custom",), 1, errors=(nav_error(),)))
     monkeypatch.setenv("EPUBCHECK_COMMAND", "custom checker")
     with (
-        patch("engine.cli_v23.checker_command", return_value=configured),
-        patch("engine.cli_v23._portable_checker") as fallback,
+        patch("engine.epub.checker.checker_command", return_value=configured),
+        patch("engine.epub.checker._portable_checker") as fallback,
     ):
         assert checker_for_source(source) is configured
     assert configured.checked == []
