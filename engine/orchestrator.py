@@ -10,7 +10,14 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from engine.agents.protocol import ProtocolError, validate_coherence_response, validate_translation_response
-from engine.agents.runtime import ModelRuntime, RequestError, RuntimePaused, request_messages, wire_hash
+from engine.agents.runtime import (
+    PROMPT_VERSION,
+    ModelRuntime,
+    RequestError,
+    RuntimePaused,
+    request_messages,
+    wire_hash,
+)
 from engine.agents.term_protocol import validate_review_response
 from engine.core.quality import find_degenerate_translation
 from engine.core.tokens import count_tokens
@@ -126,6 +133,8 @@ class TranslationEngine:
         ):
             raise IdentityMismatch("UnitRecord contains an unfrozen derived dependency")
         self.config = self.book.translation_config
+        if transport is None and self.config.get("prompt_version") != PROMPT_VERSION:
+            raise ValueError("frozen translation prompt differs from the current runtime; start a new run")
         self.planner_config = _planner_config(self.config)
         self.output_tokens = self.planner_config.max_output_tokens
         self.max_batch_items = self.planner_config.max_batch_items
@@ -380,110 +389,125 @@ class TranslationEngine:
             check = self.checks[document_id]
             items = [window_payload(window, self.records) for window in pending_windows(check)]
             for batch in self._pack_coherence_items(items):
-                request_id = "co-" + uuid4().hex
-                payload = {
-                    "protocol": "epubox-coherence-1",
-                    "request_id": request_id,
-                    "items": batch,
-                }
-                output_tokens = self.output_tokens
-                item_units: dict[str, tuple[str, ...]] = {}
-                item_vectors: dict[str, dict[str, int]] = {}
-                for item in batch:
-                    raw_ids = item["unit_ids"]
-                    if not isinstance(raw_ids, list) or not all(isinstance(value, str) for value in raw_ids):
-                        raise ValueError("coherence window Unit IDs are invalid")
-                    item_id = str(item["item_id"])
-                    item_units[item_id] = tuple(dict.fromkeys(raw_ids))
-                    item_vectors[item_id] = {
-                        unit_id: self.records[unit_id].revision for unit_id in item_units[item_id]
+                pending_batch = tuple(batch)
+                revisions: list[tuple[tuple[str, ...], list[dict[str, JsonValue]]]] = []
+                for content_attempt in range(2):
+                    request_id = "co-" + uuid4().hex
+                    payload = {
+                        "protocol": "epubox-coherence-1",
+                        "request_id": request_id,
+                        "items": pending_batch,
                     }
-                unit_ids = tuple(dict.fromkeys(unit_id for ids in item_units.values() for unit_id in ids))
-                item_ids = tuple(item_units)
-                manifest = RequestManifest(
-                    request_id=request_id,
-                    stage="coherence",
-                    owner_kind="translation_item",
-                    owner_id=item_ids[0],
-                    item_ids=item_ids,
-                    input_hashes={str(item["item_id"]): canonical_hash(item) for item in batch},
-                    wire_hash=wire_hash("coherence", payload, output_tokens),
-                    record_versions={unit_id: self.records[unit_id].record_version for unit_id in unit_ids},
-                    item_unit_ids=item_units,
-                    unit_document_ids={unit_id: self.records[unit_id].document_id for unit_id in unit_ids},
-                    plan_epochs={unit_id: self.records[unit_id].plan_epoch for unit_id in unit_ids},
-                    revisions={unit_id: self.records[unit_id].revision for unit_id in unit_ids},
-                    target_hashes={str(item["item_id"]): canonical_hash(item["target"]) for item in batch},
-                    glossary_file_sha256=self.book.glossary_file_sha256,
-                    freeze_id=self.book.freeze_id,
-                    term_ids_by_item={item_id: () for item_id in item_ids},
-                    terms_hashes={item_id: canonical_hash({"terms": []}) for item_id in item_ids},
-                    context_hashes={
-                        str(item["item_id"]): canonical_hash(
-                            {
-                                "source": item["source"],
-                                "target": item["target"],
-                                "versions": item_vectors[str(item["item_id"])],
-                            }
-                        )
-                        for item in batch
-                    },
-                )
-                manifest = self.store.write_request(manifest)
-                self._request_cache[request_id] = manifest
-                encoded = json.dumps(request_messages("coherence", payload), ensure_ascii=False, sort_keys=True)
-                batch_error = ""
-                try:
-                    response = await self.runtime.invoke(
-                        "coherence",
-                        payload,
-                        {
-                            "request_id": request_id,
-                            "item_ids": item_ids,
-                            "estimated_tokens": count_tokens(encoded) + output_tokens,
-                            "output_tokens": output_tokens,
+                    output_tokens = self.output_tokens
+                    item_units: dict[str, tuple[str, ...]] = {}
+                    item_vectors: dict[str, dict[str, int]] = {}
+                    for item in pending_batch:
+                        raw_ids = item["unit_ids"]
+                        if not isinstance(raw_ids, list) or not all(isinstance(value, str) for value in raw_ids):
+                            raise ValueError("coherence window Unit IDs are invalid")
+                        item_id = str(item["item_id"])
+                        item_units[item_id] = tuple(dict.fromkeys(raw_ids))
+                        item_vectors[item_id] = {
+                            unit_id: self.records[unit_id].revision for unit_id in item_units[item_id]
+                        }
+                    unit_ids = tuple(dict.fromkeys(unit_id for ids in item_units.values() for unit_id in ids))
+                    item_ids = tuple(item_units)
+                    manifest = RequestManifest(
+                        request_id=request_id,
+                        stage="coherence",
+                        owner_kind="translation_item",
+                        owner_id=item_ids[0],
+                        item_ids=item_ids,
+                        input_hashes={str(item["item_id"]): canonical_hash(item) for item in pending_batch},
+                        wire_hash=wire_hash("coherence", payload, output_tokens),
+                        record_versions={unit_id: self.records[unit_id].record_version for unit_id in unit_ids},
+                        item_unit_ids=item_units,
+                        unit_document_ids={unit_id: self.records[unit_id].document_id for unit_id in unit_ids},
+                        plan_epochs={unit_id: self.records[unit_id].plan_epoch for unit_id in unit_ids},
+                        revisions={unit_id: self.records[unit_id].revision for unit_id in unit_ids},
+                        target_hashes={str(item["item_id"]): canonical_hash(item["target"]) for item in pending_batch},
+                        glossary_file_sha256=self.book.glossary_file_sha256,
+                        freeze_id=self.book.freeze_id,
+                        term_ids_by_item={item_id: () for item_id in item_ids},
+                        terms_hashes={item_id: canonical_hash({"terms": []}) for item_id in item_ids},
+                        context_hashes={
+                            str(item["item_id"]): canonical_hash(
+                                {
+                                    "source": item["source"],
+                                    "target": item["target"],
+                                    "versions": item_vectors[str(item["item_id"])],
+                                }
+                            )
+                            for item in pending_batch
                         },
                     )
-                    parsed = validate_coherence_response(
-                        response["raw"], request_id, {item_id: set(ids) for item_id, ids in item_units.items()}
-                    )
-                except (RuntimePaused, TranslationPaused) as error:
-                    return str(error), revised
-                except (ProtocolError, RequestError) as error:
-                    parsed = None
-                    batch_error = str(error)
-                for item_id in item_ids:
-                    vector = item_vectors[item_id]
-                    if any(
-                        self.records[unit_id].revision != revision
-                        or self.records[unit_id].accepted_revision != revision
-                        for unit_id, revision in vector.items()
-                    ):
-                        continue
-                    if parsed is not None and item_id in parsed.accepted:
-                        issues: list[dict[str, JsonValue]] = [
-                            dict(issue) for issue in parsed.accepted[item_id]["issues"]
-                        ]
-                    else:
-                        message = (
-                            parsed.errors.get(item_id, "coherence item missing") if parsed is not None else batch_error
+                    manifest = self.store.write_request(manifest)
+                    self._request_cache[request_id] = manifest
+                    encoded = json.dumps(request_messages("coherence", payload), ensure_ascii=False, sort_keys=True)
+                    batch_error = ""
+                    try:
+                        response = await self.runtime.invoke(
+                            "coherence",
+                            payload,
+                            {
+                                "request_id": request_id,
+                                "item_ids": item_ids,
+                                "estimated_tokens": count_tokens(encoded) + output_tokens,
+                                "output_tokens": output_tokens,
+                            },
                         )
+                        parsed = validate_coherence_response(
+                            response["raw"], request_id, {item_id: set(ids) for item_id, ids in item_units.items()}
+                        )
+                    except (RuntimePaused, TranslationPaused, RequestError) as error:
+                        return str(error), revised
+                    except ProtocolError as error:
+                        parsed = None
+                        batch_error = str(error)
+
+                    failed: list[dict[str, Any]] = []
+                    failure_messages: dict[str, str] = {}
+                    for item in pending_batch:
+                        item_id = str(item["item_id"])
+                        vector = item_vectors[item_id]
+                        if any(
+                            self.records[unit_id].revision != revision
+                            or self.records[unit_id].accepted_revision != revision
+                            for unit_id, revision in vector.items()
+                        ):
+                            continue
+                        if parsed is None or item_id not in parsed.accepted:
+                            failed.append(item)
+                            failure_messages[item_id] = (
+                                parsed.errors.get(item_id, "coherence item missing")
+                                if parsed is not None
+                                else batch_error
+                            )
+                            continue
+                        issues = [dict(issue) for issue in parsed.accepted[item_id]["issues"]]
+                        check = save_window_result(self.store, check, item_id, issues)
+                        self.checks[document_id] = check
+                        affected = tuple(str(value) for value in parsed.accepted[item_id]["unit_ids"])
+                        if any(issue.get("severity") in {"major", "critical"} for issue in issues) and affected:
+                            revisions.append((affected, issues))
+                    if not failed:
+                        break
+                    if content_attempt == 0:
+                        pending_batch = tuple(failed)
+                        continue
+                    for item in failed:
+                        item_id = str(item["item_id"])
                         issues = [
                             {
                                 "code": "coherence_request_failed",
                                 "severity": "major",
-                                "message": message[:2000],
+                                "message": failure_messages[item_id][:2000],
                             }
                         ]
-                    check = save_window_result(self.store, check, item_id, issues)
-                    self.checks[document_id] = check
-                    affected = (
-                        tuple(str(value) for value in parsed.accepted[item_id]["unit_ids"])
-                        if parsed is not None and item_id in parsed.accepted
-                        else ()
-                    )
-                    if any(issue.get("severity") in {"major", "critical"} for issue in issues) and affected:
-                        revised |= self._schedule_coherence_revision(document_id, affected, issues)
+                        check = save_window_result(self.store, check, item_id, issues)
+                        self.checks[document_id] = check
+                for affected, issues in revisions:
+                    revised |= self._schedule_coherence_revision(document_id, affected, issues)
         return None, revised
 
     def _pack_coherence_items(self, items: Sequence[dict[str, Any]]) -> tuple[tuple[dict[str, Any], ...], ...]:

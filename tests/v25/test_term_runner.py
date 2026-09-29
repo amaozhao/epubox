@@ -29,7 +29,7 @@ def _prepare(tmp_path: Path, **extraction_overrides: int) -> tuple[RunStore, tup
             extraction_config={
                 "max_primary_chars": 100,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-1",
+                "prompt_version": "epubox-v25-2",
                 "model": "fake",
                 "target_language": "zh-Hans",
                 **extraction_overrides,

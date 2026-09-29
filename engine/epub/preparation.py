@@ -11,6 +11,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from engine.agents.runtime import PROMPT_VERSION
 from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
 from engine.epub.derived_bindings import resolve_derived_navigation
@@ -139,7 +140,7 @@ def prepare_book(
             user_terms=terms,
             user_terms_hash=terms_hash,
             extraction_config=extraction_config,
-            translation_config=dict(config.translation_config),
+            translation_config=_frozen_translation_config(config),
         )
         preparation_hash = store.write_preparation(preparation)
         if store.read_preparation() != preparation:
@@ -206,7 +207,9 @@ def _frozen_extraction_config(config: PreparationConfig) -> dict[str, JsonValue]
         raise ValueError(f"unsupported terminology extraction strategy: {strategy!r}")
     extraction["strategy"] = strategy
 
-    prompt_version = extraction.get("prompt_version", "epubox-v25-1")
+    prompt_version = extraction.get("prompt_version", PROMPT_VERSION)
+    if prompt_version != PROMPT_VERSION:
+        raise ValueError(f"unsupported terminology prompt version: {prompt_version!r}")
     provider = extraction.get("provider", config.translation_config.get("provider", "agnes"))
     if provider not in {"agnes", "cr_proxy"}:
         raise ValueError(f"unsupported terminology provider: {provider!r}")
@@ -239,6 +242,15 @@ def _frozen_extraction_config(config: PreparationConfig) -> dict[str, JsonValue]
         if name not in extraction and name in config.translation_config:
             extraction[name] = config.translation_config[name]
     return extraction
+
+
+def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue]:
+    translation = dict(config.translation_config)
+    prompt_version = translation.get("prompt_version", PROMPT_VERSION)
+    if prompt_version != PROMPT_VERSION:
+        raise ValueError(f"unsupported translation prompt version: {prompt_version!r}")
+    translation["prompt_version"] = PROMPT_VERSION
+    return translation
 
 
 __all__ = ["PreparationConfig", "PreparedBook", "prepare_book"]

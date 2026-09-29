@@ -23,7 +23,7 @@ def config(*, auto_extract: bool = True, user_terms_path: Path | None = None) ->
         auto_extract=auto_extract,
         extraction_config={
             "strategy": TERM_PLANNER_VERSION,
-            "prompt_version": "epubox-v25-1",
+            "prompt_version": "epubox-v25-2",
             "model": "fake",
             "target_language": "zh-Hans",
             "max_primary_chars": 200,

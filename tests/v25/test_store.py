@@ -38,7 +38,7 @@ _SOURCE_MARKUP = "<html><body><p>The process uses RAM.</p></body></html>"
 _EXTRACTION_CONFIG: dict[str, JsonValue] = {
     "auto_extract": True,
     "strategy": "epubox-term-planner-1",
-    "prompt_version": "epubox-v25-1",
+    "prompt_version": "epubox-v25-2",
     "model": "agnes",
     "target_language": "zh-Hans",
 }

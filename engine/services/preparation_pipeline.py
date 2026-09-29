@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from engine.epub.preparation import PreparationConfig, _frozen_extraction_config, prepare_book
+from engine.epub.preparation import (
+    PreparationConfig,
+    _frozen_extraction_config,
+    _frozen_translation_config,
+    prepare_book,
+)
 from engine.item.planner import PlanningError
 from engine.item.unit_planner import build_context_index, initial_derived_navigation, plan_unit
 from engine.schemas.contracts import (
@@ -349,7 +354,7 @@ def _p1(
                 preparation.source_hash != source_hash
                 or preparation.run_id != config.run_id
                 or preparation.extraction_config != _frozen_extraction_config(config)
-                or preparation.translation_config != config.translation_config
+                or preparation.translation_config != _frozen_translation_config(config)
             ):
                 raise IdentityMismatch("resume configuration differs from the committed P1 inputs")
             return store, preparation, _sha256(preparation_path)

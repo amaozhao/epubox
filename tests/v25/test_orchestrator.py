@@ -112,10 +112,24 @@ class ScriptedTransport:
 
 
 class PartialBatchTransport:
-    def __init__(self, *, coherence_major_once: bool = False, title_target: str | None = None):
+    def __init__(
+        self,
+        *,
+        coherence_major_once: bool = False,
+        coherence_empty_once: bool = False,
+        coherence_always_empty: bool = False,
+        coherence_omit_once: bool = False,
+        coherence_pause_once: bool = False,
+        title_target: str | None = None,
+    ):
         self.calls: list[tuple[str, tuple[str, ...]]] = []
         self.omitted: str | None = None
         self.coherence_major_once = coherence_major_once
+        self.coherence_empty_once = coherence_empty_once
+        self.coherence_always_empty = coherence_always_empty
+        self.coherence_omit_once = coherence_omit_once
+        self.coherence_pause_once = coherence_pause_once
+        self.coherence_omitted: str | None = None
         self.title_target = title_target
 
     async def __call__(self, stage: str, payload: dict):
@@ -145,6 +159,18 @@ class PartialBatchTransport:
                 )
             }
         if stage == "coherence":
+            if self.coherence_pause_once:
+                self.coherence_pause_once = False
+                raise ProviderError("account paused", status_code=401)
+            included = list(payload["items"])
+            if self.coherence_always_empty:
+                included = []
+            elif self.coherence_empty_once:
+                self.coherence_empty_once = False
+                included = []
+            elif self.coherence_omit_once and len(included) > 1:
+                self.coherence_omit_once = False
+                self.coherence_omitted = included.pop(1)["item_id"]
             blocking = self.coherence_major_once
             self.coherence_major_once = False
             return {
@@ -166,7 +192,7 @@ class PartialBatchTransport:
                                 if blocking
                                 else [],
                             }
-                            for item in payload["items"]
+                            for item in included
                         ],
                     }
                 )
@@ -220,7 +246,7 @@ async def ready_batch_store(tmp_path, run_id: str = "batch-run") -> RunStore:
             extraction_config={
                 "auto_extract": False,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-1",
+                "prompt_version": "epubox-v25-2",
                 "model": "fake",
                 "target_language": "zh-Hans",
             },
@@ -251,7 +277,7 @@ async def ready_derived_store(tmp_path, run_id: str = "derived-run") -> tuple[Ru
             extraction_config={
                 "auto_extract": False,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-1",
+                "prompt_version": "epubox-v25-2",
                 "model": "fake",
                 "target_language": "zh-Hans",
             },
@@ -597,6 +623,73 @@ async def test_batch_saves_valid_items_and_retries_only_the_missing_item(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_coherence_empty_batch_is_repaired_once_without_manual_resume(tmp_path) -> None:
+    store = await ready_batch_store(tmp_path, "coherence-empty-repair")
+    transport = PartialBatchTransport(coherence_empty_once=True)
+    transport.omitted = "disabled"
+
+    result = await TranslationEngine(store, transport=transport).run()
+    coherence_calls = [ids for stage, ids in transport.calls if stage == "coherence"]
+
+    assert result.status == "translated"
+    assert len(coherence_calls) == 2
+    assert len(coherence_calls[0]) >= 2
+    assert coherence_calls[1] == coherence_calls[0]
+    assert result.http_attempts == len(transport.calls)
+
+
+@pytest.mark.asyncio
+async def test_coherence_partial_batch_retries_only_the_missing_window(tmp_path) -> None:
+    store = await ready_batch_store(tmp_path, "coherence-partial-repair")
+    transport = PartialBatchTransport(coherence_omit_once=True)
+    transport.omitted = "disabled"
+
+    result = await TranslationEngine(store, transport=transport).run()
+    coherence_calls = [ids for stage, ids in transport.calls if stage == "coherence"]
+
+    assert result.status == "translated"
+    assert len(coherence_calls) == 2 and transport.coherence_omitted is not None
+    assert coherence_calls[1] == (transport.coherence_omitted,)
+    assert all(
+        item_id not in coherence_calls[1] for item_id in coherence_calls[0] if item_id != transport.coherence_omitted
+    )
+
+
+@pytest.mark.asyncio
+async def test_coherence_marks_major_only_after_the_repair_response_is_still_bad(tmp_path) -> None:
+    store = await ready_batch_store(tmp_path, "coherence-final-bad")
+    transport = PartialBatchTransport(coherence_always_empty=True)
+    transport.omitted = "disabled"
+    engine = TranslationEngine(store, transport=transport)
+
+    result = await engine.run()
+    coherence_calls = [ids for stage, ids in transport.calls if stage == "coherence"]
+    checks = [check for check in engine.checks.values() if check["windows"]]
+
+    assert result.status == "needs_attention"
+    assert len(coherence_calls) == 2
+    assert checks and all(check["status"] == "needs_attention" for check in checks)
+    assert all(len(check["checks"]) == len(check["windows"]) for check in checks)
+    assert len(coherence_calls) <= sum(int(check["http_limit"]) for check in checks)
+
+
+@pytest.mark.asyncio
+async def test_coherence_transport_pause_keeps_windows_pending_for_resume(tmp_path) -> None:
+    store = await ready_batch_store(tmp_path, "coherence-pause")
+    transport = PartialBatchTransport(coherence_pause_once=True)
+    transport.omitted = "disabled"
+    engine = TranslationEngine(store, transport=transport)
+
+    paused = await engine.run()
+    checks = [check for check in engine.checks.values() if check["windows"]]
+
+    assert paused.status == "paused"
+    assert checks and all(check["status"] == "pending" and not check["checks"] for check in checks)
+    resumed = await TranslationEngine(store, transport=PartialBatchTransport()).run()
+    assert resumed.status == "translated"
+
+
+@pytest.mark.asyncio
 async def test_one_oversized_item_does_not_upgrade_or_fail_its_batch_siblings(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -671,7 +764,7 @@ async def test_long_unit_accepts_segment_reviews_from_multiple_manifests(tmp_pat
             extraction_config={
                 "auto_extract": False,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-1",
+                "prompt_version": "epubox-v25-2",
                 "model": "fake",
                 "target_language": "zh-Hans",
             },
@@ -735,7 +828,7 @@ async def test_coherence_major_issue_gets_one_unit_revision_and_full_rereview(tm
             extraction_config={
                 "auto_extract": False,
                 "strategy": TERM_PLANNER_VERSION,
-                "prompt_version": "epubox-v25-1",
+                "prompt_version": "epubox-v25-2",
                 "model": "fake",
                 "target_language": "zh-Hans",
             },

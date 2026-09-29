@@ -96,7 +96,7 @@ def test_request_messages_are_budgetable_and_wire_hash_is_deterministic():
 def test_review_prompt_shows_no_change_without_target_and_preserves_literal_markup_text():
     system = request_messages("review", payload("review"))[0]["content"]
     no_change_example = system.split("no_change: ", 1)[1].split("\nreplace:", 1)[0]
-    assert PROMPT_VERSION == "epubox-v25-1"
+    assert PROMPT_VERSION == "epubox-v25-2"
     assert '"decision":"no_change"' in no_change_example
     assert '"target"' not in no_change_example
     assert "omit the target key entirely; never return target:null" in system

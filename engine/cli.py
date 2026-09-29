@@ -105,6 +105,7 @@ def translate_book(
         "provider": provider,
         "model": model_id,
         "planner_version": PLANNER_VERSION,
+        "prompt_version": PROMPT_VERSION,
         "context_tokens": context_tokens,
         "max_source_tokens": MAX_SOURCE_TOKENS,
         "max_output_tokens": max_output_tokens,
