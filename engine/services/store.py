@@ -246,6 +246,10 @@ class RunStore:
             document_id: self.read_document(document_id, expected_hash=document_hash)
             for document_id, document_hash in preparation.document_hashes.items()
         }
+        from engine.item.structural_extractor import EXTRACTOR_VERSION
+
+        if any(document.extractor_version != EXTRACTOR_VERSION for document in documents.values()):
+            raise IdentityMismatch("preparation uses an obsolete extractor version; start a new run")
         try:
             with zipfile.ZipFile(self.root / preparation.source_path) as archive:
                 for document in documents.values():

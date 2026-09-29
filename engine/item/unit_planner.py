@@ -11,7 +11,7 @@ from typing import Any, Literal
 import regex
 
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name
-from engine.item.inline import parse_projection, plain_text
+from engine.item.inline import parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS, PlannerConfig, validate_cut_plan
 from engine.item.planner import plan_unit as plan_projection_segments
 from engine.schemas import source_internal
@@ -32,7 +32,7 @@ from engine.schemas.contracts import (
     validate_cut_plan_coverage,
 )
 
-PLANNER_VERSION = "epubox-unit-planner-3"
+PLANNER_VERSION = "epubox-unit-planner-5"
 type TermRole = Literal["target", "context"]
 
 
@@ -118,7 +118,16 @@ def select_terms(
     """Select every matching frozen rule without truncation or cross-scope promotion."""
     _validate_inputs(unit, document, glossary)
     projection = unit.source_projection if source_projection is None else source_projection
-    target_text = plain_text(projection)
+    target_text = "".join(
+        event.value
+        if event.kind == "text"
+        else "\n"
+        if event.value.startswith("-")
+        and (entry := unit.registry.get(event.value[1:])) is not None
+        and entry.hints.get("source_view_boundary") == "paragraph"
+        else ""
+        for event in parse_projection(projection)
+    )
     context = build_context(
         unit,
         document,
@@ -388,7 +397,10 @@ def build_context_index(
                 raise TypeError("source relation_edges must be a list")
             for raw_edge in raw_edges:
                 left, right, kind = _edge(raw_edge, units)
-                _append_context_range(ranges[left], seen[left], units[right], document, "next", kind, context_chars)
+                if kind != "table_header":
+                    _append_context_range(
+                        ranges[left], seen[left], units[right], document, "next", kind, context_chars
+                    )
                 _append_context_range(
                     ranges[right], seen[right], units[left], document, "previous", kind, context_chars
                 )

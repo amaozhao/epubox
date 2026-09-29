@@ -235,7 +235,7 @@ def ready_store(tmp_path):
 async def ready_batch_store(tmp_path, run_id: str = "batch-run") -> RunStore:
     source = make_epub(
         tmp_path / f"{run_id}.epub",
-        {"chapter.xhtml": "<p>First item.</p><p>Second item.</p><p>Third item.</p>"},
+        {"chapter.xhtml": "<div><p>First item.</p></div><div><p>Second item.</p></div><div><p>Third item.</p></div>"},
     )
     prepared = await prepare_translation(
         source,
@@ -817,7 +817,7 @@ async def test_long_unit_accepts_segment_reviews_from_multiple_manifests(tmp_pat
 async def test_coherence_major_issue_gets_one_unit_revision_and_full_rereview(tmp_path) -> None:
     source = make_epub(
         tmp_path / "coherence.epub",
-        {"chapter.xhtml": "<p>First transition.</p><p>Second transition.</p>"},
+        {"chapter.xhtml": "<div><p>First transition.</p></div><div><p>Second transition.</p></div>"},
     )
     prepared = await prepare_translation(
         source,

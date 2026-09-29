@@ -35,7 +35,7 @@ def accepted_records(document):
 def test_windows_freeze_budget_block_dependencies_and_keep_later_results(tmp_path) -> None:
     markup = (
         '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Book</title></head><body>'
-        "<p>First.</p><p>Second.</p><p>Third.</p></body></html>"
+        "<div><p>First.</p></div><div><p>Second.</p></div><div><p>Third.</p></div></body></html>"
     )
     document = extract_document(markup, "chapter.xhtml", "source-sha")
     store = RunStore(tmp_path)

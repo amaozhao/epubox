@@ -16,7 +16,7 @@ from engine.schemas.contracts import (
 from engine.schemas.source_internal import DocumentPlan as ExtractedDocument
 from engine.schemas.source_internal import SourceSlot, Unit
 
-SOURCE_VIEW_RULE_VERSION = "epubox-source-view-1"
+SOURCE_VIEW_RULE_VERSION = "epubox-source-view-2"
 
 
 class SourceViewError(ValueError):
@@ -119,7 +119,7 @@ def _derive_unit_views(
             entry = unit.registry.get(ref_id)
             if entry is None or entry.kind != ref_id[:1]:
                 raise SourceViewError(f"{unit.unit_id}: projection marker {ref_id!r} has no matching registry entry")
-            if entry.kind in {"x", "b"}:
+            if entry.kind in {"x", "b"} or entry.hints.get("source_view_boundary") == "paragraph":
                 flush()
             if event.value[0] == "+":
                 range_stack.append(ref_id)
@@ -134,7 +134,7 @@ def _derive_unit_views(
             fragment = fragments[fragment_index]
             domain_node_key = next(
                 (unit.registry[ref_id].source_node_key for ref_id in reversed(range_stack) if ref_id.startswith("g")),
-                unit.node_key,
+                str(unit.region.get("parent_node_key", unit.node_key)),
             )
             if fragment.domain_node_key != domain_node_key:
                 raise SourceViewError(

@@ -16,7 +16,7 @@ from engine.schemas.contracts import FrozenTerm, GlossarySnapshot, TermScope, ca
 
 
 def source(*paragraphs: str) -> str:
-    body = "".join(f"<p>{paragraph}</p>" for paragraph in paragraphs)
+    body = "".join(f"<div><p>{paragraph}</p></div>" for paragraph in paragraphs)
     return f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Book</title></head><body>{body}</body></html>'
 
 
@@ -160,6 +160,44 @@ def test_context_scope_uses_the_context_view_owner_and_hints_are_read_only() -> 
     )
     split_unit = paragraph(split_document, "foo")
     assert select_terms(split_unit, split_document, glossary(frozen_term("t-cross", "foobar"))).terms == ()
+
+
+def test_grouped_paragraph_seam_cannot_invent_a_segment_term() -> None:
+    document = extract_document(
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>data</p><p>base</p><p>database</p></body></html>',
+        "chapter.xhtml",
+        "source-sha",
+    )
+    unit = next(unit for unit in document.units if unit.kind == "paragraph_group")
+    rule = frozen_term("t-database", "database")
+    prefix = unit.source_projection.split("⟦+g3⟧", 1)[0]
+
+    assert select_terms(unit, document, glossary(rule), source_projection=prefix).applicability == {
+        rule.term_id: "context"
+    }
+    assert select_terms(unit, document, glossary(rule)).applicability == {rule.term_id: "target"}
+
+
+def test_table_header_context_flows_to_data_cells_without_flooding_the_header() -> None:
+    cells = "".join(f'<td headers="header">Data {index}.</td>' for index in range(40))
+    document = extract_document(
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        f'<table><tr><th id="header">Examples</th></tr><tr>{cells}</tr></table></body></html>',
+        "chapter.xhtml",
+        "source-sha",
+    )
+    header = next(unit for unit in document.units if unit.source_projection == "Examples")
+    data = next(unit for unit in document.units if unit.source_projection == "Data 0.")
+    index = build_context_index((document,))
+
+    assert not any(
+        view["relation_kind"] == "table_header"
+        for view in build_context(header, document, context_index=index)["views"]
+    )
+    assert any(
+        view["text"] == "Examples" and view["relation_kind"] == "table_header"
+        for view in build_context(data, document, context_index=index)["views"]
+    )
 
 
 def test_frozen_narrative_table_header_and_footnote_edges_supply_bounded_context() -> None:

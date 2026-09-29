@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 import engine.services.atomic_store as base_store_module
+from engine.item import structural_extractor
 from engine.item.source_views import SOURCE_VIEW_RULE_VERSION, SourceViewError
+from engine.item.structural_extractor import EXTRACTOR_VERSION
 from engine.schemas.contracts import (
     Attempt,
     CandidatePool,
@@ -81,7 +83,7 @@ def _prepare(
 
 
 def _trusted_document(source_hash: str):
-    document = make_document().model_copy(update={"source_hash": source_hash})
+    document = make_document().model_copy(update={"source_hash": source_hash, "extractor_version": EXTRACTOR_VERSION})
     document = document.model_copy(
         update={
             "resource": document.resource.model_copy(
@@ -141,6 +143,17 @@ def test_p1_commits_documents_and_empty_user_copy_without_bookplan(tmp_path: Pat
     (tmp_path / "documents" / "d1.json").write_text(json.dumps(raw))
     with pytest.raises(UnsupportedFormatError, match="unsupported format"):
         store.read_document("d1")
+
+
+def test_obsolete_extractor_checkpoint_is_rejected_before_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = _prepare(tmp_path)
+    monkeypatch.setattr(structural_extractor, "EXTRACTOR_VERSION", "epubox-extractor-next")
+
+    with pytest.raises(IdentityMismatch, match="obsolete extractor version"):
+        store._trusted_preparation_documents()
+    assert not list((store.root / "requests").glob("*.json"))
 
 
 def test_store_replays_source_views_before_accepting_a_document(tmp_path: Path) -> None:

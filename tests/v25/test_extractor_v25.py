@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import cast
 
+import pytest
+
+from engine.epub.assembly import assemble_document
 from engine.item.extractor import extract_document, validate_source_relations
+from engine.item.inline import ProjectionError, validate_projection
 from engine.item.source_views import validate_source_views
 from engine.item.structural_extractor import extract_document as extract_structure
 from engine.schemas.contracts import DOCUMENT_FORMAT, DocumentPlan
@@ -102,6 +107,69 @@ def test_adapter_is_deterministic_and_ignores_pre_freeze_term_configuration() ->
 
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
     assert all("logical_hash" not in type(unit).model_fields for unit in first.units)
+
+
+def test_adjacent_paragraphs_form_one_ordered_unit_with_separate_source_views() -> None:
+    source = _source(
+        "<h2>First section</h2><p>Alpha <em>one</em>.</p><p>Beta two.</p><p>Gamma three.</p>"
+        "<h2>Second section</h2><p>Delta four.</p><p>Epsilon five.</p>"
+    )
+    document = extract_document(source, "OPS/chapter.xhtml", "source-sha")
+    groups = [unit for unit in document.units if unit.kind == "paragraph_group"]
+
+    assert [len(cast(list[str], unit.region["member_node_keys"])) for unit in groups] == [3, 2]
+    assert [document.source_views[view_id].text for view_id in groups[0].source_view_ids] == [
+        "Alpha one.",
+        "Beta two.",
+        "Gamma three.",
+    ]
+    assert source.split("<body>", 1)[1] in assemble_document(document, {}, identity=True).markup
+    validate_source_views(document)
+
+    first, second = tuple(entry.ref_id for entry in groups[0].registry.values() if entry.hints.get("element") == "p")[
+        :2
+    ]
+    projection = groups[0].source_projection
+    first_end = projection.index(f"⟦-{first}⟧") + len(f"⟦-{first}⟧")
+    second_end = projection.index(f"⟦-{second}⟧") + len(f"⟦-{second}⟧")
+    swapped = projection[first_end:second_end] + projection[:first_end] + projection[second_end:]
+    with pytest.raises(ProjectionError):
+        validate_projection(groups[0], swapped)
+
+
+def test_grouping_stops_at_comments_and_translation_boundaries() -> None:
+    source = _source(
+        "<p>Alpha.</p><p>Beta.</p><!--keep--><p>Gamma.</p><p>Delta.</p>"
+        '<p translate="no">Protected.</p><p>Epsilon.</p><p>Zeta.</p>'
+    )
+    document = extract_document(source, "OPS/chapter.xhtml", "source-sha")
+    groups = [unit for unit in document.units if unit.kind == "paragraph_group"]
+
+    assert len(groups) == 1
+    assert [document.source_views[view_id].text for view_id in groups[0].source_view_ids] == [
+        "Epsilon.",
+        "Zeta.",
+    ]
+    assert source.split("<body>", 1)[1] in assemble_document(document, {}, identity=True).markup
+
+
+def test_long_paragraph_run_is_bounded_and_adjacent_groups_assemble_in_order() -> None:
+    source = _source("".join(f"<p>Paragraph {index} text.</p>" for index in range(20)))
+    document = extract_document(source, "OPS/chapter.xhtml", "source-sha")
+    groups = [unit for unit in document.units if unit.kind == "paragraph_group"]
+
+    assert [len(cast(list[str], unit.region["member_node_keys"])) for unit in groups] == [8, 8, 4]
+    assert source.split("<body>", 1)[1] in assemble_document(document, {}, identity=True).markup
+
+
+def test_paragraph_group_cannot_hide_a_following_heading_by_erasing_its_boundary() -> None:
+    document = extract_document(_source("<p>Alpha.</p><p>Beta.</p><h2>Keep heading</h2>"), "chapter.xhtml", "sha")
+    payload = document.model_dump(mode="python")
+    group = next(unit for unit in payload["units"] if unit["kind"] == "paragraph_group")
+    group["region"]["before_node_key"] = None
+
+    with pytest.raises(ValueError, match="paragraph group boundaries"):
+        DocumentPlan.model_validate(payload)
 
 
 def test_adapter_keeps_comment_and_pi_tails_without_structural_whitespace_views() -> None:

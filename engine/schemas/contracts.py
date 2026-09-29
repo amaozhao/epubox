@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from enum import StrEnum
+from itertools import pairwise
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
@@ -247,6 +248,13 @@ class DocumentPlan(FrozenModel):
             raise ValueError("source view map keys must match view_id")
         if len({node.element_path for node in self.nodes.values()}) != len(self.nodes):
             raise ValueError("node element paths must be unique")
+        last_child_by_parent: dict[tuple[int, ...], int] = {}
+        for node in self.nodes.values():
+            if node.element_path:
+                parent_path = node.element_path[:-1]
+                last_child_by_parent[parent_path] = max(
+                    last_child_by_parent.get(parent_path, -1), node.element_path[-1]
+                )
         if len({unit.unit_id for unit in self.units}) != len(self.units):
             raise ValueError("unit_id must be unique within a document")
         units_by_id = {unit.unit_id: unit for unit in self.units}
@@ -292,6 +300,64 @@ class DocumentPlan(FrozenModel):
                 raise ValueError("Unit references an unknown document or node")
             if not set(unit.slot_ids).issubset(self.source_slots):
                 raise ValueError("Unit references an unknown source slot")
+            members = unit.region.get("member_node_keys")
+            if unit.kind == "paragraph_group" or members is not None:
+                parent_key = unit.region.get("parent_node_key")
+                parent = self.nodes.get(parent_key) if isinstance(parent_key, str) else None
+                if (
+                    unit.kind != "paragraph_group"
+                    or not isinstance(members, (list, tuple))
+                    or len(members) < 2
+                    or any(not isinstance(key, str) for key in members)
+                    or len(set(members)) != len(members)
+                    or parent is None
+                    or unit.node_key != members[0]
+                ):
+                    raise ValueError("invalid paragraph group identity")
+                paths = [self.nodes[key].element_path for key in members if isinstance(key, str) and key in self.nodes]
+                if (
+                    len(paths) != len(members)
+                    or any(path[:-1] != parent.element_path for path in paths)
+                    or any(right[-1] != left[-1] + 1 for left, right in pairwise(paths))
+                    or any(
+                        self.nodes[key].qname.rsplit("}", 1)[-1] != "p"
+                        for key in members
+                        if isinstance(key, str) and key in self.nodes
+                    )
+                ):
+                    raise ValueError("paragraph group members must be adjacent sibling paragraphs")
+                after_key, before_key = unit.region.get("after_node_key"), unit.region.get("before_node_key")
+                after = self.nodes.get(after_key) if isinstance(after_key, str) else None
+                before = self.nodes.get(before_key) if isinstance(before_key, str) else None
+                last_child = last_child_by_parent.get(parent.element_path, -1)
+                if (
+                    (after is None and paths[0][-1] != 0)
+                    or (after is not None and after.element_path != (*parent.element_path, paths[0][-1] - 1))
+                    or (after is None and after_key is not None)
+                    or (before is not None and before.element_path != (*parent.element_path, paths[-1][-1] + 1))
+                    or (before is None and before_key is not None)
+                    or (before is None and paths[-1][-1] != last_child)
+                ):
+                    raise ValueError("paragraph group boundaries do not match its members")
+                wrappers = [
+                    entry for entry in unit.registry.values() if entry.kind == "g" and entry.parent_ref == parent_key
+                ]
+                if (
+                    any(not entry.ref_id[1:].isdigit() for entry in wrappers)
+                    or [entry.source_node_key for entry in sorted(wrappers, key=lambda entry: int(entry.ref_id[1:]))]
+                    != list(members)
+                    or any(
+                        entry.movement not in {"locked", "fixed"}
+                        or entry.reorder_allowed
+                        or entry.hints.get("source_view_boundary") != "paragraph"
+                        for entry in wrappers
+                    )
+                ):
+                    raise ValueError("paragraph group wrappers must preserve paragraph order")
+                for slot_id in unit.slot_ids:
+                    slot_path = self.nodes[self.source_slots[slot_id].node_key].element_path
+                    if not any(slot_path[: len(path)] == path for path in paths):
+                        raise ValueError("paragraph group owns a source slot outside its member paragraphs")
             owned_slots = {slot_id for slot_id, owners in slot_owners.items() if unit.unit_id in owners}
             if set(unit.slot_ids) != owned_slots:
                 raise ValueError("Unit/source slot ownership must be bidirectional")

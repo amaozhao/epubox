@@ -13,8 +13,8 @@ from engine.services.term_candidates import (
 def _document():
     source = (
         '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Systems</title></head><body>'
-        "<p>Use pro<em>cess</em>or scheduling safely.</p>"
-        "<p>A category contains items.</p>"
+        "<div><p>Use pro<em>cess</em>or scheduling safely.</p></div>"
+        "<div><p>A category contains items.</p></div>"
         "</body></html>"
     )
     return extract_document(source, "OPS/chapter.xhtml", "source-sha")
@@ -156,7 +156,7 @@ def test_evidence_is_limited_to_the_items_exact_ranges_of_a_shared_view() -> Non
         ),
     )
 
-    assert [candidate.status for candidate in result.candidates] == ["proposed", "rejected_evidence"]
+    assert {candidate.status for candidate in result.candidates} == {"proposed", "rejected_evidence"}
     matched = next(candidate for candidate in result.candidates if candidate.status == "proposed").evidence[0]
     assert matched.source_refs[0].start == 0
     assert {diagnostic["reason"] for diagnostic in result.diagnostics} == {"quote_not_found_in_primary_range"}

@@ -22,7 +22,7 @@ EXTRACTION_IDENTITY = {
 
 
 def _document(name: str, paragraphs: tuple[str, ...]):
-    body = "".join(f"<p>{text}</p>" for text in paragraphs)
+    body = "".join(f"<div><p>{text}</p></div>" for text in paragraphs)
     source = f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>{name}</title></head><body>{body}</body></html>'
     return extract_document(source, f"OPS/{name}.xhtml", "source-sha")
 

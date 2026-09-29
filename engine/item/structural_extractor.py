@@ -17,6 +17,7 @@ from lxml import etree  # type: ignore[attr-defined]
 
 from engine.core.markup import element_path, parse_xml_safely, qname_local_name
 from engine.core.styles import ReorderPolicy, StyleIssue, StyleScan, scan_inline_style, scan_stylesheets
+from engine.core.tokens import count_tokens
 from engine.item.inline import Event, events_to_projection, parse_projection
 from engine.schemas.source_internal import (
     DocumentPlan,
@@ -29,8 +30,10 @@ from engine.schemas.source_internal import (
     canonical_hash,
 )
 
-EXTRACTOR_VERSION = "epubox-extractor-3"
+EXTRACTOR_VERSION = "epubox-extractor-5"
 ADAPTER_VERSION = "epubox-xml-1"
+_MAX_GROUP_PARAGRAPHS = 8
+_MAX_GROUP_TEXT_TOKENS = 700
 
 _EPUB_TYPE = "{http://www.idpf.org/2007/ops}type"
 _XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
@@ -515,13 +518,52 @@ class _Extractor:
             if not direct_blocks:
                 self._make_whole_content_unit(node, translated, self._kind(node))
                 return
-        if name in _CONTAINER_TAGS or name in _SEMANTIC_TAGS:
+        grouped = (
             self._extract_direct_regions(node, translated)
+            if name in _CONTAINER_TAGS or name in _SEMANTIC_TAGS
+            else set()
+        )
         for child in node:
-            if isinstance(child.tag, str) and qname_local_name(child.tag) in _BLOCK_TAGS:
+            if child not in grouped and isinstance(child.tag, str) and qname_local_name(child.tag) in _BLOCK_TAGS:
                 self._walk(child, translated, metadata_mode)
 
-    def _extract_direct_regions(self, parent: etree._Element, translated: bool) -> None:
+    def _extract_direct_regions(self, parent: etree._Element, translated: bool) -> set[etree._Element]:
+        grouped: set[etree._Element] = set()
+        children = list(parent)
+        index = 0
+        while index < len(children):
+            first = index
+            text_tokens = 0
+            while index < len(children) and self._groupable_paragraph(children[index], translated):
+                paragraph_tokens = count_tokens("".join(children[index].itertext()))
+                if index > first and (
+                    index - first >= _MAX_GROUP_PARAGRAPHS or text_tokens + paragraph_tokens > _MAX_GROUP_TEXT_TOKENS
+                ):
+                    break
+                text_tokens += paragraph_tokens
+                index += 1
+            run = children[first:index]
+            after = children[first - 1] if first else None
+            before = children[index] if index < len(children) else None
+            lead = parent.text if after is None else after.tail
+            if (
+                len(run) > 1
+                and (after is None or isinstance(after.tag, str) and qname_local_name(after.tag) in _BLOCK_TAGS)
+                and (before is None or isinstance(before.tag, str) and qname_local_name(before.tag) in _BLOCK_TAGS)
+                and not (lead or "").strip()
+                and all(not (member.tail or "").strip() for member in run)
+                and self._make_region_unit(
+                    parent,
+                    after,
+                    before,
+                    translated,
+                    "paragraph_group",
+                    member_node_keys=tuple(self.node_keys[member] for member in run),
+                )
+            ):
+                grouped.update(run)
+            if index == first:
+                index += 1
         blocks = [
             child for child in parent if isinstance(child.tag, str) and qname_local_name(child.tag) in _BLOCK_TAGS
         ]
@@ -529,6 +571,17 @@ class _Extractor:
         for after in [*blocks, None]:
             self._make_region_unit(parent, before, after, translated, self._kind(parent, virtual=True))
             before = after
+        return grouped
+
+    def _groupable_paragraph(self, node: etree._Element, translated: bool) -> bool:
+        return (
+            isinstance(node.tag, str)
+            and qname_local_name(node.tag) == "p"
+            and self._translate_state(node, translated)
+            and not self._is_hard(node)
+            and not any(isinstance(child.tag, str) and qname_local_name(child.tag) in _BLOCK_TAGS for child in node)
+            and bool(_LATIN_RE.search("".join(node.itertext())))
+        )
 
     def _make_whole_content_unit(self, node: etree._Element, translated: bool, kind: str) -> None:
         self._make_region_unit(node, None, None, translated, kind)
@@ -540,18 +593,22 @@ class _Extractor:
         before_node: etree._Element | None,
         translated: bool,
         kind: str,
-    ) -> None:
+        *,
+        member_node_keys: tuple[str, ...] = (),
+    ) -> bool:
         members = self._region_members(parent, after_node, before_node)
         lead_slot = self._leading_slot(parent, after_node)
         has_latin = bool(lead_slot and _LATIN_RE.search(lead_slot.source_value)) or self._members_have_latin(members)
         if (not translated and not self._has_translate_yes(parent)) or not has_latin:
-            return
+            return False
         region = {
             "type": "content",
             "parent_node_key": self.node_keys[parent],
             "after_node_key": self.node_keys.get(after_node) if after_node is not None else None,
             "before_node_key": self.node_keys.get(before_node) if before_node is not None else None,
         }
+        if member_node_keys:
+            region["member_node_keys"] = member_node_keys
         unit_id = _stable_id("u", self.source_hash, self.resource_path, canonical_hash(region), EXTRACTOR_VERSION)
         registry: dict[str, RegistryEntry] = {}
         events: list[Event] = []
@@ -572,7 +629,17 @@ class _Extractor:
         for member in members:
             if member is after_node or member is before_node:
                 continue
-            self._emit_child(member, unit_id, events, registry, counter, slot_ids, self.node_keys[parent], translated)
+            self._emit_child(
+                member,
+                unit_id,
+                events,
+                registry,
+                counter,
+                slot_ids,
+                self.node_keys[parent],
+                translated,
+                paragraph_boundary=bool(member_node_keys),
+            )
             tail = self._tail_slot(member)
             if tail is not None:
                 self._emit_slot(
@@ -587,7 +654,7 @@ class _Extractor:
                 )
         events = list(self._constrain_hard_boundaries(tuple(events), registry, counter))
         if not any(event.kind == "text" and _LATIN_RE.search(event.value) for event in events):
-            return
+            return False
         projection = events_to_projection(events)
         self.units.append(
             Unit(
@@ -595,7 +662,7 @@ class _Extractor:
                 document_id=self.document_id,
                 kind=kind,
                 source_projection=projection,
-                node_key=self.node_keys[parent],
+                node_key=member_node_keys[0] if member_node_keys else self.node_keys[parent],
                 slot_ids=tuple(dict.fromkeys(slot_ids)),
                 registry=registry,
                 checks=("projection", "source_target", "format_binding"),
@@ -603,6 +670,7 @@ class _Extractor:
                 logical_hash="pending",
             )
         )
+        return True
 
     def _region_members(
         self, parent: etree._Element, after_node: etree._Element | None, before_node: etree._Element | None
@@ -641,6 +709,8 @@ class _Extractor:
         slot_ids: list[str],
         parent_ref: str,
         inherited_translate: bool,
+        *,
+        paragraph_boundary: bool = False,
     ) -> None:
         if not isinstance(node.tag, str):
             self._add_atom(
@@ -654,7 +724,7 @@ class _Extractor:
             return
         counter["g"] += 1
         ref = f"g{counter['g']}"
-        reorder = self._style_reorder_allowed(node) and self._inline_reorder_allowed(node)
+        reorder = not paragraph_boundary and self._style_reorder_allowed(node) and self._inline_reorder_allowed(node)
         registry[ref] = RegistryEntry(
             ref_id=ref,
             kind="g",
@@ -663,7 +733,8 @@ class _Extractor:
             movement="same_parent" if reorder else "locked",
             reorder_allowed=reorder,
             source_text="".join(node.itertext()),
-            hints={"element": qname_local_name(node.tag)},
+            hints={"element": qname_local_name(node.tag)}
+            | ({"source_view_boundary": "paragraph"} if paragraph_boundary else {}),
         )
         events.append(Event(kind="marker", value=f"+{ref}"))
         text_slot = self._slot_for(self.node_keys[node], "text")

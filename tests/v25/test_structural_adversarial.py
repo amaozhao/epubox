@@ -49,7 +49,7 @@ def _rewrite_epub(path: Path, replacements: dict[str, bytes], additions: dict[st
 
 def test_t02_same_label_link_and_emphasis_reorder_keep_source_identity() -> None:
     document = extract_document(
-        _source('<p><a href="#note">same</a> and <em>same</em></p><p id="note">Note.</p>'),
+        _source('<div><p><a href="#note">same</a> and <em>same</em></p></div><div><p id="note">Note.</p></div>'),
         "OPS/chapter.xhtml",
         "source-sha",
     )
@@ -73,7 +73,9 @@ def test_t02_same_label_link_and_emphasis_reorder_keep_source_identity() -> None
 
 def test_t03_bad_marker_candidates_are_rejected_without_poisoning_later_units() -> None:
     document = extract_document(
-        _source('<p><a href="#n">First</a> and <em>second</em>.</p><p id="n">Later content.</p>'),
+        _source(
+            '<div><p><a href="#n">First</a> and <em>second</em>.</p></div><div><p id="n">Later content.</p></div>'
+        ),
         "OPS/chapter.xhtml",
         "source-sha",
     )
@@ -122,7 +124,9 @@ def test_t07_first_child_and_unknown_css_lock_reorder_without_touching_unrelated
 
 def test_t17_actual_assembled_mutations_delete_duplicate_href_and_alt_are_rejected() -> None:
     document = extract_document(
-        _source('<p>Lead <a href="#note">link</a> tail<img src="chart.png" alt="Chart"/></p><p id="note">Note.</p>'),
+        _source(
+            '<div><p>Lead <a href="#note">link</a> tail<img src="chart.png" alt="Chart"/></p></div><div><p id="note">Note.</p></div>'
+        ),
         "OPS/chapter.xhtml",
         "source-sha",
     )

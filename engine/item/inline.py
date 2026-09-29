@@ -288,11 +288,12 @@ def _validate_locked_order(source: Mapping[str, Any], target: Mapping[str, Any],
         if kind == "b":
             groups[("boundary", parent_scope)].append(ref)
         if fixed_order:
-            if any(item not in source_index for item in fixed_order):
+            if any(item not in refs for item in fixed_order):
                 raise ProjectionError(f"fixed order for {ref} names an unknown reference")
-            source_fixed = tuple(sorted(fixed_order, key=source_index.__getitem__))
-            target_fixed = tuple(sorted(fixed_order, key=target_index.__getitem__))
-            if source_fixed != fixed_order or target_fixed != fixed_order:
+            present_fixed = tuple(item for item in fixed_order if item in source_index)
+            source_fixed = tuple(sorted(present_fixed, key=source_index.__getitem__))
+            target_fixed = tuple(sorted(present_fixed, key=target_index.__getitem__))
+            if source_fixed != present_fixed or target_fixed != present_fixed:
                 raise ProjectionError(f"fixed reference order changed: {fixed_order}")
         if kind == "x" and boundary in {"code", "formula", "math", "footnote", "br", "page", "anchor"}:
             groups[("hard", parent_scope)].append(ref)

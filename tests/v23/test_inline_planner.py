@@ -557,9 +557,9 @@ def test_coherence_windows_exclude_semantic_toc_and_index_regions_but_keep_their
     document = extract_document(
         '<html xmlns="http://www.w3.org/1999/xhtml" '
         'xmlns:epub="http://www.idpf.org/2007/ops"><body>'
-        f'<section epub:type="toc"><p>Contents.</p><p>{long_toc}</p></section>'
-        f'<section role="doc-index"><p>Index.</p><p>{long_index}</p></section>'
-        "<p>Outside navigation one.</p><p>Outside navigation two.</p>"
+        f'<section epub:type="toc"><div><p>Contents.</p></div><div><p>{long_toc}</p></div></section>'
+        f'<section role="doc-index"><div><p>Index.</p></div><div><p>{long_index}</p></div></section>'
+        "<div><p>Outside navigation one.</p></div><div><p>Outside navigation two.</p></div>"
         "</body></html>",
         "OPS/navigation.xhtml",
         "source-hash",
@@ -614,10 +614,10 @@ def test_frozen_document_relations_cover_table_rows_notes_and_independent_seams(
         '<html xmlns="http://www.w3.org/1999/xhtml" '
         'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>'
         f"{long_text}</title></head><body>"
-        '<p id="p1">Body one<a epub:type="noteref" href="#n1">1</a>.</p>'
-        '<p id="p2">Body two<a role="doc-noteref" href="chapter.xhtml#n%32">2</a>.</p>'
-        '<p>Read the <a href="#topic">topic</a> and '
-        '<a href="https://example.invalid/chapter.xhtml#n1">external note</a>.</p>'
+        '<div><p id="p1">Body one<a epub:type="noteref" href="#n1">1</a>.</p></div>'
+        '<div><p id="p2">Body two<a role="doc-noteref" href="chapter.xhtml#n%32">2</a>.</p></div>'
+        '<div><p>Read the <a href="#topic">topic</a> and '
+        '<a href="https://example.invalid/chapter.xhtml#n1">external note</a>.</p></div>'
         '<h2 id="topic">Topic</h2>'
         "<table>"
         + "".join(
