@@ -45,12 +45,13 @@ from engine.schemas.v25 import (
     UserTerm,
     candidate_pool_record_hash,
     canonical_hash,
+    canonical_json_bytes,
     parse_contract,
     unit_record_hash,
     validate_cut_plan_coverage,
     validate_term_scopes,
 )
-from engine.services.store import CorruptRecord, IdentityMismatch, StaleWrite, Store
+from engine.services.atomic_store import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite
 from engine.services.term_planning import plan_term_extraction
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -72,19 +73,31 @@ class StoreV25:
     """
 
     def __init__(self, root: Path | str):
-        self._base = Store(root)
+        self._base = AtomicStore(
+            root,
+            directories=("documents", "units", "checks", "requests", "staging", "glossary/extraction"),
+        )
         self.root = self._base.root
-        (self.root / "glossary" / "extraction").mkdir(parents=True, exist_ok=True)
+        self._unit_context_cache: (
+            tuple[
+                tuple[tuple[int, int], ...],
+                PreparationPlan,
+                dict[str, DocumentPlan],
+                FreezeIntent,
+                GlossarySnapshot,
+            ]
+            | None
+        ) = None
 
     def lock(self, *, blocking: bool = True):
         return self._base.lock(blocking=blocking)
 
     def _path(self, directory: str, record_id: str) -> Path:
-        return self._base._path(directory, record_id)
+        return self._base.path(directory, record_id)
 
     @staticmethod
     def _atomic_write(path: Path, value: BaseModel | dict[str, JsonValue]) -> str:
-        return Store._atomic_write(path, value)
+        return AtomicStore.atomic_write_bytes(path, canonical_json_bytes(value))
 
     @staticmethod
     def _file_hash(path: Path) -> str:
@@ -379,8 +392,14 @@ class StoreV25:
     def _with_unit_hash(record: UnitRecord) -> UnitRecord:
         return record.model_copy(update={"record_hash": unit_record_hash(record)})
 
-    def _unit_source(self, unit_id: str) -> tuple[PreparationPlan, DocumentPlan, Unit]:
-        preparation, documents = self._trusted_preparation_documents()
+    def _unit_source(self, unit_id: str) -> tuple[PreparationPlan, DocumentPlan, Unit, FreezeIntent, GlossarySnapshot]:
+        fingerprint = self._shared_fingerprint()
+        if self._unit_context_cache is None or self._unit_context_cache[0] != fingerprint:
+            preparation, documents = self._trusted_preparation_documents()
+            freeze, glossary = self._trusted_frozen_glossary(preparation)
+            fingerprint = self._shared_fingerprint()
+            self._unit_context_cache = (fingerprint, preparation, documents, freeze, glossary)
+        _, preparation, documents, freeze, glossary = self._unit_context_cache
         document_id = preparation.unit_documents.get(unit_id)
         if document_id is None:
             raise IdentityMismatch(f"unknown UnitRecord source Unit: {unit_id}")
@@ -388,13 +407,25 @@ class StoreV25:
         unit = next((item for item in document.units if item.unit_id == unit_id), None)
         if unit is None:
             raise IdentityMismatch(f"Unit inventory does not contain {unit_id}")
-        return preparation, document, unit
+        return preparation, document, unit, freeze, glossary
+
+    def _shared_fingerprint(self) -> tuple[tuple[int, int], ...]:
+        paths = (
+            self.root / "source.epub",
+            self.root / "preparation.json",
+            self.root / "documents",
+            self.root / "glossary.json",
+            self.root / "glossary" / "freeze.json",
+            self.root / "glossary" / "plan.json",
+            self.root / "glossary" / "candidates.json",
+            self.root / "glossary" / "extraction",
+        )
+        return tuple((status.st_mtime_ns, status.st_size) for path in paths for status in (path.stat(),))
 
     def _validate_unit_record(self, record: UnitRecord) -> None:
-        preparation, document, unit = self._unit_source(record.unit_id)
+        preparation, document, unit, _, glossary = self._unit_source(record.unit_id)
         if (record.document_id, record.source_hash) != (document.document_id, preparation.source_hash):
             raise IdentityMismatch(f"UnitRecord source identity mismatch: {record.unit_id}")
-        _, glossary = self._trusted_frozen_glossary(preparation)
         term_ids = {term.term_id for term in glossary.terms}
         if record.cut_plan is None:
             if record.logical_hash is not None or record.input_hash is not None or record.items:
@@ -530,6 +561,8 @@ class StoreV25:
             expected_units = tuple(
                 unit.unit_id for document_id in ordered_documents for unit in documents[document_id].units
             )
+            reading_edges = tuple(zip(preparation.reading_order, preparation.reading_order[1:], strict=False))
+            context_chars = self._config_int(preparation.translation_config, "context_chars", 400)
             if plan.unit_ids != expected_units or plan.required_unit_count != len(expected_units):
                 raise IdentityMismatch("BookPlan Unit inventory differs from DocumentPlans")
             disk_units = {entry.stem for entry in (self.root / "units").glob("*.json")}
@@ -549,7 +582,15 @@ class StoreV25:
                 if record.cut_plan is not None:
                     document = documents[record.document_id]
                     unit = next(unit for unit in document.units if unit.unit_id == unit_id)
-                    expected = plan_unit_v25(unit, document, glossary, preparation.translation_config)
+                    expected = plan_unit_v25(
+                        unit,
+                        document,
+                        glossary,
+                        preparation.translation_config,
+                        documents=documents,
+                        reading_edges=reading_edges,
+                        context_chars=context_chars,
+                    )
                     if (
                         record.logical_hash != expected.logical_hash
                         or record.input_hash != expected.input_hash
@@ -566,10 +607,27 @@ class StoreV25:
                 ):
                     raise IdentityMismatch(f"initial UnitRecord already contains item results: {unit_id}")
 
-            for request_path in sorted((self.root / "requests").glob("*.json")):
-                request = self.read_request(request_path.stem)
-                if request.stage in {"terms", "resolution"} and any(
-                    attempt.state in {"reserved", "sent", "unknown"} for attempt in request.attempts
+            requests = tuple(
+                self.read_request(request_path.stem)
+                for request_path in sorted((self.root / "requests").glob("*.json"))
+            )
+            term_requests = tuple(request for request in requests if request.stage in {"terms", "resolution"})
+            succeeded_owners = {
+                (request.stage, request.owner_kind, request.owner_id)
+                for request in term_requests
+                if any(attempt.state == "succeeded" for attempt in request.attempts)
+            }
+            for request in term_requests:
+                if (request.stage, request.owner_kind, request.owner_id) not in succeeded_owners and any(
+                    attempt.state in {"sent", "unknown"}
+                    or (
+                        attempt.state == "reserved"
+                        and any(
+                            value is not None
+                            for value in (attempt.sent_at, attempt.finished_at, attempt.usage, attempt.error)
+                        )
+                    )
+                    for attempt in request.attempts
                 ):
                     raise IdentityMismatch(f"term request is not terminal: {request.request_id}")
             return self._atomic_write(path, plan)

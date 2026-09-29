@@ -21,7 +21,7 @@ from engine.schemas.v25 import (
     cut_plan_hash,
     segment_hash,
 )
-from engine.services.store import IdentityMismatch, StaleWrite
+from engine.services.atomic_store import IdentityMismatch, StaleWrite
 from engine.services.store_v25 import StoreV25
 from engine.services.term_freeze import freeze_terminology
 from tests.v25.test_store import _prepare, _write_term_plan
@@ -62,11 +62,17 @@ def _unit_record(
 ) -> UnitRecord:
     preparation = store.read_preparation()
     document = store.read_document(unit.document_id)
+    documents = {document_id: store.read_document(document_id) for document_id in preparation.document_hashes}
+    context_chars = preparation.translation_config.get("context_chars", 400)
+    assert isinstance(context_chars, int)
     initialized = plan_unit_v25(
         unit,
         document,
         store.read_glossary(),
         preparation.translation_config,
+        documents=documents,
+        reading_edges=tuple(zip(preparation.reading_order, preparation.reading_order[1:], strict=False)),
+        context_chars=context_chars,
     )
     cut_plan = initialized.cut_plan
     items = initialized.items
@@ -189,3 +195,58 @@ def test_ready_rejects_missing_unit_and_unresolved_term_attempt(tmp_path: Path) 
     store._atomic_write(request_path, request)
     with pytest.raises(IdentityMismatch, match="term request is not terminal"):
         store.write_bookplan(_bookplan(store, stored))
+
+
+def test_reserved_but_never_sent_term_attempt_occupies_budget_without_blocking_ready(tmp_path: Path) -> None:
+    store, unit = _frozen_store(tmp_path)
+    stored = store.save_unit(_unit_record(store, unit))
+    term_item = store.read_term_plan().items[0]
+    request = RequestManifest(
+        request_id="reserved-only",
+        stage="terms",
+        owner_kind="extraction_item",
+        owner_id=term_item.item_id,
+        item_ids=(term_item.item_id,),
+        input_hashes={term_item.item_id: term_item.extraction_input_hash},
+        wire_hash="wire",
+        attempts=(
+            Attempt(
+                attempt_id="reserved-attempt",
+                affected_items=(term_item.item_id,),
+                reservation={"http": 1},
+                created_at="2026-09-29T00:00:00Z",
+            ),
+        ),
+    )
+    store._atomic_write(store._path("requests", request.request_id), request)
+
+    store.write_bookplan(_bookplan(store, stored))
+    persisted = store.read_request(request.request_id).attempts[0]
+    assert persisted.state == "reserved" and persisted.sent_at is None and persisted.usage is None
+
+
+def test_unit_cas_reuses_one_verified_shared_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, unit = _frozen_store(tmp_path)
+    counts = {"preparation": 0, "freeze": 0}
+    load_preparation = store._trusted_preparation_documents
+    load_freeze = store._trusted_frozen_glossary
+
+    def counted_preparation():
+        counts["preparation"] += 1
+        return load_preparation()
+
+    def counted_freeze(preparation=None):
+        counts["freeze"] += 1
+        return load_freeze(preparation)
+
+    monkeypatch.setattr(store, "_trusted_preparation_documents", counted_preparation)
+    monkeypatch.setattr(store, "_trusted_frozen_glossary", counted_freeze)
+    current = store.save_unit(_unit_record(store, unit))
+    for version in range(1, 21):
+        current = store.save_unit(
+            current.model_copy(update={"record_version": version}),
+            expected_record_version=version - 1,
+        )
+
+    assert current.record_version == 20
+    assert counts == {"preparation": 1, "freeze": 1}

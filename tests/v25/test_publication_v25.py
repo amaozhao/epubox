@@ -21,7 +21,6 @@ from engine.schemas.v25 import (
     UnitRecord,
     canonical_hash,
 )
-from engine.services.store import Store
 from engine.services.store_v25 import StoreV25
 from tests.v23.book_factory import make_epub
 
@@ -301,7 +300,7 @@ def test_publication_rejects_unaccepted_v25_record_and_legacy_store(
     with pytest.raises(EpubValidationError, match="not currently accepted"):
         publish_book(store, tmp_path / "review-1.epub", StubChecker())
     with pytest.raises(TypeError, match="StoreV25"):
-        publish_book(cast(Any, Store(tmp_path / "legacy")), tmp_path / "legacy.epub", StubChecker())
+        publish_book(cast(Any, object()), tmp_path / "legacy.epub", StubChecker())
 
 
 def test_publication_rejects_record_changed_during_package_verification(

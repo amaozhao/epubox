@@ -13,11 +13,12 @@ from pathlib import Path
 
 from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
+from engine.epub.derived_bindings import resolve_derived_navigation
 from engine.epub.validation import EpubChecker, PackageInventory, ZipLimits, inspect_epub
 from engine.item.extractor import select_primary_title
 from engine.item.extractor_v25 import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
 from engine.schemas.v25 import JsonValue, PreparationPlan
-from engine.services.store import Store
+from engine.services.atomic_store import AtomicStore
 from engine.services.store_v25 import StoreV25
 from engine.services.term_inputs import load_user_terms
 from engine.services.term_planning import TERM_PLANNER_VERSION
@@ -72,7 +73,7 @@ def prepare_book(
             temporary_snapshot.unlink()
         else:
             os.replace(temporary_snapshot, snapshot)
-            Store._sync_directory(work_dir)
+            AtomicStore.sync_directory(work_dir)
             snapshot.chmod(0o444)
     except BaseException:
         temporary_snapshot.unlink(missing_ok=True)
@@ -82,7 +83,6 @@ def prepare_book(
     with store.lock(blocking=False):
         inventory = inspect_epub(snapshot, source_hash, checker=checker, limits=config.zip_limits)
         documents = []
-        document_hashes: dict[str, str] = {}
         with zipfile.ZipFile(snapshot) as archive:
             manifest = {item.path: item for item in inventory.manifest}
             styles = {
@@ -111,8 +111,10 @@ def prepare_book(
                     raise ValueError(
                         f"Extractor version mismatch: {document.extractor_version} != {config.extractor_version}"
                     )
-                document_hashes[document.document_id] = store.write_document(document)
                 documents.append(document)
+
+        documents = list(resolve_derived_navigation(documents))
+        document_hashes = {document.document_id: store.write_document(document) for document in documents}
 
         by_resource = {document.resource.path: document for document in documents}
         reading_order = tuple(

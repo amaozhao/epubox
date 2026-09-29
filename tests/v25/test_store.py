@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import engine.services.store as base_store_module
+import engine.services.atomic_store as base_store_module
 from engine.item.source_views import SOURCE_VIEW_RULE_VERSION, SourceViewError
 from engine.schemas.v25 import (
     Attempt,
@@ -28,7 +28,7 @@ from engine.schemas.v25 import (
     source_view_hash_payload,
     term_plan_hash,
 )
-from engine.services.store import CorruptRecord, IdentityMismatch, StaleWrite, StoreLocked
+from engine.services.atomic_store import CorruptRecord, IdentityMismatch, StaleWrite, StoreLocked
 from engine.services.store_v25 import StoreV25
 from engine.services.term_planning import plan_term_extraction
 from tests.v23.book_factory import make_epub
@@ -160,6 +160,12 @@ def test_store_replays_source_views_before_accepting_a_document(tmp_path: Path) 
 
     with pytest.raises(SourceViewError, match="do not match frozen"):
         StoreV25(tmp_path).write_document(bad)
+
+
+@pytest.mark.parametrize("record_id", ("../escape", "nested/name", ".", ".."))
+def test_atomic_store_rejects_unsafe_record_ids(tmp_path: Path, record_id: str) -> None:
+    with pytest.raises(ValueError, match="unsafe record id"):
+        StoreV25(tmp_path)._path("documents", record_id)
 
 
 def test_preparation_is_last_commit_and_rejects_partial_or_changed_inventory(tmp_path: Path) -> None:

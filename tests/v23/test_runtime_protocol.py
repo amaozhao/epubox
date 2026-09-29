@@ -24,7 +24,30 @@ from engine.agents.runtime_v23 import (
     wire_hash,
 )
 from engine.schemas.v23 import Attempt, RequestManifest
-from engine.services.store import Store
+
+
+class MemoryJournal:
+    def __init__(self):
+        self.requests: dict[str, RequestManifest] = {}
+
+    def write_request(self, request: RequestManifest) -> None:
+        self.requests[request.request_id] = request
+
+    def read_request(self, request_id: str) -> RequestManifest:
+        return self.requests[request_id]
+
+    def reserve_attempt(self, request_id: str, attempt: Attempt) -> None:
+        request = self.read_request(request_id)
+        self.requests[request_id] = request.model_copy(update={"attempts": (*request.attempts, attempt)})
+
+    def finish_attempt(self, request_id: str, attempt_id: str, **fields) -> None:
+        request = self.read_request(request_id)
+        updates = {key: value for key, value in fields.items() if value is not None}
+        attempts = tuple(
+            attempt.model_copy(update=updates) if attempt.attempt_id == attempt_id else attempt
+            for attempt in request.attempts
+        )
+        self.requests[request_id] = request.model_copy(update={"attempts": attempts})
 
 
 def payload(kind: str, request_id: str = "r1") -> dict:
@@ -309,7 +332,7 @@ async def test_runtime_does_not_call_provider_when_preflight_reservation_fails()
 
 @pytest.mark.asyncio
 async def test_runtime_records_each_real_http_attempt_in_the_run_store(tmp_path):
-    store = Store(tmp_path)
+    store = MemoryJournal()
     store.write_request(
         RequestManifest(
             request_id="r1",
@@ -395,7 +418,7 @@ async def test_repeated_shared_service_failures_pause_instead_of_burning_more_it
 
 @pytest.mark.asyncio
 async def test_repeated_connection_failures_pause_after_three_unknown_attempts(tmp_path):
-    store = Store(tmp_path)
+    store = MemoryJournal()
     store.write_request(
         RequestManifest(
             request_id="r1",
@@ -431,7 +454,7 @@ async def test_repeated_connection_failures_pause_after_three_unknown_attempts(t
 
 @pytest.mark.asyncio
 async def test_cancellation_marks_a_reserved_attempt_unknown(tmp_path):
-    store = Store(tmp_path)
+    store = MemoryJournal()
     store.write_request(
         RequestManifest(
             request_id="r1",
@@ -657,7 +680,7 @@ async def test_provider_error_redacts_only_the_exact_configured_api_key(tmp_path
         def get_request_params(self, **_kwargs):
             return {"max_completion_tokens": self.max_completion_tokens}
 
-    store = Store(tmp_path)
+    store = MemoryJournal()
     store.write_request(
         RequestManifest(
             request_id="r1",
