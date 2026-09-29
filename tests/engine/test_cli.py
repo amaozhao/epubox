@@ -8,6 +8,7 @@ import pytest
 
 from engine import cli
 from engine.epub.preparation import prepare_book
+from engine.schemas.contracts import ItemStatus
 from engine.services.atomic_store import AtomicStore, StoreLocked
 from engine.services.coherence import load_budget_overrides
 from tests.engine.epub.book_factory import make_epub
@@ -368,6 +369,36 @@ def test_same_manual_authorization_replay_does_not_add_budget_twice(tmp_path: Pa
     with pytest.raises(ValueError, match="different resume action"):
         authorize(7)
     assert load_budget_overrides(store)["add_run_http"] == 6
+
+
+def test_same_retry_authorization_does_not_add_logical_grant_twice(tmp_path: Path) -> None:
+    store, unit, initial = ready_store(tmp_path)
+    item_id = next(iter(initial.items))
+    item = initial.items[item_id].model_copy(
+        update={
+            "status": ItemStatus.NEEDS_ATTENTION,
+            "failure": {"stage": "translate", "code": "request_failed", "message": "manual retry"},
+        }
+    )
+    store.save_unit(
+        initial.model_copy(update={"record_version": initial.record_version + 1, "items": {item_id: item}}),
+        expected_record_version=initial.record_version,
+    )
+
+    for _ in range(2):
+        cli._authorize_resume_actions(
+            store,
+            retry_units=(unit.unit_id,),
+            add_unit_http=0,
+            add_run_http=0,
+            retry_checks=(),
+            add_check_http=0,
+            repair_file=None,
+            authorization_id="same-retry",
+        )
+
+    record = store.read_unit(unit.unit_id)
+    assert record.counters[f"explicit_retry_translate:{item_id}"] == 1
 
 
 def test_only_known_empty_term_freeze_can_be_superseded(tmp_path: Path, monkeypatch) -> None:

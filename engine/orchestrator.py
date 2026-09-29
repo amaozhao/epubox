@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -26,7 +27,14 @@ from engine.agents.term_protocol import validate_review_response
 from engine.core.quality import find_degenerate_translation
 from engine.core.tokens import count_tokens
 from engine.epub.assembly import derive_navigation_projection
-from engine.item.inline import Event, events_to_projection, parse_projection, plain_text, validate_projection
+from engine.item.inline import (
+    Event,
+    ProjectionError,
+    events_to_projection,
+    parse_projection,
+    plain_text,
+    validate_projection,
+)
 from engine.item.planner import (
     MAX_SOURCE_TOKENS,
     PlannerConfig,
@@ -39,6 +47,7 @@ from engine.schemas.contracts import (
     Attempt,
     DocumentPlan,
     FrozenTerm,
+    ItemRecord,
     ItemStatus,
     JsonValue,
     RequestManifest,
@@ -400,7 +409,16 @@ class TranslationEngine:
                 self._apply_response(manifest, tuple(jobs), response.raw)
             except ProtocolError as error:
                 for job in jobs:
-                    self._fail_item(self.records[job.unit_id], job.item_id, job.stage, str(error), retry=True)
+                    self._fail_item(
+                        self.records[job.unit_id],
+                        job.item_id,
+                        job.stage,
+                        str(error),
+                        retry=True,
+                        code=(
+                            "translation_protocol_rejected" if job.stage == "translate" else "review_protocol_rejected"
+                        ),
+                    )
 
     def _replay_coherence_responses(self, document_id: str, check: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         pending = {
@@ -482,6 +500,8 @@ class TranslationEngine:
                     self._advance_local_state()
                     jobs = self._ready_jobs()
                     if not jobs:
+                        if self._recover_terminal_items():
+                            continue
                         break
                     batches = self._pack_jobs(jobs)
                     if not batches:
@@ -904,7 +924,9 @@ class TranslationEngine:
             local_checks={},
             review=None,
             unresolved_issues=tuple(
-                issue for issue in record.unresolved_issues if issue.get("code") != "planning_retry"
+                issue
+                for issue in record.unresolved_issues
+                if issue.get("code") not in {"planning_retry", "blocking_review"}
             ),
             counters=counters,
         )
@@ -916,6 +938,12 @@ class TranslationEngine:
             check.get("status") == "valid" for check in self.checks.values()
         ):
             return "translated", None
+        if any(
+            issue.get("code") in {"blocking_review", "blocking_coherence"}
+            for record in self.records.values()
+            for issue in record.unresolved_issues
+        ):
+            return "needs_attention", "translation has unresolved blocking review issues"
         if any(check.get("status") == "blocked_dependency" for check in self.checks.values()):
             return "needs_attention", "chapter coherence is blocked by missing Unit acceptance"
         if any(check.get("status") == "needs_attention" for check in self.checks.values()):
@@ -1047,6 +1075,11 @@ class TranslationEngine:
                 and record.items
                 and all(item.status == ItemStatus.REVIEWED for item in record.items.values())
             ):
+                if any(
+                    issue.get("code") in {"blocking_review", "blocking_coherence"}
+                    for issue in record.unresolved_issues
+                ):
+                    continue
                 target_hash = canonical_hash(record.candidate)
                 item_reviews: dict[str, dict[str, JsonValue]] = {}
                 invalid = False
@@ -1179,16 +1212,190 @@ class TranslationEngine:
                     ItemStatus.CANDIDATE,
                 }:
                     continue
-                limit = 3 if stage == "translate" else 2
+                limit = self._logical_limit(record, item.item_id, stage)
                 logical_calls = self._logical_calls(
                     item.item_id, stage, record.revision if stage == "review" else None
                 )
                 if logical_calls >= limit:
-                    self._fail_item(record, item.item_id, stage, "logical attempt limit exhausted", retry=False)
+                    self._fail_item(
+                        record,
+                        item.item_id,
+                        stage,
+                        "logical attempt limit exhausted",
+                        retry=False,
+                        code="logical_attempt_limit",
+                    )
                     record = self.records[unit_id]
                     continue
                 jobs.append(_Job(stage, unit_id, item.item_id))
         return jobs
+
+    def _logical_limit(self, record: UnitRecord, item_id: str, stage: str) -> int:
+        base = 3 if stage == "translate" else 2
+        return (
+            base
+            + int(self._automatic_recovery_active(record, item_id, stage))
+            + record.counters.get(f"explicit_retry_{stage}:{item_id}", 0)
+        )
+
+    @staticmethod
+    def _automatic_recovery_active(record: UnitRecord, item_id: str, stage: str) -> bool:
+        return bool(record.counters.get(f"automatic_recovery_{stage}:{item_id}", 0)) and (
+            stage == "translate"
+            or record.counters.get(f"automatic_recovery_review_revision:{item_id}") == record.revision
+        )
+
+    def _recover_terminal_items(self) -> bool:
+        """Grant one durable retry only for classified model-content failures."""
+        if self._spent() >= self.run_limit:
+            return False
+        changed = False
+        for unit_id in self.book.unit_ids:
+            record = self.records[unit_id]
+            if record.derived is not None or record.cut_plan is None or record.accepted_revision is not None:
+                continue
+            if max(record.counters.get("http_attempts", 0), self._spent_by_unit.get(unit_id, 0)) >= self._unit_limit(
+                record
+            ):
+                continue
+            translate_failures: list[tuple[str, str]] = []
+            review_failures: list[tuple[str, list[dict[str, JsonValue]]]] = []
+            for item_id, item in record.items.items():
+                if item.status != ItemStatus.NEEDS_ATTENTION or item.failure is None:
+                    continue
+                classified = _recoverable_failure(item) or self._journaled_review_failure(record, item_id, item)
+                if classified is None:
+                    continue
+                stage, kind, issues = classified
+                marker = f"automatic_recovery_{stage}:{item_id}"
+                if record.counters.get(marker, 0):
+                    continue
+                if stage == "review":
+                    review_failures.append((item_id, issues))
+                else:
+                    translate_failures.append((item_id, kind))
+            replanned = False
+            for item_id, kind in translate_failures:
+                record = self.records[unit_id]
+                if item_id not in record.items:
+                    continue
+                if kind == "truncated" and self._upgrade_cut_plan(unit_id, "automatic truncated response recovery"):
+                    changed = replanned = True
+                    break
+                counters = dict(record.counters)
+                counters[f"automatic_recovery_translate:{item_id}"] = 1
+                item = record.items[item_id].model_copy(
+                    update={"status": ItemStatus.RETRY_WAIT, "next_action": "translate"}
+                )
+                record = self._save(record, items=dict(record.items) | {item_id: item}, counters=counters)
+                changed = True
+            if replanned:
+                continue
+            if review_failures:
+                counters = dict(record.counters)
+                unresolved = list(record.unresolved_issues)
+                recovered_revision = record.revision + 1
+                for item_id, issues in review_failures:
+                    counters[f"automatic_recovery_review:{item_id}"] = 1
+                    counters[f"automatic_recovery_review_revision:{item_id}"] = recovered_revision
+                    issue_values: list[JsonValue] = [dict(issue) for issue in issues]
+                    unresolved.append(
+                        {
+                            "stage": "review",
+                            "code": "blocking_review",
+                            "item_id": item_id,
+                            "message": "review requires a validated replacement",
+                            "issues": issue_values,
+                        }
+                    )
+                counters["review_cycle"] = counters.get("review_cycle", 0) + 1
+                items = {
+                    item_id: item
+                    if item.target_projection is None
+                    else item.model_copy(
+                        update={
+                            "status": ItemStatus.LOCAL_VALID,
+                            "checks": {},
+                            "request_id": None,
+                            "failure": None,
+                            "next_action": "review",
+                        }
+                    )
+                    for item_id, item in record.items.items()
+                }
+                record = self._save(
+                    record,
+                    revision=recovered_revision,
+                    items=items,
+                    candidate=None,
+                    accepted_revision=None,
+                    accepted_target_hash=None,
+                    local_checks={},
+                    review=None,
+                    unresolved_issues=tuple(unresolved),
+                    counters=counters,
+                )
+                changed = True
+        return changed
+
+    def _journaled_review_failure(
+        self, record: UnitRecord, item_id: str, item: ItemRecord
+    ) -> tuple[Literal["review"], str, list[dict[str, JsonValue]]] | None:
+        """Recover one truncated legacy review failure from its immutable validated response."""
+        failure = item.failure or {}
+        request_id = item.request_id
+        if (
+            item.target_projection is None
+            or failure.get("stage") != "review"
+            or failure.get("code") != "request_failed"
+            or not isinstance(request_id, str)
+        ):
+            return None
+        manifest = self._request_cache.get(request_id)
+        if (
+            manifest is None
+            or manifest.stage != "review"
+            or manifest.freeze_id != self.book.freeze_id
+            or manifest.glossary_file_sha256 != self.book.glossary_file_sha256
+            or manifest.item_unit_ids.get(item_id) != (record.unit_id,)
+        ):
+            return None
+        if (
+            manifest.revisions.get(record.unit_id) != record.revision
+            or manifest.plan_epochs.get(record.unit_id) != record.plan_epoch
+            or manifest.input_hashes.get(item_id) != record.input_hash
+            or manifest.target_hashes.get(item_id) != item.target_hash
+        ):
+            return None
+        segment = _segment(record, item_id)
+        if (
+            manifest.terms_hashes.get(item_id) != segment.terms_hash
+            or manifest.context_hashes.get(item_id) != segment.context_hash
+        ):
+            return None
+        expected = {
+            item_id: {
+                "base_revision": record.revision,
+                "terminology_applicable": any(value == "target" for value in segment.term_applicability.values()),
+                "bindings_applicable": bool(self.units[record.unit_id].registry),
+            }
+        }
+        for attempt in reversed(manifest.attempts):
+            if attempt.state != "succeeded":
+                continue
+            response = self.store.read_model_response("review", request_id, attempt.attempt_id)
+            if response is None or response.finish_reason == "length":
+                continue
+            try:
+                parsed = validate_review_response(response.raw, request_id, expected)
+            except ProtocolError:
+                return None
+            result = parsed.accepted.get(item_id)
+            if result is None or result.get("decision") != "needs_attention":
+                return None
+            issues = _normalized_review_issues(result.get("issues"))
+            return ("review", "needs_attention", issues) if issues else None
+        return None
 
     def _pack_jobs(self, jobs: Sequence[_Job]) -> list[tuple[_Job, ...]]:
         result: list[tuple[_Job, ...]] = []
@@ -1203,19 +1410,34 @@ class TranslationEngine:
                     )
                 except ValueError as error:
                     if not self._upgrade_cut_plan(job.unit_id, str(error)):
-                        self._fail_item(self.records[job.unit_id], job.item_id, stage, str(error), retry=False)
+                        self._fail_item(
+                            self.records[job.unit_id],
+                            job.item_id,
+                            stage,
+                            str(error),
+                            retry=False,
+                            code=(
+                                "translation_output_oversized" if stage == "translate" else "review_output_oversized"
+                            ),
+                        )
                     continue
                 staged.append(job)
             forced: dict[str, list[_Job]] = {}
+            singletons: list[_Job] = []
             ordinary: list[_Job] = []
             for job in staged:
-                failure = self.records[job.unit_id].items[job.item_id].failure or {}
+                record = self.records[job.unit_id]
+                failure = record.items[job.item_id].failure or {}
+                if self._automatic_recovery_active(record, job.item_id, job.stage):
+                    singletons.append(job)
+                    continue
                 split_id = failure.get("split_id") if failure.get("code") == "truncated_batch" else None
                 if isinstance(split_id, str):
                     forced.setdefault(split_id, []).append(job)
                 else:
                     ordinary.append(job)
             result.extend(tuple(group) for group in forced.values())
+            result.extend((job,) for job in singletons)
             chunks: list[list[_Job]] = []
             current: list[_Job] = []
             for job in ordinary:
@@ -1257,6 +1479,7 @@ class TranslationEngine:
                 job.stage,
                 "model response was truncated",
                 retry=False,
+                code="model_response_truncated",
             )
             return
         if not pending:
@@ -1270,6 +1493,7 @@ class TranslationEngine:
                     job.stage,
                     "model response was truncated; retrying a smaller batch",
                     retry=True,
+                    code="model_response_truncated",
                 )
                 record = self.records[job.unit_id]
                 item = record.items[job.item_id]
@@ -1313,6 +1537,7 @@ class TranslationEngine:
                     stage,
                     f"model input exceeds {MAX_MODEL_INPUT_TOKENS} tokens: {input_tokens}",
                     retry=False,
+                    code="model_input_oversized",
                 )
             return
         if output_tokens > self.output_tokens:
@@ -1334,6 +1559,7 @@ class TranslationEngine:
                         stage,
                         "request output budget exceeded",
                         retry=False,
+                        code=("translation_output_oversized" if stage == "translate" else "review_output_oversized"),
                     )
             return
         manifest = self._manifest(request_id, stage, jobs, payload, output_tokens)
@@ -1373,7 +1599,14 @@ class TranslationEngine:
         except (ProtocolError, MalformedEnvelopeError, RequestError) as error:
             for job in jobs:
                 retry = not isinstance(error, RequestError) or error.attempts > 0
-                self._fail_item(self.records[job.unit_id], job.item_id, stage, str(error), retry=retry)
+                code = (
+                    "translation_protocol_rejected"
+                    if stage == "translate" and isinstance(error, (ProtocolError, MalformedEnvelopeError))
+                    else "review_protocol_rejected"
+                    if stage == "review" and isinstance(error, (ProtocolError, MalformedEnvelopeError))
+                    else "request_failed"
+                )
+                self._fail_item(self.records[job.unit_id], job.item_id, stage, str(error), retry=retry, code=code)
 
     def _manifest(
         self,
@@ -1460,11 +1693,16 @@ class TranslationEngine:
                     "bindings": _bindings(segment.source_projection, item.target_projection or "", unit),
                 }
             )
-            required = [
+            required: list[Any] = [
                 str(issue.get("message", ""))
                 for issue in record.unresolved_issues
                 if issue.get("code") == "blocking_coherence"
             ]
+            required.extend(
+                dict(issue)
+                for issue in record.unresolved_issues
+                if issue.get("code") == "blocking_review" and issue.get("item_id") == job.item_id
+            )
             if required:
                 payload["required_revision"] = required
         return payload
@@ -1475,12 +1713,35 @@ class TranslationEngine:
             for job in jobs:
                 if job.item_id not in parsed.accepted:
                     message = parsed.errors.get(job.item_id, "translation item missing")
-                    self._fail_item(self.records[job.unit_id], job.item_id, "translate", message, retry=True)
+                    self._fail_item(
+                        self.records[job.unit_id],
+                        job.item_id,
+                        "translate",
+                        message,
+                        retry=True,
+                        code="translation_protocol_rejected",
+                    )
                     continue
                 try:
                     self._apply_translation(manifest, job, str(parsed.accepted[job.item_id]["target"]))
+                except ProjectionError as error:
+                    self._fail_item(
+                        self.records[job.unit_id],
+                        job.item_id,
+                        "translate",
+                        str(error),
+                        retry=True,
+                        code="projection_protocol_rejected",
+                    )
                 except (ValueError, ProtocolError) as error:
-                    self._fail_item(self.records[job.unit_id], job.item_id, "translate", str(error), retry=True)
+                    self._fail_item(
+                        self.records[job.unit_id],
+                        job.item_id,
+                        "translate",
+                        str(error),
+                        retry=True,
+                        code="translation_protocol_rejected",
+                    )
             return
         expected = {
             job.item_id: {
@@ -1497,7 +1758,14 @@ class TranslationEngine:
         for job in jobs:
             if job.item_id not in parsed.accepted:
                 message = parsed.errors.get(job.item_id, "review item missing")
-                self._fail_item(self.records[job.unit_id], job.item_id, "review", message, retry=True)
+                self._fail_item(
+                    self.records[job.unit_id],
+                    job.item_id,
+                    "review",
+                    message,
+                    retry=True,
+                    code="review_protocol_rejected",
+                )
                 continue
             try:
                 self._apply_review(
@@ -1507,7 +1775,14 @@ class TranslationEngine:
                     parsed.rejected_suggestions.get(job.item_id, ()),
                 )
             except (ValueError, ProtocolError) as error:
-                self._fail_item(self.records[job.unit_id], job.item_id, "review", str(error), retry=True)
+                self._fail_item(
+                    self.records[job.unit_id],
+                    job.item_id,
+                    "review",
+                    str(error),
+                    retry=True,
+                    code="review_protocol_rejected",
+                )
 
     def _apply_translation(self, manifest: RequestManifest, job: _Job, target: str) -> None:
         record = self._current_for(manifest, job)
@@ -1548,9 +1823,30 @@ class TranslationEngine:
             self.units[job.unit_id],
         )
         decision = result["decision"]
-        if decision == "needs_attention":
+        blocking_review = any(
+            issue.get("code") == "blocking_review" and issue.get("item_id") == job.item_id
+            for issue in record.unresolved_issues
+        )
+        if blocking_review and decision != "replace":
             self._fail_item(
-                record, job.item_id, "review", str(result.get("issues", "review needs attention")), retry=False
+                record,
+                job.item_id,
+                "review",
+                "automatic review recovery requires a replacement target",
+                retry=False,
+                code="review_replacement_required",
+            )
+            return
+        if decision == "needs_attention":
+            issue_values: list[JsonValue] = [dict(issue) for issue in result.get("issues", ())]
+            self._fail_item(
+                record,
+                job.item_id,
+                "review",
+                str(result.get("issues", "review needs attention")),
+                retry=False,
+                code="review_needs_attention",
+                details={"issues": issue_values},
             )
             if feedback:
                 current = self.records[job.unit_id]
@@ -1558,13 +1854,24 @@ class TranslationEngine:
             return
         if decision == "replace":
             review_cycle = record.counters.get("review_cycle", 0)
-            if record.counters.get("replacement_cycle") == review_cycle:
-                self._fail_item(record, job.item_id, "review", "replacement review limit exhausted", retry=False)
+            replacement_key = f"replacement_cycle:{job.item_id}"
+            has_item_cycles = any(key.startswith("replacement_cycle:") for key in record.counters)
+            if record.counters.get(replacement_key) == review_cycle or (
+                not has_item_cycles and record.counters.get("replacement_cycle") == review_cycle
+            ):
+                self._fail_item(
+                    record,
+                    job.item_id,
+                    "review",
+                    "replacement review limit exhausted",
+                    retry=False,
+                    code="replacement_review_limit_exhausted",
+                )
                 return
             target = str(result["target"])
             segment = _segment(record, job.item_id)
             validate_projection(segment.source_projection, target, self.units[job.unit_id].registry)
-            counters = dict(record.counters) | {"replacement_cycle": review_cycle}
+            counters = dict(record.counters) | {"replacement_cycle": review_cycle, replacement_key: review_cycle}
             replaced = item.model_copy(
                 update={
                     "status": ItemStatus.LOCAL_VALID,
@@ -1601,7 +1908,10 @@ class TranslationEngine:
                 counters=counters,
                 term_feedback=_dedupe_feedback((*record.term_feedback, *feedback)),
                 unresolved_issues=tuple(
-                    issue for issue in record.unresolved_issues if issue.get("code") != "blocking_coherence"
+                    issue
+                    for issue in record.unresolved_issues
+                    if issue.get("code") != "blocking_coherence"
+                    and not (issue.get("code") == "blocking_review" and issue.get("item_id") == job.item_id)
                 ),
             )
             return
@@ -1612,6 +1922,7 @@ class TranslationEngine:
                 "review",
                 "coherence revision requires a replacement target",
                 retry=False,
+                code="review_replacement_required",
             )
             return
         reviewed = item.model_copy(
@@ -1653,12 +1964,27 @@ class TranslationEngine:
         self.records[job.unit_id] = record
         return record
 
-    def _fail_item(self, record: UnitRecord, item_id: str, stage: str, message: str, *, retry: bool) -> None:
+    def _fail_item(
+        self,
+        record: UnitRecord,
+        item_id: str,
+        stage: str,
+        message: str,
+        *,
+        retry: bool,
+        code: str = "request_failed",
+        details: Mapping[str, JsonValue] | None = None,
+    ) -> None:
         current = self.store.read_unit(record.unit_id)
         item = current.items[item_id]
-        limit = 3 if stage == "translate" else 2
+        limit = self._logical_limit(current, item_id, stage)
+        blocking_review = stage == "review" and any(
+            issue.get("code") == "blocking_review" and issue.get("item_id") == item_id
+            for issue in current.unresolved_issues
+        )
         retry = (
             retry
+            and not blocking_review
             and self._logical_calls(item_id, stage, current.revision if stage == "review" else None) < limit
             and max(current.counters.get("http_attempts", 0), self._spent_by_unit.get(current.unit_id, 0))
             < self._unit_limit(current)
@@ -1667,7 +1993,7 @@ class TranslationEngine:
             update={
                 "stage": stage,
                 "status": ItemStatus.RETRY_WAIT if retry else ItemStatus.NEEDS_ATTENTION,
-                "failure": {"stage": stage, "code": "request_failed", "message": message[:2000]},
+                "failure": {"stage": stage, "code": code, "message": message[:2000], **dict(details or {})},
                 "next_action": stage if retry else "repair",
             }
         )
@@ -1707,6 +2033,7 @@ def retry_failed_units(store: RunStore, unit_ids: Sequence[str]) -> tuple[UnitRe
         updated: list[UnitRecord] = []
         for unit_id in dict.fromkeys(unit_ids):
             record = store.read_unit(unit_id)
+            counters = dict(record.counters)
             items = {
                 item_id: item.model_copy(
                     update={"status": ItemStatus.RETRY_WAIT, "failure": None, "next_action": item.stage}
@@ -1715,15 +2042,90 @@ def retry_failed_units(store: RunStore, unit_ids: Sequence[str]) -> tuple[UnitRe
                 else item
                 for item_id, item in record.items.items()
             }
+            for item_id, item in record.items.items():
+                if item.status != ItemStatus.NEEDS_ATTENTION:
+                    continue
+                stage = _item_failure_stage(item)
+                key = f"explicit_retry_{stage}:{item_id}"
+                counters[key] = counters.get(key, 0) + 1
             if items == record.items:
                 continue
             updated.append(
                 store.save_unit(
-                    record.model_copy(update={"record_version": record.record_version + 1, "items": items}),
+                    record.model_copy(
+                        update={"record_version": record.record_version + 1, "items": items, "counters": counters}
+                    ),
                     expected_record_version=record.record_version,
                 )
             )
         return tuple(updated)
+
+
+def _item_failure_stage(item: ItemRecord) -> Literal["translate", "review"]:
+    failure = item.failure or {}
+    return "review" if failure.get("stage") == "review" or item.target_projection is not None else "translate"
+
+
+def _recoverable_failure(
+    item: ItemRecord,
+) -> tuple[Literal["translate", "review"], str, list[dict[str, JsonValue]]] | None:
+    failure = item.failure or {}
+    stage = failure.get("stage")
+    code = failure.get("code")
+    message = failure.get("message")
+    if not isinstance(message, str):
+        return None
+    if stage == "translate":
+        if item.target_projection is not None:
+            return None
+        if code == "model_response_truncated" or (
+            code == "request_failed" and message == "model response was truncated"
+        ):
+            return "translate", "truncated", []
+        typed = {"translation_protocol_rejected", "projection_protocol_rejected", "translation_output_oversized"}
+        prefixes = (
+            "unknown projection marker:",
+            "marker inventory mismatch",
+            "crossed or unmatched target close marker:",
+            "unclosed target reference:",
+            "duplicate target reference:",
+            "text moved across a protected range or boundary",
+        )
+        if code in typed or (code == "request_failed" and message.startswith(prefixes)):
+            return "translate", "protocol", []
+        return None
+    if stage != "review" or item.target_projection is None:
+        return None
+    if code == "replacement_review_limit_exhausted" or (
+        code == "request_failed" and message == "replacement review limit exhausted"
+    ):
+        return "review", "replacement", [{"code": "replacement_limit", "severity": "major", "message": message}]
+    if code == "review_needs_attention":
+        issues = failure.get("issues")
+    elif code == "request_failed":
+        try:
+            issues = ast.literal_eval(message)
+        except (SyntaxError, ValueError):
+            return None
+    else:
+        return None
+    normalized = _normalized_review_issues(issues)
+    return ("review", "needs_attention", normalized) if normalized else None
+
+
+def _normalized_review_issues(issues: object) -> list[dict[str, JsonValue]]:
+    if not isinstance(issues, list) or not issues:
+        return []
+    normalized: list[dict[str, JsonValue]] = []
+    for issue in issues:
+        if (
+            not isinstance(issue, dict)
+            or not all(isinstance(issue.get(key), str) and issue.get(key) for key in ("code", "severity", "message"))
+            or issue.get("severity") not in {"minor", "major", "critical"}
+        ):
+            return []
+        normalized.append({key: issue[key] for key in ("code", "severity", "message")})
+    return normalized
 
 
 def validate_retry_failed_units(
@@ -1829,7 +2231,11 @@ def _journal_spent_for_unit(store: RunStore, unit_id: str) -> int:
 def _record_needs_attention(record: UnitRecord) -> bool:
     if record.derived is not None:
         return False
-    return record.cut_plan is None or any(item.status == ItemStatus.NEEDS_ATTENTION for item in record.items.values())
+    return (
+        record.cut_plan is None
+        or any(item.status == ItemStatus.NEEDS_ATTENTION for item in record.items.values())
+        or any(issue.get("code") in {"blocking_review", "blocking_coherence"} for issue in record.unresolved_issues)
+    )
 
 
 def _merge_candidate(unit: Unit, record: UnitRecord) -> str:

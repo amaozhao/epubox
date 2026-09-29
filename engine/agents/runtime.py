@@ -75,6 +75,9 @@ _SYSTEM_PROMPTS["review"] += (
     " An item may include optional term_suggestions. Each suggestion has source, target, category, "
     "optional aliases/scope_hint/note, and exact evidence from the supplied source views. Suggestions do not "
     "change the frozen glossary. Report any major semantic error as an issue even when suggesting a term."
+    " If required_revision is present, no_change is forbidden: return replace with the complete corrected target"
+    " addressing its listed issues, or needs_attention when a safe correction is impossible. A replacement"
+    " must still pass a separate full review and is never self-approved."
 )
 
 

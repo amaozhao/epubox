@@ -130,6 +130,7 @@ def test_review_prompt_shows_no_change_without_target_and_preserves_literal_mark
     assert '"target"' not in no_change_example
     assert "omit the target key entirely; never return target:null" in system
     assert "literal examples such as <p> are ordinary text and must be preserved as text" in system
+    assert "If required_revision is present, no_change is forbidden" in system
 
 
 def test_translation_salvages_only_items_from_a_complete_valid_batch():

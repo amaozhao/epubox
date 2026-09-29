@@ -639,7 +639,7 @@ def test_frozen_document_relations_cover_table_rows_notes_and_independent_seams(
     document = DocumentPlan.model_validate_json(extracted.model_dump_json())
     original_units = tuple(unit.unit_id for unit in document.units)
     config = PlannerConfig(
-        context_tokens=1200,
+        context_tokens=1600,
         max_output_tokens=160,
         review_output_tokens=80,
         safety_margin=8,
