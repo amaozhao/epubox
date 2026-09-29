@@ -333,7 +333,6 @@ def _accepted_target(store: StoreV25, plan: BookPlan, record: UnitRecord, *, pla
     if (
         review is None
         or review.get("protocol") != "epubox-review-2"
-        or not isinstance(review.get("request_id"), str)
         or review.get("plan_epoch") != record.plan_epoch
         or review.get("passed") is not True
         or review.get("revision") != record.revision
@@ -343,29 +342,40 @@ def _accepted_target(store: StoreV25, plan: BookPlan, record: UnitRecord, *, pla
         return None
     if planned and (not record.items or any(item.status != ItemStatus.REVIEWED for item in record.items.values())):
         return None
-    try:
-        manifest = store.read_request(str(review["request_id"]))
-    except (FileNotFoundError, ValueError):
+    raw_item_reviews = review.get("item_reviews")
+    if not isinstance(raw_item_reviews, dict):
         return None
-    participant_items = tuple(
-        item_id for item_id, unit_ids in manifest.item_unit_ids.items() if record.unit_id in unit_ids
-    )
-    if (
-        manifest.stage != "review"
-        or manifest.freeze_id != plan.freeze_id
-        or manifest.glossary_file_sha256 != plan.glossary_file_sha256
-        or manifest.plan_epochs.get(record.unit_id) != record.plan_epoch
-        or manifest.revisions.get(record.unit_id) != record.revision
-        or manifest.unit_document_ids.get(record.unit_id) != record.document_id
-        or not participant_items
-        or any(manifest.target_hashes.get(item_id) != target_hash for item_id in participant_items)
-        or (planned and set(participant_items) != set(record.items))
-        or not any(
-            attempt.state == "succeeded" and set(attempt.affected_items).intersection(participant_items)
-            for attempt in manifest.attempts
-        )
-    ):
+    expected_items = set(record.items) if planned else set(raw_item_reviews)
+    if not expected_items or set(raw_item_reviews) != expected_items:
         return None
+    for item_id in sorted(expected_items):
+        item_review = raw_item_reviews.get(item_id)
+        item_target_hash = record.items[item_id].target_hash if planned else target_hash
+        if (
+            not isinstance(item_review, dict)
+            or not isinstance(item_review.get("request_id"), str)
+            or item_review.get("target_hash") != item_target_hash
+            or item_target_hash is None
+        ):
+            return None
+        try:
+            manifest = store.read_request(str(item_review["request_id"]))
+        except (FileNotFoundError, ValueError):
+            return None
+        if (
+            manifest.stage != "review"
+            or manifest.freeze_id != plan.freeze_id
+            or manifest.glossary_file_sha256 != plan.glossary_file_sha256
+            or manifest.plan_epochs.get(record.unit_id) != record.plan_epoch
+            or manifest.revisions.get(record.unit_id) != record.revision
+            or manifest.unit_document_ids.get(record.unit_id) != record.document_id
+            or manifest.item_unit_ids.get(item_id) != (record.unit_id,)
+            or manifest.target_hashes.get(item_id) != item_target_hash
+            or not any(
+                attempt.state == "succeeded" and item_id in attempt.affected_items for attempt in manifest.attempts
+            )
+        ):
+            return None
     return target
 
 

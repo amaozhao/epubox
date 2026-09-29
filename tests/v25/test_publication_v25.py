@@ -31,10 +31,13 @@ class StubChecker:
         return EpubCheckResult(("stub-epubcheck",), 0)
 
 
-def _prepared(tmp_path: Path):
+def _prepared(
+    tmp_path: Path,
+    chapter: str = "<h1>Reliable systems</h1><p>Keep <em>source data</em> safe.</p>",
+):
     source = make_epub(
         tmp_path / "source.epub",
-        {"chapter.xhtml": "<h1>Reliable systems</h1><p>Keep <em>source data</em> safe.</p>"},
+        {"chapter.xhtml": chapter},
     )
     prepared = prepare_book(
         source,
@@ -89,18 +92,23 @@ def _accepted_records(documents, *, translated_heading: str | None = None):
                 local_checks={"passed": True, "target_hash": target_hash},
                 review={
                     "protocol": "epubox-review-2",
-                    "request_id": f"review-{unit.unit_id}",
                     "plan_epoch": 0,
                     "passed": True,
                     "revision": 1,
                     "input_hash": None,
                     "target_hash": target_hash,
+                    "item_reviews": {
+                        f"derived-{unit.unit_id}": {
+                            "request_id": f"review-derived-{unit.unit_id}",
+                            "target_hash": target_hash,
+                        }
+                    },
                 },
             )
     return records
 
 
-def _planned_record(document, unit, target: str):
+def _planned_record(document, unit, target: str, *, context_tokens: int = 8192, max_output_tokens: int = 2048):
     glossary = GlossarySnapshot(
         source_hash=document.source_hash,
         freeze_id="freeze-1",
@@ -113,19 +121,34 @@ def _planned_record(document, unit, target: str):
         unit,
         document,
         glossary,
-        {"target_language": "zh-Hans", "context_tokens": 8192, "max_output_tokens": 2048},
+        {
+            "target_language": "zh-Hans",
+            "context_tokens": context_tokens,
+            "max_output_tokens": max_output_tokens,
+            "review_output_tokens": max_output_tokens,
+        },
     )
-    assert len(initialized.items) == 1
     target_hash = canonical_hash(target)
     items = {
         item_id: item.model_copy(
             update={
                 "status": ItemStatus.REVIEWED,
-                "target_projection": target,
-                "target_hash": target_hash,
+                "target_projection": (
+                    target
+                    if len(initialized.items) == 1
+                    else next(
+                        segment.source_projection
+                        for segment in initialized.cut_plan.segments
+                        if segment.item_id == item_id
+                    )
+                ),
             }
         )
         for item_id, item in initialized.items.items()
+    }
+    items = {
+        item_id: item.model_copy(update={"target_hash": canonical_hash(item.target_projection)})
+        for item_id, item in items.items()
     }
     return UnitRecord(
         unit_id=unit.unit_id,
@@ -142,12 +165,18 @@ def _planned_record(document, unit, target: str):
         local_checks={"passed": True, "target_hash": target_hash},
         review={
             "protocol": "epubox-review-2",
-            "request_id": f"review-{unit.unit_id}",
             "plan_epoch": initialized.cut_plan.plan_epoch,
             "passed": True,
             "revision": 1,
             "input_hash": initialized.input_hash,
             "target_hash": target_hash,
+            "item_reviews": {
+                item_id: {
+                    "request_id": f"review-{item_id}",
+                    "target_hash": item.target_hash,
+                }
+                for item_id, item in items.items()
+            },
         },
     )
 
@@ -155,44 +184,40 @@ def _planned_record(document, unit, target: str):
 def _review_manifests(plan: BookPlan, records: dict[str, UnitRecord]) -> dict[str, RequestManifest]:
     manifests = {}
     for unit_id, record in records.items():
-        request_id = f"review-{unit_id}"
-        item_ids = tuple(record.items) or (request_id,)
-        target_hash = canonical_hash(record.candidate)
-        manifests[request_id] = RequestManifest(
-            request_id=request_id,
-            stage="review",
-            owner_kind="translation_item",
-            owner_id=item_ids[0],
-            item_ids=item_ids,
-            input_hashes={item_id: f"input-{item_id}" for item_id in item_ids},
-            wire_hash=f"wire-{unit_id}",
-            record_versions={unit_id: record.record_version},
-            item_unit_ids={item_id: (unit_id,) for item_id in item_ids},
-            unit_document_ids={unit_id: record.document_id},
-            plan_epochs={unit_id: record.plan_epoch},
-            revisions={unit_id: record.revision},
-            target_hashes={item_id: target_hash for item_id in item_ids},
-            glossary_file_sha256=plan.glossary_file_sha256,
-            freeze_id=plan.freeze_id,
-            term_ids_by_item={item_id: () for item_id in item_ids},
-            terms_hashes={
-                item_id: record.items[item_id].terms_hash if item_id in record.items else "terms"
-                for item_id in item_ids
-            },
-            context_hashes={
-                item_id: record.items[item_id].context_hash if item_id in record.items else "context"
-                for item_id in item_ids
-            },
-            attempts=(
-                Attempt(
-                    attempt_id=f"attempt-{unit_id}",
-                    affected_items=item_ids,
-                    state="succeeded",
-                    created_at="2026-09-29T00:00:00Z",
-                    finished_at="2026-09-29T00:00:01Z",
+        assert record.review is not None and isinstance(record.review["item_reviews"], dict)
+        for item_id, item_review in record.review["item_reviews"].items():
+            assert isinstance(item_review, dict)
+            request_id = str(item_review["request_id"])
+            item_target_hash = str(item_review["target_hash"])
+            manifests[request_id] = RequestManifest(
+                request_id=request_id,
+                stage="review",
+                owner_kind="translation_item",
+                owner_id=item_id,
+                item_ids=(item_id,),
+                input_hashes={item_id: f"input-{item_id}"},
+                wire_hash=f"wire-{item_id}",
+                record_versions={unit_id: record.record_version},
+                item_unit_ids={item_id: (unit_id,)},
+                unit_document_ids={unit_id: record.document_id},
+                plan_epochs={unit_id: record.plan_epoch},
+                revisions={unit_id: record.revision},
+                target_hashes={item_id: item_target_hash},
+                glossary_file_sha256=plan.glossary_file_sha256,
+                freeze_id=plan.freeze_id,
+                term_ids_by_item={item_id: ()},
+                terms_hashes={item_id: record.items[item_id].terms_hash if item_id in record.items else "terms"},
+                context_hashes={item_id: record.items[item_id].context_hash if item_id in record.items else "context"},
+                attempts=(
+                    Attempt(
+                        attempt_id=f"attempt-{item_id}",
+                        affected_items=(item_id,),
+                        state="succeeded",
+                        created_at="2026-09-29T00:00:00Z",
+                        finished_at="2026-09-29T00:00:01Z",
+                    ),
                 ),
-            ),
-        )
+            )
     return manifests
 
 
@@ -325,3 +350,43 @@ def test_publication_rejects_record_changed_during_package_verification(
     with pytest.raises(EpubValidationError, match="changed while publication"):
         publish_book(store, tmp_path / "stale.epub", StubChecker())
     assert not (tmp_path / "stale.epub").exists()
+
+
+def test_long_unit_requires_every_segment_review_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    long_text = "Long sentence for segmented review. " * 100
+    _, store, plan, documents = _prepared(tmp_path, chapter=f"<p>{long_text}</p>")
+    records = _accepted_records(documents)
+    document = next(document for document in documents.values() if document.resource.path.endswith("chapter.xhtml"))
+    unit = next(unit for unit in document.units if "Long sentence" in unit.source_projection)
+    records[unit.unit_id] = _planned_record(
+        document,
+        unit,
+        unit.source_projection,
+        context_tokens=4096,
+        max_output_tokens=256,
+    )
+    assert len(records[unit.unit_id].items) > 1
+    initial_plans = dict(plan.initial_unit_plans)
+    assert records[unit.unit_id].cut_plan is not None
+    initial_plans[unit.unit_id] = records[unit.unit_id].cut_plan.plan_hash
+    plan = plan.model_copy(update={"initial_unit_plans": initial_plans})
+    manifests = _review_manifests(plan, records)
+    loaded_requests: list[str] = []
+
+    def read_request(request_id: str):
+        loaded_requests.append(request_id)
+        return manifests[request_id]
+
+    monkeypatch.setattr(store, "read_bookplan", lambda: plan)
+    monkeypatch.setattr(store, "read_unit", lambda unit_id: records[unit_id])
+    monkeypatch.setattr(store, "read_request", read_request)
+
+    publish_book(store, tmp_path / "long.epub", StubChecker())
+
+    review = records[unit.unit_id].review
+    assert review is not None and isinstance(review["item_reviews"], dict)
+    expected_requests = {
+        item_review["request_id"] for item_review in review["item_reviews"].values() if isinstance(item_review, dict)
+    }
+    assert len(expected_requests) == len(records[unit.unit_id].items)
+    assert expected_requests.issubset(loaded_requests)
