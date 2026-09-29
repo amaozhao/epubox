@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from lxml import etree  # type: ignore[attr-defined]
 
 from engine.core.markup import element_path, find_by_element_path, parse_xml_safely, serialize_xml
-from engine.item.inline import plain_text, validate_projection
+from engine.item.inline import events_to_projection, parse_projection, plain_text, validate_projection
 from engine.schemas.v25 import DOCUMENT_FORMAT, DocumentPlan, RegistryEntry, Unit
 
 
@@ -194,4 +194,27 @@ def assemble_document(
     return AssembledDocument(serialize_xml(tree, source_markup=document.source_markup), sidecar)
 
 
-__all__ = ["AssembledDocument", "assemble_document"]
+def derive_navigation_projection(unit: Unit, accepted_title: str) -> str:
+    """Replace one simple navigation label with the current accepted title text."""
+
+    title = plain_text(accepted_title).strip()
+    if not title or any(entry.kind == "x" for entry in unit.registry.values()):
+        raise ValueError("derived navigation requires one non-empty plain title")
+    events = parse_projection(unit.source_projection)
+    text_indexes = [index for index, event in enumerate(events) if event.kind == "text" and event.value.strip()]
+    if len(text_indexes) != 1:
+        raise ValueError("derived navigation requires exactly one text range")
+    index = text_indexes[0]
+    value = events[index].value
+    leading = value[: len(value) - len(value.lstrip())]
+    trailing = value[len(value.rstrip()) :]
+    replaced = tuple(
+        {"kind": event.kind, "value": leading + title + trailing if offset == index else event.value}
+        for offset, event in enumerate(events)
+    )
+    projection = events_to_projection(replaced)
+    validate_projection(unit, projection)
+    return projection
+
+
+__all__ = ["AssembledDocument", "assemble_document", "derive_navigation_projection"]

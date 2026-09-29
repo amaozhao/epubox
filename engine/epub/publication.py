@@ -18,7 +18,7 @@ from pathlib import Path
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name, serialize_xml
-from engine.epub.assembly import assemble_document
+from engine.epub.assembly import assemble_document, derive_navigation_projection
 from engine.epub.validation import (
     EpubCheckResult,
     EpubValidationError,
@@ -257,6 +257,8 @@ def publish_book(
                 planned=plan.initial_unit_plans[unit.unit_id] is not None,
             )
             if target is None:
+                target = _derived_navigation_target(store, plan, document, unit, record, records)
+            if target is None:
                 raise EpubValidationError("unit_not_accepted", f"Unit is not currently accepted: {unit.unit_id}")
             document_targets[unit.unit_id] = target
             version_vector[unit.unit_id] = record.revision
@@ -288,22 +290,28 @@ def publish_book(
         expected_language=None if identity else "zh-Hans",
     )
     if not identity:
-        for unit_id, record in records.items():
-            current = store.read_unit(unit_id)
-            if (
-                current != record
-                or _accepted_target(
+        current_records = {unit_id: store.read_unit(unit_id) for unit_id in plan.unit_ids}
+        if current_records != records:
+            changed = next(unit_id for unit_id in plan.unit_ids if current_records[unit_id] != records[unit_id])
+            raise EpubValidationError(
+                "unit_changed_during_publication",
+                f"Unit changed while publication was being verified: {changed}",
+            )
+        for document, document_targets, _ in assembled_documents.values():
+            for unit in document.units:
+                current = current_records[unit.unit_id]
+                target = _accepted_target(
                     store,
                     plan,
                     current,
-                    planned=plan.initial_unit_plans[unit_id] is not None,
-                )
-                is None
-            ):
-                raise EpubValidationError(
-                    "unit_changed_during_publication",
-                    f"Unit changed while publication was being verified: {unit_id}",
-                )
+                    planned=plan.initial_unit_plans[unit.unit_id] is not None,
+                ) or _derived_navigation_target(store, plan, document, unit, current, current_records)
+                if target != document_targets[unit.unit_id]:
+                    unit_id = unit.unit_id
+                    raise EpubValidationError(
+                        "unit_changed_during_publication",
+                        f"Unit changed while publication was being verified: {unit_id}",
+                    )
     intent = publish_verified(
         staged_path,
         output_path,
@@ -380,6 +388,59 @@ def _accepted_target(store: StoreV25, plan: BookPlan, record: UnitRecord, *, pla
         ):
             return None
     return target
+
+
+def _derived_navigation_target(
+    store: StoreV25,
+    plan: BookPlan,
+    document: DocumentPlan,
+    unit: Unit,
+    record: UnitRecord,
+    records: Mapping[str, UnitRecord],
+) -> str | None:
+    derived = record.derived
+    if (
+        derived is None
+        or derived.get("state") != "valid"
+        or record.candidate is not None
+        or record.accepted_revision is not None
+        or record.unresolved_issues
+    ):
+        return None
+    source_unit_id = derived.get("source_unit_id")
+    if not isinstance(source_unit_id, str):
+        return None
+    binding = next(
+        (
+            item
+            for item in document.derived_bindings
+            if item.get("kind") == "derived_navigation"
+            and item.get("unit_id") == unit.unit_id
+            and item.get("source_unit_id") == source_unit_id
+        ),
+        None,
+    )
+    source = records.get(source_unit_id)
+    if binding is None or source is None or plan.unit_documents.get(source_unit_id) != source.document_id:
+        return None
+    source_target = _accepted_target(
+        store,
+        plan,
+        source,
+        planned=plan.initial_unit_plans[source_unit_id] is not None,
+    )
+    if source_target is None:
+        return None
+    expected = derive_navigation_projection(unit, source_target)
+    expected_hash = canonical_hash(expected)
+    if (
+        derived.get("source_revision") != source.revision
+        or derived.get("source_target_hash") != source.accepted_target_hash
+        or derived.get("target") != expected
+        or derived.get("target_hash") != expected_hash
+    ):
+        return None
+    return expected
 
 
 def _validate_document_coherence(

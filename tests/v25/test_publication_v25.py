@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from engine.epub.assembly import assemble_document
+from engine.epub.assembly import assemble_document, derive_navigation_projection
 from engine.epub.preparation_v25 import PreparationConfig, prepare_book
 from engine.epub.publication import publish_book, recover_publication, validate_assembled_document
 from engine.epub.validation import EpubCheckResult, EpubValidationError
@@ -185,6 +185,8 @@ def _planned_record(document, unit, target: str, *, context_tokens: int = 8192, 
 def _review_manifests(plan: BookPlan, records: dict[str, UnitRecord]) -> dict[str, RequestManifest]:
     manifests = {}
     for unit_id, record in records.items():
+        if record.derived is not None:
+            continue
         assert record.review is not None and isinstance(record.review["item_reviews"], dict)
         for item_id, item_review in record.review["item_reviews"].items():
             assert isinstance(item_review, dict)
@@ -459,3 +461,77 @@ def test_formal_publication_requires_current_complete_nonblocking_coherence(
     write_check(blocking)
     with pytest.raises(EpubValidationError, match="blocking issues"):
         publish_book(store, tmp_path / "blocking-check.epub", StubChecker())
+
+
+def test_derived_navigation_tracks_current_accepted_title_and_rejects_stale_or_failed_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chapter = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter 1</title></head>'
+        "<body><p>Chapter body.</p></body></html>"
+    )
+    _, store, plan, documents = _prepared(tmp_path, chapter=chapter)
+    binding_document = next(
+        document
+        for document in documents.values()
+        if document.resource.path.endswith("nav.xhtml")
+        and any(binding.get("kind") == "derived_navigation" for binding in document.derived_bindings)
+    )
+    binding = next(
+        binding for binding in binding_document.derived_bindings if binding.get("kind") == "derived_navigation"
+    )
+    target_unit = next(unit for unit in binding_document.units if unit.unit_id == binding["unit_id"])
+    source_document = next(
+        document
+        for document in documents.values()
+        if any(unit.unit_id == binding["source_unit_id"] for unit in document.units)
+    )
+    source_unit = next(unit for unit in source_document.units if unit.unit_id == binding["source_unit_id"])
+    records = _accepted_records(documents)
+    records[source_unit.unit_id] = _planned_record(source_document, source_unit, "第一章")
+    derived_target = derive_navigation_projection(target_unit, "第一章")
+    records[target_unit.unit_id] = UnitRecord(
+        unit_id=target_unit.unit_id,
+        document_id=binding_document.document_id,
+        source_hash=binding_document.source_hash,
+        derived={
+            "state": "valid",
+            "source_unit_id": source_unit.unit_id,
+            "source_revision": records[source_unit.unit_id].revision,
+            "source_target_hash": records[source_unit.unit_id].accepted_target_hash,
+            "target": derived_target,
+            "target_hash": canonical_hash(derived_target),
+        },
+    )
+    initial_plans = dict(plan.initial_unit_plans)
+    assert records[source_unit.unit_id].cut_plan is not None
+    initial_plans[source_unit.unit_id] = records[source_unit.unit_id].cut_plan.plan_hash
+    initial_plans[target_unit.unit_id] = None
+    plan = plan.model_copy(update={"initial_unit_plans": initial_plans})
+    manifests = _review_manifests(plan, records)
+    _coherence_checks(store, documents, records)
+    monkeypatch.setattr(store, "read_bookplan", lambda: plan)
+    monkeypatch.setattr(store, "read_unit", lambda unit_id: records[unit_id])
+    monkeypatch.setattr(store, "read_request", lambda request_id: manifests[request_id])
+
+    output = tmp_path / "derived.epub"
+    publish_book(store, output, StubChecker())
+    with zipfile.ZipFile(output) as archive:
+        assert "第一章" in archive.read("OEBPS/nav.xhtml").decode()
+
+    replacement = _planned_record(source_document, source_unit, "第二章").model_copy(
+        update={"revision": 2, "accepted_revision": 2}
+    )
+    assert replacement.review is not None
+    replacement = replacement.model_copy(update={"review": replacement.review | {"revision": 2}})
+    records[source_unit.unit_id] = replacement
+    manifests = _review_manifests(plan, records)
+    _coherence_checks(store, documents, records)
+    with pytest.raises(EpubValidationError, match="not currently accepted"):
+        publish_book(store, tmp_path / "stale-derived.epub", StubChecker())
+
+    records[source_unit.unit_id] = replacement.model_copy(
+        update={"accepted_revision": None, "accepted_target_hash": None}
+    )
+    with pytest.raises(EpubValidationError, match="not currently accepted"):
+        publish_book(store, tmp_path / "failed-title.epub", StubChecker())
