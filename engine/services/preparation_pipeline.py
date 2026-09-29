@@ -289,8 +289,8 @@ async def _advance(
                     )
                 record = store.save_unit(record)
             initial_plans[unit.unit_id] = record.cut_plan.plan_hash if record.cut_plan is not None else None
-            completed_units += record.cut_plan is not None
-            failed_units += record.cut_plan is None
+            completed_units += record.cut_plan is not None or record.derived is not None
+            failed_units += record.cut_plan is None and record.derived is None
             processed = completed_units + failed_units
             if processed == total_units or processed % max(1, total_units // 100) == 0:
                 _emit(

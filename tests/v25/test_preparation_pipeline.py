@@ -84,6 +84,34 @@ def test_p4_builds_one_context_index_for_the_complete_unit_inventory(
     assert calls == 1
 
 
+def test_derived_navigation_is_counted_as_planned_not_as_a_local_problem(tmp_path: Path) -> None:
+    progress: list[PreparationProgress] = []
+    source = make_epub(
+        tmp_path / "source.epub",
+        {
+            "chapter.xhtml": '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter 1</title></head>'
+            '<body><h1 id="chapter">Chapter 1</h1><p>Memory allocation is fast.</p></body></html>'
+        },
+    )
+    result = asyncio.run(
+        prepare_translation(
+            source,
+            tmp_path / "work",
+            config(auto_extract=False),
+            StubChecker(),
+            progress=progress.append,
+        )
+    )
+
+    assert result.status == "ready"
+    assert result.bookplan is not None
+    assert any(
+        RunStore(result.work_dir).read_unit(unit_id).derived is not None for unit_id in result.bookplan.unit_ids
+    )
+    p4 = [event for event in progress if event.phase == "p4"][-1]
+    assert p4.succeeded == p4.planned and p4.failed == 0
+
+
 def test_term_and_resolution_transports_feed_one_frozen_glossary(tmp_path: Path) -> None:
     calls: list[str] = []
     progress: list[PreparationProgress] = []
