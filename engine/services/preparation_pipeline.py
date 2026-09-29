@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from engine.epub.preparation_v25 import PreparationConfig, _frozen_extraction_config, prepare_book
 from engine.item.planner import PlanningError
-from engine.item.planner_v25 import plan_unit_v25
+from engine.item.planner_v25 import build_context_index, plan_unit_v25
 from engine.schemas.v25 import (
     BookPlan,
     DocumentPlan,
@@ -38,6 +40,19 @@ class PreparationPipelineResult:
     bookplan: BookPlan | None = None
 
 
+@dataclass(frozen=True)
+class PreparationProgress:
+    phase: Literal["terms", "resolution", "p4", "ready"]
+    planned: int
+    succeeded: int
+    failed: int
+    pending: int
+    http_attempts: int
+
+
+type ProgressCallback = Callable[[PreparationProgress], None]
+
+
 async def prepare_translation(
     source: Path,
     work_root: Path,
@@ -48,6 +63,7 @@ async def prepare_translation(
     resolution_transport: Any = None,
     model: Any = None,
     output_policy_hash: str = "preserve-source-resources-1",
+    progress: ProgressCallback | None = None,
 ) -> PreparationPipelineResult:
     """Create P1 if needed, then advance the durable run through P4."""
     store, preparation, preparation_hash = _p1(source, work_root, config, checker)
@@ -59,6 +75,7 @@ async def prepare_translation(
         resolution_transport=resolution_transport,
         model=model,
         output_policy_hash=output_policy_hash,
+        progress=progress,
     )
 
 
@@ -70,6 +87,7 @@ async def resume_preparation(
     resolution_transport: Any = None,
     model: Any = None,
     output_policy_hash: str = "preserve-source-resources-1",
+    progress: ProgressCallback | None = None,
 ) -> PreparationPipelineResult:
     """Resume P2-P4 using only the committed P1 snapshot and JSON inputs."""
     _ = checker
@@ -83,6 +101,7 @@ async def resume_preparation(
         resolution_transport=resolution_transport,
         model=model,
         output_policy_hash=output_policy_hash,
+        progress=progress,
     )
 
 
@@ -95,6 +114,7 @@ async def _advance(
     resolution_transport: Any,
     model: Any,
     output_policy_hash: str,
+    progress: ProgressCallback | None,
 ) -> PreparationPipelineResult:
     bookplan_path = store.root / "bookplan.json"
     if bookplan_path.exists():
@@ -102,6 +122,10 @@ async def _advance(
         glossary = store.read_glossary()
         has_gaps = glossary.extraction_status == "closed_with_gaps" or any(
             store.read_unit(unit_id).cut_plan is None for unit_id in ready.unit_ids
+        )
+        _emit(
+            progress,
+            PreparationProgress("ready", len(ready.unit_ids), len(ready.unit_ids), 0, 0, _http_attempts(store)),
         )
         return PreparationPipelineResult(
             "needs_attention" if has_gaps else "ready",
@@ -136,10 +160,15 @@ async def _advance(
         store.write_term_plan(term_plan)
 
     _initialize_extraction_records(store, term_plan)
+    _emit(progress, _term_progress(store, term_plan))
     freeze_path = store.root / "glossary" / "freeze.json"
     term_status = "frozen"
     if not freeze_path.exists():
-        term_result = await TermRunner(store, model=model, transport=term_transport).run()
+        term_result = await _with_progress(
+            TermRunner(store, model=model, transport=term_transport).run(),
+            progress,
+            lambda: _term_progress(store, term_plan),
+        )
         term_status = term_result.status
         if term_result.status == "paused" or _has_unsettled_term_attempts(store):
             return PreparationPipelineResult("paused", "terms", store.root, preparation.run_id, term_result.status)
@@ -160,7 +189,7 @@ async def _advance(
 
         if pool.extraction_status == "open":
             resolver = TermResolutionRunner(store, model=model, transport=resolution_transport or term_transport)
-            resolution = await resolver.run()
+            resolution = await _with_progress(resolver.run(), progress, lambda: _resolution_progress(store))
             if resolution.status == "paused":
                 return PreparationPipelineResult("paused", "resolution", store.root, preparation.run_id, term_status)
             decisions = resolver.decisions()
@@ -205,6 +234,10 @@ async def _advance(
     initial_plans: dict[str, str | None] = {}
     reading_edges = tuple(zip(preparation.reading_order, preparation.reading_order[1:], strict=False))
     context_chars = _integer(preparation.translation_config, "context_chars", 400)
+    context_index = build_context_index(documents, reading_edges, context_chars)
+    total_units = sum(len(document.units) for document in documents)
+    completed_units = 0
+    failed_units = 0
     for document in documents:
         for unit in document.units:
             path = store._path("units", unit.unit_id)
@@ -220,6 +253,7 @@ async def _advance(
                         documents=documents,
                         reading_edges=reading_edges,
                         context_chars=context_chars,
+                        context_index=context_index,
                     )
                     record = UnitRecord(
                         unit_id=unit.unit_id,
@@ -240,6 +274,21 @@ async def _advance(
                     )
                 record = store.save_unit(record)
             initial_plans[unit.unit_id] = record.cut_plan.plan_hash if record.cut_plan is not None else None
+            completed_units += record.cut_plan is not None
+            failed_units += record.cut_plan is None
+            processed = completed_units + failed_units
+            if processed == total_units or processed % max(1, total_units // 100) == 0:
+                _emit(
+                    progress,
+                    PreparationProgress(
+                        "p4",
+                        total_units,
+                        completed_units,
+                        failed_units,
+                        total_units - processed,
+                        _http_attempts(store),
+                    ),
+                )
 
     unit_ids = tuple(unit.unit_id for document in documents for unit in document.units)
     freeze = store.read_freeze()
@@ -260,6 +309,12 @@ async def _advance(
     )
     store.write_bookplan(bookplan)
     ready = store.read_bookplan()
+    _emit(
+        progress,
+        PreparationProgress(
+            "ready", len(unit_ids), len(unit_ids) - failed_units, failed_units, 0, _http_attempts(store)
+        ),
+    )
     return PreparationPipelineResult(
         "needs_attention" if local_gaps else "ready",
         "ready",
@@ -349,6 +404,72 @@ def _has_unsettled_term_attempts(store: StoreV25) -> bool:
     )
 
 
+async def _with_progress(
+    operation: Awaitable[Any],
+    callback: ProgressCallback | None,
+    snapshot: Callable[[], PreparationProgress],
+) -> Any:
+    if callback is None:
+        return await operation
+    task = asyncio.ensure_future(operation)
+    previous: PreparationProgress | None = None
+    while not task.done():
+        current = snapshot()
+        if current != previous:
+            callback(current)
+            previous = current
+        await asyncio.wait((task,), timeout=0.25)
+    current = snapshot()
+    if current != previous:
+        callback(current)
+    return await task
+
+
+def _term_progress(store: StoreV25, plan: TermExtractionPlan) -> PreparationProgress:
+    records = [
+        store.read_extraction(item.item_id)
+        for item in plan.items
+        if store._path("glossary/extraction", item.item_id).exists()
+    ]
+    succeeded = sum(record.status in {"succeeded", "succeeded_with_rejections"} for record in records)
+    failed = sum(record.status in {"failed_exhausted", "unplannable"} for record in records)
+    return PreparationProgress(
+        "terms",
+        len(plan.items),
+        succeeded,
+        failed,
+        len(plan.items) - succeeded - failed,
+        _http_attempts(store),
+    )
+
+
+def _resolution_progress(store: StoreV25) -> PreparationProgress:
+    pool = store.read_candidate_pool()
+    succeeded = sum(group.get("decision") == "select" for group in pool.conflict_groups)
+    failed = sum(group.get("decision") == "defer" for group in pool.conflict_groups)
+    return PreparationProgress(
+        "resolution",
+        len(pool.conflict_groups),
+        succeeded,
+        failed,
+        len(pool.conflict_groups) - succeeded - failed,
+        _http_attempts(store),
+    )
+
+
+def _http_attempts(store: StoreV25) -> int:
+    return sum(
+        attempt.state != "reserved"
+        for path in (store.root / "requests").glob("*.json")
+        for attempt in store.read_request(path.stem).attempts
+    )
+
+
+def _emit(callback: ProgressCallback | None, event: PreparationProgress) -> None:
+    if callback is not None:
+        callback(event)
+
+
 def _string_tuple(value: object) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise IdentityMismatch("stored resolution IDs must be a string array")
@@ -377,4 +498,10 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-__all__ = ["PreparationPipelineResult", "prepare_translation", "resume_preparation"]
+__all__ = [
+    "PreparationPipelineResult",
+    "PreparationProgress",
+    "ProgressCallback",
+    "prepare_translation",
+    "resume_preparation",
+]

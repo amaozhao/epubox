@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import engine.services.preparation_pipeline as pipeline_module
 from engine.epub.preparation_v25 import PreparationConfig
-from engine.services.preparation_pipeline import prepare_translation, resume_preparation
+from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.store_v25 import StoreV25
 from engine.services.term_planning import TERM_PLANNER_VERSION
 from engine.services.term_runner import TermRunner, TermRunResult
@@ -57,8 +58,34 @@ def test_disabled_extraction_reaches_ready_only_after_freeze_and_every_unit(tmp_
     assert (result.work_dir / "glossary" / "freeze.json").is_file()
 
 
+def test_p4_builds_one_context_index_for_the_complete_unit_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    original = pipeline_module.build_context_index
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "build_context_index", counted)
+    result = asyncio.run(
+        prepare_translation(
+            source_book(tmp_path),
+            tmp_path / "work",
+            config(auto_extract=False),
+            StubChecker(),
+        )
+    )
+    assert result.status == "ready"
+    assert result.bookplan is not None and result.bookplan.required_unit_count > 1
+    assert calls == 1
+
+
 def test_term_and_resolution_transports_feed_one_frozen_glossary(tmp_path: Path) -> None:
     calls: list[str] = []
+    progress: list[PreparationProgress] = []
 
     async def terms(kind, payload):
         calls.append(kind)
@@ -123,6 +150,7 @@ def test_term_and_resolution_transports_feed_one_frozen_glossary(tmp_path: Path)
             StubChecker(),
             term_transport=terms,
             resolution_transport=resolution,
+            progress=progress.append,
         )
     )
 
@@ -133,6 +161,10 @@ def test_term_and_resolution_transports_feed_one_frozen_glossary(tmp_path: Path)
     assert calls.count("terms") >= 1
     assert [(term.source, term.target) for term in glossary.terms] == [("Memory", "内存")]
     assert StoreV25(result.work_dir).read_candidate_pool().extraction_status == "closed"
+    assert progress[0].phase == "terms" and progress[0].planned > 0
+    assert any(event.phase == "resolution" and event.planned == 1 for event in progress)
+    assert progress[-1].phase == "ready" and progress[-1].pending == 0
+    assert progress[-1].http_attempts == len(calls)
 
 
 def test_paused_terms_leave_no_pool_or_bookplan_and_resume_from_json(
