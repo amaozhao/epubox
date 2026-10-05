@@ -19,13 +19,13 @@ from engine.orchestrator import (
     validate_retry_failed_units,
 )
 from engine.schemas.contracts import ItemStatus, Unit, UnitRecord, canonical_hash
-from engine.services.atomic_store import StoreError
+from engine.services.atomic import StoreError
 from engine.services.preparation_pipeline import prepare_translation
 from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION
 from main import _progress_printer
-from tests.engine.epub.book_factory import make_epub
-from tests.engine.epub.test_preparation import StubChecker
+from tests.engine.epub.factory import make_epub
+from tests.engine.epub.preparation import StubChecker
 from tests.engine.services.test_store_contracts import _bookplan, _frozen_store, _unit_record
 
 

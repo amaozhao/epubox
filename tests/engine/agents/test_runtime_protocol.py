@@ -28,7 +28,7 @@ from engine.agents.runtime import (
     wire_hash,
 )
 from engine.agents.term_protocol import validate_review_response
-from engine.schemas.source_internal import Attempt, RequestManifest
+from engine.schemas.internal import Attempt, RequestManifest
 
 
 class MemoryJournal:

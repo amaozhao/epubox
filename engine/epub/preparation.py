@@ -19,7 +19,7 @@ from engine.epub.validation import EpubChecker, PackageInventory, ZipLimits, ins
 from engine.item.extractor import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
 from engine.item.structural_extractor import select_primary_title
 from engine.schemas.contracts import JsonValue, PreparationPlan
-from engine.services.atomic_store import AtomicStore
+from engine.services.atomic import AtomicStore, IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.term_inputs import load_user_terms
 from engine.services.term_planning import TERM_PLANNER_VERSION
@@ -30,6 +30,7 @@ _SAFE_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 @dataclass(frozen=True)
 class PreparationConfig:
     run_id: str | None = None
+    expected_source_hash: str | None = None
     user_terms_path: Path | None = None
     auto_extract: bool = True
     extraction_config: dict[str, JsonValue] = field(default_factory=dict)
@@ -59,6 +60,9 @@ def prepare_book(
     source = source.resolve(strict=True)
     work_root.mkdir(parents=True, exist_ok=True)
     temporary_snapshot, source_hash = _stable_snapshot(source, work_root)
+    if config.expected_source_hash is not None and source_hash != config.expected_source_hash:
+        temporary_snapshot.unlink(missing_ok=True)
+        raise IdentityMismatch("source EPUB identity changed before the immutable snapshot was created")
     run_id = config.run_id or uuid.uuid4().hex
     if run_id in {".", ".."} or not _SAFE_RUN_ID.fullmatch(run_id):
         temporary_snapshot.unlink(missing_ok=True)

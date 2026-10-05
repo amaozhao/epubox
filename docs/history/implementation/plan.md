@@ -1,6 +1,6 @@
 # EPUBox v2.5 实施计划（审定版）
 
-基准为 [v2.5 主文](epubox_mvp_design_v2_5.md)，原始 SHA256 `d8b9a4dd99608c880a9b0efb148574bc5f948675fc29bcbb702eaafb507ec376`。旧版设计及其评审只供比较，不叠加为本轮新需求。2026-09-29 基线：`codex/epubox-v23-implementation`、工作树无已有代码改动、`uv run pytest -q` 为 **616 passed**。
+基准为 [v2.5 主文](../design/plan.md)，原始 SHA256 `d8b9a4dd99608c880a9b0efb148574bc5f948675fc29bcbb702eaafb507ec376`。旧版设计及其评审只供比较，不叠加为本轮新需求。2026-09-29 基线：`codex/epubox-v23-implementation`、工作树无已有代码改动、`uv run pytest -q` 为 **616 passed**。
 
 **用户本轮直接覆盖一项 v2.5 主文中的历史兼容建议：只保留新的翻译逻辑。** 主文 §10.5/§13 提议旧引擎继续恢复旧 HTML checkpoint；本轮按用户指令删除旧翻译执行路径。旧 checkpoint 不能混入 v2.5，也不启动旧代码；读取到时明确报不支持并要求建立新运行。保留可复用的安全解析、模型连接、格式校验、EPUB 包装功能，不因为来源于旧模块就删除正确性能力。
 
@@ -34,7 +34,7 @@
 | V10 | 两阶段只读 `plan_resume`、续跑和报告：准备/提取/核对/冻结/正文 action+reasons，CLI 默认 auto_extract=true、显式 false；同一运行端到端 P1→P5 | V01、V09 | 两次只读预览字节不变/0 HTTP；提取已收费而无 bookplan 时准确恢复；全局暂停不提前冻结；`in_flight`按可能收费计数、manifest/owner不同步保守占额度；局部坏Unit/Document仅可定位时隔离，共享source/preparation/glossary/book身份坏则停止；blocked_dependency不占worker，依赖满足后重新入队；不做record_only、glob回退或未知外部目标自动认领；显式追加额度留档且不清零历史；旧checkpoint仅unsupported-format；普通单命令可进入两门槛流程 |
 | V11 | 发布前复核 preparation/freeze/glossary/bookplan/Unit/checks 身份；原模板重建、资源多重集、真实 EPUBCheck、原子发布凭证 | V10 | closed_with_gaps 已披露可继续，但正文失败不放行；旧输出/mtime/日志不伪成功；发布失败可从 JSON 重建，不重翻有效 Unit |
 | V12 | 新流程的相关验证/装配/恢复回归已通过后，按 V01 逐文件裁决表迁移共享能力后，物理删除旧 orchestrator/workflow/translator/proofer/validator/fallback_runtime/Parser/Builder/DomReplacer、旧schemas、旧GlossaryExtractor及旧item模块的legacy-only实现、旧专属测试与只供旧逻辑使用的依赖；清理生产和测试 import closure | V11 | 无legacy-only源文件或专属测试残留；不能导入旧 orchestrator/workflow；CLI不再暴露 `--engine` 兼容选择；生产/测试 import 闭包、CLI help、wheel/package smoke均只有新翻译路径；共享正确性能力及测试已迁移；旧 checkpoint 明确拒绝而不再启旧代码 |
-| V13 | 按 [逐号验收矩阵](epubox_v25_test_matrix.md) 执行 T01—T60，完整全库/类型/lint/静态检查；具名 EPUB2/3 实书术语→翻译→重建及恢复、同模型历史结果比较，成本、人工评阅与阅读器记录 | V12 | 每个T有具名测试节点/fixture/期望状态与命令；确定性错误目标为0；旧结果只用已保存历史证据；自动、代理修订、用户人评分开；未完成外部人评/阅读验收时不得宣称 v2.5 质量放行 |
+| V13 | 按 [逐号验收矩阵](tests.md) 执行 T01—T60，完整全库/类型/lint/静态检查；具名 EPUB2/3 实书术语→翻译→重建及恢复、同模型历史结果比较，成本、人工评阅与阅读器记录 | V12 | 每个T有具名测试节点/fixture/期望状态与命令；确定性错误目标为0；旧结果只用已保存历史证据；自动、代理修订、用户人评分开；未完成外部人评/阅读验收时不得宣称 v2.5 质量放行 |
 
 ## V01/V12 旧代码逐文件裁决
 

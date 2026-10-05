@@ -23,7 +23,7 @@ from engine.schemas.contracts import (
 )
 from engine.services.coherence import pending_windows, prepare_document_check, save_window_result
 from engine.services.store import RunStore
-from tests.engine.epub.book_factory import make_epub
+from tests.engine.epub.factory import make_epub
 
 
 class StubChecker:

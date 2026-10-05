@@ -7,8 +7,8 @@ from pathlib import Path
 from engine.epub.preparation import PreparationConfig
 from engine.services.preparation_pipeline import prepare_translation
 from engine.services.resume_plan import plan_resume
-from tests.engine.epub.book_factory import make_epub
-from tests.engine.epub.test_preparation import StubChecker
+from tests.engine.epub.factory import make_epub
+from tests.engine.epub.preparation import StubChecker
 
 
 def _tree(root: Path) -> tuple[tuple[str, str], ...]:

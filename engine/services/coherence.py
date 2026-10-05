@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from engine.schemas.contracts import DocumentPlan, JsonValue, UnitRecord, canonical_hash, strict_json_loads
-from engine.services.atomic_store import CorruptRecord
+from engine.services.atomic import CorruptRecord
 from engine.services.store import RunStore
 
 CHECK_FORMAT = "epubox-check-3"

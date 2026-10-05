@@ -8,6 +8,7 @@ import os
 import traceback
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -40,7 +41,7 @@ from engine.schemas.contracts import (
     canonical_json_bytes,
     strict_json_loads,
 )
-from engine.services.atomic_store import AtomicStore, IdentityMismatch, StoreLocked, safe_id
+from engine.services.atomic import AtomicStore, IdentityMismatch, StoreLocked, safe_id
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.coherence import add_http_budget, retry_document_check
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
@@ -92,7 +93,7 @@ def translate_book(
     source: Path,
     *,
     output: Path | None = None,
-    work_root: Path = Path("work"),
+    work_root: Path | None = None,
     glossary: Path | None = None,
     auto_extract: bool = True,
     provider: str = "agnes",
@@ -107,7 +108,7 @@ def translate_book(
 ) -> RunOutcome:
     """Start and advance all durable gates with one user command."""
     source = source.resolve(strict=True)
-    output = output or source.with_name(f"{source.stem}-zh-Hans.epub")
+    output = output or source.with_name(f"{source.stem}-cn.epub")
     provider = _provider(provider)
     if min(context_tokens, max_output_tokens, concurrency) < 1 or http_limit < 0:
         raise ValueError("model limits must be positive and HTTP limit non-negative")
@@ -138,8 +139,9 @@ def translate_book(
         extraction_config=extraction_config,
         translation_config=translation_config,
     )
-    work_root = work_root.resolve()
     source_hash = _sha256_file(source)
+    config = replace(config, expected_source_hash=source_hash)
+    work_root = _resolve_work_root(work_root) if work_root is not None else _default_work_root(source, source_hash)
     with AtomicStore(work_root / source_hash).lock(blocking=False):
         resumable_work_dir = None
         if run_id := _existing_run_id(work_root / source_hash, source_hash, config, repair_terms=repair_terms):
@@ -166,6 +168,46 @@ def translate_book(
         )
 
 
+def _default_work_root(source: Path, source_hash: str) -> Path:
+    """Place artifacts beside the source and safely adopt one legacy checkpoint."""
+    root = source.with_name(source.stem)
+    destination = root / source_hash
+    legacy_candidates = {
+        Path("work").resolve() / source_hash,
+        (Path(__file__).resolve().parents[1] / "work").resolve() / source_hash,
+    }
+    if root.is_symlink():
+        raise IdentityMismatch("source-adjacent work directory must not be a symbolic link")
+    with AtomicStore(root).lock(blocking=False):
+        if destination.is_symlink() or any(path != destination and path.is_symlink() for path in legacy_candidates):
+            raise IdentityMismatch("checkpoint directory must not be a symbolic link")
+        legacy = sorted(path for path in legacy_candidates if path != destination and path.is_dir())
+        if not legacy:
+            return root
+        if destination.exists() or len(legacy) != 1:
+            raise IdentityMismatch("multiple checkpoint locations exist; use resume with the intended work directory")
+        old = legacy[0]
+        with AtomicStore(old).lock(blocking=False), ExitStack() as locks:
+            runs = sorted(old.iterdir())
+            if any(run.is_symlink() for run in runs):
+                raise IdentityMismatch("run checkpoint must not be a symbolic link")
+            for run in runs:
+                if run.is_dir():
+                    locks.enter_context(AtomicStore(run).lock(blocking=False))
+            # ponytail: rename is deliberately same-filesystem only; cross-device migration stays explicit.
+            old.rename(destination)
+            AtomicStore.sync_directory(root)
+            AtomicStore.sync_directory(old.parent)
+    return root
+
+
+def _resolve_work_root(work_root: Path) -> Path:
+    absolute = work_root.absolute()
+    if any(path.is_symlink() and not path.exists() for path in reversed((absolute, *absolute.parents))):
+        raise IdentityMismatch("work root contains a dangling symbolic link")
+    return work_root.resolve()
+
+
 def _existing_run_id(
     source_root: Path,
     source_hash: str,
@@ -179,7 +221,9 @@ def _existing_run_id(
     other_runs: list[Path] = []
     repairable_runs: list[tuple[RunStore, Any]] = []
     for run_dir in sorted(source_root.iterdir()):
-        if run_dir.is_symlink() or not (run_dir / "preparation.json").is_file():
+        if run_dir.is_symlink():
+            raise IdentityMismatch("run checkpoint must not be a symbolic link")
+        if not (run_dir / "preparation.json").is_file():
             continue
         store = RunStore(run_dir)
         try:
@@ -539,7 +583,8 @@ async def _advance_source(
         raise
     except Exception as error:
         if config.run_id is not None:
-            _record_internal_failure(work_root / _sha256_file(source) / safe_id(config.run_id), "preparation", error)
+            failure_hash = config.expected_source_hash or _sha256_file(source)
+            _record_internal_failure(work_root / failure_hash / safe_id(config.run_id), "preparation", error)
         raise
     return await _finish(
         prepared.status, prepared.phase, prepared.work_dir, output, checker, model, overwrite, progress

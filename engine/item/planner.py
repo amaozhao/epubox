@@ -18,7 +18,7 @@ import tiktoken
 from engine.agents.runtime import request_messages
 from engine.core.markup import UnsafeMarkupError, find_by_element_path, parse_xml_safely, qname_local_name
 from engine.item.inline import Event, events_to_projection, parse_projection, validate_projection
-from engine.schemas.source_internal import CutPlan, DocumentPlan, Segment, Unit, UnitRecord, canonical_hash
+from engine.schemas.internal import CutPlan, DocumentPlan, Segment, Unit, UnitRecord, canonical_hash
 
 
 class PlanningError(ValueError):

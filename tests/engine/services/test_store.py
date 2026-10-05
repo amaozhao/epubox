@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import engine.services.atomic_store as base_store_module
+import engine.services.atomic as base_store_module
 from engine.item import structural_extractor
 from engine.item.source_views import SOURCE_VIEW_RULE_VERSION, SourceViewError
 from engine.item.structural_extractor import EXTRACTOR_VERSION
@@ -30,11 +30,11 @@ from engine.schemas.contracts import (
     source_view_hash_payload,
     term_plan_hash,
 )
-from engine.services.atomic_store import CorruptRecord, IdentityMismatch, StaleWrite, StoreLocked
+from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, StoreLocked
 from engine.services.store import RunStore
 from engine.services.term_planning import plan_term_extraction
-from tests.engine.epub.book_factory import make_epub
-from tests.engine.schemas.test_contracts import make_document
+from tests.engine.epub.factory import make_epub
+from tests.engine.schemas.contracts import make_document
 
 _SOURCE_MARKUP = "<html><body><p>The process uses RAM.</p></body></html>"
 _EXTRACTION_CONFIG: dict[str, JsonValue] = {

@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     CR_PROXY_MODEL: str = "gpt-5.3-codex-spark"
     CR_PROXY_BASE_URL: str = "http://3.93.42.33:3000/api/v1"
 
+    # EPUB 分块配置
+    EPUB_CHUNK_MAX_TOKENS: PositiveInt = 2000
+
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_FORMAT: Literal["json", "console"] = "json"
@@ -91,3 +94,11 @@ def get_settings() -> Settings:
         Settings: The application settings.
     """
     return settings
+
+
+def resolve_chunk_limit(limit: int | None = None, *, configured: int | None = None) -> int:
+    """Resolve an explicit chunk limit before the configured environment value."""
+    value = limit if limit is not None else settings.EPUB_CHUNK_MAX_TOKENS if configured is None else configured
+    if type(value) is not int or value < 1:
+        raise ValueError("chunk token limit must be a positive integer")
+    return value

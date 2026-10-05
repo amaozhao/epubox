@@ -60,7 +60,7 @@ from engine.schemas.contracts import (
     canonical_hash,
     strict_json_loads,
 )
-from engine.services.atomic_store import IdentityMismatch, StoreError
+from engine.services.atomic import IdentityMismatch, StoreError
 from engine.services.coherence import (
     load_budget_overrides,
     pending_windows,

@@ -13,8 +13,8 @@ from engine.services.preparation_pipeline import PreparationProgress, prepare_tr
 from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION
 from engine.services.term_runner import TermRunner, TermRunResult
-from tests.engine.epub.book_factory import make_epub
-from tests.engine.epub.test_preparation import StubChecker
+from tests.engine.epub.factory import make_epub
+from tests.engine.epub.preparation import StubChecker
 
 
 def config(*, auto_extract: bool = True, user_terms_path: Path | None = None) -> PreparationConfig:

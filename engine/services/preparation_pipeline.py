@@ -27,7 +27,7 @@ from engine.schemas.contracts import (
     UnitRecord,
     canonical_hash,
 )
-from engine.services.atomic_store import IdentityMismatch
+from engine.services.atomic import IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.term_freeze import ResolutionDecision, freeze_terminology, prepare_candidate_pool
 from engine.services.term_inputs import load_user_terms

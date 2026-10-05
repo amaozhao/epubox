@@ -1,10 +1,10 @@
 # EPUBox v2.3 架构与任务拆分（待用户确认实施）
 
-- 唯一需求基准：`docs/epubox_redesign.md`，版本 **2.3**，860 行，SHA-256 `bbd1aed9a313f34d5af23514253b48218a8552253f727e4219e0fd3ee084f2b0`。
+- 唯一需求基准：`docs/history/redesign.md`，版本 **2.3**，860 行，SHA-256 `bbd1aed9a313f34d5af23514253b48218a8552253f727e4219e0fd3ee084f2b0`。
 - 源码基线：`13ece3a`；工作分支：`codex/translation-architecture-redesign`。沿用已创建分支，不重新切回 main、不丢弃已有文件。
 - 本文完全替换上一轮 v2.1 任务方案；旧 T0–T12 编号不再生效。本文用 **P00–P14** 表示实施任务；**T01–T32** 始终指需求文档的验收用例。
 - 当前授权仅为分析、架构设计、任务拆分和 review。正文中的拟议接口/命令/测试均未实现。用户确认任务拆分后才实施；文档 §15 的执行措辞不覆盖这个授权边界。
-- 计划审查结果单列于 `docs/epubox_architecture_review.md`；设计 review 通过不代表实现、真实翻译或阅读器验收通过。
+- 计划审查结果单列于 `docs/history/architecture/review.md`；设计 review 通过不代表实现、真实翻译或阅读器验收通过。
 
 ## 1. 重新分析后的结论与旧计划删除项
 

@@ -19,7 +19,7 @@ from engine.core.markup import element_path, parse_xml_safely, qname_local_name
 from engine.core.styles import ReorderPolicy, StyleIssue, StyleScan, scan_inline_style, scan_stylesheets
 from engine.item.inline import Event, events_to_projection, parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS, source_token_count
-from engine.schemas.source_internal import (
+from engine.schemas.internal import (
     DocumentPlan,
     NodeRecord,
     RegistryEntry,

@@ -8,8 +8,8 @@
 
 | 对象 | 路径/版本 | SHA-256 |
 |---|---|---|
-| 唯一需求文档 | `docs/epubox_redesign.md`，v2.3，860 行 | `bbd1aed9a313f34d5af23514253b48218a8552253f727e4219e0fd3ee084f2b0` |
-| 架构与任务计划 | `docs/epubox_architecture_plan.md`，417 行，P00–P14 | `1214ccf216fa06f50c0a759ea959f229c8e6ff7b3a2b9382c23f338f29fad2f7` |
+| 唯一需求文档 | `docs/history/redesign.md`，v2.3，860 行 | `bbd1aed9a313f34d5af23514253b48218a8552253f727e4219e0fd3ee084f2b0` |
+| 架构与任务计划 | `docs/history/architecture/plan.md`，417 行，P00–P14 | `1214ccf216fa06f50c0a759ea959f229c8e6ff7b3a2b9382c23f338f29fad2f7` |
 | 源码 | HEAD `13ece3a` | 业务代码与受审基线无 diff |
 | 分支 | `codex/translation-architecture-redesign` | 沿用上一轮分支，没有提交/推送 |
 
@@ -70,7 +70,7 @@ Reviewer：`review_v23_coverage`（verifier）。
 
 ## 4. 源文档的两处非阻断差异
 
-1. 需求第 787 行称基准文件为 `epubox_mvp_refactoring_v2_3.md`，实际用户提供文件为 `docs/epubox_redesign.md`。计划使用实际路径、版本与完整哈希锁定基准，不臆造另一份需求。
+1. 需求第 787 行称基准文件为 `epubox_mvp_refactoring_v2_3.md`，实际用户提供文件为 `docs/history/redesign.md`。计划使用实际路径、版本与完整哈希锁定基准，不臆造另一份需求。
 2. 需求第 532 行引用 `examples/document.json`，当前仓库未提供。计划明确以 §10.2 完整字段表为准，P00/P01 建立自己的合成契约 fixture；不把不存在的示例或探针当作项目实测。
 
 两点均不要求扩大实施范围，也未修改原需求文件。

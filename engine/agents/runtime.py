@@ -19,7 +19,7 @@ from agno.models.message import Message
 from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 
 from engine.core.tokens import count_tokens
-from engine.schemas.source_internal import Attempt, Usage
+from engine.schemas.internal import Attempt, Usage
 
 from .models import build_primary_model
 from .streaming_openai_like import StreamingOpenAILike

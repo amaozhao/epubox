@@ -20,7 +20,7 @@ from engine.schemas.contracts import (
     parse_contract,
     strict_json_loads,
 )
-from engine.services.atomic_store import CorruptRecord, safe_id
+from engine.services.atomic import CorruptRecord, safe_id
 from engine.services.coherence import _read as read_coherence_record
 
 type ResumePhase = Literal["preparation", "terms", "freeze", "translation", "coherence", "publication"]

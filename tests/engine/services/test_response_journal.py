@@ -10,7 +10,7 @@ from engine.schemas.contracts import (
     RequestManifest,
     TermExtractionRecord,
 )
-from engine.services.atomic_store import CorruptRecord, IdentityMismatch, StaleWrite
+from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite
 from engine.services.store import ModelResponseStage, RunStore
 from tests.engine.services.test_store import _prepare, _write_term_plan
 

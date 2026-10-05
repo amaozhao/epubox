@@ -12,7 +12,7 @@ from engine.epub.publication import stage_epub, validate_assembled_document, ver
 from engine.epub.validation import EpubCheckResult, EpubValidationError, inspect_epub
 from engine.item.extractor import extract_document
 from engine.item.inline import ProjectionError, validate_projection
-from tests.engine.epub.book_factory import make_epub
+from tests.engine.epub.factory import make_epub
 
 
 class StubChecker:

@@ -21,7 +21,7 @@ from engine.schemas.contracts import (
     cut_plan_hash,
     segment_hash,
 )
-from engine.services.atomic_store import IdentityMismatch, StaleWrite
+from engine.services.atomic import IdentityMismatch, StaleWrite
 from engine.services.store import RunStore
 from engine.services.term_freeze import freeze_terminology
 from tests.engine.services.test_store import _prepare, _write_term_plan

@@ -52,7 +52,7 @@ from engine.schemas.contracts import (
     validate_cut_plan_coverage,
     validate_term_scopes,
 )
-from engine.services.atomic_store import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite, safe_id
+from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite, safe_id
 from engine.services.term_planning import plan_term_extraction
 
 ModelT = TypeVar("ModelT", bound=BaseModel)

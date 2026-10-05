@@ -13,8 +13,8 @@ from engine.schemas.contracts import (
     canonical_hash,
     source_view_hash_payload,
 )
-from engine.schemas.source_internal import DocumentPlan as ExtractedDocument
-from engine.schemas.source_internal import SourceSlot, Unit
+from engine.schemas.internal import DocumentPlan as ExtractedDocument
+from engine.schemas.internal import SourceSlot, Unit
 
 SOURCE_VIEW_RULE_VERSION = "epubox-source-view-2"
 

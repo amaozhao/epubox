@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -11,12 +12,12 @@ import engine.services.preparation_pipeline as pipeline_module
 from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.preparation import PreparationConfig, prepare_book
-from engine.epub.validation import EpubCheckResult
+from engine.epub.validation import EpubCheckResult, EpubValidationError
 from engine.item.extractor import extract_document
-from engine.services.atomic_store import IdentityMismatch
+from engine.services.atomic import IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.term_planning import TERM_PLANNER_VERSION, plan_term_extraction
-from tests.engine.epub.book_factory import make_epub
+from tests.engine.epub.factory import make_epub
 
 
 class StubChecker:
@@ -26,6 +27,37 @@ class StubChecker:
     def check(self, path: Path) -> EpubCheckResult:
         self.paths.append(path)
         return EpubCheckResult(("stub-epubcheck",), 0)
+
+
+def test_snapshot_rejects_source_that_changes_during_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"first")
+    work = tmp_path / "work"
+    work.mkdir()
+    copy = preparation_module.shutil.copyfileobj
+
+    def changing_copy(input_file, output_file):
+        copy(input_file, output_file)
+        source.write_bytes(source.read_bytes() + b"x")
+
+    monkeypatch.setattr(preparation_module.shutil, "copyfileobj", changing_copy)
+    with pytest.raises(OSError, match="kept changing"):
+        preparation_module._stable_snapshot(source, work)
+    assert not list(work.glob(".source-*.tmp"))
+
+
+@pytest.mark.parametrize("contents", [b"not a zip", None])
+def test_p1_rejects_invalid_epub_before_commit(tmp_path: Path, contents: bytes | None) -> None:
+    source = tmp_path / "bad.epub"
+    if contents is None:
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+    else:
+        source.write_bytes(contents)
+
+    with pytest.raises((zipfile.BadZipFile, EpubValidationError)):
+        prepare_book(source, tmp_path / "work", PreparationConfig(run_id="bad"), StubChecker())
+    assert not list((tmp_path / "work").glob("*/bad/preparation.json"))
 
 
 def test_p1_snapshots_complete_source_inventory_and_commits_parsed_ready_last(tmp_path: Path) -> None:

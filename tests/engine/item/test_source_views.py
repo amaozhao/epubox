@@ -17,7 +17,7 @@ from engine.schemas.contracts import (
     canonical_hash,
     source_view_hash_payload,
 )
-from engine.schemas.source_internal import DocumentPlan
+from engine.schemas.internal import DocumentPlan
 
 
 def _plan(body: str) -> DocumentPlan:

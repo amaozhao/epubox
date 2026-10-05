@@ -26,7 +26,7 @@ from engine.item.planner import (
     validate_cut_plan,
 )
 from engine.item.structural_extractor import extract_document
-from engine.schemas.source_internal import (
+from engine.schemas.internal import (
     DocumentPlan,
     ItemRecord,
     JsonValue,

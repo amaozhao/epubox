@@ -14,7 +14,7 @@ from engine.core.markup import find_by_element_path, parse_xml_safely, qname_loc
 from engine.item.inline import parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS, PlannerConfig, validate_cut_plan
 from engine.item.planner import plan_unit as plan_projection_segments
-from engine.schemas import source_internal
+from engine.schemas import internal
 from engine.schemas.contracts import (
     CutPlan,
     DocumentPlan,
@@ -227,7 +227,7 @@ def plan_unit(
     temporary_logical_hash = canonical_hash(
         {"version": PLANNER_VERSION, "unit_id": unit.unit_id, "source_projection": unit.source_projection}
     )
-    legacy_unit = source_internal.Unit(
+    legacy_unit = internal.Unit(
         unit_id=unit.unit_id,
         document_id=unit.document_id,
         kind=unit.kind,
@@ -235,7 +235,7 @@ def plan_unit(
         node_key=unit.node_key,
         slot_ids=unit.slot_ids,
         registry={
-            ref_id: source_internal.RegistryEntry.model_validate(entry.model_dump(mode="python"))
+            ref_id: internal.RegistryEntry.model_validate(entry.model_dump(mode="python"))
             for ref_id, entry in unit.registry.items()
         },
         context={"source_context": json.dumps(unit_selection.context, ensure_ascii=False, sort_keys=True)},

@@ -24,7 +24,7 @@ from engine.schemas.contracts import (
     SourceSlot,
     Unit,
 )
-from engine.schemas.source_internal import DocumentPlan as ExtractedDocument
+from engine.schemas.internal import DocumentPlan as ExtractedDocument
 
 type SourceDocument = ExtractedDocument | DocumentPlan
 

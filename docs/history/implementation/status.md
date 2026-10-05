@@ -1,6 +1,6 @@
 # v2.5 实施状态
 
-分支：`codex/epubox-v25-implementation`。需求依据：[v2.5 设计](epubox_mvp_design_v2_5.md)（SHA256 `d8b9a4dd99608c880a9b0efb148574bc5f948675fc29bcbb702eaafb507ec376`）；范围和验收见[审定计划](epubox_v25_implementation_plan.md)及[T01—T60 矩阵](epubox_v25_test_matrix.md)。设计文档是需求材料，实际执行范围还包括用户后续确认的“只保留一条翻译逻辑”“失败片段不阻塞独立任务”“每个模型源片段不超过 1200 token”和“同一容器内合并连续段落”。
+分支：`codex/epubox-v25-implementation`。需求依据：[v2.5 设计](../design/plan.md)（SHA256 `d8b9a4dd99608c880a9b0efb148574bc5f948675fc29bcbb702eaafb507ec376`）；范围和验收见[审定计划](plan.md)及[T01—T60 矩阵](tests.md)。设计文档是需求材料，实际执行范围还包括用户后续确认的“只保留一条翻译逻辑”“失败片段不阻塞独立任务”“每个模型源片段不超过 1200 token”和“同一容器内合并连续段落”。
 
 | 范围 | 状态 | 当前证据 |
 |---|---|---|

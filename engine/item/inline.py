@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from engine.schemas.source_internal import Event
+from engine.schemas.internal import Event
 
 LEFT = "⟦"
 RIGHT = "⟧"

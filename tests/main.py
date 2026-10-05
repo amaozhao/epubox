@@ -4,7 +4,7 @@ from typer.testing import CliRunner
 
 import main
 from engine.cli import RunOutcome
-from engine.services.atomic_store import StoreLocked
+from engine.services.atomic import StoreLocked
 
 
 def test_translate_cli_uses_one_pipeline_and_defaults_to_auto_terms(tmp_path: Path, monkeypatch) -> None:
@@ -22,6 +22,7 @@ def test_translate_cli_uses_one_pipeline_and_defaults_to_auto_terms(tmp_path: Pa
     assert result.exit_code == 0, result.output
     assert len(called) == 1
     assert called[0][1]["auto_extract"] is True
+    assert called[0][1]["work_root"] is None
     assert "输出：" in result.output
 
 

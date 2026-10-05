@@ -9,10 +9,10 @@ import pytest
 from engine import cli
 from engine.epub.preparation import prepare_book
 from engine.schemas.contracts import ItemStatus
-from engine.services.atomic_store import AtomicStore, StoreLocked
+from engine.services.atomic import AtomicStore, StoreLocked
 from engine.services.coherence import load_budget_overrides
-from tests.engine.epub.book_factory import make_epub
-from tests.engine.epub.test_preparation import StubChecker
+from tests.engine.epub.factory import make_epub
+from tests.engine.epub.preparation import StubChecker
 from tests.engine.test_orchestrator import ready_store
 
 
@@ -88,11 +88,87 @@ def test_translate_command_routes_only_through_preparation_pipeline(
     assert captured["config"].translation_config["target_language"] == "zh-Hans"
 
 
+def test_default_paths_are_beside_source_independent_of_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = make_epub(tmp_path / "library" / "novel.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: StubChecker())
+    outputs: list[Path] = []
+
+    async def advance(actual_source, output, actual_work_root, config, actual_checker, **_kwargs):
+        outputs.append(output)
+        prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
+        return cli.RunOutcome("paused", prepared.work_dir, "terms")
+
+    monkeypatch.setattr(cli, "_advance_source", advance)
+    result = cli.translate_book(source)
+
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert result.work_dir.parent == source.parent / source.stem / source_hash
+    assert outputs == [source.with_name("novel-cn.epub")]
+
+
+def test_source_identity_change_before_snapshot_never_starts_the_new_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>First edition.</p>"})
+    replacement = make_epub(tmp_path / "replacement.epub", {"chapter.xhtml": "<p>Second edition.</p>"})
+    replacement_bytes = replacement.read_bytes()
+    old_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    new_hash = hashlib.sha256(replacement_bytes).hexdigest()
+    root = source.parent / source.stem
+    source_root = root / old_hash
+    source_root.mkdir(parents=True)
+    accounting = source_root / "accounting.json"
+    accounting.write_bytes(b'{"http_attempts":31}')
+    hash_calls = 0
+    model_sends = 0
+    original_hash = cli._sha256_file
+
+    def hash_then_change(path: Path) -> str:
+        nonlocal hash_calls
+        digest = original_hash(path)
+        if hash_calls == 0:
+            source.write_bytes(replacement_bytes)
+        hash_calls += 1
+        return digest
+
+    class Model:
+        async def ainvoke(self, *_args, **_kwargs):
+            nonlocal model_sends
+            model_sends += 1
+            raise AssertionError("source mismatch must fail before any model request")
+
+    monkeypatch.setattr(cli, "_sha256_file", hash_then_change)
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: Model())
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: StubChecker())
+
+    with pytest.raises(cli.IdentityMismatch, match="source EPUB identity changed"):
+        cli.translate_book(source)
+
+    assert hash_calls == 1
+    assert model_sends == 0
+    assert accounting.read_bytes() == b'{"http_attempts":31}'
+    assert not (root / new_hash).exists()
+    assert not list(root.glob(".source-*.tmp"))
+    assert not list(root.rglob("requests/*.json"))
+
+
+def test_output_alias_never_overwrites_source(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    alias = tmp_path / "alias.epub"
+    alias.symlink_to(source)
+
+    with pytest.raises(ValueError, match="aliases"):
+        cli.check_output(source.resolve(), alias, overwrite=True)
+
+
 def test_repeating_translate_command_reuses_the_same_prepared_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
-    work_root = tmp_path / "work"
     seen_run_ids: list[str | None] = []
     checker = StubChecker()
     monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
@@ -106,11 +182,235 @@ def test_repeating_translate_command_reuses_the_same_prepared_run(
         return cli.RunOutcome("paused", first.work_dir, "terms")
 
     monkeypatch.setattr(cli, "_advance_source", advance)
-    first = cli.translate_book(source, work_root=work_root)
-    second = cli.translate_book(source, work_root=work_root)
+    first = cli.translate_book(source)
+    second = cli.translate_book(source)
 
     assert first.work_dir == second.work_dir
     assert seen_run_ids == [first.work_dir.name, first.work_dir.name]
+
+
+def test_default_work_roots_separate_same_named_books_in_different_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = [
+        make_epub(tmp_path / directory / "book.epub", {"chapter.xhtml": "<p>Same book.</p>"})
+        for directory in ("one", "two")
+    ]
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: StubChecker())
+
+    async def advance(actual_source, _output, actual_work_root, config, actual_checker, **_kwargs):
+        prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
+        return cli.RunOutcome("paused", prepared.work_dir, "terms")
+
+    monkeypatch.setattr(cli, "_advance_source", advance)
+    results = [cli.translate_book(source) for source in sources]
+
+    source_hash = hashlib.sha256(sources[0].read_bytes()).hexdigest()
+    assert [result.work_dir.parent for result in results] == [
+        source.parent / source.stem / source_hash for source in sources
+    ]
+
+
+def test_default_work_root_migrates_legacy_progress_without_record_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(tmp_path / "library" / "book.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    cwd = tmp_path / "old-directory"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    legacy_root = cwd / "work"
+    model_calls = 0
+
+    class ForbiddenModel:
+        id = cli.settings.AGNES_MODEL
+
+        async def ainvoke(self, *_args, **_kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            raise AssertionError("migration must not repeat model work")
+
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: ForbiddenModel())
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: StubChecker())
+
+    async def prepare(actual_source, _output, actual_work_root, config, actual_checker, **_kwargs):
+        prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
+        return cli.RunOutcome("paused", prepared.work_dir, "terms")
+
+    monkeypatch.setattr(cli, "_advance_source", prepare)
+    legacy = cli.translate_book(source, work_root=legacy_root)
+    (legacy.work_dir / "bookplan.json").write_text("{}")
+    before = {
+        path.relative_to(legacy.work_dir): path.read_bytes() for path in legacy.work_dir.rglob("*") if path.is_file()
+    }
+
+    async def forbidden_prepare(*_args, **_kwargs):
+        raise AssertionError("migration must resume the frozen run")
+
+    resumed_paths: list[Path] = []
+
+    async def resume(actual_work_dir, *_args, **_kwargs):
+        resumed_paths.append(actual_work_dir)
+        return cli.RunOutcome("paused", actual_work_dir, "translation")
+
+    monkeypatch.setattr(cli, "_advance_source", forbidden_prepare)
+    monkeypatch.setattr(cli, "_advance_work_dir", resume)
+    migrated = cli.translate_book(source)
+
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    expected = source.parent / source.stem / source_hash / legacy.work_dir.name
+    after = {
+        path.relative_to(migrated.work_dir): path.read_bytes()
+        for path in migrated.work_dir.rglob("*")
+        if path.is_file()
+    }
+    assert migrated.work_dir == expected
+    assert resumed_paths == [expected]
+    assert not legacy.work_dir.exists()
+    assert after == before
+    assert model_calls == 0
+
+
+def test_default_work_root_refuses_symlinked_run_without_moving_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(tmp_path / "library" / "book.epub", {"chapter.xhtml": "<p>Keep progress.</p>"})
+    monkeypatch.chdir(tmp_path)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    legacy = tmp_path / "work" / digest
+    run = legacy / "saved-run"
+    run.mkdir(parents=True)
+    checkpoint = run / "checkpoint.json"
+    checkpoint.write_bytes(b'{"http_attempts":17}')
+    dangling = legacy / "missing-run"
+    dangling.symlink_to(tmp_path / "offline" / "missing-run", target_is_directory=True)
+    model_calls = 0
+
+    def build(*_args, **_kwargs):
+        nonlocal model_calls
+        model_calls += 1
+        return object()
+
+    monkeypatch.setattr(cli, "build_run_model", build)
+    with pytest.raises(cli.IdentityMismatch, match="run checkpoint"):
+        cli.translate_book(source)
+
+    assert model_calls == 0
+    assert checkpoint.read_bytes() == b'{"http_attempts":17}'
+    assert dangling.is_symlink()
+    assert legacy.is_dir()
+    assert not (source.parent / source.stem / digest).exists()
+
+
+@pytest.mark.parametrize("locked_directory", ["source", "run"])
+def test_default_work_root_does_not_move_a_locked_checkpoint(tmp_path, monkeypatch, locked_directory) -> None:
+    source = make_epub(tmp_path / "library" / "book.epub", {"chapter.xhtml": "<p>Keep progress.</p>"})
+    monkeypatch.chdir(tmp_path)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    legacy = tmp_path / "work" / digest
+    run = legacy / "saved-run"
+    run.mkdir(parents=True)
+    checkpoint = run / "checkpoint.json"
+    checkpoint.write_text('{"accepted":1}')
+    with (
+        AtomicStore(legacy if locked_directory == "source" else run).lock(blocking=False),
+        pytest.raises(StoreLocked),
+    ):
+        cli._default_work_root(source, digest)
+    assert checkpoint.read_text() == '{"accepted":1}'
+    assert not (source.parent / source.stem / digest).exists()
+
+
+def test_default_work_root_never_merges_competing_checkpoints(tmp_path, monkeypatch) -> None:
+    source = make_epub(tmp_path / "library" / "book.epub", {"chapter.xhtml": "<p>Keep progress.</p>"})
+    monkeypatch.chdir(tmp_path)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    roots = (tmp_path / "work" / digest, source.parent / source.stem / digest)
+    for index, root in enumerate(roots):
+        root.mkdir(parents=True)
+        (root / "checkpoint.json").write_text(str(index))
+    with pytest.raises(cli.IdentityMismatch, match="multiple checkpoint locations"):
+        cli._default_work_root(source, digest)
+    assert [(root / "checkpoint.json").read_text() for root in roots] == ["0", "1"]
+
+
+def test_default_work_root_refuses_dangling_legacy_checkpoint_link(tmp_path, monkeypatch) -> None:
+    source = make_epub(tmp_path / "library" / "book.epub", {"chapter.xhtml": "<p>Keep progress.</p>"})
+    monkeypatch.chdir(tmp_path)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    legacy = tmp_path / "work" / digest
+    legacy.parent.mkdir()
+    missing = tmp_path / "offline-disk" / digest
+    legacy.symlink_to(missing, target_is_directory=True)
+    with pytest.raises(cli.IdentityMismatch, match="symbolic link"):
+        cli._default_work_root(source, digest)
+    assert legacy.is_symlink() and legacy.readlink() == missing
+    assert not (source.parent / source.stem / digest).exists()
+
+
+def test_default_work_root_refuses_dangling_destination_link(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>Keep progress.</p>"})
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    root = source.parent / source.stem
+    root.mkdir()
+    destination = root / digest
+    destination.symlink_to(tmp_path / "offline" / digest, target_is_directory=True)
+
+    with pytest.raises(cli.IdentityMismatch, match="symbolic link"):
+        cli._default_work_root(source, digest)
+    assert destination.is_symlink()
+
+
+def test_explicit_work_root_refuses_dangling_parent_before_model_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>Keep progress.</p>"})
+    missing = tmp_path / "offline"
+    link = tmp_path / "worklink"
+    link.symlink_to(missing, target_is_directory=True)
+    model_calls = 0
+
+    def build(*_args, **_kwargs):
+        nonlocal model_calls
+        model_calls += 1
+        return object()
+
+    monkeypatch.setattr(cli, "build_run_model", build)
+    with pytest.raises(cli.IdentityMismatch, match="dangling symbolic link"):
+        cli.translate_book(source, work_root=link / "nested")
+
+    assert model_calls == 0
+    assert link.is_symlink()
+    assert not missing.exists()
+
+
+def test_run_discovery_refuses_dangling_link_before_model_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>Keep progress.</p>"})
+    work_root = tmp_path / "work"
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    source_root = work_root / digest
+    source_root.mkdir(parents=True)
+    checkpoint = source_root / "usage.json"
+    checkpoint.write_bytes(b'{"http_attempts":23}')
+    dangling = source_root / "missing-run"
+    dangling.symlink_to(tmp_path / "offline" / "missing-run", target_is_directory=True)
+    model_calls = 0
+
+    def build(*_args, **_kwargs):
+        nonlocal model_calls
+        model_calls += 1
+        return object()
+
+    monkeypatch.setattr(cli, "build_run_model", build)
+    with pytest.raises(cli.IdentityMismatch, match="run checkpoint"):
+        cli.translate_book(source, work_root=work_root)
+
+    assert model_calls == 0
+    assert checkpoint.read_bytes() == b'{"http_attempts":23}'
+    assert dangling.is_symlink()
+    assert {path.name for path in source_root.iterdir() if path.name != ".store.lock"} == {"missing-run", "usage.json"}
 
 
 def test_translate_command_resumes_frozen_bookplan_without_reentering_p1_or_provider(

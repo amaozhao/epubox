@@ -9,7 +9,7 @@ from typing import Any, cast
 import typer
 
 from engine.cli import RunOutcome, resume_book, translate_book
-from engine.services.atomic_store import StoreLocked
+from engine.services.atomic import StoreLocked
 from engine.services.resume_plan import plan_resume
 
 app = typer.Typer()
@@ -20,7 +20,7 @@ def translate(
     epub_path: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False, readable=True),
     language: str = typer.Option("Chinese", "--language", "-lg"),
     output: Path | None = typer.Option(None, "--output", "-o"),
-    work_root: Path = typer.Option(Path("work"), "--work-root"),
+    work_root: Path | None = typer.Option(None, "--work-root", help="工作资料目录，默认在原书旁创建同名目录。"),
     glossary: Path | None = typer.Option(None, "--glossary", exists=True, dir_okay=False),
     auto_extract: bool = typer.Option(True, "--auto-extract/--no-auto-extract"),
     provider: str = typer.Option("agnes", "--provider"),
