@@ -9,12 +9,12 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name
-from engine.item.source_views import SourceViewGap, derive_source_views
-from engine.item.structural_extractor import (
+from engine.item.structure import (
     ADAPTER_VERSION,
     EXTRACTOR_VERSION,
 )
-from engine.item.structural_extractor import extract_document as extract_structure
+from engine.item.structure import extract_document as extract_structure
+from engine.item.views import SourceViewGap, derive_source_views
 from engine.schemas.contracts import (
     DocumentPlan,
     NodeRecord,

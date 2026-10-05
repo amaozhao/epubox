@@ -13,8 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from engine.item.extractor import validate_source_relations
 from engine.item.inline import events_to_projection, parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS, _atomize, _range_stacks, _segment_events, source_token_count
-from engine.item.source_views import validate_source_views
 from engine.item.unit_planner import build_context_index, initial_derived_navigation, plan_unit
+from engine.item.views import validate_source_views
 from engine.schemas.contracts import (
     BOOK_FORMAT,
     CANDIDATES_FORMAT,
@@ -313,7 +313,7 @@ class RunStore:
             document_id: self.read_document(document_id, expected_hash=document_hash)
             for document_id, document_hash in preparation.document_hashes.items()
         }
-        from engine.item.structural_extractor import EXTRACTOR_VERSION
+        from engine.item.structure import EXTRACTOR_VERSION
 
         if any(document.extractor_version != EXTRACTOR_VERSION for document in documents.values()):
             raise IdentityMismatch("preparation uses an obsolete extractor version; start a new run")

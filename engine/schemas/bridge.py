@@ -15,6 +15,7 @@ from engine.agents.runtime import wire_hash
 from engine.schemas.budget import BudgetResult
 from engine.schemas.contracts import (
     BookPlan,
+    DocumentPlan,
     FrozenModel,
     GlossarySnapshot,
     ItemRecord,
@@ -29,12 +30,22 @@ from engine.schemas.contracts import (
 type SourceContext = PreparationPlan
 type FrozenTerms = GlossarySnapshot
 type ItemResult = ItemRecord
+type AtomicTag = Literal["p", "table", "em", "i", "ul", "ol"]
+type SourceChannel = Literal["body", "attribute", "metadata", "navigation"]
 
 MAP_FORMAT = "epubox-map-1"
 BATCH_FORMAT = "epubox-batch-1"
 PREPARED_FORMAT = "epubox-prepared-1"
 ATOMIC_TAGS = frozenset({"p", "table", "em", "i", "ul", "ol"})
 TRANSLATABLE_ATTRIBUTES = frozenset({"alt", "title", "aria-label", "aria-description"})
+
+
+def source_channel(unit: Unit) -> SourceChannel:
+    if unit.kind == "navigation":
+        return "navigation"
+    if unit.kind.startswith(("head_", "metadata_")) or unit.region.get("attribute_name") == "content":
+        return "metadata"
+    return "attribute" if unit.kind == "attribute" else "body"
 
 
 class ByteSpan(FrozenModel):
@@ -73,6 +84,7 @@ class SourceMap(FrozenModel):
     document_hash: str = Field(min_length=1)
     encoding: str = Field(min_length=1)
     source_size: int = Field(ge=0, strict=True)
+    node_spans: dict[str, ByteSpan] = Field(default_factory=dict)
     locations: tuple[SourceLocation, ...] = ()
     protected_spans: tuple[ByteSpan, ...] = ()
 
@@ -81,7 +93,7 @@ class SourceMap(FrozenModel):
         refs: dict[str, list[SourceRef]] = {}
         spans = [location.byte_span for location in self.locations]
         spans.extend(self.protected_spans)
-        if any(span.byte_end > self.source_size for span in spans):
+        if any(span.byte_end > self.source_size for span in [*spans, *self.node_spans.values()]):
             raise ValueError("byte span exceeds the original resource")
         for location in self.locations:
             refs.setdefault(location.source_ref.slot_id, []).append(location.source_ref)
@@ -92,6 +104,13 @@ class SourceMap(FrozenModel):
         ordered_spans = sorted(spans, key=lambda span: span.byte_start)
         if any(left.byte_end > right.byte_start for left, right in pairwise(ordered_spans)):
             raise ValueError("editable and protected source byte spans must not overlap")
+        if self.source_size and (
+            not ordered_spans
+            or ordered_spans[0].byte_start != 0
+            or ordered_spans[-1].byte_end != self.source_size
+            or any(left.byte_end != right.byte_start for left, right in pairwise(ordered_spans))
+        ):
+            raise ValueError("editable and protected spans must cover every original source byte")
         return self
 
 
@@ -100,9 +119,155 @@ class AtomicItem(Unit):
 
     item_id: str = Field(min_length=1)
     ordinal: int = Field(ge=0, strict=True)
-    channel: Literal["body", "attribute", "metadata", "navigation"]
-    atomic_tag: Literal["p", "table", "em", "i", "ul", "ol"] | None = None
+    channel: SourceChannel
+    atomic_tag: AtomicTag | None = None
     source_span: ByteSpan
+
+
+class AtomicDocument(FrozenModel):
+    """Persistable T05 output; raw resource bytes stay in the source snapshot."""
+
+    format: Literal["epubox-atoms-1"] = "epubox-atoms-1"
+    document: DocumentPlan
+    source_map: SourceMap
+    items: tuple[AtomicItem, ...]
+
+    @model_validator(mode="after")
+    def validate_inventory(self) -> AtomicDocument:
+        document = self.document
+        if self.source_map.document_id != document.document_id or self.source_map.source_hash != document.source_hash:
+            raise ValueError("atomic inventory and source map must share a document identity")
+        if self.source_map.document_hash != document.resource.source_sha256:
+            raise ValueError("atomic inventory must refer to the original resource bytes")
+        if tuple(item.unit_id for item in self.items) != tuple(unit.unit_id for unit in document.units):
+            raise ValueError("atomic inventory must cover the ordered source Units exactly once")
+        if len({item.item_id for item in self.items}) != len(self.items):
+            raise ValueError("atomic item IDs must be unique")
+        if set(self.source_map.node_spans) != set(document.nodes):
+            raise ValueError("atomic inventory requires the complete element byte-span inventory")
+        if tuple(item.ordinal for item in self.items) != tuple(range(len(self.items))):
+            raise ValueError("atomic ordinals must cover the complete reading order")
+        if any(left.source_span.byte_start > right.source_span.byte_start for left, right in pairwise(self.items)):
+            raise ValueError("atomic reading order must match the original byte positions")
+        fields = set(Unit.model_fields)
+        by_id = {item.unit_id: item for item in self.items}
+        owners_by_range = {
+            (slot.slot_id, part.start, part.end): part.owner_unit_id
+            for slot in document.source_slots.values()
+            for part in slot.ranges
+            if part.owner_kind == "unit"
+        }
+        locations_by_owner: dict[str, list[ByteSpan]] = {}
+        for location in self.source_map.locations:
+            ref = location.source_ref
+            owner = owners_by_range.get((ref.slot_id, ref.start, ref.end))
+            if owner is None:
+                raise ValueError("mapped location must belong to an authoritative source owner")
+            locations_by_owner.setdefault(owner, []).append(location.byte_span)
+        patch_parent: AtomicItem | None = None
+        previous_content: ByteSpan | None = None
+        for item, unit in zip(self.items, document.units, strict=True):
+            if (
+                Unit.model_validate(item.model_dump(include=fields)) != unit
+                or item.document_id != document.document_id
+            ):
+                raise ValueError("atomic item differs from its authoritative source Unit")
+            if item.source_span.byte_end > self.source_map.source_size:
+                raise ValueError("atomic item byte span exceeds the original resource")
+            node_span = self.source_map.node_spans[item.node_key]
+            if item.source_span.byte_start < node_span.byte_start or item.source_span.byte_end > node_span.byte_end:
+                raise ValueError("item byte span must stay inside its authoritative source node")
+            if any(
+                location.byte_start < item.source_span.byte_start or location.byte_end > item.source_span.byte_end
+                for location in locations_by_owner.get(item.unit_id, ())
+            ):
+                raise ValueError("actual mapped source ranges must lie inside their item byte span")
+            if item.channel != source_channel(unit):
+                raise ValueError("atomic content channel differs from its authoritative source Unit")
+            qname = document.nodes[item.node_key].qname
+            tag = qname.removeprefix("{http://www.w3.org/1999/xhtml}")
+            attribute_item = bool(unit.slot_ids) and all(
+                document.source_slots[slot_id].field == "attribute" for slot_id in unit.slot_ids
+            )
+            if (unit.region.get("type") == "attribute") != attribute_item:
+                raise ValueError("item region type must match its authoritative source fields")
+            if attribute_item:
+                if len(unit.slot_ids) != 1:
+                    raise ValueError("one attribute item must name exactly one source attribute")
+                slot = document.source_slots[unit.slot_ids[0]]
+                if (
+                    item.node_key != slot.node_key
+                    or unit.region.get("node_key") != slot.node_key
+                    or unit.region.get("attribute_name") != slot.attribute_name
+                    or locations_by_owner.get(item.unit_id) != [item.source_span]
+                ):
+                    raise ValueError("attribute item must match its exact authoritative source field and bytes")
+            else:
+                if previous_content is not None and previous_content.byte_end > item.source_span.byte_start:
+                    raise ValueError("independent content item byte spans must not overlap")
+                previous_content = item.source_span
+            expected_atomic = (
+                tag
+                if qname.startswith("{http://www.w3.org/1999/xhtml}") and tag in ATOMIC_TAGS and not attribute_item
+                else None
+            )
+            if item.atomic_tag != expected_atomic:
+                raise ValueError("indivisible source elements must retain their atomic tag")
+            if item.atomic_tag is not None and (
+                item.source_span != self.source_map.node_spans[item.node_key]
+                or document.nodes[item.node_key].qname != f"{{http://www.w3.org/1999/xhtml}}{item.atomic_tag}"
+                or item.channel != "body"
+            ):
+                raise ValueError("an indivisible item must own its complete original element")
+            if item.channel == "body":
+                patch_parent = item
+            if unit.region.get("type") == "attribute":
+                parent_id = unit.region.get("patch_owner_id")
+                expected_parent = None
+                if patch_parent is not None:
+                    parent_span = patch_parent.source_span
+                    parent_path = document.nodes[patch_parent.node_key].element_path
+                    path = document.nodes[item.node_key].element_path
+                    if (
+                        parent_span.byte_start <= item.source_span.byte_start
+                        and item.source_span.byte_end <= parent_span.byte_end
+                        and path[: len(parent_path)] == parent_path
+                        and (
+                            item.node_key == patch_parent.node_key
+                            or any(entry.source_node_key == item.node_key for entry in patch_parent.registry.values())
+                        )
+                    ):
+                        expected_parent = patch_parent.unit_id
+                if parent_id != expected_parent or parent_id is not None and parent_id not in by_id:
+                    raise ValueError("attribute patch owner must be its containing source body item")
+        owners = {document.nodes[item.node_key].element_path for item in self.items if item.atomic_tag is not None}
+        for item in self.items:
+            if item.channel != "body":
+                continue
+            path = document.nodes[item.node_key].element_path
+            if any(path[:depth] in owners for depth in range(len(path))):
+                raise ValueError("outer atomic elements cannot have descendant body tasks")
+        owned = {
+            (slot.slot_id, part.start, part.end)
+            for slot in document.source_slots.values()
+            for part in slot.ranges
+            if part.owner_kind == "unit"
+        }
+        mapped = {
+            (location.source_ref.slot_id, location.source_ref.start, location.source_ref.end)
+            for location in self.source_map.locations
+        }
+        if owned != mapped:
+            raise ValueError("every owned source character range requires exactly one byte mapping")
+        for location in self.source_map.locations:
+            slot = document.source_slots[location.source_ref.slot_id]
+            if (
+                location.node_key != slot.node_key
+                or location.field != slot.field
+                or location.attribute_name != slot.attribute_name
+            ):
+                raise ValueError("mapped location fields must match the authoritative source slot")
+        return self
 
 
 class RequestBatch(FrozenModel):

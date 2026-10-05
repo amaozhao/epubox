@@ -9,8 +9,8 @@ from engine.epub.assembly import assemble_document
 from engine.item.extractor import extract_document, validate_source_relations
 from engine.item.inline import ProjectionError, validate_projection
 from engine.item.planner import MAX_SOURCE_TOKENS, source_token_count
-from engine.item.source_views import validate_source_views
-from engine.item.structural_extractor import extract_document as extract_structure
+from engine.item.structure import extract_document as extract_structure
+from engine.item.views import validate_source_views
 from engine.schemas.contracts import DOCUMENT_FORMAT, DocumentPlan
 
 

@@ -1,6 +1,7 @@
 import html.entities
 import re
 from functools import lru_cache
+from xml.parsers import expat
 
 from lxml import etree  # type: ignore[attr-defined]
 
@@ -60,11 +61,53 @@ class _EpubResolver(etree.Resolver):
         raise OSError(f"external entity is not allowed: {url or public_id}")
 
 
-def parse_xml_safely(markup: str) -> etree._ElementTree:
-    """Parse EPUB XML without network or arbitrary local-file entity access."""
+class _RootSeen(Exception):
+    pass
 
+
+def _validate_doctype(data: bytes | str) -> None:
+    """Reject custom DTD declarations before lxml can expand them."""
+
+    parser = expat.ParserCreate()
+    if isinstance(data, str):
+        source = data
+    else:
+        try:
+            if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+                source = data.decode("utf-16")
+            elif data.startswith(b"\xef\xbb\xbf"):
+                source = data.decode("utf-8-sig")
+            elif data.startswith(b"<\x00"):
+                source = data.decode("utf-16-le")
+            elif data.startswith(b"\x00<"):
+                source = data.decode("utf-16-be")
+            else:
+                source = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise UnsafeMarkupError(str(exc)) from exc
+
+    def doctype(_name: str, system_id: str | None, _public_id: str | None, internal: bool) -> None:
+        if internal:
+            raise UnsafeMarkupError("internal DTD subsets are not allowed")
+        if system_id and system_id.rsplit("/", 1)[-1].lower() not in _TRUSTED_XHTML_DTDS:
+            raise UnsafeMarkupError(f"external entity is not allowed: {system_id}")
+
+    def root(_name: str, _attributes: dict[str, str]) -> None:
+        raise _RootSeen
+
+    parser.StartDoctypeDeclHandler = doctype
+    parser.StartElementHandler = root
+    try:
+        parser.Parse(source, True)
+    except _RootSeen:
+        return
+    except expat.ExpatError as exc:
+        raise UnsafeMarkupError(str(exc)) from exc
+
+
+def _xml_parser(*, encoding: str | None = None) -> etree.XMLParser:
     parser = etree.XMLParser(
-        encoding="utf-8",
+        encoding=encoding,
         load_dtd=True,
         no_network=True,
         resolve_entities=True,
@@ -76,8 +119,26 @@ def parse_xml_safely(markup: str) -> etree._ElementTree:
         huge_tree=False,
     )
     parser.resolvers.add(_EpubResolver())
+    return parser
+
+
+def parse_xml_bytes(data: bytes) -> etree._ElementTree:
+    """Strictly parse XML bytes while honoring their declaration or BOM."""
+
+    _validate_doctype(data)
     try:
-        root = etree.fromstring(markup.encode("utf-8"), parser)
+        root = etree.fromstring(data, _xml_parser())
+    except (OSError, etree.XMLSyntaxError) as exc:
+        raise UnsafeMarkupError(str(exc)) from exc
+    return root.getroottree()
+
+
+def parse_xml_safely(markup: str) -> etree._ElementTree:
+    """Parse EPUB XML without network or arbitrary local-file entity access."""
+
+    _validate_doctype(markup)
+    try:
+        root = etree.fromstring(markup.encode("utf-8"), _xml_parser(encoding="utf-8"))
     except (OSError, etree.XMLSyntaxError) as exc:
         raise UnsafeMarkupError(str(exc)) from exc
     return root.getroottree()

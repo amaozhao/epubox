@@ -17,7 +17,7 @@ from engine.core.markup import parse_xml_safely
 from engine.epub.derived_bindings import resolve_derived_navigation
 from engine.epub.validation import EpubChecker, PackageInventory, ZipLimits, inspect_epub
 from engine.item.extractor import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
-from engine.item.structural_extractor import select_primary_title
+from engine.item.structure import select_primary_title
 from engine.schemas.contracts import JsonValue, PreparationPlan
 from engine.services.atomic import AtomicStore, IdentityMismatch
 from engine.services.store import RunStore

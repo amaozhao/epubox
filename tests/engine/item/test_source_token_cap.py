@@ -8,7 +8,7 @@ from engine.item.planner import (
     source_token_count,
     validate_cut_plan,
 )
-from engine.item.structural_extractor import extract_document
+from engine.item.structure import extract_document
 from tests.engine.item.test_inline_planner import make_unit
 
 

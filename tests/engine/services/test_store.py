@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 import engine.services.atomic as base_store_module
-from engine.item import structural_extractor
-from engine.item.source_views import SOURCE_VIEW_RULE_VERSION, SourceViewError
-from engine.item.structural_extractor import EXTRACTOR_VERSION
+from engine.item import structure
+from engine.item.structure import EXTRACTOR_VERSION
+from engine.item.views import SOURCE_VIEW_RULE_VERSION, SourceViewError
 from engine.schemas.contracts import (
     Attempt,
     CandidatePool,
@@ -149,7 +149,7 @@ def test_obsolete_extractor_checkpoint_is_rejected_before_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, _ = _prepare(tmp_path)
-    monkeypatch.setattr(structural_extractor, "EXTRACTOR_VERSION", "epubox-extractor-next")
+    monkeypatch.setattr(structure, "EXTRACTOR_VERSION", "epubox-extractor-next")
 
     with pytest.raises(IdentityMismatch, match="obsolete extractor version"):
         store._trusted_preparation_documents()

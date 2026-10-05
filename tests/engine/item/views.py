@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from engine.item.source_views import SourceViewError, derive_source_views, validate_source_views
-from engine.item.structural_extractor import extract_document
+from engine.item.structure import extract_document
+from engine.item.views import SourceViewError, derive_source_views, validate_source_views
 from engine.schemas.contracts import (
     DocumentPlan as V25DocumentPlan,
 )

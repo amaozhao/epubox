@@ -25,7 +25,7 @@ from engine.item.planner import (
     recommended_output_tokens,
     validate_cut_plan,
 )
-from engine.item.structural_extractor import extract_document
+from engine.item.structure import extract_document
 from engine.schemas.internal import (
     DocumentPlan,
     ItemRecord,

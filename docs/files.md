@@ -57,8 +57,8 @@
 | engine/item/extractor.py | engine/item/extractor.py | 374 | T05 | 保留 |
 | engine/item/inline.py | engine/item/inline.py | 337 | T06 | 保留 |
 | engine/item/planner.py | engine/item/planner.py | 899 | T14 | 保留 |
-| engine/item/source_views.py | engine/item/views.py | 226 | T05 | 待实施 |
-| engine/item/structural_extractor.py | engine/item/structure.py；structure.py/metadata.py 区分正文与元数据 | 1592 | T05 | 待实施 |
+| engine/item/source_views.py | engine/item/views.py | 226 | T05 | 完成 |
+| engine/item/structural_extractor.py | engine/item/structure.py；metadata.py/projection.py/policy.py 按源归属、元数据、投影与规则拆分 | 1592 | T05 | 完成 |
 | engine/item/unit_planner.py | engine/item/context.py | 728 | T13 | 待实施 |
 | engine/orchestrator.py | engine/orchestrator.py；按初译/校对/修订与保存分离，分别单词文件 | 2487 | T16 | 待实施 |
 | engine/schemas/__init__.py | engine/schemas/__init__.py | 1 | T00 | 工具固定名称 |
@@ -98,11 +98,11 @@
 | tests/engine/epub/test_preparation.py | tests/engine/epub/preparation.py | 210 | T02 | 完成 |
 | tests/engine/epub/test_publication.py | tests/engine/epub/publication.py | 537 | T18 | 待实施 |
 | tests/engine/item/__init__.py | tests/engine/item/__init__.py | 0 | T00 | 工具固定名称 |
-| tests/engine/item/test_extractor.py | tests/engine/item/extractor.py | 338 | T05 | 待实施 |
+| tests/engine/item/test_extractor.py | tests/engine/item/extractor.py | 338 | T05 | 完成 |
 | tests/engine/item/test_inline_planner.py | tests/engine/item/inline.py | 715 | T06 | 待实施 |
 | tests/engine/item/test_planner.py | tests/engine/item/planner.py | 357 | T14 | 待实施 |
 | tests/engine/item/test_source_token_cap.py | tests/engine/item/limits.py | 49 | T20 | 待实施 |
-| tests/engine/item/test_source_views.py | tests/engine/item/views.py | 185 | T20 | 待实施 |
+| tests/engine/item/test_source_views.py | tests/engine/item/views.py | 185 | T05 | 完成 |
 | tests/engine/schemas/__init__.py | tests/engine/schemas/__init__.py | 0 | T00 | 工具固定名称 |
 | tests/engine/schemas/test_contracts.py | tests/engine/schemas/contracts.py | 803 | T00 | 完成 |
 | tests/engine/services/__init__.py | tests/engine/services/__init__.py | 0 | T00 | 工具固定名称 |
@@ -135,7 +135,7 @@
 |---|---|---|
 | engine/schemas/bridge.py、engine/schemas/budget.py、tests/engine/schemas/bridge.py、tests/engine/schemas/files.py | T00 | 交接契约/测试，单词且≤1000行 |
 | engine/item/budget.py、tests/engine/item/budget.py、tests/engine/core/config.py | T01 | 纯预算/配置测试，单词且≤1000行 |
-| docs/baseline.md、docs/files.md、docs/tasks.md、docs/chunking.md、docs/migration.md、docs/review.md | T00 | 基线/清单/需求/计划，单词且≤1000行 |
+| docs/baseline.md、docs/files.md、docs/tasks.md、docs/chunking.md、docs/migration.md、docs/review.md、docs/extraction.md | T00 | 基线/清单/需求/计划，单词且≤1000行 |
 
 ## 引用同步与兼容验证
 
@@ -143,3 +143,13 @@
 - schema 拆分保持 contracts.py 公开入口和既有 JSON 格式/哈希，比较旧模型 JSON Schema，并运行全套回归。
 - 文档移动同步相对链接；历史长文档按完整章节拆分并添加前后文入口。
 - 任务的基线统计不冒充当前行数；T20 重新遍历全部维护文件并做单词人工复核。
+
+## 第二阶段新增文件
+
+| 路径 | 责任 | 约束 |
+|---|---|---|
+| engine/epub/parsing.py、tests/engine/epub/parsing.py | T03 | 严格资源解析/反例，单词且≤1000行 |
+| engine/epub/ranges.py、tests/engine/epub/ranges.py | T04 | 原字节区间映射/反例，单词且≤1000行 |
+| engine/item/atoms.py、tests/engine/item/atoms.py | T05 | 原子提取/覆盖/反例，单词且≤1000行 |
+| engine/item/metadata.py、engine/item/projection.py、engine/item/policy.py | T05 | 原有职责拆分，单词且≤1000行 |
+| docs/extraction.md | T05 | 本阶段交接合同与验收记录，单词且≤1000行 |

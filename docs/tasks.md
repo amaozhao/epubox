@@ -2,9 +2,11 @@
 
 日期：2026-10-06\
 实施分支：feature/preflight\
-状态：第一阶段 T00/T01/T02 已完成并验收，其余 18 个任务待实施。基线合同见 [baseline.md](baseline.md)，完整文件整改清单见 [files.md](files.md)。
+状态：T00—T05 已完成并验收；其余 15 个任务待实施。基线合同见 [baseline.md](baseline.md)，第二阶段交接见 [extraction.md](extraction.md)，完整文件整改清单见 [files.md](files.md)。
 
-本阶段验证：全量 pytest **428 passed（49.72 秒）**，Ruff/Pyright/diff 检查通过，CLI 帮助检查正常；独立代码审查 APPROVE、架构审查 CLEAR。修正及复核记录见 [review.md](review.md)。没有调用付费模型或操作真实书籍断点。
+第一阶段验证：全量 pytest **428 passed（49.72 秒）**，Ruff/Pyright/diff 检查通过，CLI 帮助检查正常；独立代码审查 APPROVE、架构审查 CLEAR。修正及复核记录见 [review.md](review.md)。没有调用付费模型或操作真实书籍断点。
+
+第二阶段 T03/T04/T05 验证：全量 pytest **481 passed（47.55 秒）**，Ruff、格式、Pyright 与 diff 检查通过；独立代码审查 APPROVE、架构审查 CLEAR。交付为严格资源解析、原字节映射和完整原子源清单；中文回填和生产管线接通仍按后续任务实施。
 
 ## 1. 唯一需求来源与范围
 
@@ -56,8 +58,8 @@ H 是 main 的历史祖先，不是要求再建立第三个实现分支。M 和 
 | E01 | [main.py](../main.py)、[cli.py](../engine/cli.py)：translate_book/resume_book | M 默认工作目录仍为 work，默认成品为 -zh-Hans.epub，当前入口没有历史 --limit 参数；需要迁移目录/命名并按 C 恢复配置覆盖入口 |
 | E02 | [preparation.py](../engine/epub/preparation.py)：prepare_book；[validation.py](../engine/epub/validation.py)：inspect_epub | 源快照、ZIP/EPUB 检查、资源清单和配置冻结 |
 | E03 | [markup.py](../engine/core/markup.py)：parse_xml_safely/serialize_xml | 安全 XML 解析；没有已证明的源码字节区间回写能力 |
-| E04 | [structural_extractor.py](../engine/item/structural_extractor.py)：_walk/_extract_direct_regions/_paragraph_group/_add_atom | 当前提取和段落合并需要调整为最外层不可拆元素归属 |
-| E05 | [extractor.py](../engine/item/extractor.py)：extract_document/_to_document_plan；[source_views.py](../engine/item/source_views.py) | 文档、源槽位、证据视图及结构关系 |
+| E04 | [structural_extractor.py](../engine/item/structure.py)：_walk/_extract_direct_regions/_paragraph_group/_add_atom | 当前提取和段落合并需要调整为最外层不可拆元素归属 |
+| E05 | [extractor.py](../engine/item/extractor.py)：extract_document/_to_document_plan；[source_views.py](../engine/item/views.py) | 文档、源槽位、证据视图及结构关系 |
 | E06 | [inline.py](../engine/item/inline.py)：parse_projection/validate_projection | g/x 标记、清单、嵌套及边界校验，可复用 |
 | E07 | [planner.py](../engine/item/planner.py)：PlannerConfig/plan_unit/recommended_output_tokens | M 的 MAX_SOURCE_TOKENS=1200 和递归分片不能继续作为新规则 |
 | E08 | [term_inputs.py](../engine/services/term_inputs.py)、[term_planning.py](../engine/services/term_planning.py) | M/D 核心输入与提取规划相同，避免重写 |
@@ -113,7 +115,7 @@ PreparedInput 是对现有 PreparationPipelineResult/最终 ready 索引的最�
 
 ## 4. 总任务表
 
-T00/T01/T02 已完成；其余任务待实施。依赖列给出直接依赖，其他依赖由其传递得到。T01 的纯预算/配置已经实现，CLI 的 --limit 接通及正文采用新预算仍由 T19/T14/T16 负责，不能据此宣称新分块已经上线。
+T00—T05 已完成；其余任务待实施。依赖列给出直接依赖，其他依赖由其传递得到。T01 的纯预算/配置已经实现，新源提取接口已经交付；CLI 的 --limit、生产准备管线与正文采用新预算仍由 T19/T15/T14/T16 负责。
 
 | ID | 独立交付 | 直接依赖 |
 |---|---|---|
@@ -178,7 +180,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 ### T04：原始字节区间与保护范围映射
 
 - **需求**：C§2/9/12，P§5/13。
-- **依赖/文件**：T03；现有 SourceSlot/SourceRef/DocumentPlan 必要扩展；可新增单一源区间工具文件 engine/epub/source_ranges.py，使用标准库 Expat 辅助，不增加解析框架。
+- **依赖/文件**：T03；现有 SourceSlot/SourceRef/DocumentPlan 必要扩展；engine/epub/ranges.py 使用标准库 Expat 辅助，不增加解析框架。
 - **交付**：从解析节点/文本/属性到同一份原始资源字节的可靠映射，以及 head/内联 CSS/JS/其他保护区间。
 - **实施边界**：不能用 head 起止正则代替解析定位。原始字节保留在源快照，避免把整本二进制资源复制进每个 JSON。区间映射不可靠即报错，不回退整文档重写。
 - **独立验收**：带有伪 head 标签字符串的 JS、CDATA/注释、实体、自闭合标签、命名空间和多字节编码都能准确定位或明确拒绝；映射不越界、无错误重叠；零编辑重放与原资源逐字节一致。
@@ -187,7 +189,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 
 - **需求**：C§4/5/7，P§5/12。
 - **依赖/文件**：T04；E04/E05，替换当前段落成组和无条件下钻的相关方法。
-- **交付**：AtomicItem 有序清单、最外层原子所有权、text/tail/属性覆盖及源证据视图。ID 不由一次 HTTP 批次决定。
+- **交付**：AtomicItem 有序清单、最外层原子所有权、text/tail/属性覆盖及源证据视图；AtomicDocument 为可独立保存/回读的交接对象。虚拟块登记安全源切点，实际预算分组留给 T08/T14。ID 不由一次 HTTP 批次决定。
 - **实施边界**：p/table/em/i/ul/ol 只作为完整项；内部后代不重复生成任务。普通容器按 T00 已冻结的安全文本边界处理。精确实现 XML 白名单、translate=no/yes 可译岛及属性归属。
 - **独立验收**：三层 div；p+em/i/a；整表跨行跨列；嵌套列表；父 text/child.tail 混排；独立 em/i；可译岛仍属于外层原子；源文字覆盖无漏重；机器 XML 字段、路径、ID 和作者保留规则不被错误翻译。
 
@@ -211,7 +213,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 
 - **需求**：C§3/6，P§12。
 - **依赖/文件**：T01/T06/T07；E07 的规划入口及 preparation_pipeline 的预检接点，先提供可单独调用接口，实际总接线在 T15。
-- **交付**：列出全部原子项的大小、源位置、初步输入/输出需求及超限原因的准备诊断；通过结果绑定源/映射/原子清单哈希、chunk 配置及预算版本，供派发时验证。
+- **交付**：列出全部原子项的大小、源位置、初步输入/输出需求及超限原因的准备诊断；普通虚拟文本块只使用 T05 登记的安全源切点选择满足预算的分组，不切配对引用或字符簇；通过结果绑定源/映射/原子清单哈希、chunk 配置及预算版本，供派发时验证。
 - **实施边界**：这一步不依赖自动词表，不调用模型。若原子本身过大，不能通过去掉上下文谎称解决；不能拆 p/table/list。完整词表导致的后续预算问题由 T14 再检查。
 - **独立验收**：2600-token 原子在 2000 上限下失败，在足够的 5000/模型额度下可继续；输出不足同样报错；违规原子仍保留映射；任一此类阻断存在时模型调用为零；配置/源身份变更使旧通过记录失效，不能伪造或沿用。
 

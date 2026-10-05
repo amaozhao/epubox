@@ -82,7 +82,7 @@ P1 不调用模型；P2 和需要时的 P3 会调用模型；P4 是本地规划�
 当前 prepare_book() 读取正文、NCX、OPF，以及用于提取判断的样式信息，再调用文档提取器。相关代码：
 
 - [engine/item/extractor.py](../engine/item/extractor.py)
-- [engine/item/structural_extractor.py](../engine/item/structural_extractor.py)
+- [engine/item/structural_extractor.py](../engine/item/structure.py)
 - [engine/epub/derived_bindings.py](../engine/epub/derived_bindings.py)
 - [engine/core/markup.py](../engine/core/markup.py)
 
