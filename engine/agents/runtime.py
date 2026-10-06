@@ -7,6 +7,7 @@ import copy
 import hashlib
 import inspect
 import json
+import math
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
@@ -18,7 +19,7 @@ from uuid import uuid4
 from agno.models.message import Message
 from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 
-from engine.core.tokens import count_tokens
+from engine.core.tokens import _get_tokenizer, count_tokens
 from engine.schemas.internal import Attempt, Usage
 
 from .models import build_primary_model
@@ -67,9 +68,9 @@ _SYSTEM_PROMPTS["terms"] += (
     "Return to text. A technical paragraph should not receive an empty candidates array when it contains "
     "a directly citable technical phrase. The source_quote may be the exact source phrase itself if it is "
     "a contiguous substring of the cited primary view; never invent context."
-    " Each item's views object maps primary view IDs to source text; context maps read-only view IDs to arrays"
-    " of frozen text slices."
-    " Cite only views keys as primary evidence, never context keys."
+    " Each item's views object maps primary view IDs to source text. Root context is shared read-only"
+    " context as a list of {view_id,text}; legacy item context maps view IDs to frozen text slices."
+    " Cite only item views keys as primary evidence, never context."
 )
 _SYSTEM_PROMPTS["review"] += (
     " An item may include optional term_suggestions. Each suggestion has source, target, category, "
@@ -149,17 +150,32 @@ def request_messages(kind: Stage, payload: dict[str, Any]) -> tuple[dict[str, st
     )
 
 
-def model_input_budget(kind: Stage, payload: dict[str, Any]) -> dict[str, int]:
+def model_input_budget(kind: Stage, payload: dict[str, Any], *, algorithm_version: int = 1) -> dict[str, int]:
     """Return a reproducible conservative Agnes input budget for pre-splitting."""
+    if type(algorithm_version) is not int or algorithm_version not in {1, 2}:
+        raise ValueError("unsupported input budget algorithm version")
     messages = request_messages(kind, payload)
     rendered = json.dumps({"messages": messages}, ensure_ascii=False, separators=(",", ":"))
     rendered_bytes = len(rendered.encode("utf-8"))
-    return {
+    result = {
         "algorithm_version": INPUT_BUDGET_ALGORITHM_VERSION,
         "cl100k_tokens": count_tokens(rendered),
         "rendered_utf8_bytes": rendered_bytes,
         "wrapper_headroom_bytes": _CHAT_WRAPPER_HEADROOM_BYTES,
         "estimated_input_tokens": rendered_bytes + _CHAT_WRAPPER_HEADROOM_BYTES,
+    }
+    if algorithm_version == 1:
+        return result
+    tokenizer = _get_tokenizer()
+    if tokenizer is None or tokenizer.name != "cl100k_base":
+        raise RuntimeError("tokenizer unavailable for input budget v2")
+    tokens = len(tokenizer.encode(rendered))
+    return result | {
+        "algorithm_version": 2,
+        "cl100k_tokens": tokens,
+        "wrapper_headroom_bytes": 0,
+        "wrapper_headroom_tokens": 256,
+        "estimated_input_tokens": tokens + math.ceil(tokens * 0.5) + 256,
     }
 
 
@@ -253,6 +269,7 @@ class ModelRuntime:
         model_max_output_tokens: int | None = None,
         provider_output_token_field: Literal["max_tokens", "max_completion_tokens"] | None = None,
         prior_input_limit_breach: int | None = None,
+        input_budget_version: Literal[1, 2] = 1,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -272,6 +289,8 @@ class ModelRuntime:
             raise ValueError("model_max_output_tokens must be positive")
         if prior_input_limit_breach is not None and prior_input_limit_breach <= MAX_MODEL_INPUT_TOKENS:
             raise ValueError("prior_input_limit_breach must exceed the model input limit")
+        if type(input_budget_version) is not int or input_budget_version not in {1, 2}:
+            raise ValueError("unsupported input budget algorithm version")
 
         self.rpm = rpm
         self.tpm = tpm
@@ -287,6 +306,7 @@ class ModelRuntime:
         self._max_service_failures = max_service_failures
         self._service_failures = 0
         self._actual_input_limit_breached = prior_input_limit_breach
+        self._input_budget_version = input_budget_version
         self._request_timeout_seconds = request_timeout_seconds
         self._model_max_output_tokens = model_max_output_tokens
         self._provider_output_token_field = provider_output_token_field
@@ -294,6 +314,7 @@ class ModelRuntime:
         self._sleep = sleep
         self._monotonic = monotonic
 
+        self._transport: Transport
         if transport is None:
             configured_model = copy.copy(model or build_primary_model())
             if self._provider_output_token_field is None:
@@ -459,7 +480,7 @@ class ModelRuntime:
         payload: dict[str, Any],
         context_manifest: Mapping[str, Any],
     ) -> dict[str, Any]:
-        budget = model_input_budget(kind, payload)
+        budget = model_input_budget(kind, payload, algorithm_version=self._input_budget_version)
         estimated_input_tokens = budget["estimated_input_tokens"]
         self._ensure_dispatch_allowed()
         if estimated_input_tokens > MAX_MODEL_INPUT_TOKENS:
@@ -504,6 +525,11 @@ class ModelRuntime:
                     "cl100k_input_tokens": budget["cl100k_tokens"],
                     "rendered_input_bytes": budget["rendered_utf8_bytes"],
                     "input_wrapper_headroom_bytes": budget["wrapper_headroom_bytes"],
+                    **(
+                        {"input_wrapper_headroom_tokens": budget["wrapper_headroom_tokens"]}
+                        if budget["algorithm_version"] == 2
+                        else {}
+                    ),
                     "reserved_output_tokens": output_tokens_value,
                     "estimated_tpm_tokens": estimated_tpm_tokens,
                     "output_tokens": output_tokens_value,

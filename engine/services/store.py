@@ -53,7 +53,6 @@ from engine.schemas.contracts import (
     validate_term_scopes,
 )
 from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite, safe_id
-from engine.services.terms.planning import plan_term_extraction
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 USER_TERMS_FORMAT = "epubox-user-terms-1"
@@ -249,41 +248,10 @@ class RunStore:
         return self._read_contract(self.root / "preparation.json", PreparationPlan, PREPARATION_FORMAT)
 
     def write_term_plan(self, plan: TermExtractionPlan) -> str:
+        from engine.services.terms.storage import write_plan
+
         with self.lock():
-            preparation, documents = self._trusted_preparation_documents()
-            if plan.source_hash != preparation.source_hash or plan.preparation_hash != self._file_hash(
-                self.root / "preparation.json"
-            ):
-                raise IdentityMismatch("term plan does not belong to the committed preparation")
-            ordered_ids = (
-                *preparation.reading_order,
-                *(
-                    document_id
-                    for document_id in preparation.document_hashes
-                    if document_id not in preparation.reading_order
-                ),
-            )
-            reading_edges = tuple(zip(preparation.reading_order, preparation.reading_order[1:], strict=False))
-            extraction_config = preparation.extraction_config
-            expected = plan_term_extraction(
-                tuple(documents[document_id] for document_id in ordered_ids),
-                preparation.user_terms,
-                source_hash=preparation.source_hash,
-                preparation_hash=self._file_hash(self.root / "preparation.json"),
-                auto_extract=self._config_bool(extraction_config, "auto_extract", True),
-                max_primary_chars=self._config_int(extraction_config, "max_primary_chars", 12_000),
-                adjacent_context_views=self._config_int(extraction_config, "adjacent_context_views", 1),
-                context_chars=self._config_int(extraction_config, "context_chars", 400),
-                item_http_limit=self._config_int(extraction_config, "item_http_limit", 6),
-                resolution_group_limit=self._config_int(extraction_config, "resolution_group_limit", 20),
-                reading_edges=reading_edges,
-                extraction_identity=extraction_config,
-            ).plan
-            if plan != expected:
-                raise IdentityMismatch("term plan differs from the deterministic P1 coverage plan")
-            return self._write_immutable(
-                self.root / "glossary" / "plan.json", plan, TermExtractionPlan, TERM_PLAN_FORMAT
-            )
+            return write_plan(self, plan)
 
     @staticmethod
     def _config_int(config: dict[str, JsonValue], name: str, default: int) -> int:
@@ -300,22 +268,17 @@ class RunStore:
         return value
 
     def _trusted_preparation_documents(self) -> tuple[PreparationPlan, dict[str, DocumentPlan]]:
-        preparation = self.read_preparation()
-        if (
-            preparation.source_path != "source.epub"
-            or self._file_hash(self.root / preparation.source_path) != preparation.source_hash
-        ):
-            raise IdentityMismatch("preparation source snapshot identity changed")
-        disk_ids = {entry.stem for entry in (self.root / "documents").glob("*.json")}
-        if disk_ids != set(preparation.document_hashes):
-            raise IdentityMismatch("document inventory differs from preparation")
-        documents = {
-            document_id: self.read_document(document_id, expected_hash=document_hash)
-            for document_id, document_hash in preparation.document_hashes.items()
-        }
+        preparation, documents = self._preparation_documents()
+        from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
         from engine.item.structure import EXTRACTOR_VERSION
 
-        if any(document.extractor_version != EXTRACTOR_VERSION for document in documents.values()):
+        versions = {document.extractor_version for document in documents.values()}
+        if versions == {ATOMIC_EXTRACTOR_VERSION}:
+            from engine.services.terms.storage import canonical_documents
+
+            canonical_documents(self, preparation, documents)
+            return preparation, documents
+        if versions != {EXTRACTOR_VERSION}:
             raise IdentityMismatch("preparation uses an obsolete extractor version; start a new run")
         try:
             with zipfile.ZipFile(self.root / preparation.source_path) as archive:
@@ -331,6 +294,22 @@ class RunStore:
                         )
         except (KeyError, zipfile.BadZipFile) as error:
             raise IdentityMismatch("DocumentPlan resource is unavailable in source snapshot") from error
+        return preparation, documents
+
+    def _preparation_documents(self) -> tuple[PreparationPlan, dict[str, DocumentPlan]]:
+        preparation = self.read_preparation()
+        if (
+            preparation.source_path != "source.epub"
+            or self._file_hash(self.root / preparation.source_path) != preparation.source_hash
+        ):
+            raise IdentityMismatch("preparation source snapshot identity changed")
+        disk_ids = {entry.stem for entry in (self.root / "documents").glob("*.json")}
+        if disk_ids != set(preparation.document_hashes):
+            raise IdentityMismatch("document inventory differs from preparation")
+        documents = {
+            document_id: self.read_document(document_id, expected_hash=document_hash)
+            for document_id, document_hash in preparation.document_hashes.items()
+        }
         return preparation, documents
 
     def read_term_plan(self) -> TermExtractionPlan:

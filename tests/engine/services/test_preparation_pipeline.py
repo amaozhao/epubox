@@ -9,12 +9,44 @@ import pytest
 import engine.services.preparation_pipeline as pipeline_module
 from engine.agents.runtime import ProviderError
 from engine.epub.preparation import PreparationConfig
+from engine.schemas.budget import BudgetLimits
+from engine.services.preflight import prepare_preflight
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.store import RunStore
-from engine.services.term_runner import TermRunner, TermRunResult
 from engine.services.terms.planning import TERM_PLANNER_VERSION
+from engine.services.terms.runner import TermRunner, TermRunResult
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
+
+
+@pytest.fixture(autouse=True)
+def verified_preflight_for_legacy_pipeline_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T15 owns real wiring; legacy integration fixtures explicitly prepare T08."""
+    original = pipeline_module._p1
+
+    def verified(*args, **kwargs):
+        store, preparation, digest = original(*args, **kwargs)
+        config = preparation.translation_config
+
+        def configured(name, default):
+            value = config.get(name, default)
+            assert type(value) is int
+            return value
+
+        context = configured("context_tokens", 32768)
+        prepare_preflight(
+            store,
+            limits=BudgetLimits(
+                source_tokens=configured("max_source_tokens", 2000),
+                input_tokens=configured("max_input_tokens", context),
+                output_tokens=configured("max_output_tokens", 4096),
+                context_tokens=context,
+            ),
+            model=str(config.get("model", preparation.extraction_config["model"])),
+        )
+        return store, preparation, digest
+
+    monkeypatch.setattr(pipeline_module, "_p1", verified)
 
 
 def config(*, auto_extract: bool = True, user_terms_path: Path | None = None) -> PreparationConfig:

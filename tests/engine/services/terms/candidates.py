@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from engine.item.extractor import extract_document
 from engine.schemas.contracts import ExtractionItem, TermExtractionRecord, TermScope, UserTerm
-from engine.services.term_candidates import (
+from engine.services.terms.candidates import (
     CandidateProposal,
     EvidenceProposal,
     dispose_candidates,

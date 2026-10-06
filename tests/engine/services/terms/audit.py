@@ -7,9 +7,9 @@ import pytest
 
 from engine.schemas.contracts import canonical_hash
 from engine.services.report import write_report
-from engine.services.term_freeze import freeze_terminology, prepare_candidate_pool
-from engine.services.term_runner import TermRunner
-from tests.engine.services.test_term_runner import _prepare
+from engine.services.terms.freeze import freeze_terminology, prepare_candidate_pool
+from engine.services.terms.runner import TermRunner
+from tests.engine.services.terms.runner import _prepare
 
 
 def test_exhausted_evidence_rejections_remain_auditable(tmp_path) -> None:

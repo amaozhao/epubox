@@ -27,7 +27,12 @@ from engine.schemas.contracts import (
     canonical_hash,
     glossary_rules_hash,
 )
-from engine.services.term_candidates import dispose_candidates
+from engine.services.terms.candidates import (
+    CandidateProposal,
+    EvidenceProposal,
+    dispose_candidates,
+    validate_candidate_proposals,
+)
 
 _TERMINAL = {"succeeded", "succeeded_with_rejections", "failed_exhausted", "unplannable"}
 
@@ -198,6 +203,28 @@ def _validate_inputs(
             raise ValueError(f"extraction record identity mismatch: {item_id}")
         if item.document_id not in document_map:
             raise ValueError(f"extraction item references an unknown document: {item_id}")
+        document = document_map[item.document_id]
+        for candidate in record.candidates:
+            checked = validate_candidate_proposals(
+                document,
+                item,
+                (
+                    CandidateProposal(
+                        source=candidate.source,
+                        target=candidate.target,
+                        category=candidate.category,
+                        evidence=tuple(
+                            EvidenceProposal(evidence.view_id, evidence.source_quote)
+                            for evidence in candidate.evidence
+                        ),
+                        aliases=candidate.aliases,
+                        scope_hint=candidate.scope_hint,
+                        note=candidate.note,
+                    ),
+                ),
+            ).candidates
+            if checked != (candidate,):
+                raise ValueError(f"extraction candidate differs from frozen source evidence: {candidate.candidate_id}")
         if record.status in {"failed_exhausted", "unplannable"} and any(
             candidate.status not in {"rejected_evidence", "rejected_schema"} for candidate in record.candidates
         ):

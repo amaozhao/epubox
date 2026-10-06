@@ -4,7 +4,7 @@ import pytest
 
 from engine.agents.protocol import ProtocolError
 from engine.agents.runtime import Stage, request_messages
-from engine.agents.term_protocol import (
+from engine.agents.terms import (
     validate_resolution_response,
     validate_review_response,
     validate_terms_response,

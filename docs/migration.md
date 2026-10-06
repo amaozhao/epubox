@@ -1,12 +1,12 @@
 # 翻译前处理功能清单与迁移边界
 
 日期：2026-10-06\
-用途：记录当前分支已经实现的翻译前处理能力，作为后续基于 main 创建新分支、实现新 chunk 方案及迁移前置功能的依据。\
+用途：记录翻译前处理能力、迁移边界及 feature/preflight 的当前交付状态。\
 配套文档：[EPUB 语义分块与安全回写方案](chunking.md)。
 
 ## 1. 本轮范围与代码基线
 
-本轮只形成文档，不创建分支、不 reset、不移植代码、不发起模型请求。
+本文最初只形成迁移清单；当前 feature/preflight 已完成 T00—T12 的选择性迁移和验证。T13—T20、生产接线、真实模型请求及最终 EPUB 发布仍不属于已完成范围。
 
 本次核查的提交：
 
@@ -15,11 +15,11 @@
 | 当前分支 codex/epubox-v25-implementation | 7d882be |
 | 本地 main | 61ebb35 |
 
-当前工作区还有未提交的翻译执行器、日志及测试改动。这些未完成改动不属于本文的已确认迁移基线，不能混入新分支。
+下表提交用于说明最初比较来源，不代表当前 feature/preflight 的 HEAD。
 
 重要事实：main 已经包含 P1—P4 准备管线和大部分术语核心功能。后续不能把“迁移前置术语功能”理解为重新实现全部术语模块，也不能把当前分支整批覆盖到 main。
 
-按用户最新要求，后续以 main 创建新分支。另需明确：当前 main 已不是最早的旧 workflow 版本；如果目标还包括保留或恢复原来的 translate → proofread → apply_corrections，需要单独确认其代码基线，不能假定从 main 开分支就已经恢复了它。本文不擅自更换用户指定的分支基础。
+feature/preflight 已从用户指定的 main 基线建立。translate → proofread → apply_corrections 的正文行为仍由后续 T16/T17 负责，不能把术语阶段完成误报为正文 workflow 已接通。
 
 ## 2. 当前翻译前实际执行顺序
 
@@ -105,7 +105,7 @@ P1 不调用模型；P2 和需要时的 P3 会调用模型；P4 是本地规划�
 
 ## 6. P1：用户词表输入与规则标准化
 
-依据：[engine/services/term_inputs.py](../engine/services/terms/inputs.py) 的 load_user_terms()；数据约束位于 [engine/schemas/contracts.py](../engine/schemas/contracts.py)。
+依据：[inputs.py](../engine/services/terms/inputs.py) 的 load_user_terms()；数据约束位于 [engine/schemas/contracts.py](../engine/schemas/contracts.py)。
 
 支持两种 JSON 输入：
 
@@ -157,7 +157,7 @@ keep_source 未提供 target 时，默认使用 source。未知字段、错误�
 
 ## 7. P2：术语提取计划
 
-依据：[engine/services/term_planning.py](../engine/services/terms/planning.py) 的 plan_term_extraction()、_ordered_primary_views()、_groups()、_context_ranges()。
+依据：[planning.py](../engine/services/terms/planning.py) 的 plan_term_extraction()、_ordered_primary_views()、_groups()、_context_ranges()。
 
 当前能力：
 
@@ -188,7 +188,7 @@ keep_source 未提供 target 时，默认使用 source。未知字段、错误�
 
 ## 8. P2：模型提取、批量派发与计数
 
-依据：[engine/services/term_runner.py](../engine/services/term_runner.py) 的 TermRunner；共用请求入口位于 [engine/agents/runtime.py](../engine/agents/runtime.py)。
+依据：[runner.py](../engine/services/terms/runner.py) 的 TermRunner；共用请求入口位于 [engine/agents/runtime.py](../engine/agents/runtime.py)。
 
 当前能力：
 
@@ -207,7 +207,7 @@ keep_source 未提供 target 时，默认使用 source。未知字段、错误�
 |---|---|
 | 输出上限 | 默认 4096 tokens，可由冻结配置覆盖 |
 | 并发 | 默认 2，可由冻结配置覆盖 |
-| Agnes RPM | 未配置时运行层采用 18；这是程序默认值，不是供应商能力承诺 |
+| RPM | 仅在冻结配置明确给出时限制；不在运行层猜测供应商默认值 |
 | TPM | 配置后限制；未配置则不由此项设限 |
 | 运行 HTTP 限额 | 显式限额优先，否则使用提取计划预算及合法追加额度 |
 | 提取项逻辑调用 | 最多 2 个逻辑提取调用，另受单项 HTTP 额度约束 |
@@ -222,11 +222,15 @@ batch_item_cap = min(256, max(1, output_tokens // 1300))
 
 因此输出上限为 4096 时，这个经验规则最多先选择 3 项，再按完整输入预算缩小。1300 是经验参数，不能描述成模型规定，也不能把它当作新正文 chunk 的固定限制。
 
-当前分支的输入预算 v2 使用本地 tokenizer 估算并预留分词差异及包装空间；旧算法保留用于历史日志校验。接口返回的实际输入超出程序限制时，会停止后续派发。派发前的估算不等于服务端精确 token 数。
+当前分支的输入预算 v2 统计完整渲染消息，使用本地 tokenizer 计数，并预留 50% 分词差异和 256 tokens 包装空间；旧算法保留用于历史日志校验。派发同时检查冻结的输入上限、输出预留、模型上下文和 TPM。接口返回的实际输入超出程序限制时，会停止后续派发。派发前估算不等于服务端精确 token 数。
+
+T08 的通过记录是所有新术语派发的前置条件。执行器在真正预留 HTTP attempt 前重新核对源快照、准备记录、原子清单、映射、模型和预算身份；缺失或不匹配时暂停且不发请求。已保存的模型响应仍先在本地回放，不因凭据暂时缺失而重复付费。
+
+请求清单、attempt、原始响应、提取记录、候选池和冻结词表仍分别保存在 JSON 文件中。reserved 表示已占用额度，sent/unknown/succeeded/failed 表示实际进入过网络边界的状态，两类计数不能互相替代。日志索引和源视图在进程内增量缓存，恢复时以落盘 JSON 为权威来源。
 
 ## 9. P2：候选协议与源证据校验
 
-依据：[engine/agents/term_protocol.py](../engine/agents/term_protocol.py)、[engine/services/term_candidates.py](../engine/services/term_candidates.py)。
+依据：[terms.py](../engine/agents/terms.py)、[candidates.py](../engine/services/terms/candidates.py)。
 
 当前模型只负责提出候选，包括：
 
@@ -247,7 +251,7 @@ batch_item_cap = min(256, max(1, output_tokens // 1300))
 
 ## 10. P3：本地归并、用户优先与冲突核对
 
-依据：[term_candidates.py](../engine/services/term_candidates.py) 的 dispose_candidates()；[term_resolution.py](../engine/services/term_resolution.py) 的 TermResolutionRunner。
+依据：[candidates.py](../engine/services/terms/candidates.py) 的 dispose_candidates()；[resolution.py](../engine/services/terms/resolution.py) 的 TermResolutionRunner。
 
 当前处理：
 
@@ -266,7 +270,7 @@ batch_item_cap = min(256, max(1, output_tokens // 1300))
 
 ## 11. P3：源词频统计和词表冻结
 
-依据：[engine/services/term_freeze.py](../engine/services/term_freeze.py) 的 freeze_terminology()、_with_source_frequency()；持久化约束见 [store.py](../engine/services/store.py) 的 write_freeze()/write_glossary()。
+依据：[engine/services/terms/freeze.py](../engine/services/terms/freeze.py) 的 freeze_terminology()、_with_source_frequency()；持久化约束见 [store.py](../engine/services/store.py) 的 write_freeze()/write_glossary()。
 
 冻结前：
 
@@ -368,16 +372,16 @@ workflow 使用这份结果继续 translate → proofread → apply_corrections 
 
 | 部分 | main 状态/当前分支差异 | 迁移动作 |
 |---|---|---|
-| term_inputs.py | 本次比较无差异 | 直接复用 main，保留规则语义 |
-| term_planning.py | 本次比较无差异 | 复用核心证据规划，按新要求调整上下文策略 |
-| term_candidates.py | 本次比较无差异 | 复用验证、用户优先和冲突分组 |
-| term_freeze.py | 本次比较无差异 | 复用冻结与词频规则 |
+| inputs.py | 本次比较无差异 | 直接复用 main，保留规则语义 |
+| planning.py | 本次比较无差异 | 复用核心证据规划，按新要求调整上下文策略 |
+| candidates.py | 本次比较无差异 | 复用验证、用户优先和冲突分组 |
+| freeze.py | 本次比较无差异 | 复用冻结与词频规则 |
 | preparation.py | 当前分支增加阶段进度等改进，也包含翻译配置身份变化 | 选择性迁移前置进度，不盲目覆盖新解析方案 |
 | preparation_pipeline.py | 更细准备进度、批量初始化、内存进度快照及暂停原因 | 迁移必要优化，替换 P4 拆分接口 |
-| term_runner.py | 日志索引/缓存、并发批次、批量请求与恢复计数等改进 | 重点迁移并保留回归测试 |
-| term_resolution.py | 请求/恢复处理的增量修复 | 按差异核对后迁移，不重写已存在核对流程 |
+| runner.py | 日志索引/缓存、并发批次、批量请求与恢复计数等改进 | 已迁移并保留回归测试 |
+| resolution.py | 请求/恢复处理的增量修复 | 按差异核对后迁移，不重写已存在核对流程 |
 | store.py | 批量初始化、终态判定修复；还混有正文 chunk 新功能 | 只迁移准备阶段需要的存储能力，避免整文件覆盖 |
-| term_protocol.py | 当前差异主要涉及 review 的适用性、版本及问题限制 | 自动术语协议本身不必因这些差异重做；正文 review 另行适配 |
+| terms.py | 当前差异主要涉及 review 的适用性、版本及问题限制 | 自动术语协议本身不必因这些差异重做；正文 review 另行适配 |
 | agents/runtime.py | 共用计量、限流、暂停、预算等改进，也含正文协议内容 | 只选迁移所需共用能力，保留旧日志兼容性 |
 | cli.py/main.py | 启动提示、同任务恢复、同名目录及其他正文功能混合 | 单独迁移路径与准备入口，避免复制正文恢复分支 |
 
@@ -426,11 +430,11 @@ workflow 使用这份结果继续 translate → proofread → apply_corrections 
 现有测试参考：
 
 - [test_preparation_pipeline.py](../tests/engine/services/test_preparation_pipeline.py)
-- [test_term_inputs.py](../tests/engine/services/terms/inputs.py)
-- [test_term_planning.py](../tests/engine/services/terms/planning.py)
-- [test_term_runner.py](../tests/engine/services/test_term_runner.py)
-- [test_term_candidates.py](../tests/engine/services/test_term_candidates.py)
-- [test_term_resolution.py](../tests/engine/services/test_term_resolution.py)
-- [test_term_freeze.py](../tests/engine/services/test_term_freeze.py)
+- [inputs.py](../tests/engine/services/terms/inputs.py)
+- [planning.py](../tests/engine/services/terms/planning.py)
+- [runner.py](../tests/engine/services/terms/runner.py)
+- [candidates.py](../tests/engine/services/terms/candidates.py)
+- [resolution.py](../tests/engine/services/terms/resolution.py)
+- [freeze.py](../tests/engine/services/terms/freeze.py)
 
-本文是当前实现盘点与迁移边界，不是新分支已实现、已测试或兼容旧断点的声明。后续实施顺序应为：先固定 main 基线与目标 workflow，再落实 chunk 方案，随后按本清单选择性接入前置能力，最后验证整本书的真实流程。
+本文同时保留最初盘点和当前迁移边界。T08/T11/T12 的已实现合同见 [terminology.md](terminology.md)；生产接线、正文 workflow 和整本书真实验收仍按 T15—T20 继续，不能由术语阶段测试替代。

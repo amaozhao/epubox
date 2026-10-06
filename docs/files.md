@@ -36,7 +36,7 @@
 | engine/agents/protocol.py | engine/agents/protocol.py | 241 | T16 | 保留 |
 | engine/agents/runtime.py | engine/agents/runtime.py | 636 | T16 | 保留 |
 | engine/agents/streaming_openai_like.py | engine/agents/streaming.py | 112 | T16 | 待实施 |
-| engine/agents/term_protocol.py | engine/agents/terms.py | 297 | T11 | 待实施 |
+| engine/agents/term_protocol.py | engine/agents/terms.py | 297 | T11 | 完成 |
 | engine/cli.py | engine/cli.py | 674 | T02 | 保留 |
 | engine/constant.py | engine/constant.py | 3 | T00 | 保留 |
 | engine/core/__init__.py | engine/core/__init__.py | 0 | T00 | 工具固定名称 |
@@ -71,12 +71,12 @@
 | engine/services/report.py | engine/services/report.py | 198 | T19 | 保留 |
 | engine/services/resume_plan.py | engine/services/resume.py | 191 | T17 | 待实施 |
 | engine/services/store.py | engine/services/store.py | 951 | T17 | 保留 |
-| engine/services/term_candidates.py | engine/services/terms/candidates.py | 381 | T12 | 待实施 |
-| engine/services/term_freeze.py | engine/services/terms/freeze.py | 541 | T12 | 待实施 |
+| engine/services/term_candidates.py | engine/services/terms/candidates.py | 381 | T12 | 完成 |
+| engine/services/term_freeze.py | engine/services/terms/freeze.py | 541 | T12 | 完成 |
 | engine/services/term_inputs.py | engine/services/terms/inputs.py | 97 | T09 | 完成 |
 | engine/services/term_planning.py | engine/services/terms/planning.py | 591 | T10 | 完成 |
-| engine/services/term_resolution.py | engine/services/terms/resolution.py | 585 | T12 | 待实施 |
-| engine/services/term_runner.py | engine/services/terms/runner.py | 568 | T11 | 待实施 |
+| engine/services/term_resolution.py | engine/services/terms/resolution.py | 585 | T12 | 完成 |
+| engine/services/term_runner.py | engine/services/terms/runner.py；存储辅助拆入 storage.py | 568 | T11 | 完成 |
 | main.py | main.py | 178 | T02 | 保留 |
 | pyproject.toml | pyproject.toml | 92 | T00 | 工具固定名称 |
 | tests/__init__.py | tests/__init__.py | 0 | T00 | 工具固定名称 |
@@ -113,14 +113,14 @@
 | tests/engine/services/test_resume_plan.py | tests/engine/services/resume.py | 69 | T20 | 待实施 |
 | tests/engine/services/test_store.py | tests/engine/services/store.py | 522 | T17 | 待实施 |
 | tests/engine/services/test_store_contracts.py | tests/engine/services/contracts.py | 255 | T17 | 待实施 |
-| tests/engine/services/test_term_candidates.py | tests/engine/services/terms/candidates.py | 322 | T12 | 待实施 |
-| tests/engine/services/test_term_freeze.py | tests/engine/services/terms/freeze.py | 358 | T12 | 待实施 |
+| tests/engine/services/test_term_candidates.py | tests/engine/services/terms/candidates.py | 322 | T12 | 完成 |
+| tests/engine/services/test_term_freeze.py | tests/engine/services/terms/freeze.py | 358 | T12 | 完成 |
 | tests/engine/services/test_term_inputs.py | tests/engine/services/terms/inputs.py | 118 | T09 | 完成 |
 | tests/engine/services/test_term_planning.py | tests/engine/services/terms/planning.py | 561 | T10 | 完成 |
-| tests/engine/services/test_term_rejection_audit.py | tests/engine/services/terms/audit.py | 139 | T12 | 待实施 |
-| tests/engine/services/test_term_resolution.py | tests/engine/services/terms/resolution.py | 489 | T12 | 待实施 |
-| tests/engine/services/test_term_response_journal.py | tests/engine/services/terms/response.py | 184 | T11 | 待实施 |
-| tests/engine/services/test_term_runner.py | tests/engine/services/terms/runner.py | 653 | T11 | 待实施 |
+| tests/engine/services/test_term_rejection_audit.py | tests/engine/services/terms/audit.py | 139 | T12 | 完成 |
+| tests/engine/services/test_term_resolution.py | tests/engine/services/terms/resolution.py | 489 | T12 | 完成 |
+| tests/engine/services/test_term_response_journal.py | tests/engine/services/terms/response.py | 184 | T11 | 完成 |
+| tests/engine/services/test_term_runner.py | tests/engine/services/terms/runner.py；并发与存储边界测试拆入 execution.py、storage.py | 653 | T11 | 完成 |
 | tests/engine/test_cli.py | tests/engine/cli.py | 563 | T02 | 完成 |
 | tests/engine/test_orchestrator.py | tests/engine/orchestrator.py；按上述阶段分组测试 | 2095 | T16 | 待实施 |
 | tests/engine/test_single_command_e2e.py | tests/engine/integration.py | 221 | T20 | 待实施 |
@@ -162,3 +162,15 @@
 | tests/engine/item/markers.py | T06 | 目标标记与字面标记反例，单词且≤1000行 |
 | engine/services/terms/__init__.py、tests/engine/services/terms/__init__.py | T09/T10 | 明确的Python包固定名称例外 |
 | docs/translation.md | T06/T07/T09/T10 | 本批次交接与验收，单词且≤1000行 |
+
+## 第四阶段新增文件
+
+| 路径 | 责任 | 约束 |
+|---|---|---|
+| engine/services/preflight.py、tests/engine/services/preflight.py | T08 | 零模型原子预检、凭据校验及反例，单词且≤1000行 |
+| engine/agents/terms.py、engine/services/terms/runner.py、engine/services/terms/storage.py | T11 | 术语协议、批量调度和日志存储，单词且≤1000行 |
+| tests/engine/services/terms/runner.py、tests/engine/services/terms/execution.py、tests/engine/services/terms/response.py、tests/engine/services/terms/storage.py | T11 | 计量、并发、恢复和派发门禁测试，单词且≤1000行 |
+| engine/services/terms/candidates.py、engine/services/terms/freeze.py、engine/services/terms/resolution.py | T12 | 候选、冻结和冲突核对，单词且≤1000行 |
+| tests/engine/services/terms/candidates.py、tests/engine/services/terms/freeze.py、tests/engine/services/terms/resolution.py、tests/engine/services/terms/audit.py | T12 | 证据、终态和冻结测试，单词且≤1000行 |
+| tests/engine/agents/budget.py | T11 | 完整模型消息 token 预算测试，单词且≤1000行 |
+| docs/terminology.md | T08/T11/T12 | 本批次交接与验收，单词且≤1000行 |

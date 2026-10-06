@@ -10,19 +10,17 @@ from uuid import uuid4
 
 from engine.agents.protocol import ProtocolError
 from engine.agents.runtime import (
-    MAX_MODEL_INPUT_TOKENS,
     RESOLUTION_PROTOCOL_VERSION,
     RequestError,
     RuntimePaused,
-    model_input_budget,
     wire_hash,
 )
-from engine.agents.term_protocol import validate_resolution_batch_response, validate_resolution_response
+from engine.agents.terms import validate_resolution_batch_response, validate_resolution_response
 from engine.core.tokens import count_tokens
 from engine.schemas.contracts import JsonValue, RequestManifest, Usage
 from engine.services.store import RunStore
-from engine.services.term_freeze import ResolutionDecision
-from engine.services.term_runner import TermBudgetPaused, TermRunner
+from engine.services.terms.freeze import ResolutionDecision, prepare_candidate_pool
+from engine.services.terms.runner import TermBudgetPaused, TermRunner
 
 
 @dataclass(frozen=True)
@@ -32,6 +30,7 @@ class ResolutionResult:
     deferred: int
     pending: int
     http_attempts: int
+    reason: str | None = None
 
 
 class TermResolutionRunner:
@@ -43,6 +42,80 @@ class TermResolutionRunner:
         self._replayed_splits: list[tuple[dict[str, JsonValue], ...]] = []
         if self.pool.extraction_status != "open":
             raise ValueError("conflict resolution requires an open candidate pool")
+        self._validate_pool()
+
+    def _validate_pool(self) -> None:
+        records = {item.item_id: self.store.read_extraction(item.item_id) for item in self.term_runner.plan.items}
+        expected = prepare_candidate_pool(
+            self.term_runner.plan,
+            records,
+            self.preparation.user_terms,
+            self.preparation.unit_documents,
+            tuple(self.term_runner.documents.values()),
+        )
+        for field in ("source_hash", "preparation_hash", "term_plan_hash", "extraction_status"):
+            if getattr(self.pool, field) != getattr(expected, field):
+                raise ValueError(f"candidate pool {field} differs from committed extraction inputs")
+        if self.pool.candidates != expected.candidates or self.pool.rejections != expected.rejections:
+            raise ValueError("candidate pool differs from committed extraction records")
+        if not set(expected.consumed_response_ids).issubset(self.pool.consumed_response_ids):
+            raise ValueError("candidate pool lost a committed extraction response")
+        expected_groups = {str(group["group_id"]): group for group in expected.conflict_groups}
+        if len(expected_groups) != len(expected.conflict_groups) or len(self.pool.conflict_groups) != len(
+            expected_groups
+        ):
+            raise ValueError("candidate pool conflict groups differ from canonical conflicts")
+        allowed_keys = {
+            "group_id",
+            "group_input_hash",
+            "candidate_ids",
+            "allowed_unit_ids",
+            "status",
+            "decision",
+            "selected_candidate_ids",
+            "restricted_unit_ids",
+            "reason",
+        }
+        seen: set[str] = set()
+        for group in self.pool.conflict_groups:
+            group_id = group.get("group_id")
+            if not isinstance(group_id, str) or group_id in seen or group_id not in expected_groups:
+                raise ValueError("candidate pool conflict groups differ from canonical conflicts")
+            seen.add(group_id)
+            canonical = expected_groups[group_id]
+            if set(group) - allowed_keys or any(
+                group.get(key) != canonical.get(key)
+                for key in ("group_input_hash", "candidate_ids", "allowed_unit_ids")
+            ):
+                raise ValueError(f"conflict group facts differ from canonical conflict: {group_id}")
+            self._validate_resolution_state(group)
+
+    @staticmethod
+    def _validate_resolution_state(group: dict[str, JsonValue]) -> None:
+        decision = group.get("decision")
+        status = group.get("status")
+        selected = _ids(group, "selected_candidate_ids", missing_ok=True)
+        restricted = _ids(group, "restricted_unit_ids", missing_ok=True)
+        if decision is None:
+            if status != "deferred_conflict" or selected or restricted or "reason" in group:
+                raise ValueError("unresolved conflict group contains resolution state")
+            return
+        if decision not in {"select", "defer"}:
+            raise ValueError("conflict group has an invalid resolution decision")
+        if not isinstance(group.get("reason"), str):
+            raise TypeError("resolved conflict group requires a reason")
+        candidates = set(_ids(group, "candidate_ids"))
+        allowed = set(_ids(group, "allowed_unit_ids"))
+        if decision == "defer":
+            if status != "deferred_conflict" or selected or restricted:
+                raise ValueError("deferred conflict group cannot select candidates or Units")
+        elif (
+            status != "resolved"
+            or not selected
+            or not set(selected).issubset(candidates)
+            or not set(restricted).issubset(allowed)
+        ):
+            raise ValueError("selected conflict resolution exceeds canonical conflict scope")
 
     def _save_group(self, group_id: str, fields: dict[str, JsonValue], response_id: str | None = None) -> None:
         groups = tuple(
@@ -155,7 +228,7 @@ class TermResolutionRunner:
         return await self._run_v2()
 
     async def _run_v1(self) -> ResolutionResult:
-        paused = False
+        paused_reason: str | None = None
         groups = sorted(self.pool.conflict_groups, key=lambda group: str(group.get("group_id")))
         for index, group in enumerate(groups):
             group_id = group.get("group_id")
@@ -180,8 +253,17 @@ class TermResolutionRunner:
             payload = self._payload(current, request_id)
             encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
             estimated_tokens = count_tokens(encoded) + self.term_runner.output_tokens
-            estimated_input = model_input_budget("resolution", payload)["estimated_input_tokens"]
-            if estimated_input > self.term_runner._input_limit():
+            if self._minimal_v1_response_tokens(current) > self.term_runner.output_tokens:
+                self._save_group(
+                    group_id,
+                    {
+                        "decision": "defer",
+                        "status": "deferred_conflict",
+                        "reason": "unplannable_output_budget",
+                    },
+                )
+                continue
+            if not self.term_runner._request_fits("resolution", payload, self.term_runner.output_tokens):
                 self._save_group(
                     group_id,
                     {
@@ -206,6 +288,7 @@ class TermResolutionRunner:
                 )
             )
             try:
+                self.term_runner._guard_dispatch("resolution", payload, self.term_runner.output_tokens)
                 response = await self.term_runner.runtime.invoke(
                     "resolution",
                     payload,
@@ -236,8 +319,8 @@ class TermResolutionRunner:
                     },
                     request_id,
                 )
-            except (RuntimePaused, TermBudgetPaused):
-                paused = True
+            except (RuntimePaused, TermBudgetPaused) as error:
+                paused_reason = str(error)
                 break
             except (ProtocolError, RequestError) as error:
                 if isinstance(error, RequestError) and error.attempts == 0:
@@ -253,12 +336,25 @@ class TermResolutionRunner:
         deferred = sum(group.get("decision") == "defer" for group in self.pool.conflict_groups)
         pending = len(self.pool.conflict_groups) - selected - deferred
         return ResolutionResult(
-            "paused" if paused or pending else "closed",
+            "paused" if paused_reason or pending else "closed",
             selected,
             deferred,
             pending,
             self.term_runner._spent(actual=True),
+            paused_reason,
         )
+
+    @staticmethod
+    def _minimal_v1_response_tokens(group: dict[str, JsonValue]) -> int:
+        envelope = {
+            "protocol": "epubox-term-resolution-1",
+            "request_id": "rr-" + "0" * 32,
+            "group_id": group["group_id"],
+            "decision": "defer",
+            "selected_candidate_ids": [],
+            "reason": "x",
+        }
+        return count_tokens(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")))
 
     def _eligible_v2_groups(self) -> tuple[dict[str, JsonValue], ...]:
         groups = sorted(self.pool.conflict_groups, key=lambda group: str(group.get("group_id")))
@@ -273,9 +369,8 @@ class TermResolutionRunner:
 
     def _budget_ok(self, groups: tuple[dict[str, JsonValue], ...]) -> bool:
         payload = self._batch_payload(groups, "rr-" + "0" * 32)
-        estimated_input = model_input_budget("resolution", payload)["estimated_input_tokens"]
         return (
-            estimated_input <= min(MAX_MODEL_INPUT_TOKENS, self.term_runner._input_limit())
+            self.term_runner._request_fits("resolution", payload, self.term_runner.output_tokens)
             and self._minimal_response_tokens(groups) <= self.term_runner.output_tokens
         )
 
@@ -464,8 +559,21 @@ class TermResolutionRunner:
             return True
         request_id = f"rr-{uuid4().hex}"
         payload = self._batch_payload(groups, request_id)
+        if not self.term_runner._request_fits("resolution", payload, self.term_runner.output_tokens):
+            if len(groups) > 1:
+                middle = len(groups) // 2
+                left = await self._dispatch_v2(groups[:middle])
+                right = await self._dispatch_v2(groups[middle:])
+                return left or right
+            only = next(iter(groups))
+            self._save_group(
+                str(only["group_id"]),
+                {"decision": "defer", "status": "deferred_conflict", "reason": "unplannable_input_budget"},
+            )
+            return True
         self._write_batch_request(groups, request_id, payload)
         try:
+            self.term_runner._guard_dispatch("resolution", payload, self.term_runner.output_tokens)
             response = await self.term_runner.runtime.invoke(
                 "resolution",
                 payload,
@@ -514,12 +622,12 @@ class TermResolutionRunner:
         eligible_groups = self._eligible_v2_groups()
         eligible = self._group_map(eligible_groups)
         self._replay_v2(eligible)
-        paused = False
+        paused_reason: str | None = None
         try:
             for batch in self._replayed_splits:
                 await self._dispatch_v2(batch)
-        except (RuntimePaused, TermBudgetPaused):
-            paused = True
+        except (RuntimePaused, TermBudgetPaused) as error:
+            paused_reason = str(error)
         while True:
             pending: list[dict[str, JsonValue]] = []
             for group_id, original in eligible.items():
@@ -544,23 +652,24 @@ class TermResolutionRunner:
                     pending.append(original)
             if not pending:
                 break
-            if paused:
+            if paused_reason:
                 break
             try:
                 for batch in self._batches(tuple(pending)):
                     await self._dispatch_v2(batch)
-            except (RuntimePaused, TermBudgetPaused):
-                paused = True
+            except (RuntimePaused, TermBudgetPaused) as error:
+                paused_reason = paused_reason or str(error)
                 break
         selected = sum(group.get("decision") == "select" for group in self.pool.conflict_groups)
         deferred = sum(group.get("decision") == "defer" for group in self.pool.conflict_groups)
         pending_count = len(self.pool.conflict_groups) - selected - deferred
         return ResolutionResult(
-            "paused" if paused or pending_count else "closed",
+            "paused" if paused_reason or pending_count else "closed",
             selected,
             deferred,
             pending_count,
             self.term_runner._spent(actual=True),
+            paused_reason,
         )
 
     def decisions(self) -> tuple[ResolutionDecision, ...]:

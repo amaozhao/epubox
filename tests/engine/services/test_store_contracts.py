@@ -23,7 +23,7 @@ from engine.schemas.contracts import (
 )
 from engine.services.atomic import IdentityMismatch, StaleWrite
 from engine.services.store import RunStore
-from engine.services.term_freeze import freeze_terminology
+from engine.services.terms.freeze import freeze_terminology
 from tests.engine.services.test_store import _prepare, _write_term_plan
 
 

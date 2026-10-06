@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from engine.item.extractor import extract_document
 from engine.schemas.contracts import (
     TermExtractionRecord,
@@ -9,8 +11,8 @@ from engine.schemas.contracts import (
     canonical_hash,
     glossary_rules_hash,
 )
-from engine.services.term_candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
-from engine.services.term_freeze import ResolutionDecision, freeze_terminology, prepare_candidate_pool
+from engine.services.terms.candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
+from engine.services.terms.freeze import ResolutionDecision, freeze_terminology, prepare_candidate_pool
 from engine.services.terms.planning import plan_term_extraction
 
 EXTRACTION_IDENTITY = {
@@ -356,3 +358,65 @@ def test_disabled_and_not_required_freeze_to_distinct_empty_snapshots() -> None:
     assert disabled.glossary.extraction_status == "disabled"
     assert not_required.glossary.extraction_status == "not_required"
     assert disabled.glossary.warnings != not_required.glossary.warnings
+
+
+def test_empty_closed_freeze_is_distinct_from_disabled_and_not_required() -> None:
+    document = _document("one", ("Plain source text.",))
+    plan = _plan((document,))
+
+    result = freeze_terminology(
+        plan,
+        _records(plan, (document,)),
+        (),
+        _unit_documents((document,)),
+        (document,),
+        extraction_config_hash="extract-config",
+    )
+
+    assert result.glossary.extraction_status == "closed"
+    assert not result.glossary.terms
+    assert any("No valid terminology" in warning for warning in result.glossary.warnings)
+
+
+@pytest.mark.parametrize("status", ("pending", "in_flight", "retry_wait"))
+def test_freeze_rejects_every_nonterminal_extraction_status(status: str) -> None:
+    document = _document("one", ("Memory allocation is fast.",))
+    plan = _plan((document,))
+    records = _records(plan, (document,))
+    item_id = next(iter(records))
+    records[item_id] = records[item_id].model_copy(update={"status": status})
+
+    with pytest.raises(ValueError, match="is not terminal"):
+        freeze_terminology(
+            plan,
+            records,
+            (),
+            _unit_documents((document,)),
+            (document,),
+            extraction_config_hash="extract-config",
+        )
+
+
+def test_freeze_rejects_a_candidate_payload_forged_under_an_existing_id() -> None:
+    document = _document("one", ("Memory allocation is fast.",))
+    plan = _plan((document,))
+    item = next(
+        item
+        for item in plan.items
+        if any("Memory" in document.source_views[view_id].text for view_id in item.view_ids)
+    )
+    candidate = _candidate(document, item, "Memory", "内存")
+    records = _records(plan, (document,))
+    records[item.item_id] = records[item.item_id].model_copy(
+        update={"candidates": (candidate.model_copy(update={"target": "幽灵"}),)}
+    )
+
+    with pytest.raises(ValueError, match="differs from frozen source evidence"):
+        freeze_terminology(
+            plan,
+            records,
+            (),
+            _unit_documents((document,)),
+            (document,),
+            extraction_config_hash="extract-config",
+        )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -17,7 +18,8 @@ from engine.agents.runtime import (
     model_input_budget,
     wire_hash,
 )
-from engine.agents.term_protocol import validate_terms_response
+from engine.agents.terms import validate_terms_response
+from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import (
     Attempt,
     ExtractionItem,
@@ -25,8 +27,10 @@ from engine.schemas.contracts import (
     TermExtractionRecord,
     Usage,
 )
+from engine.services.atomic import StoreError
 from engine.services.coherence import load_budget_overrides
 from engine.services.store import RunStore
+from engine.services.terms.planning import _tail_start, _term_applies, _term_occurs, _unit_lanes
 
 _TERM_OUTPUT_TOKENS_PER_ITEM = 1_300
 
@@ -42,6 +46,7 @@ class TermRunResult:
     failed: int
     pending: int
     http_attempts: int
+    reason: str | None = None
 
 
 class TermRunner:
@@ -56,6 +61,17 @@ class TermRunner:
             document_id: store.read_document(document_id, expected_hash=digest)
             for document_id, digest in self.preparation.document_hashes.items()
         }
+        self._source_views = {
+            view_id: view for document in self.documents.values() for view_id, view in document.source_views.items()
+        }
+        self._view_lanes = {}
+        for document in self.documents.values():
+            lanes = _unit_lanes(document)
+            self._view_lanes.update(
+                {view_id: lanes[unit.unit_id] for unit in document.units for view_id in unit.source_view_ids}
+            )
+        self._user_terms = {term.term_id: term for term in self.preparation.user_terms}
+        self._records: dict[str, TermExtractionRecord] = {}
         config = self.preparation.extraction_config
         if config.get("prompt_version") != TERM_PROMPT_VERSION or config.get("target_language") != "zh-Hans":
             raise ValueError("frozen terminology prompt or target language does not match this runtime")
@@ -65,28 +81,73 @@ class TermRunner:
             raise ValueError("provider model differs from frozen terminology identity")
         self.config = config
         self.output_tokens = _positive_int(config.get("max_output_tokens"), 4096)
+        self.max_concurrency = _positive_int(config.get("concurrency"), 2)
         configured_limit = _nonnegative_int(config.get("run_http_limit"), 0)
         self.run_limit = (configured_limit or self.plan.extraction_http_limit) + int(
             load_budget_overrides(store)["add_run_http"]
         )
+        self._rebuild_journal()
         self.prior_input_limit_breach = self._prior_input_limit_breach()
+        timeout = config.get("request_timeout_seconds", 120.0)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("request timeout must be positive seconds")
         self.runtime = ModelRuntime(
             model=model,
             transport=transport,
             rpm=_optional_positive_int(config.get("rpm")),
             tpm=_optional_positive_int(config.get("tpm")),
-            max_inflight=_positive_int(config.get("concurrency"), 2),
+            max_inflight=self.max_concurrency,
             model_max_output_tokens=self.output_tokens,
             reserve_attempt=self._reserve,
             finish_attempt=self._finish,
             persist_response=self.store.save_model_response,
             prior_input_limit_breach=self.prior_input_limit_breach,
+            input_budget_version=2,
+            request_timeout_seconds=float(timeout),
         )
 
     def _requests(self) -> tuple[RequestManifest, ...]:
-        return tuple(
-            self.store.read_request(path.stem) for path in sorted((self.store.root / "requests").glob("*.json"))
-        )
+        for path in sorted((self.store.root / "requests").glob("*.json")):
+            modified = path.stat().st_mtime_ns
+            if self._request_mtimes.get(path.stem) != modified:
+                self._cache_request(self.store.read_request(path.stem))
+                self._request_mtimes[path.stem] = modified
+        return tuple(self._request_cache[request_id] for request_id in sorted(self._request_cache))
+
+    def _rebuild_journal(self) -> None:
+        self._request_cache: dict[str, RequestManifest] = {}
+        self._spent_total = 0
+        self._actual_http_total = 0
+        self._spent_by_item: dict[str, int] = {}
+        self._actual_by_item: dict[str, int] = {}
+        self._logical_terms_by_item: dict[str, int] = {}
+        self._request_mtimes: dict[str, int] = {}
+        for path in sorted((self.store.root / "requests").glob("*.json")):
+            self._cache_request(self.store.read_request(path.stem))
+            self._request_mtimes[path.stem] = path.stat().st_mtime_ns
+
+    def _cache_request(self, request: RequestManifest) -> None:
+        previous = self._request_cache.get(request.request_id)
+        if previous == request:
+            return
+        if previous is not None:
+            self._index_request(previous, -1)
+        self._request_cache[request.request_id] = request
+        self._index_request(request, 1)
+        path = self.store._path("requests", request.request_id)
+        if path.exists():
+            self._request_mtimes[request.request_id] = path.stat().st_mtime_ns
+
+    def _index_request(self, request: RequestManifest, direction: int) -> None:
+        reserved = len(request.attempts)
+        actual = sum(attempt.state != "reserved" for attempt in request.attempts)
+        self._spent_total += direction * reserved
+        self._actual_http_total += direction * actual
+        for item_id in request.item_ids:
+            self._spent_by_item[item_id] = self._spent_by_item.get(item_id, 0) + direction * reserved
+            self._actual_by_item[item_id] = self._actual_by_item.get(item_id, 0) + direction * actual
+            if request.stage == "terms" and actual:
+                self._logical_terms_by_item[item_id] = self._logical_terms_by_item.get(item_id, 0) + direction
 
     def _prior_input_limit_breach(self) -> int | None:
         observed: list[int] = []
@@ -100,22 +161,16 @@ class TermRunner:
         return max((value for value in observed if value > MAX_MODEL_INPUT_TOKENS), default=None)
 
     def _spent(self, item_id: str | None = None, *, actual: bool = False) -> int:
-        return sum(
-            (sum(attempt.state != "reserved" for attempt in request.attempts) if actual else len(request.attempts))
-            for request in self._requests()
-            if item_id is None or item_id in request.item_ids
-        )
+        if item_id is None:
+            return self._actual_http_total if actual else self._spent_total
+        return (self._actual_by_item if actual else self._spent_by_item).get(item_id, 0)
 
     def _logical_calls(self, item_id: str) -> int:
-        return sum(
-            request.stage == "terms"
-            and item_id in request.item_ids
-            and any(attempt.state != "reserved" for attempt in request.attempts)
-            for request in self._requests()
-        )
+        return self._logical_terms_by_item.get(item_id, 0)
 
     def _reserve(self, request_id: str, attempt: Any) -> None:
         with self.store.lock():
+            self._require_preflight()
             manifest = self.store.read_request(request_id)
             if self._spent() >= self.plan.extraction_http_limit or self._spent() >= self.run_limit:
                 raise TermBudgetPaused("run terminology HTTP budget exhausted")
@@ -133,13 +188,14 @@ class TermRunner:
                     raise RequestError(f"term preparation item HTTP budget exhausted: {item_id}", attempts=0)
             else:
                 raise ValueError("terminology runner cannot reserve a translation request")
-            self.store.reserve_attempt(request_id, Attempt.model_validate(attempt.model_dump(mode="python")))
+            updated = self.store.reserve_attempt(request_id, Attempt.model_validate(attempt.model_dump(mode="python")))
+            self._cache_request(updated)
 
     def _finish(self, request_id: str, attempt_id: str, **fields: Any) -> None:
         usage = fields.get("usage")
         if usage is not None:
             fields["usage"] = Usage.model_validate(usage.model_dump(mode="python"))
-        self.store.finish_attempt(request_id, attempt_id, **fields)
+        self._cache_request(self.store.finish_attempt(request_id, attempt_id, **fields))
 
     def _record(self, item: ExtractionItem) -> TermExtractionRecord:
         if self.store._path("glossary/extraction", item.item_id).exists():
@@ -154,10 +210,12 @@ class TermRunner:
         )
 
     def _save(self, record: TermExtractionRecord, **updates: Any) -> TermExtractionRecord:
-        return self.store.save_extraction(
+        saved = self.store.save_extraction(
             record.model_copy(update={"record_version": record.record_version + 1, **updates}),
             expected_record_version=record.record_version,
         )
+        self._records[record.item_id] = saved
+        return saved
 
     def _payload_item(self, item: ExtractionItem, retry_feedback: tuple[str, ...] = ()) -> dict[str, Any]:
         document = self.documents[item.document_id]
@@ -169,19 +227,15 @@ class TermRunner:
             if type(start) is not int or type(end) is not int:
                 raise ValueError("planned primary range must use integer offsets")
             views[str(view_id)] = view.text[start:end]
-        all_views = {
-            view_id: view for source in self.documents.values() for view_id, view in source.source_views.items()
-        }
         context: dict[str, list[str]] = {}
         for interval in item.context_ranges:
             view_id, start, end = interval["view_id"], interval["start"], interval["end"]
             if not isinstance(view_id, str) or type(start) is not int or type(end) is not int:
                 raise ValueError("planned context range has invalid identity")
-            view = all_views[view_id]
+            view = self._source_views[view_id]
             context.setdefault(view_id, []).append(view.text[start:end])
-        terms = {term.term_id: term for term in self.preparation.user_terms}
         user_terms = [
-            terms[term_id].model_dump(mode="json") | {"role": role}
+            self._user_terms[term_id].model_dump(mode="json") | {"role": role}
             for role, ids in (("target", item.user_term_ids), ("context", item.context_user_term_ids))
             for term_id in ids
         ]
@@ -202,12 +256,66 @@ class TermRunner:
         feedback: dict[str, tuple[str, ...]] | None = None,
     ) -> dict[str, Any]:
         feedback = feedback or {}
-        return {
+        payload = {
             "protocol": "epubox-terms-1",
             "request_id": request_id,
             "target_language": self.config["target_language"],
             "items": [self._payload_item(item, feedback.get(item.item_id, ())) for item in items],
         }
+        # Context belongs to the complete request, never independently to every item.
+        ranges = [interval for item in items for interval in item.primary_ranges]
+        first = items[0]
+        view_order = {
+            view_id: index
+            for index, view_id in enumerate(
+                view_id for unit in self.documents[first.document_id].units for view_id in unit.source_view_ids
+            )
+        }
+        first_range = first.primary_ranges[0]
+        first_view, first_start, _ = _interval(first_range)
+        first_position = (view_order[first_view], first_start)
+        candidates: dict[tuple[str, int, int], dict[str, Any]] = {}
+        for item in items:
+            for interval in item.context_ranges:
+                view_id, start, end = _interval(interval)
+                view = self._source_views[view_id]
+                if view.document_id != first.document_id or view_id not in view_order:
+                    continue
+                if self._view_lanes[view_id] != self._view_lanes[first_view]:
+                    continue
+                if (view_order[view_id], end) > first_position:
+                    continue
+                if any(
+                    _interval(part)[0] == view_id and start < _interval(part)[2] and _interval(part)[1] < end
+                    for part in ranges
+                ):
+                    continue
+                start = max(start, _tail_start(view.text, end, 400))
+                candidates[(view_id, start, end)] = {"view_id": view_id, "text": view.text[start:end]}
+        ordered = sorted(candidates, key=lambda value: (view_order[value[0]], value[2]))[-2:]
+        shared_channel = all(
+            item.document_id == first.document_id
+            and all(self._view_lanes[view_id] == self._view_lanes[first_view] for view_id in item.view_ids)
+            for item in items
+        )
+        payload["context"] = [candidates[key] for key in ordered] if shared_channel else []
+        for wire_item in payload["items"]:
+            wire_item.pop("context", None)
+        self._filter_context_terms(payload)
+        return payload
+
+    def _filter_context_terms(self, payload: dict[str, Any]) -> None:
+        for wire_item in payload["items"]:
+            wire_item["user_terms"] = [
+                term
+                for term in wire_item["user_terms"]
+                if term["role"] == "target"
+                or any(
+                    _term_applies(self._user_terms[term["term_id"]], self._source_views[context["view_id"]])
+                    and _term_occurs(self._user_terms[term["term_id"]], context["text"])
+                    for context in payload["context"]
+                )
+            ]
 
     def _accept_response(
         self,
@@ -257,7 +365,7 @@ class TermRunner:
                     "reserved_attempts": self._spent(item.item_id),
                 },
             )
-        from engine.services.term_candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
+        from engine.services.terms.candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
 
         proposals = tuple(
             CandidateProposal(
@@ -304,7 +412,7 @@ class TermRunner:
         )
 
     def _replay_response(self, item: ExtractionItem, record: TermExtractionRecord) -> TermExtractionRecord:
-        if record.status != "in_flight" or not record.request_ids:
+        if record.status not in {"pending", "in_flight"} or not record.request_ids:
             return record
         request_id = record.request_ids[-1]
         request = self.store.read_request(request_id)
@@ -314,7 +422,7 @@ class TermRunner:
                 continue
             if attempt.state in {"sent", "unknown"}:
                 usage = response.usage
-                self.store.finish_attempt(
+                self._finish(
                     request_id,
                     attempt.attempt_id,
                     state="succeeded",
@@ -346,10 +454,71 @@ class TermRunner:
 
     def _input_limit(self) -> int:
         limits = [MAX_MODEL_INPUT_TOKENS]
+        input_cap = self.config.get("max_input_tokens", self.preparation.translation_config.get("max_input_tokens"))
+        if input_cap is not None:
+            limits.append(_positive_int(input_cap, MAX_MODEL_INPUT_TOKENS))
+        context_cap = self.config.get("context_tokens", self.preparation.translation_config.get("context_tokens"))
+        if context_cap is not None:
+            limits.append(max(0, _positive_int(context_cap, 32768) - self.output_tokens - 256))
         tpm = _optional_positive_int(self.config.get("tpm"))
         if tpm is not None:
             limits.append(max(0, tpm - self.output_tokens))
         return min(limits)
+
+    def _require_preflight(self) -> None:
+        from engine.services.preflight import require_preflight
+
+        config = self.preparation.translation_config
+        context = _positive_int(config.get("context_tokens"), 32768)
+        limits = BudgetLimits(
+            source_tokens=_positive_int(config.get("max_source_tokens"), 2000),
+            input_tokens=_positive_int(config.get("max_input_tokens"), context),
+            output_tokens=_positive_int(config.get("max_output_tokens"), 4096),
+            context_tokens=context,
+        )
+        paths = [
+            self.store.root / "preparation.json",
+            self.store.root / "source.epub",
+            self.store.root / "checks" / "preflight.json",
+        ]
+        paths.extend(sorted((self.store.root / "inventories").glob("*.json")))
+        paths.extend(sorted((self.store.root / "documents").glob("*.json")))
+        try:
+            fingerprint = tuple(
+                (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+                for path in paths
+                for stat in [path.stat()]
+            )
+            if getattr(self, "_preflight_fingerprint", None) == fingerprint:
+                return
+            require_preflight(self.store, limits=limits, model=str(config.get("model", self.config["model"])))
+            self._preflight_fingerprint = fingerprint
+        except (OSError, ValueError, StoreError) as error:
+            raise TermBudgetPaused(f"atomic preflight is required before paid dispatch: {error}") from error
+
+    def _request_fits(self, kind, payload: dict[str, Any], output_tokens: int) -> bool:
+        budget = model_input_budget(kind, payload, algorithm_version=2)
+        incoming = budget["estimated_input_tokens"]
+        config = self.config
+        context = _positive_int(
+            config.get("context_tokens", self.preparation.translation_config.get("context_tokens")), 32768
+        )
+        maximum = _positive_int(
+            config.get("max_input_tokens", self.preparation.translation_config.get("max_input_tokens")),
+            MAX_MODEL_INPUT_TOKENS,
+        )
+        tpm = _optional_positive_int(config.get("tpm"))
+        return (
+            incoming <= min(MAX_MODEL_INPUT_TOKENS, maximum)
+            and output_tokens <= self.output_tokens
+            and incoming + output_tokens + 256 <= context
+            and (tpm is None or incoming + output_tokens <= tpm)
+        )
+
+    def _guard_dispatch(self, kind, payload: dict[str, Any], output_tokens: int) -> None:
+        self._require_preflight()
+        if not self._request_fits(kind, payload, output_tokens):
+            raise TermBudgetPaused("complete terminology request exceeds frozen input/output/context/TPM limits")
 
     @staticmethod
     def _feedback(record: TermExtractionRecord) -> tuple[str, ...]:
@@ -361,8 +530,11 @@ class TermRunner:
         self,
         items: tuple[ExtractionItem, ...],
         records: dict[str, TermExtractionRecord],
+        active_item_ids: set[str] | frozenset[str] = frozenset(),
     ) -> None:
         for item in items:
+            if item.item_id in active_item_ids:
+                continue
             record = records[item.item_id]
             if record.status in {"pending", "in_flight", "retry_wait"} and (
                 self._logical_calls(item.item_id) >= 2 or self._spent(item.item_id) >= item.http_limit
@@ -374,11 +546,13 @@ class TermRunner:
         items: tuple[ExtractionItem, ...],
         records: dict[str, TermExtractionRecord],
         request_id: str,
+        active_item_ids: set[str] | frozenset[str] = frozenset(),
     ) -> tuple[tuple[ExtractionItem, ...], dict[str, Any] | None, int]:
         eligible = tuple(
             item
             for item in items
-            if records[item.item_id].status in {"pending", "in_flight", "retry_wait"}
+            if item.item_id not in active_item_ids
+            and records[item.item_id].status in {"pending", "in_flight", "retry_wait"}
             and self._logical_calls(item.item_id) < 2
             and self._spent(item.item_id) < item.http_limit
         )
@@ -416,8 +590,15 @@ class TermRunner:
                 request_id,
                 {entry.item_id: self._feedback(records[entry.item_id]) for entry in proposed},
             )
-            proposed_input = model_input_budget("terms", proposed_payload)["estimated_input_tokens"]
-            if proposed_input > input_limit:
+            while proposed_payload["context"] and not self._request_fits(
+                "terms", proposed_payload, self.output_tokens
+            ):
+                proposed_payload["context"].pop(0)
+                self._filter_context_terms(proposed_payload)
+            proposed_input = model_input_budget("terms", proposed_payload, algorithm_version=2)[
+                "estimated_input_tokens"
+            ]
+            if proposed_input > input_limit or not self._request_fits("terms", proposed_payload, self.output_tokens):
                 if not batch:
                     records[item.item_id] = self._save(
                         records[item.item_id],
@@ -459,34 +640,27 @@ class TermRunner:
                 },
             )
 
-    async def run(self) -> TermRunResult:
-        if not self.plan.auto_extract:
-            return TermRunResult("disabled", 0, 0, 0, self._spent(actual=True))
-        if not self.plan.items:
-            return TermRunResult("not_required", 0, 0, 0, self._spent(actual=True))
-        with self.store.lock():
-            for item in self.plan.items:
-                self._record(item)
-        items = self.plan.items
-        records = {item.item_id: self._replay_response(item, self._record(item)) for item in items}
-        if self.prior_input_limit_breach is not None:
-            final_records = [records[item.item_id] for item in items]
-            succeeded = sum(record.status in {"succeeded", "succeeded_with_rejections"} for record in final_records)
-            failed = sum(record.status in {"failed_exhausted", "unplannable"} for record in final_records)
-            return TermRunResult(
-                "paused", succeeded, failed, len(final_records) - succeeded - failed, self._spent(actual=True)
-            )
-        paused = False
-        while not paused:
-            self._close_exhausted(items, records)
-            request_id = f"tr-{uuid4().hex}"
-            batch, payload, estimated_input = self._next_batch(items, records, request_id)
-            if not batch:
-                if any(record.status in {"pending", "in_flight", "retry_wait"} for record in records.values()):
-                    continue
-                break
-            assert payload is not None
-            item_ids = tuple(item.item_id for item in batch)
+    async def _process_batch(
+        self,
+        batch: tuple[ExtractionItem, ...],
+        payload: dict[str, Any],
+        request_id: str,
+        estimated_input: int,
+        records: dict[str, TermExtractionRecord],
+        dispatch_stopped: asyncio.Event,
+        pause_reasons: list[str],
+    ) -> str | None:
+        if dispatch_stopped.is_set():
+            return pause_reasons[0] if pause_reasons else None
+        try:
+            self._guard_dispatch("terms", payload, self.output_tokens)
+        except TermBudgetPaused as error:
+            dispatch_stopped.set()
+            if not pause_reasons:
+                pause_reasons.append(str(error))
+            return pause_reasons[0]
+        item_ids = tuple(item.item_id for item in batch)
+        self._cache_request(
             self.store.write_request(
                 RequestManifest(
                     request_id=request_id,
@@ -498,53 +672,158 @@ class TermRunner:
                     wire_hash=wire_hash("terms", payload, self.output_tokens),
                 )
             )
+        )
+        for item in batch:
+            record = records[item.item_id]
+            records[item.item_id] = self._save(
+                record, status="in_flight", request_ids=(*record.request_ids, request_id)
+            )
+        try:
+            response = await self.runtime.invoke(
+                "terms",
+                payload,
+                {
+                    "request_id": request_id,
+                    "item_ids": item_ids,
+                    "estimated_tokens": estimated_input,
+                    "output_tokens": self.output_tokens,
+                },
+            )
+            if response.get("finish_reason") == "length":
+                raise ProtocolError("term response was truncated")
+        except (TermBudgetPaused, RuntimePaused) as error:
+            dispatch_stopped.set()
+            if not pause_reasons:
+                pause_reasons.append(str(error))
             for item in batch:
-                record = records[item.item_id]
-                records[item.item_id] = self._save(
-                    record, status="in_flight", request_ids=(*record.request_ids, request_id)
-                )
+                records[item.item_id] = self._save(records[item.item_id], status="pending")
+            return pause_reasons[0]
+        except (ProtocolError, RequestError) as error:
+            self._mark_batch_error(
+                batch,
+                records,
+                request_id,
+                error,
+                unplannable=isinstance(error, RequestError) and error.attempts == 0,
+            )
+            return None
+
+        expected = set(item_ids)
+        for item in batch:
             try:
-                response = await self.runtime.invoke(
-                    "terms",
-                    payload,
-                    {
-                        "request_id": request_id,
-                        "item_ids": item_ids,
-                        "estimated_tokens": estimated_input,
-                        "output_tokens": self.output_tokens,
-                    },
+                records[item.item_id] = self._accept_response(
+                    item, records[item.item_id], request_id, response["raw"], expected
                 )
-                if response.get("finish_reason") == "length":
-                    raise ProtocolError("term response was truncated")
-                expected = set(item_ids)
-                for item in batch:
-                    record = records[item.item_id]
-                    try:
-                        records[item.item_id] = self._accept_response(
-                            item, record, request_id, response["raw"], expected
+            except ProtocolError as error:
+                self._mark_batch_error((item,), records, request_id, error)
+        return None
+
+    async def run(self) -> TermRunResult:
+        if not self.plan.auto_extract:
+            return TermRunResult("disabled", 0, 0, 0, self._spent(actual=True))
+        if not self.plan.items:
+            return TermRunResult("not_required", 0, 0, 0, self._spent(actual=True))
+        with self.store.lock():
+            for item in self.plan.items:
+                self._record(item)
+        items = self.plan.items
+        records = self._records
+        records.clear()
+        for item in items:
+            records[item.item_id] = self._replay_response(item, self._record(item))
+        if self.prior_input_limit_breach is not None:
+            final_records = [records[item.item_id] for item in items]
+            succeeded = sum(record.status in {"succeeded", "succeeded_with_rejections"} for record in final_records)
+            failed = sum(record.status in {"failed_exhausted", "unplannable"} for record in final_records)
+            return TermRunResult(
+                "paused",
+                succeeded,
+                failed,
+                len(final_records) - succeeded - failed,
+                self._spent(actual=True),
+                "provider reported input over limit; future dispatch is stopped: "
+                f"{self.prior_input_limit_breach} > {MAX_MODEL_INPUT_TOKENS}",
+            )
+        paused_reason: str | None = None
+        pause_reasons: list[str] = []
+        active_item_ids: set[str] = set()
+        dispatch_stopped = asyncio.Event()
+        active_tasks: dict[asyncio.Task[str | None], tuple[ExtractionItem, ...]] = {}
+        try:
+            while True:
+                while not dispatch_stopped.is_set() and len(active_tasks) < self.max_concurrency:
+                    self._close_exhausted(items, records, active_item_ids)
+                    request_id = f"tr-{uuid4().hex}"
+                    batch, payload, estimated_input = self._next_batch(items, records, request_id, active_item_ids)
+                    if not batch:
+                        break
+                    assert payload is not None
+                    item_ids = tuple(item.item_id for item in batch)
+                    active_item_ids.update(item_ids)
+                    task = asyncio.create_task(
+                        self._process_batch(
+                            batch,
+                            payload,
+                            request_id,
+                            estimated_input,
+                            records,
+                            dispatch_stopped,
+                            pause_reasons,
                         )
-                    except ProtocolError as error:
-                        self._mark_batch_error((item,), records, request_id, error)
-            except (TermBudgetPaused, RuntimePaused):
-                paused = True
-                for item in batch:
-                    records[item.item_id] = self._save(records[item.item_id], status="pending")
-            except (ProtocolError, RequestError) as error:
-                self._mark_batch_error(
-                    batch,
-                    records,
-                    request_id,
-                    error,
-                    unplannable=isinstance(error, RequestError) and error.attempts == 0,
-                )
-        if not paused:
-            self._close_exhausted(items, records)
+                    )
+                    active_tasks[task] = batch
+
+                if not active_tasks:
+                    if paused_reason:
+                        break
+                    self._close_exhausted(items, records, active_item_ids)
+                    if any(record.status in {"pending", "in_flight", "retry_wait"} for record in records.values()):
+                        continue
+                    break
+
+                done, _ = await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    batch = active_tasks.pop(task)
+                    item_ids = tuple(item.item_id for item in batch)
+                    try:
+                        paused_reason = task.result() or paused_reason
+                    finally:
+                        active_item_ids.difference_update(item_ids)
+        except BaseException as original:
+            for task in active_tasks:
+                if not task.done():
+                    task.cancel()
+            peer_results = await asyncio.gather(*active_tasks, return_exceptions=True)
+            peer_errors = [
+                result
+                for result in peer_results
+                if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
+            ]
+            if peer_errors:
+                raise BaseExceptionGroup("concurrent terminology batches failed", [original, *peer_errors])
+            raise
+        if not paused_reason:
+            self._close_exhausted(items, records, active_item_ids)
         final_records = [records[item.item_id] for item in items]
         succeeded = sum(record.status in {"succeeded", "succeeded_with_rejections"} for record in final_records)
         failed = sum(record.status in {"failed_exhausted", "unplannable"} for record in final_records)
         pending = len(final_records) - succeeded - failed
         status: Literal["closed", "closed_with_gaps", "paused", "disabled", "not_required"] = (
-            "paused" if paused or pending else "closed_with_gaps" if failed else "closed"
+            "paused" if paused_reason or pending else "closed_with_gaps" if failed else "closed"
+        )
+        return TermRunResult(status, succeeded, failed, pending, self._spent(actual=True), paused_reason)
+
+    def progress_snapshot(self) -> TermRunResult:
+        if not self.plan.auto_extract:
+            return TermRunResult("disabled", 0, 0, 0, self._spent(actual=True))
+        if not self.plan.items:
+            return TermRunResult("not_required", 0, 0, 0, self._spent(actual=True))
+        records = tuple(self._records.values())
+        succeeded = sum(record.status in {"succeeded", "succeeded_with_rejections"} for record in records)
+        failed = sum(record.status in {"failed_exhausted", "unplannable"} for record in records)
+        pending = len(self.plan.items) - succeeded - failed
+        status: Literal["closed", "closed_with_gaps", "paused"] = (
+            "paused" if pending else "closed_with_gaps" if failed else "closed"
         )
         return TermRunResult(status, succeeded, failed, pending, self._spent(actual=True))
 
@@ -566,3 +845,10 @@ def _positive_int(value: Any, default: int) -> int:
 
 def _optional_positive_int(value: Any) -> int | None:
     return None if value is None else _positive_int(value, 1)
+
+
+def _interval(interval) -> tuple[str, int, int]:
+    view_id, start, end = interval["view_id"], interval["start"], interval["end"]
+    if not isinstance(view_id, str) or type(start) is not int or type(end) is not int:
+        raise ValueError("planned range requires a view ID and integer offsets")
+    return view_id, start, end

@@ -2,13 +2,15 @@
 
 日期：2026-10-06\
 实施分支：feature/preflight\
-状态：T00—T07、T09/T10 已完成并验收；其余 11 个任务待实施。基线合同见 [baseline.md](baseline.md)，第二阶段交接见 [extraction.md](extraction.md)，第三阶段交接见 [translation.md](translation.md)，完整文件整改清单见 [files.md](files.md)。
+状态：T00—T12 已完成并验收；T13—T20 共 8 个任务待实施。基线合同见 [baseline.md](baseline.md)，第二阶段交接见 [extraction.md](extraction.md)，第三阶段交接见 [translation.md](translation.md)，第四阶段交接见 [terminology.md](terminology.md)，完整文件整改清单见 [files.md](files.md)。
 
 第一阶段验证：全量 pytest **428 passed（49.72 秒）**，Ruff/Pyright/diff 检查通过，CLI 帮助检查正常；独立代码审查 APPROVE、架构审查 CLEAR。修正及复核记录见 [review.md](review.md)。没有调用付费模型或操作真实书籍断点。
 
 第二阶段 T03/T04/T05 验证：全量 pytest **481 passed（47.55 秒）**，Ruff、格式、Pyright 与 diff 检查通过；独立代码审查 APPROVE、架构审查 CLEAR。交付为严格资源解析、原字节映射和完整原子源清单；中文回填和生产管线接通仍按后续任务实施。
 
 第三阶段 T06/T07/T09/T10 验证：全量 pytest **505 passed（49.81 秒）**，Ruff、格式、Pyright 与 diff 检查通过；独立代码审查 APPROVE、架构审查 CLEAR。交付为标记验证、原字节中文局部回填、用户词表适配和 v3 术语窗口；T08 及付费执行、生产接线仍由后续任务完成。
+
+第四阶段 T08/T11/T12 验证：全量 pytest **542 passed（53.02 秒）**，Ruff、格式、Pyright 和 diff 检查通过。交付：原子预检凭据、术语批量执行与恢复、候选证据和冻结流程已经实现。所有新派发统一校验冻结配置和 T08 凭据，已落盘响应可先本地回放；生产 P1—P4 接线仍属于 T15，本阶段没有把新流程接入 CLI。
 
 ## 1. 唯一需求来源与范围
 
@@ -64,9 +66,9 @@ H 是 main 的历史祖先，不是要求再建立第三个实现分支。M 和 
 | E05 | [extractor.py](../engine/item/extractor.py)：extract_document/_to_document_plan；[source_views.py](../engine/item/views.py) | 文档、源槽位、证据视图及结构关系 |
 | E06 | [inline.py](../engine/item/inline.py)：parse_projection/validate_projection | g/x 标记、清单、嵌套及边界校验，可复用 |
 | E07 | [planner.py](../engine/item/planner.py)：PlannerConfig/plan_unit/recommended_output_tokens | M 的 MAX_SOURCE_TOKENS=1200 和递归分片不能继续作为新规则 |
-| E08 | [term_inputs.py](../engine/services/terms/inputs.py)、[term_planning.py](../engine/services/terms/planning.py) | M/D 核心输入与提取规划相同，避免重写 |
-| E09 | [term_candidates.py](../engine/services/term_candidates.py)、[term_freeze.py](../engine/services/term_freeze.py) | M/D 核心候选、优先级、冲突分组及冻结相同 |
-| E10 | [term_runner.py](../engine/services/term_runner.py)、[term_resolution.py](../engine/services/term_resolution.py) | D 包含批次并发、索引、计量、暂停和回放修复 |
+| E08 | [inputs.py](../engine/services/terms/inputs.py)、[planning.py](../engine/services/terms/planning.py) | M/D 核心输入与提取规划相同，避免重写 |
+| E09 | [candidates.py](../engine/services/terms/candidates.py)、[freeze.py](../engine/services/terms/freeze.py) | M/D 核心候选、优先级、冲突分组及冻结相同 |
+| E10 | [runner.py](../engine/services/terms/runner.py)、[resolution.py](../engine/services/terms/resolution.py) | D 包含批次并发、索引、计量、暂停和回放修复 |
 | E11 | [runtime.py](../engine/agents/runtime.py)、[store.py](../engine/services/store.py) | 共用模型入口与持久化；D 混有正文新执行器相关改动，只取需要的部分 |
 | E12 | [preparation_pipeline.py](../engine/services/preparation_pipeline.py)：_advance | 已有 P1—P4；需保留术语准备，替换 P4 对旧分片方式的依赖 |
 | E13 | [unit_planner.py](../engine/item/unit_planner.py)：select_terms/build_context/plan_unit | 术语筛选可复用；上下文选择及旧 CutPlan 需要适配 |
@@ -117,7 +119,7 @@ PreparedInput 是对现有 PreparationPipelineResult/最终 ready 索引的最�
 
 ## 4. 总任务表
 
-T00—T07、T09/T10 已完成；其余任务待实施。依赖列给出直接依赖，其他依赖由其传递得到。源提取、局部回填与术语计划已可独立调用；CLI 的 --limit、生产准备管线与正文采用新预算仍由 T19/T15/T14/T16 负责。
+T00—T12 已完成；T13—T20 待实施。依赖列给出直接依赖，其他依赖由其传递得到。源提取、局部回填、原子预检与术语准备已可独立调用；CLI 的 --limit、生产准备管线与正文采用新预算仍由 T19/T15/T14/T16 负责。
 
 | ID | 独立交付 | 直接依赖 |
 |---|---|---|
@@ -218,6 +220,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 - **交付**：列出全部原子项的大小、源位置、初步输入/输出需求及超限原因的准备诊断；普通虚拟文本块只使用 T05 登记的安全源切点选择满足预算的分组，不切配对引用或字符簇；通过结果绑定源/映射/原子清单哈希、chunk 配置及预算版本，供派发时验证。
 - **实施边界**：这一步不依赖自动词表，不调用模型。若原子本身过大，不能通过去掉上下文谎称解决；不能拆 p/table/list。完整词表导致的后续预算问题由 T14 再检查。
 - **独立验收**：2600-token 原子在 2000 上限下失败，在足够的 5000/模型额度下可继续；输出不足同样报错；违规原子仍保留映射；任一此类阻断存在时模型调用为零；配置/源身份变更使旧通过记录失效，不能伪造或沿用。
+- **完成记录**：`preflight.py` 从冻结源快照重建原子清单，执行恒等回填和 S/I/R/M 预算检查；通过记录绑定源、准备记录、映射、原子、模型和预算身份。`require_preflight()` 重算并比较当前状态，供术语派发边界调用。总管线接点保留给 T15。
 
 ### T09：用户术语规则适配
 
@@ -242,6 +245,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 - **交付**：可独立运行/恢复的术语执行阶段，输出候选记录和真实调用/用量状态。
 - **实施边界**：保留已有额度语义，不清零或无界重试；1300 tokens/项只是现有经验合批参数。派发检查冻结的模型上下文/输出额度及已有总输入/TPM 限制，不能只检查 50000；正文 S 上限不被误用于术语窗口。实际网络输入、估算及 reserved/sent/unknown/succeeded 必须分清。
 - **独立验收**：缺少/不匹配 T08 通过记录时，直接派发和恢复派发均零 HTTP；已有响应仍可本地读取；并发不超配置且可补位；失败项隔离；缺项/截断只处理未完成项并缩小批次；落盘响应在状态写失败后零 HTTP 回放；取消/暂停不丢已付费结果；不按每个候选重复扫描全书/全部请求日志。
+- **完成记录**：术语请求按冻结并发额度补位，整批共享最多两份前文；完整渲染消息采用 token 预算 v2，连同输出预留、模型上下文和 TPM 一起检查。请求清单、attempt、响应和提取记录继续使用 JSON 保存，reserved 与实际 sent 分开累计，恢复优先回放已保存响应。
 
 ### T12：候选证据、冲突与词表冻结
 
@@ -250,6 +254,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 - **交付**：候选池、冲突决定、源词频、freeze_id、冻结词表及明确缺口诊断。
 - **实施边界**：只能引用真实 primary 引文；用户规则优先；自动采用项为 preferred；冲突只能选择已有候选/缩小合法范围/defer。冻结后不动态改词表。
 - **独立验收**：虚构引文、错误视图、无别名证据被拒；合法候选保留；用户作用域不被覆盖；冲突与词频正确；冲突派发同样不能绕过 T08；上述终态规则正确；已结束 unknown/已被同身份成功响应覆盖的旧请求不永久挡住 freeze；重新启动不重提词表、不重复核对。
+- **完成记录**：候选只接受 primary 源证据，用户规则保持优先；冲突核对复用 T11 的派发门禁和恢复记录。冻结只接受完整终态，旧 unknown 被同身份成功响应覆盖后不再阻塞，缺口、拒绝和 defer 仍写入冻结诊断。
 
 ### T13：正文术语筛选与最小请求投影
 

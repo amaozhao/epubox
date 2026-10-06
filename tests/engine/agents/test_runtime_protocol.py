@@ -27,7 +27,7 @@ from engine.agents.runtime import (
     request_messages,
     wire_hash,
 )
-from engine.agents.term_protocol import validate_review_response
+from engine.agents.terms import validate_review_response
 from engine.schemas.internal import Attempt, RequestManifest
 
 

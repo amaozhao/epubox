@@ -9,11 +9,13 @@ import pytest
 
 from engine.agents.runtime import model_input_budget as runtime_input_budget
 from engine.epub.preparation import PreparationConfig, prepare_book
+from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import Attempt, RequestManifest, TermExtractionRecord
+from engine.services.preflight import prepare_preflight
 from engine.services.preparation_pipeline import resume_preparation
 from engine.services.store import RunStore
-from engine.services.term_runner import TermRunner
 from engine.services.terms.planning import TERM_PLANNER_VERSION, plan_term_extraction
+from engine.services.terms.runner import TermRunner
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
 
@@ -56,6 +58,26 @@ def _prepare(tmp_path: Path, **extraction_overrides: int) -> tuple[RunStore, tup
         extraction_identity=prep.extraction_config,
     ).plan
     store.write_term_plan(plan)
+    translation = prep.translation_config
+
+    def configured(name: str, default: int) -> int:
+        value = translation.get(name, default)
+        assert isinstance(value, int) and not isinstance(value, bool)
+        return value
+
+    context = configured("context_tokens", 32_768)
+    model = translation.get("model", prep.extraction_config["model"])
+    assert isinstance(model, str)
+    prepare_preflight(
+        store,
+        BudgetLimits(
+            source_tokens=configured("max_source_tokens", 2_000),
+            input_tokens=configured("max_input_tokens", context),
+            output_tokens=configured("max_output_tokens", 4_096),
+            context_tokens=context,
+        ),
+        model,
+    )
     return store, tuple(item.item_id for item in plan.items)
 
 
@@ -312,17 +334,17 @@ def test_unplannable_term_windows_do_not_enter_an_unbounded_retry_loop(tmp_path:
     assert result.http_attempts == 0
 
 
-def test_term_payload_uses_compact_view_maps_and_independent_50k_limit(tmp_path: Path) -> None:
+def test_term_payload_uses_compact_view_maps_and_complete_context_limit(tmp_path: Path) -> None:
     store, _item_ids = _prepare(tmp_path, context_tokens=1_000, max_output_tokens=900)
     runner = TermRunner(store, transport=lambda *_: None)
     item = runner.plan.items[0]
     payload = runner._payload((item,), "request-1")
     wire_item = payload["items"][0]
 
-    assert runner._input_limit() == 50_000
+    assert runner._input_limit() == 0
     assert isinstance(wire_item["views"], dict) and wire_item["views"]
-    assert isinstance(wire_item["context"], dict)
-    assert all(isinstance(slices, list) for slices in wire_item["context"].values())
+    assert "context" not in wire_item
+    assert len(payload["context"]) <= 2
     assert set(wire_item["views"]) == set(item.view_ids)
     assert all(isinstance(view_id, str) and isinstance(text, str) for view_id, text in wire_item["views"].items())
     assert "unit_id" not in json.dumps(wire_item, ensure_ascii=False)
@@ -333,7 +355,6 @@ def test_term_payload_preserves_repeated_context_slices_for_one_view(tmp_path: P
     runner = TermRunner(store, transport=lambda *_: None)
     item = runner.plan.items[0]
     view_id = item.view_ids[0]
-    text = runner.documents[item.document_id].source_views[view_id].text
     item = item.model_copy(
         update={
             "context_ranges": (
@@ -345,7 +366,49 @@ def test_term_payload_preserves_repeated_context_slices_for_one_view(tmp_path: P
 
     payload = runner._payload((item,), "request-1")
 
-    assert payload["items"][0]["context"][view_id] == [text[:3], text[3:7]]
+    assert payload["context"] == []  # Current primary members never repeat as context.
+    assert "context" not in payload["items"][0]
+
+
+def test_context_is_shared_once_and_excludes_all_primary_members(tmp_path: Path) -> None:
+    store, _ = _prepare(tmp_path)
+    runner = TermRunner(store, transport=lambda *_: None)
+    item = runner.plan.items[0]
+    view_id = item.view_ids[0]
+    text = runner.documents[item.document_id].source_views[view_id].text
+    context = (
+        {"view_id": view_id, "start": 0, "end": 3},
+        {"view_id": view_id, "start": 3, "end": 7},
+        {"view_id": view_id, "start": 7, "end": 10},
+    )
+    first = item.model_copy(
+        update={"primary_ranges": ({"view_id": view_id, "start": 7, "end": 15},), "context_ranges": context}
+    )
+    second = item.model_copy(
+        update={
+            "item_id": "second",
+            "primary_ranges": ({"view_id": view_id, "start": 15, "end": len(text)},),
+            "context_ranges": context,
+        }
+    )
+
+    payload = runner._payload((first, second), "request-1")
+
+    assert payload["context"] == [
+        {"view_id": view_id, "text": text[:3]},
+        {"view_id": view_id, "text": text[3:7]},
+    ]
+    assert all("context" not in entry for entry in payload["items"])
+    shortened = runner._payload((first,), "request-1")
+    shortened["context"].pop(0)
+    incoming = runtime_input_budget("terms", shortened, algorithm_version=2)["estimated_input_tokens"]
+    runner.config["context_tokens"] = incoming + runner.output_tokens + 256
+    records = {first.item_id: runner._record(first)}
+
+    batch, budgeted, _ = runner._next_batch((first,), records, "request-1")
+
+    assert batch == (first,)
+    assert budgeted is not None and budgeted["context"] == shortened["context"]
 
 
 def test_term_items_share_one_budgeted_request_and_charge_each_item(tmp_path: Path) -> None:
@@ -406,12 +469,14 @@ def test_term_batches_reserve_output_for_at_most_three_items(tmp_path: Path) -> 
 def test_oversized_term_item_is_local_and_later_items_continue(tmp_path: Path, monkeypatch) -> None:
     store, item_ids = _prepare(tmp_path)
 
-    def selective_budget(kind, payload):
+    def selective_budget(kind, payload, *, algorithm_version=1):
         if payload["items"][0]["item_id"] == item_ids[0]:
-            return runtime_input_budget(kind, payload) | {"estimated_input_tokens": 50_001}
-        return runtime_input_budget(kind, payload)
+            return runtime_input_budget(kind, payload, algorithm_version=algorithm_version) | {
+                "estimated_input_tokens": 50_001
+            }
+        return runtime_input_budget(kind, payload, algorithm_version=algorithm_version)
 
-    monkeypatch.setattr("engine.services.term_runner.model_input_budget", selective_budget)
+    monkeypatch.setattr("engine.services.terms.runner.model_input_budget", selective_budget)
     sent: list[tuple[str, ...]] = []
 
     async def transport(_kind, payload):

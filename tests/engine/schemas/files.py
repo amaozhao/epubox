@@ -19,7 +19,7 @@ def test_all_baseline_files_have_an_owner_and_current_stage_files_conform() -> N
     assert len({row[0] for row in rows}) == len(rows)
     for old, destination, _, owner, state in rows:
         assert owner in {f"T{number:02}" for number in range(21)}, old
-        if owner not in {f"T{number:02}" for number in range(8)} | {"T09", "T10"}:
+        if owner not in {f"T{number:02}" for number in range(13)}:
             continue
         assert state != "待实施", old
         path = ROOT / destination.split("；", 1)[0]
@@ -59,6 +59,23 @@ def test_current_stage_new_files_and_documents_conform() -> None:
         ROOT / "engine/services/terms/planning.py",
         ROOT / "tests/engine/services/terms/inputs.py",
         ROOT / "tests/engine/services/terms/planning.py",
+        ROOT / "engine/services/preflight.py",
+        ROOT / "tests/engine/services/preflight.py",
+        ROOT / "engine/agents/terms.py",
+        ROOT / "engine/services/terms/runner.py",
+        ROOT / "engine/services/terms/storage.py",
+        ROOT / "engine/services/terms/candidates.py",
+        ROOT / "engine/services/terms/freeze.py",
+        ROOT / "engine/services/terms/resolution.py",
+        ROOT / "tests/engine/services/terms/runner.py",
+        ROOT / "tests/engine/services/terms/execution.py",
+        ROOT / "tests/engine/services/terms/response.py",
+        ROOT / "tests/engine/services/terms/storage.py",
+        ROOT / "tests/engine/services/terms/candidates.py",
+        ROOT / "tests/engine/services/terms/freeze.py",
+        ROOT / "tests/engine/services/terms/resolution.py",
+        ROOT / "tests/engine/services/terms/audit.py",
+        ROOT / "tests/engine/agents/budget.py",
         *sorted((ROOT / "engine/schemas").glob("*.py")),
     ]
     for path in files:

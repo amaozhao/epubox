@@ -61,3 +61,19 @@ SourceMap.node_spans 可自然嵌套，是源结构记录，不能直接当作�
 | head description quote、嵌套 img alt、实体或 CDATA 在回填时损坏 | 属性按 region.type 处理，父子合并唯一补丁；未改实体原字节复制；root/g叶 CDATA 保壳、]]>合法编码，mixed不确定输入明确拒绝 |
 
 本批次完成单独可测试的中文局部回填。生产准备、HTTP 批次共享上下文、逐阶段保存和最终 EPUB 出版分别继续由 T15/T11/T17/T18 接通；不能将独立 bytes 回填测试声称为整本书已翻译出版。
+
+## 第四阶段 T08/T11/T12 验收
+
+基线 9e3f33d。冻结最终实现后，全量 pytest **542 passed（53.02 秒）**；Ruff、125 个 Python 文件的格式检查、Pyright（0 errors/0 warnings）、阶段文件约束和暂存 diff 检查通过。交接合同见 [terminology.md](terminology.md)。
+
+独立代码审查的两项 HIGH 已关闭，复核为 **APPROVE**，无剩余问题。架构审查为 **WATCH**：当前没有阻断；T15 接线需继续使用现有 runner guard 与 runtime reservation，避免绕过冻结的完整请求额度检查。当前不为未来调用方提前增加派发抽象。
+
+| 审查问题/反例 | 修正与验证 |
+|---|---|
+| 同源字节使用不同排除规则漏掉原子，并重算全部清单/凭据哈希 | 写入和复核均从冻结源重新执行标准提取，要求完整 AtomicDocument 相等；伪造遗漏被拒绝 |
+| 新 v3 计划与 legacy P1 文档 ID 混用，无法执行/冻结 | 原子计划只接受对应的 canonical 原子 P1；完整假请求→记录→候选池→冻结→词表链路通过 |
+| 已保存响应但记录回到 pending 时可能重新派发 | pending/in_flight 且有请求 ID 时先回放；缺少 paid receipt 仍允许同源本地回放，新派发继续阻断 |
+| 候选 ID 相同而内容/证据被改写仍可冻结 | 每个候选用已提交 document/item 重跑原验证，ID、内容、证据和状态必须完整相等 |
+| 候选池改写证据/目标，或伪造额外冲突组后触发付费核对 | 从已提交提取记录重建标准候选池，比较候选、拒绝记录和冲突事实；只允许合法的核对状态字段 |
+
+本阶段测试只使用临时文件和假 transport。生产 P1—P4 与 CLI 接线仍由 T15/T19 负责，正文 workflow、逐阶段保存和 EPUB 出版仍按后续任务实施。

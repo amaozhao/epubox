@@ -23,7 +23,7 @@ from engine.agents.runtime import (
     request_messages,
     wire_hash,
 )
-from engine.agents.term_protocol import validate_review_response
+from engine.agents.terms import validate_review_response
 from engine.core.quality import find_degenerate_translation
 from engine.core.tokens import count_tokens
 from engine.epub.assembly import derive_navigation_projection

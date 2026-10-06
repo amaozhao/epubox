@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from engine.agents.runtime import ProviderError
-from engine.schemas.contracts import JsonValue, TermExtractionRecord
-from engine.services.term_candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
-from engine.services.term_freeze import prepare_candidate_pool
-from engine.services.term_resolution import TermResolutionRunner
-from tests.engine.services.test_term_runner import _prepare
+from engine.schemas.contracts import Attempt, RequestManifest, TermExtractionRecord
+from engine.services.terms.candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
+from engine.services.terms.freeze import prepare_candidate_pool
+from engine.services.terms.resolution import TermResolutionRunner
+from tests.engine.services.terms.runner import _prepare
 
 
 def _seed_conflict(tmp_path: Path, **extraction_overrides: int):
@@ -59,11 +61,38 @@ def _seed_conflict(tmp_path: Path, **extraction_overrides: int):
     return store, pool
 
 
-def _add_conflict(store, pool, suffix: str = "second"):
-    first = pool.conflict_groups[0]
-    extra = first | {"group_id": f"{first['group_id']}-{suffix}", "group_input_hash": f"hash-{suffix}"}
+def _add_conflict(store, pool):
+    plan = store.read_term_plan()
+    prep = store.read_preparation()
+    documents = {document_id: store.read_document(document_id) for document_id in prep.document_hashes}
+    occupied = {candidate.extraction_item_id for candidate in pool.candidates}
+    item = next(
+        item
+        for item in plan.items
+        if item.item_id not in occupied
+        and any("Memory" in documents[item.document_id].source_views[view_id].text for view_id in item.view_ids)
+    )
+    document = documents[item.document_id]
+    view = next(
+        document.source_views[view_id] for view_id in item.view_ids if "Memory" in document.source_views[view_id].text
+    )
+    candidates = validate_candidate_proposals(
+        document,
+        item,
+        (
+            CandidateProposal("Memory", "内存", "term", (EvidenceProposal(view.view_id, view.text),)),
+            CandidateProposal("Memory", "记忆", "term", (EvidenceProposal(view.view_id, view.text),)),
+        ),
+    ).candidates
+    record = store.read_extraction(item.item_id)
+    store.save_extraction(
+        record.model_copy(update={"record_version": 1, "candidates": candidates}),
+        expected_record_version=0,
+    )
+    records = {entry.item_id: store.read_extraction(entry.item_id) for entry in plan.items}
+    canonical = prepare_candidate_pool(plan, records, prep.user_terms, prep.unit_documents, tuple(documents.values()))
     return store.save_candidate_pool(
-        pool.model_copy(update={"record_version": 1, "conflict_groups": (*pool.conflict_groups, extra)}),
+        canonical.model_copy(update={"record_version": 1}),
         expected_record_version=0,
     )
 
@@ -98,6 +127,21 @@ def test_one_bounded_resolution_selects_only_existing_candidate(tmp_path: Path) 
     assert result.selected == len(calls) == 1
     assert store.read_candidate_pool().record_version == 1
     assert TermResolutionRunner(store, transport=transport).decisions()[0].decision == "select"
+
+
+def test_resolution_without_atomic_preflight_pauses_before_http(tmp_path: Path) -> None:
+    store, _ = _seed_conflict(tmp_path)
+    (store.root / "checks" / "preflight.json").unlink()
+
+    async def forbidden(*_args):
+        raise AssertionError("resolution must not dispatch without atomic preflight")
+
+    result = asyncio.run(TermResolutionRunner(store, transport=forbidden).run())
+
+    assert result.status == "paused"
+    assert result.pending == 1 and result.http_attempts == 0
+    assert result.reason is not None and "atomic preflight" in result.reason
+    assert all(not request.attempts for request in TermResolutionRunner(store).term_runner._requests())
 
 
 def test_v2_batches_groups_and_retries_only_a_missing_group(tmp_path: Path) -> None:
@@ -218,15 +262,7 @@ def test_v2_replays_truncation_as_split_batches_after_restart(tmp_path: Path) ->
 
 
 def test_v2_defers_an_oversize_group_before_writing_a_manifest(tmp_path: Path) -> None:
-    store, pool = _seed_conflict(tmp_path)
-    group = pool.conflict_groups[0] | {
-        "allowed_unit_ids": ["u" + "x" * 50_000],
-        "group_input_hash": "oversize",
-    }
-    store.save_candidate_pool(
-        pool.model_copy(update={"record_version": 1, "conflict_groups": (group,)}),
-        expected_record_version=0,
-    )
+    store, _ = _seed_conflict(tmp_path, context_tokens=1_000, max_output_tokens=900)
 
     async def forbidden(*_args):
         raise AssertionError("oversize resolution group must not dispatch")
@@ -238,22 +274,10 @@ def test_v2_defers_an_oversize_group_before_writing_a_manifest(tmp_path: Path) -
     assert not tuple((store.root / "requests").glob("*.json"))
 
 
-def test_v2_packs_to_50000_auxiliary_input_limit_before_manifest(tmp_path: Path) -> None:
-    store, pool = _seed_conflict(tmp_path, context_tokens=8192, max_output_tokens=4096)
+def test_v2_packs_to_frozen_context_limit_before_manifest(tmp_path: Path) -> None:
+    store, pool = _seed_conflict(tmp_path, context_tokens=1_700, max_output_tokens=256)
     pool = _add_conflict(store, pool)
-    padded_groups: list[dict[str, JsonValue]] = []
-    for index, group in enumerate(pool.conflict_groups):
-        allowed = group["allowed_unit_ids"]
-        assert isinstance(allowed, list)
-        allowed_ids: list[JsonValue] = [*allowed, f"u-{index}-" + "x" * 24_000]
-        padded_group: dict[str, JsonValue] = dict(group)
-        padded_group["allowed_unit_ids"] = allowed_ids
-        padded_groups.append(padded_group)
-    padded = tuple(padded_groups)
-    store.save_candidate_pool(
-        pool.model_copy(update={"record_version": 2, "conflict_groups": padded}),
-        expected_record_version=1,
-    )
+    groups = pool.conflict_groups
     batch_sizes: list[int] = []
 
     async def transport(_kind, payload):
@@ -278,9 +302,9 @@ def test_v2_packs_to_50000_auxiliary_input_limit_before_manifest(tmp_path: Path)
         }
 
     runner = TermResolutionRunner(store, transport=transport)
-    assert runner.term_runner._input_limit() == 50_000
-    assert all(runner._budget_ok((group,)) for group in padded)
-    assert not runner._budget_ok(padded)
+    assert runner.term_runner._input_limit() == 1_188
+    assert all(runner._budget_ok((group,)) for group in groups)
+    assert not runner._budget_ok(groups)
 
     result = asyncio.run(runner.run())
 
@@ -290,16 +314,8 @@ def test_v2_packs_to_50000_auxiliary_input_limit_before_manifest(tmp_path: Path)
 
 
 def test_v2_splits_many_tiny_groups_for_minimum_output_envelope(tmp_path: Path) -> None:
-    store, pool = _seed_conflict(tmp_path, max_output_tokens=256)
-    first = pool.conflict_groups[0]
-    groups = tuple(
-        first | {"group_id": f"{first['group_id']}-{index}", "group_input_hash": f"hash-{index}"}
-        for index in range(20)
-    )
-    store.save_candidate_pool(
-        pool.model_copy(update={"record_version": 1, "conflict_groups": groups}),
-        expected_record_version=0,
-    )
+    store, pool = _seed_conflict(tmp_path, max_output_tokens=80)
+    groups = _add_conflict(store, pool).conflict_groups
     batch_sizes: list[int] = []
 
     async def transport(_kind, payload):
@@ -330,9 +346,9 @@ def test_v2_splits_many_tiny_groups_for_minimum_output_envelope(tmp_path: Path) 
     result = asyncio.run(runner.run())
 
     assert result.status == "closed"
-    assert result.deferred == 20
-    assert sum(batch_sizes) == 20
-    assert 1 < max(batch_sizes) < 20
+    assert result.deferred == 2
+    assert sum(batch_sizes) == 2
+    assert batch_sizes == [1, 1]
     by_id = {str(group["group_id"]): group for group in groups}
     assert all(
         runner._minimal_response_tokens(tuple(by_id[group_id] for group_id in request.item_ids))
@@ -342,15 +358,7 @@ def test_v2_splits_many_tiny_groups_for_minimum_output_envelope(tmp_path: Path) 
 
 
 def test_v1_defers_oversize_group_before_manifest_or_http(tmp_path: Path) -> None:
-    store, pool = _seed_conflict(tmp_path)
-    group = pool.conflict_groups[0] | {
-        "allowed_unit_ids": ["u" + "x" * 50_000],
-        "group_input_hash": "oversize-v1",
-    }
-    store.save_candidate_pool(
-        pool.model_copy(update={"record_version": 1, "conflict_groups": (group,)}),
-        expected_record_version=0,
-    )
+    store, _ = _seed_conflict(tmp_path, context_tokens=1_000, max_output_tokens=900)
 
     async def forbidden(*_args):
         raise AssertionError("oversize v1 resolution group must not dispatch")
@@ -360,6 +368,87 @@ def test_v1_defers_oversize_group_before_manifest_or_http(tmp_path: Path) -> Non
 
     assert result.status == "closed"
     assert result.deferred == 1
+    assert not tuple((store.root / "requests").glob("*.json"))
+
+
+def test_v1_defers_when_even_the_minimum_response_exceeds_output_budget(tmp_path: Path) -> None:
+    store, _ = _seed_conflict(tmp_path, max_output_tokens=1)
+
+    async def forbidden(*_args):
+        raise AssertionError("resolution with no response budget must not dispatch")
+
+    result = asyncio.run(TermResolutionRunner(store, transport=forbidden)._run_v1())
+
+    assert result.status == "closed"
+    assert result.deferred == 1
+    assert not tuple((store.root / "requests").glob("*.json"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("candidate_ids", ["ghost-candidate"]),
+        ("allowed_unit_ids", ["ghost-unit"]),
+    ),
+)
+def test_resolution_rejects_ghost_conflict_references_before_dispatch(
+    tmp_path: Path, field: str, value: list[str]
+) -> None:
+    store, pool = _seed_conflict(tmp_path)
+    group = pool.conflict_groups[0] | {field: value}
+    store.save_candidate_pool(
+        pool.model_copy(update={"record_version": 1, "conflict_groups": (group,)}),
+        expected_record_version=0,
+    )
+
+    with pytest.raises(ValueError, match="facts differ from canonical conflict"):
+        TermResolutionRunner(store)
+
+    assert not tuple((store.root / "requests").glob("*.json"))
+
+
+def test_resolution_rejects_a_candidate_absent_from_extraction_records(tmp_path: Path) -> None:
+    store, pool = _seed_conflict(tmp_path)
+    ghost = pool.candidates[0].model_copy(update={"candidate_id": "ghost-candidate"})
+    store.save_candidate_pool(
+        pool.model_copy(update={"record_version": 1, "candidates": (*pool.candidates, ghost)}),
+        expected_record_version=0,
+    )
+
+    with pytest.raises(ValueError, match="differs from committed extraction records"):
+        TermResolutionRunner(store)
+
+    assert not tuple((store.root / "requests").glob("*.json"))
+
+
+def test_resolution_rejects_candidate_content_forged_under_an_existing_id(tmp_path: Path) -> None:
+    store, pool = _seed_conflict(tmp_path)
+    forged = pool.candidates[0].model_copy(update={"target": "幽灵"})
+    store.save_candidate_pool(
+        pool.model_copy(update={"record_version": 1, "candidates": (forged, *pool.candidates[1:])}),
+        expected_record_version=0,
+    )
+
+    with pytest.raises(ValueError, match="differs from committed extraction records"):
+        TermResolutionRunner(store)
+
+    assert not tuple((store.root / "requests").glob("*.json"))
+
+
+def test_resolution_rejects_an_extra_conflict_group_before_dispatch(tmp_path: Path) -> None:
+    store, pool = _seed_conflict(tmp_path)
+    forged = pool.conflict_groups[0] | {
+        "group_id": "tcg-forged",
+        "group_input_hash": "forged-input",
+    }
+    store.save_candidate_pool(
+        pool.model_copy(update={"record_version": 1, "conflict_groups": (*pool.conflict_groups, forged)}),
+        expected_record_version=0,
+    )
+
+    with pytest.raises(ValueError, match="conflict groups differ from canonical conflicts"):
+        TermResolutionRunner(store)
+
     assert not tuple((store.root / "requests").glob("*.json"))
 
 
@@ -421,6 +510,7 @@ def test_v1_retries_a_known_failed_attempt_after_provider_recovery(tmp_path: Pat
 
     first = asyncio.run(TermResolutionRunner(store, transport=unavailable)._run_v1())
     assert first.status == "paused"
+    assert first.reason == "credential unavailable"
     failed_request = TermResolutionRunner(store, transport=unavailable).term_runner._requests()[0]
     assert failed_request.attempts[0].state == "failed"
 
@@ -487,3 +577,114 @@ def test_v2_replays_a_journaled_response_without_another_http_call(tmp_path: Pat
 
     assert result.status == "closed"
     assert result.selected == 1
+
+
+def test_finished_unknown_resolution_is_deferred_without_another_http_call(tmp_path: Path) -> None:
+    store, pool = _seed_conflict(tmp_path)
+    group = pool.conflict_groups[0]
+    group_id = str(group["group_id"])
+    request_id = "rr-finished-unknown"
+    attempt_id = "attempt-finished-unknown"
+    store.write_request(
+        RequestManifest(
+            request_id=request_id,
+            stage="resolution",
+            owner_kind="resolution_group",
+            owner_id=group_id,
+            item_ids=(group_id,),
+            input_hashes={group_id: str(group["group_input_hash"])},
+            wire_hash="finished-unknown-wire",
+        )
+    )
+    store.reserve_attempt(
+        request_id,
+        Attempt(
+            attempt_id=attempt_id,
+            affected_items=(group_id,),
+            state="reserved",
+            created_at=datetime.now(UTC).isoformat(),
+        ),
+    )
+    store.finish_attempt(
+        request_id,
+        attempt_id,
+        state="unknown",
+        finished_at=datetime.now(UTC).isoformat(),
+        error="provider outcome unavailable",
+    )
+
+    async def forbidden(*_args):
+        raise AssertionError("a finished unknown resolution must not dispatch again")
+
+    result = asyncio.run(TermResolutionRunner(store, transport=forbidden).run())
+
+    assert result.status == "closed"
+    assert result.deferred == 1
+    assert store.read_candidate_pool().conflict_groups[0]["reason"] == "resolution_unknown_result"
+
+
+def test_later_success_for_same_group_supersedes_an_old_unknown_attempt(tmp_path: Path) -> None:
+    store, pool = _seed_conflict(tmp_path)
+    group = pool.conflict_groups[0]
+    group_id = str(group["group_id"])
+    candidate_ids = group["candidate_ids"]
+    assert isinstance(candidate_ids, list) and candidate_ids and isinstance(candidate_ids[0], str)
+    candidate_id = candidate_ids[0]
+    attempts: tuple[tuple[str, str, Literal["unknown", "sent"]], ...] = (
+        ("rr-a-unknown", "attempt-unknown", "unknown"),
+        ("rr-z-success", "attempt-success", "sent"),
+    )
+    for request_id, attempt_id, state in attempts:
+        store.write_request(
+            RequestManifest(
+                request_id=request_id,
+                stage="resolution",
+                owner_kind="resolution_group",
+                owner_id=group_id,
+                item_ids=(group_id,),
+                input_hashes={group_id: str(group["group_input_hash"])},
+                wire_hash=f"{request_id}-wire",
+            )
+        )
+        store.reserve_attempt(
+            request_id,
+            Attempt(
+                attempt_id=attempt_id,
+                affected_items=(group_id,),
+                created_at=datetime.now(UTC).isoformat(),
+            ),
+        )
+        store.finish_attempt(request_id, attempt_id, state=state, finished_at=datetime.now(UTC).isoformat())
+    store.save_model_response(
+        "resolution",
+        "rr-z-success",
+        "attempt-success",
+        {
+            "raw": json.dumps(
+                {
+                    "protocol": "epubox-term-resolution-2",
+                    "request_id": "rr-z-success",
+                    "items": [
+                        {
+                            "group_id": group_id,
+                            "decision": "select",
+                            "selected_candidate_ids": [candidate_id],
+                            "reason": "Supported by the supplied evidence.",
+                        }
+                    ],
+                }
+            ),
+            "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        },
+    )
+
+    async def forbidden(*_args):
+        raise AssertionError("a later saved success must replay without HTTP")
+
+    first = asyncio.run(TermResolutionRunner(store, transport=forbidden).run())
+    second = asyncio.run(TermResolutionRunner(store, transport=forbidden).run())
+
+    assert first.status == second.status == "closed"
+    assert first.selected == second.selected == 1
+    assert first.http_attempts == second.http_attempts == 2
+    assert store.read_request("rr-z-success").attempts[0].state == "succeeded"

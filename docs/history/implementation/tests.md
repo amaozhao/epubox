@@ -17,7 +17,7 @@
 | T11 | `tests/engine/test_orchestrator.py` | `wrong_link_binding` | 结构合法错绑被语义复核暴露 |
 | T12 | `tests/engine/test_orchestrator.py` | `replacement_regression` | 重大 issue 不晋级，新目标完整复核 |
 | T13 | `tests/engine/test_orchestrator.py` | `stale_revision_checks` | 迟到结果拒绝，衔接过期，修订有界 |
-| T14 | `tests/engine/services/test_term_freeze.py` | `empty_bad_polysemy` | 空词表合法，坏用户文件拒绝，多义不误锁 |
+| T14 | `tests/engine/services/terms/freeze.py` | `empty_bad_polysemy` | 空词表合法，坏用户文件拒绝，多义不误锁 |
 | T15 | `tests/engine/agents/test_runtime_protocol.py` | `batch_order_rate_limit` | 缩批乱序归属正确，429/超时累计计数 |
 | T16 | `tests/engine/services/test_store.py` | `atomic_lock_config` | 半写/串书/配置变化/锁冲突安全 |
 | T17 | `tests/engine/test_structural_adversarial.py::test_t17_actual_assembled_mutations_delete_duplicate_href_and_alt_are_rejected` | `mutated_assembled_text` | 删中文字/复制 tail/改 href/漏 alt 均拒绝 |
@@ -39,19 +39,19 @@
 | T33 | `tests/engine/services/test_resume_plan.py` | `read_only_plan_twice` | 两次预览源/状态字节不变、零HTTP |
 | T34 | `tests/engine/services/test_resume_plan.py` | `unknown_external_output` | 未知/手改译文不自动认领完成 |
 | T35 | `tests/engine/item/test_inline_planner.py` | `zero_negative_context` | 零摘录为空、负数拒绝、跨文档/标记不串 |
-| T36 | `tests/engine/services/test_term_freeze.py` | `alias_scope_boundary` | C++/.NET、cat/category、casefold、多义边界正确 |
+| T36 | `tests/engine/services/terms/freeze.py` | `alias_scope_boundary` | C++/.NET、cat/category、casefold、多义边界正确 |
 | T37 | `tests/engine/item/test_planner.py` | `over_fifty_terms_budget` | 不静默截词，缩批/重规划或局部挂起 |
-| T38 | `tests/engine/services/test_term_freeze.py` | `structured_rule_hash` | 分隔符无歧义，note/mode/alias 敏感，有序数组不乱排 |
+| T38 | `tests/engine/services/terms/freeze.py` | `structured_rule_hash` | 分隔符无歧义，note/mode/alias 敏感，有序数组不乱排 |
 | T39 | `tests/engine/services/test_store.py` | `freeze_and_repeat_response` | 外部词表变化无效，响应幂等、HTTP 不漏 |
 | T40 | `tests/engine/epub/test_publication.py` | `resource_multiset` | 同src图片、文字伪img与多项错误准确分类 |
 | T41 | `tests/engine/epub/test_publication.py` | `mtime_existing_output` | mtime/旧文件/构建False不伪成功 |
 | T42 | `tests/engine/epub/test_publication.py` | `old_format_json_reassembly` | JSON重装配；旧-1/-2明确unsupported |
-| T43 | `tests/engine/services/test_term_freeze.py` | `default_auto_extract` | 无用户词表仍有全书窗口与候选记录 |
+| T43 | `tests/engine/services/terms/freeze.py` | `default_auto_extract` | 无用户词表仍有全书窗口与候选记录 |
 | T44 | `tests/engine/item/test_source_views.py` | `late_table_note_views` | 后半书/表格/尾注/跨格式覆盖，硬保护不扫 |
-| T45 | `tests/engine/services/test_term_freeze.py` | `false_quote_wrong_view` | 虚构/hint-only/错view/未知ID候选被拒而其他有效 |
-| T46 | `tests/engine/services/test_term_freeze.py` | `user_precedence_overlap` | 用户preferred/required优先，部分重叠不绕过 |
-| T47 | `tests/engine/services/test_term_freeze.py` | `polysemy_resolution_defer` | 多义分scope、一次核对、不明延期 |
-| T48 | `tests/engine/services/test_term_freeze.py` | `overlap_repeat_frequency` | alias/证据/上下文重复不加倍 |
+| T45 | `tests/engine/services/terms/freeze.py` | `false_quote_wrong_view` | 虚构/hint-only/错view/未知ID候选被拒而其他有效 |
+| T46 | `tests/engine/services/terms/freeze.py` | `user_precedence_overlap` | 用户preferred/required优先，部分重叠不绕过 |
+| T47 | `tests/engine/services/terms/freeze.py` | `polysemy_resolution_defer` | 多义分scope、一次核对、不明延期 |
+| T48 | `tests/engine/services/terms/freeze.py` | `overlap_repeat_frequency` | alias/证据/上下文重复不加倍 |
 | T49 | `tests/engine/services/test_store.py` | `paid_terms_without_bookplan` | 准备期已收费、无bookplan恢复不重付 |
 | T50 | `tests/engine/test_orchestrator.py` | `failed_window_later_success` | 中间术语失败后续继续，closed_with_gaps可冻结 |
 | T51 | `tests/engine/test_orchestrator.py` | `global_pause_terms_pending` | 账户/取消/总额度暂停不提前冻结 |
@@ -60,8 +60,8 @@
 | T54 | `tests/engine/test_orchestrator.py` | `term_suggestions_idempotent` | review-2可选建议幂等落UnitRecord，不改词表 |
 | T55 | `tests/engine/test_orchestrator.py` | `known_wrong_term_block` | 重大错义issue阻断，不能仅写建议放行 |
 | T56 | `tests/engine/agents/test_runtime_protocol.py` | `term_window_group_limits` | 窗/冲突/总额度及传输重试累计不清零 |
-| T57 | `tests/engine/services/test_term_freeze.py` | `file_hash_vs_rules_hash` | 证据/频次只改文件hash，note/mode/target改规则hash |
-| T58 | `tests/engine/services/test_term_freeze.py` | `disabled_empty_gap_status` | disabled/not_required/closed空/closed_with_gaps分清 |
+| T57 | `tests/engine/services/terms/freeze.py` | `file_hash_vs_rules_hash` | 证据/频次只改文件hash，note/mode/target改规则hash |
+| T58 | `tests/engine/services/terms/freeze.py` | `disabled_empty_gap_status` | disabled/not_required/closed空/closed_with_gaps分清 |
 | T59 | `tests/engine/item/test_planner.py` | `context_scope_many_terms` | 他章context不变成本段硬约束，>50词不截 |
 | T60 | `docs/epubox_v25_acceptance.md` | `technical_book_full_flow` | 真技术内容术语准备、恢复、翻译、重建、人评/费用分证据 |
 
