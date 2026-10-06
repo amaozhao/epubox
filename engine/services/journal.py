@@ -35,6 +35,7 @@ from engine.services.custody import number as _number
 from engine.services.custody import optional as _optional
 from engine.services.custody import persisted_response as _persisted_response
 from engine.services.custody import positive as _positive
+from engine.services.custody import retry_checks as _retry_checks
 from engine.services.custody import text as _text
 from engine.services.ready import ReadySession, limits_from_config
 from engine.services.store import ModelResponseStage, RunStore
@@ -330,7 +331,7 @@ class BodyJournal:
                     self._update_result(record, reopened_record)
                     reopened.append(record.item_id)
                     continue
-                checks = {"translation_frame": record.checks["translation_frame"], "review_epoch": epoch}
+                checks = _retry_checks(record, epoch)
                 reopened_record = record.model_copy(
                     update={
                         "stage": "proofread",
@@ -349,7 +350,6 @@ class BodyJournal:
         return tuple(reopened)
 
     def validate_retry_units(self, unit_ids: Sequence[str], *, retry_unknown: bool = True) -> tuple[str, ...]:
-        """Validate an explicit review retry without changing records, attempts, or quota."""
         selected = tuple(unit_ids)
         if not selected or len(selected) != len(set(selected)):
             raise ValueError("explicit atomic retry requires unique Unit IDs")
@@ -384,6 +384,7 @@ class BodyJournal:
                 and self._records[item_id].status in {ItemStatus.PENDING, ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
             )
             for record in candidates:
+                _saved_epoch(record, "translation_epoch")
                 if record.target_projection is not None:
                     self._translation_proof(record)
                 retryable.append(record.item_id)

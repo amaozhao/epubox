@@ -14,10 +14,11 @@ from engine.agents.workflow import run_workflow
 from engine.epub.preparation import PreparationConfig
 from engine.execution.repair import run_translation
 from engine.item.atoms import ADAPTER_VERSION, EXTRACTOR_VERSION
-from engine.schemas.contracts import ItemStatus, canonical_hash, canonical_json_bytes
+from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash, canonical_json_bytes
 from engine.schemas.members import MemberBatch
 from engine.services.atomic import IdentityMismatch, StaleWrite
 from engine.services.coherence import add_http_budget
+from engine.services.custody import retry_checks
 from engine.services.journal import BodyJournal
 from engine.services.preparation import prepare_translation
 from engine.services.ready import ReadySession
@@ -82,6 +83,29 @@ def _tree(root: Path) -> tuple[tuple[str, str], ...]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     )
+
+
+@pytest.mark.parametrize("invalid", (True, -1, "1"))
+def test_retry_checks_omit_zero_preserve_positive_and_reject_malformed_epoch(invalid) -> None:
+    record = ItemRecord(
+        item_id="item-1",
+        segment_id="item-1",
+        terms_hash="terms",
+        context_hash="context",
+        checks={"translation_frame": {"request_id": "r1", "member_ids": ["item-1"], "batch_hash": "hash"}},
+    )
+    assert retry_checks(record.model_copy(update={"checks": record.checks | {"translation_epoch": 0}}), 2) == {
+        "translation_frame": record.checks["translation_frame"],
+        "review_epoch": 2,
+    }
+    assert (
+        retry_checks(record.model_copy(update={"checks": record.checks | {"translation_epoch": 1}}), 2)[
+            "translation_epoch"
+        ]
+        == 1
+    )
+    with pytest.raises(IdentityMismatch, match="translation epoch"):
+        retry_checks(record.model_copy(update={"checks": record.checks | {"translation_epoch": invalid}}), 2)
 
 
 def test_workflow_results_attempts_usage_and_parent_targets_survive_restart(tmp_path) -> None:
@@ -372,9 +396,14 @@ def test_explicit_retry_reopens_all_pending_members_of_a_shared_unknown_translat
 
     async def valid(kind, payload):
         calls.append(kind)
+        if kind == "review":
+            items = [review_item(item, decision="needs_attention") for item in payload["items"]]
+            return {
+                "raw": json.dumps({"protocol": "epubox-review-2", "request_id": payload["request_id"], "items": items})
+            }
         return _answer(kind, payload)
 
-    completed = asyncio.run(
+    attention = asyncio.run(
         run_workflow(
             journal.session.prepared,
             case.batch,
@@ -385,7 +414,32 @@ def test_explicit_retry_reopens_all_pending_members_of_a_shared_unknown_translat
             records=journal.records(case.batch.manifest.item_ids),
         )
     )
-    assert completed.status == "completed" and calls == ["translate", "translate", "review"]
+    assert attention.status == "needs_attention" and calls == ["translate", "translate", "review"]
+    assert all(
+        record.checks.get("translation_epoch") == 1
+        for record in journal.records(case.batch.manifest.item_ids).values()
+    )
+    assert set(journal.retry_units(units)) == set(case.batch.manifest.item_ids)
+    restarted = BodyJournal(case.session.store)
+    restarted.recover_results()
+
+    async def reviewed(kind, payload):
+        calls.append(kind)
+        assert kind == "review"
+        return _answer(kind, payload)
+
+    completed = asyncio.run(
+        run_workflow(
+            restarted.session.prepared,
+            case.batch,
+            restarted.session.index,
+            restarted.runtime(transport=reviewed),
+            session=restarted.session,
+            save=restarted.save,
+            records=restarted.records(case.batch.manifest.item_ids),
+        )
+    )
+    assert completed.status == "completed" and calls == ["translate", "translate", "review", "review"]
     translation_requests = [request for request in journal._requests.values() if request.stage == "translate"]
     assert len(translation_requests) == 2
     assert sorted(attempt.state for request in translation_requests for attempt in request.attempts) == [

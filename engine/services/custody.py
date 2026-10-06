@@ -54,6 +54,15 @@ def epoch(record: ItemRecord, name: str) -> int:
     return value
 
 
+def retry_checks(record: ItemRecord, review_epoch: int) -> dict[str, Any]:
+    translation_epoch = epoch(record, "translation_epoch")
+    return {
+        "translation_frame": record.checks["translation_frame"],
+        "review_epoch": review_epoch,
+        **({"translation_epoch": translation_epoch} if translation_epoch else {}),
+    }
+
+
 def persisted_response(
     store: RunStore,
     request: RequestManifest,
@@ -89,4 +98,14 @@ def persisted_response(
     return None
 
 
-__all__ = ["bounded", "epoch", "manifest", "number", "optional", "persisted_response", "positive", "text"]
+__all__ = [
+    "bounded",
+    "epoch",
+    "manifest",
+    "number",
+    "optional",
+    "persisted_response",
+    "positive",
+    "retry_checks",
+    "text",
+]
