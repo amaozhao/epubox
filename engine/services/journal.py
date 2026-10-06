@@ -125,7 +125,7 @@ class BodyJournal:
             ):
                 continue
             if not any(
-                _translation_epoch(self._records[item_id])
+                _saved_epoch(self._records[item_id], "translation_epoch")
                 == request.record_versions[request.item_unit_ids[item_id][0]]
                 for item_id in request.item_ids
             ):
@@ -144,7 +144,10 @@ class BodyJournal:
             for member in batch.items:
                 if self._records[member.item_id].status != ItemStatus.PENDING:
                     continue
-                if _translation_epoch(self._records[member.item_id]) != request.record_versions[member.unit_id]:
+                if (
+                    _saved_epoch(self._records[member.item_id], "translation_epoch")
+                    != request.record_versions[member.unit_id]
+                ):
                     continue
                 accepted = parsed.accepted.get(member.item_id) if parsed is not None else None
                 error = (
@@ -217,7 +220,7 @@ class BodyJournal:
                 prior = self._records[member.item_id]
                 if prior.status not in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
                     continue
-                if _epoch(prior) != request.revisions[member.unit_id]:
+                if _saved_epoch(prior, "review_epoch") != request.revisions[member.unit_id]:
                     continue
                 decision = parsed.accepted.get(member.item_id) if parsed is not None else None
                 error = (
@@ -310,13 +313,13 @@ class BodyJournal:
             if drafts:
                 self._unlock_stage("review", item_ids, retry_unknown=retry_unknown)
             epoch = 1 + max(
-                (_epoch(record) for record in (self._records[item_id] for item_id in item_ids)),
+                (_saved_epoch(record, "review_epoch") for record in (self._records[item_id] for item_id in item_ids)),
                 default=0,
             )
             for record in candidates:
                 if record.target_projection is None:
                     translation_epoch = 1 + max(
-                        (_translation_epoch(self._records[item_id]) for item_id in item_ids), default=0
+                        (_saved_epoch(self._records[item_id], "translation_epoch") for item_id in item_ids), default=0
                     )
                     reopened_record = self._initial_pending(record.item_id).model_copy(
                         update={"checks": {"translation_epoch": translation_epoch}}
@@ -520,6 +523,8 @@ class BodyJournal:
             limits_from_config(self.session.prepared.plan.translation_config),
             targets=targets,
             revisions=request.revisions,
+            record_versions=request.record_versions,
+            plan_epochs=request.plan_epochs,
             tokenizer_model=_text(self.session.prepared.plan.translation_config, "model"),
         )
         if len(packed.batches) != 1 or packed.blocked:
@@ -531,7 +536,11 @@ class BodyJournal:
 
     def _review_target(self, item_id: str, target_hash: str, review_epoch: int) -> ItemRecord:
         current = self._records[item_id]
-        if current.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE} and current.target_hash == target_hash:
+        if (
+            current.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
+            and current.target_hash == target_hash
+            and _saved_epoch(current, "review_epoch") == review_epoch
+        ):
             return current
         for request in self._requests.values():
             if request.stage != "translate" or item_id not in request.item_ids:
@@ -985,14 +994,6 @@ class BodyJournal:
 
     def _result_path(self, item_id: str) -> Path:
         return self.store.root / "results" / f"{safe_id(item_id)}.json"
-
-
-def _epoch(record: ItemRecord) -> int:
-    return _saved_epoch(record, "review_epoch")
-
-
-def _translation_epoch(record: ItemRecord) -> int:
-    return _saved_epoch(record, "translation_epoch")
 
 
 __all__ = ["BodyJournal"]

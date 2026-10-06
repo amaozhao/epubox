@@ -548,6 +548,60 @@ def test_explicit_review_retry_uses_new_revision_without_retranslating(tmp_path)
     assert resumed.status == "completed" and calls == ["translate", "review", "review"]
 
 
+def test_shared_review_retry_reconstructs_old_response_from_its_frozen_epoch(tmp_path) -> None:
+    case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p><p>Third.</p>", ("First.", "Second.", "Third."))
+    journal = BodyJournal(case.session.store, case.session)
+    calls: list[str] = []
+
+    async def first(kind, payload):
+        calls.append(kind)
+        if kind == "translate":
+            return _answer(kind, payload)
+        items = [review_item(item, decision="needs_attention") for item in payload["items"]]
+        return {
+            "raw": json.dumps({"protocol": "epubox-review-2", "request_id": payload["request_id"], "items": items})
+        }
+
+    result = asyncio.run(
+        run_workflow(
+            case.prepared,
+            case.batch,
+            case.index,
+            journal.runtime(transport=first),
+            session=journal.session,
+            save=journal.save,
+            records=journal.records(case.batch.manifest.item_ids),
+        )
+    )
+    assert result.status == "needs_attention"
+    units = tuple(dict.fromkeys(item.unit_id for item in case.batch.items))
+    journal.retry_units(units)
+
+    resumed = BodyJournal(case.session.store)
+    resumed.recover_results()
+    assert all(
+        record.status == ItemStatus.LOCAL_VALID for record in resumed.records(case.batch.manifest.item_ids).values()
+    )
+
+    async def second(kind, payload):
+        calls.append(kind)
+        assert kind == "review"
+        return _answer(kind, payload)
+
+    completed = asyncio.run(
+        run_workflow(
+            resumed.session.prepared,
+            case.batch,
+            resumed.session.index,
+            resumed.runtime(transport=second),
+            session=resumed.session,
+            save=resumed.save,
+            records=resumed.records(case.batch.manifest.item_ids),
+        )
+    )
+    assert completed.status == "completed" and calls == ["translate", "review", "review"]
+
+
 def test_saved_draft_tamper_is_rejected_before_review_and_read_only_preview_is_unchanged(tmp_path) -> None:
     case = prepare_case(tmp_path, "<p>First.</p>", ("First.",))
     journal = BodyJournal(case.session.store, case.session)

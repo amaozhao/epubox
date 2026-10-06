@@ -139,4 +139,6 @@ T16 接线同时需给 target/context 术语角色提供版本明确的提示语
 | 模型响应已落盘，finish 从响应回读 prior usage 导致累计增量为0 | 响应落盘即记账，并按 request/attempt 恰好一次累计；重启、回放及 finish 不重复 |
 | 通用进度输出18/0 | snapshot 明确返回冻结的 required_units；真实恢复显示18/793 |
 
-全部修复后的最终全量 pytest **671 passed（128.92 秒）**；Ruff、格式、Pyright 与 diff 检查通过。独立代码审查 APPROVE（0 issues）、架构审查 CLEAR。真实旧任务 resume 未新增 HTTP；新版全书重跑等待用户选择。
+全部修复后的最终全量 pytest **671 passed（128.92 秒）**；Ruff、格式、Pyright 与 diff 检查通过。独立代码审查 APPROVE（0 issues）、架构审查 CLEAR。真实旧任务 resume 未新增 HTTP；用户已明确授权新版全书翻译，正在执行。
+
+真实新版任务进一步修复review历史epoch恢复：复用当前草稿必须同时匹配历史hash和review_epoch；历史重建携带自身record_versions/plan_epochs。26个真实历史review请求只读验证通过。新增回归后全量pytest **672 passed（126.91秒）**，独立代码审查APPROVE、架构审查CLEAR，原已通过的94项保持不变。
