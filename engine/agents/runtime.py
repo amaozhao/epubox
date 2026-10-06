@@ -31,6 +31,8 @@ type ReserveAttempt = Callable[[str, Attempt], Any]
 type FinishAttempt = Callable[..., Any]
 type PersistResponse = Callable[[Stage, str, str, dict[str, Any]], Any]
 type DispatchGuard = Callable[[], Any]
+type PrepareRequest = Callable[[Stage, dict[str, Any], Mapping[str, Any]], Any]
+type ReplayResponse = Callable[[Stage, dict[str, Any], Mapping[str, Any]], Any]
 _METADATA_KEYS = frozenset({"response_id", "model", "system_fingerprint", "finish_reason"})
 MAX_MODEL_INPUT_TOKENS = 50_000
 RESOLUTION_PROTOCOL_VERSION = "epubox-term-resolution-2"
@@ -277,6 +279,8 @@ class ModelRuntime:
         reserve_attempt: ReserveAttempt | None = None,
         finish_attempt: FinishAttempt | None = None,
         persist_response: PersistResponse | None = None,
+        prepare_request: PrepareRequest | None = None,
+        replay_response: ReplayResponse | None = None,
         max_transport_retries: int = 2,
         cooldown_seconds: float = 10.0,
         max_service_failures: int = 3,
@@ -317,6 +321,8 @@ class ModelRuntime:
         self._reserve_attempt = reserve_attempt
         self._finish_attempt = finish_attempt
         self._persist_response = persist_response
+        self._prepare_request = prepare_request
+        self._replay_response = replay_response
         self._max_transport_retries = max_transport_retries
         self._cooldown_seconds = cooldown_seconds
         self._max_service_failures = max_service_failures
@@ -513,7 +519,6 @@ class ModelRuntime:
     ) -> dict[str, Any]:
         budget = model_input_budget(kind, payload, algorithm_version=self._input_budget_version)
         estimated_input_tokens = budget["estimated_input_tokens"]
-        self._ensure_dispatch_allowed()
         if estimated_input_tokens > MAX_MODEL_INPUT_TOKENS:
             raise InputBudgetError(estimated_input_tokens)
         request_id = context_manifest.get("request_id") or payload.get("request_id")
@@ -542,6 +547,20 @@ class ModelRuntime:
         estimated_tpm_tokens = estimated_input_tokens + output_tokens_value
         if self.tpm is not None and estimated_tpm_tokens > self.tpm:
             raise RequestError("estimated request tokens exceed TPM capacity", attempts=0)
+
+        if self._prepare_request is not None:
+            prepared = self._prepare_request(kind, payload, context_manifest)
+            if inspect.isawaitable(prepared):
+                await prepared
+        if self._replay_response is not None:
+            replayed = self._replay_response(kind, payload, context_manifest)
+            if inspect.isawaitable(replayed):
+                replayed = await replayed
+            if replayed is not None:
+                if not isinstance(replayed, dict):
+                    raise TypeError("replayed response must be a dictionary")
+                return replayed
+        self._ensure_dispatch_allowed()
 
         for attempt_index in range(self._max_transport_retries + 1):
             attempt_id = str(uuid4())

@@ -393,7 +393,7 @@ async def _advance_atomic(
     output_policy_hash: str,
     progress: ProgressCallback | None,
 ) -> PreparationPipelineResult:
-    from engine.epub.derived_bindings import resolve_derived_navigation
+    from engine.epub.bindings import resolve_derived_navigation
     from engine.item.members import MemberIndex, materialize_members, pack_members
     from engine.services.ready import limits_for, read_ready, write_ready
     from engine.services.terms.planning import plan_atomic_terms

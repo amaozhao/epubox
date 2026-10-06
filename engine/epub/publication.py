@@ -1,18 +1,7 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-import re
-import shutil
-import tempfile
 import uuid
-import xml.etree.ElementTree as ET
-import zipfile
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
@@ -20,12 +9,17 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name, serialize_xml
 from engine.epub.assembly import assemble_document, derive_navigation_projection
 from engine.epub.validation import (
-    EpubCheckResult,
     EpubValidationError,
     PackageInventory,
-    ValidationIssue,
     inspect_epub,
-    validate_internal_references,
+)
+from engine.epub.verification import (
+    PackageVerification,
+    publish_verified,
+    recover_publication,
+    stage_epub,
+    utc_now,
+    verify_staged_epub,
 )
 from engine.item.inline import plain_text, projection_identities, validate_projection
 from engine.schemas.contracts import (
@@ -44,22 +38,6 @@ from engine.services.store import RunStore
 
 _TRANSLATABLE_ATTRIBUTES = {"alt", "title", "aria-label", "aria-description"}
 _XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
-
-
-@dataclass(frozen=True)
-class PackageVerification:
-    output_hash: str
-    epubcheck: EpubCheckResult
-    checked_documents: tuple[str, ...]
-    warnings: tuple[ValidationIssue, ...] = ()
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "output_hash": self.output_hash,
-            "epubcheck": self.epubcheck.to_dict(),
-            "checked_documents": list(self.checked_documents),
-            "warnings": [warning.__dict__ for warning in self.warnings],
-        }
 
 
 def validate_assembled_document(
@@ -181,38 +159,6 @@ def _expected_unit_text(document: DocumentPlan, unit: Unit, events: Sequence[obj
             raise EpubValidationError("invalid_slot_reference", f"Protected source range does not match: {slot_id}")
         parts.append(source_text)
     return "".join(parts)
-
-
-def stage_epub(
-    source_snapshot: Path,
-    staged_path: Path,
-    replacements: Mapping[str, bytes],
-) -> str:
-    """Create a candidate EPUB without modifying the source snapshot or untouched resources."""
-    staged_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(source_snapshot) as source:
-        names = set(source.namelist())
-        unknown = set(replacements) - names
-        if unknown:
-            raise EpubValidationError("unknown_replacement", f"Replacement is not in source EPUB: {min(unknown)}")
-        with zipfile.ZipFile(staged_path, "w") as target:
-            mimetype = replacements.get("mimetype", source.read("mimetype"))
-            if mimetype != b"application/epub+zip":
-                raise EpubValidationError("invalid_mimetype", "mimetype cannot be changed")
-            target.writestr("mimetype", mimetype, compress_type=zipfile.ZIP_STORED)
-            for info in source.infolist():
-                if info.filename == "mimetype":
-                    continue
-                data = replacements.get(info.filename, source.read(info.filename))
-                copied = zipfile.ZipInfo(info.filename, info.date_time)
-                copied.comment = info.comment
-                copied.extra = info.extra
-                copied.internal_attr = info.internal_attr
-                copied.external_attr = info.external_attr
-                copied.create_system = info.create_system
-                copied.flag_bits = info.flag_bits & ~0x1
-                target.writestr(copied, data, compress_type=info.compress_type)
-    return _sha256_file(staged_path)
 
 
 def publish_book(
@@ -553,52 +499,6 @@ def _snippet(value: str, *, tail: bool = False, limit: int = 800) -> str:
     return value[-limit:] if tail else value[:limit]
 
 
-def verify_staged_epub(
-    source_snapshot: Path,
-    staged_path: Path,
-    source_inventory: PackageInventory,
-    expected_documents: Mapping[str, bytes],
-    *,
-    accepted_targets: Mapping[str, Mapping[str, str]],
-    checker: object,
-    expected_language: str | None = None,
-) -> PackageVerification:
-    """Independently compare actual package bytes/XML against planned documents and accepted targets."""
-    output_hash = _sha256_file(staged_path)
-    output_inventory = inspect_epub(staged_path, output_hash, checker=checker)
-    if output_inventory.epub_version != source_inventory.epub_version:
-        raise EpubValidationError("epub_version_changed", "Output EPUB version differs from source")
-    if set(output_inventory.entries) != set(source_inventory.entries):
-        raise EpubValidationError("resource_inventory_changed", "Output resource inventory differs from source")
-    if output_inventory.opf_path != source_inventory.opf_path:
-        raise EpubValidationError("opf_changed", "Output package document path differs from source")
-    if output_inventory.spine != source_inventory.spine:
-        raise EpubValidationError("spine_changed", "Output reading order differs from source")
-    if output_inventory.obfuscated_fonts != source_inventory.obfuscated_fonts:
-        raise EpubValidationError("font_obfuscation_changed", "Font obfuscation resources changed")
-
-    warnings = list(output_inventory.warnings)
-    with zipfile.ZipFile(source_snapshot) as source, zipfile.ZipFile(staged_path) as output:
-        for name in source.namelist():
-            if name not in expected_documents and source.read(name) != output.read(name):
-                raise EpubValidationError("unexpected_resource_change", f"Unexpected resource change: {name}")
-        for path, expected in expected_documents.items():
-            actual = output.read(path)
-            _compare_document(path, expected, actual)
-            if path not in accepted_targets:
-                raise EpubValidationError("missing_target_evidence", f"No target evidence supplied for {path}")
-        reference_issues = validate_internal_references(output, output_inventory)
-        if reference_issues:
-            raise EpubValidationError("invalid_references", reference_issues[0].message, issues=reference_issues)
-        if expected_language:
-            warnings.extend(_validate_final_metadata(output, output_inventory, accepted_targets, expected_language))
-
-    result = output_inventory.epubcheck
-    if result is None or not result.passed:
-        raise EpubValidationError("output_epubcheck_failed", "Output EPUBCheck did not pass")
-    return PackageVerification(output_hash, result, tuple(sorted(expected_documents)), tuple(warnings))
-
-
 def _finalize_replacements(
     inventory: PackageInventory,
     replacements: Mapping[str, bytes],
@@ -662,7 +562,7 @@ def _finalize_replacements(
         if len(modified) != 1:
             raise EpubValidationError("invalid_modified_time", "Source EPUB 3 must have one dcterms:modified")
         keeper = modified[0]
-        keeper.text = _utc_now()
+        keeper.text = utc_now()
         changes[(node_keys[id(keeper)], "text")] = keeper.text
     finalized[inventory.opf_path] = serialize_xml(tree, source_markup=opf_source).encode("utf-8")
     return finalized, changesets
@@ -699,125 +599,6 @@ def _inherited_language(element: etree._Element) -> str | None:
             return language
         current = current.getparent()
     return None
-
-
-def _validate_final_metadata(
-    archive: zipfile.ZipFile,
-    inventory: PackageInventory,
-    accepted_targets: Mapping[str, Mapping[str, str]],
-    expected_language: str,
-) -> tuple[ValidationIssue, ...]:
-    opf = parse_xml_safely(archive.read(inventory.opf_path).decode("utf-8")).getroot()
-    languages = [(element.text or "").strip() for element in opf.iter() if qname_local_name(element.tag) == "language"]
-    if not languages or languages[0] != expected_language:
-        raise EpubValidationError("target_language_missing", "OPF primary language was not finalized")
-    if inventory.epub_version.startswith("3"):
-        modified = [
-            (element.text or "").strip()
-            for element in opf.iter()
-            if qname_local_name(element.tag) == "meta" and element.get("property") == "dcterms:modified"
-        ]
-        if len(modified) != 1 or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", modified[0]):
-            raise EpubValidationError("invalid_modified_time", "EPUB 3 requires one UTC dcterms:modified value")
-    for path in inventory.documents:
-        if path not in accepted_targets:
-            continue
-        root = parse_xml_safely(archive.read(path).decode("utf-8")).getroot()
-        if root.get("lang") != expected_language or root.get(_XML_LANG) != expected_language:
-            raise EpubValidationError("document_language_missing", f"Target language missing from {path}")
-    has_file_as = any(
-        qname_local_name(name) == "file-as" or element.get("property") == "file-as"
-        for element in opf.iter()
-        for name in element.attrib
-    )
-    return (
-        (ValidationIssue("metadata_file_as_preserved", "Ambiguous file-as metadata was preserved", "warning"),)
-        if has_file_as
-        else ()
-    )
-
-
-def publish_verified(
-    staged_path: Path,
-    target_path: Path,
-    publish_path: Path,
-    *,
-    run_id: str,
-    plan_fingerprint: str,
-    version_vector: Mapping[str, int],
-    verification: PackageVerification,
-    forbidden_paths: Sequence[Path] = (),
-    overwrite: bool = False,
-) -> dict[str, object]:
-    if _sha256_file(staged_path) != verification.output_hash:
-        raise EpubValidationError("staged_hash_changed", "Staged EPUB changed after verification")
-    _reject_target_alias(target_path, forbidden_paths)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    intent: dict[str, object] = {
-        "format": "epubox-publish-1",
-        "state": "intended",
-        "run_id": run_id,
-        "plan_fingerprint": plan_fingerprint,
-        "version_vector": dict(sorted(version_vector.items())),
-        "target_path": str(target_path.absolute()),
-        "target_hash": verification.output_hash,
-        "verification": verification.to_dict(),
-        "created_at": _utc_now(),
-    }
-
-    with _target_lock(target_path):
-        _reject_target_alias(target_path, forbidden_paths)
-        if target_path.exists() and not overwrite:
-            raise FileExistsError(f"Output already exists: {target_path}")
-        fd, temporary_name = tempfile.mkstemp(prefix=f".{target_path.name}.", suffix=".tmp", dir=target_path.parent)
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(fd, "wb") as output, staged_path.open("rb") as source:
-                shutil.copyfileobj(source, output)
-                output.flush()
-                os.fsync(output.fileno())
-            if _sha256_file(temporary) != verification.output_hash:
-                raise OSError("Target-filesystem copy hash mismatch")
-            _atomic_json(publish_path, intent)
-            if overwrite:
-                os.replace(temporary, target_path)
-            else:
-                os.link(temporary, target_path)
-                temporary.unlink()
-            _fsync_directory(target_path.parent)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-    intent["state"] = "completed"
-    intent["completed_at"] = _utc_now()
-    _atomic_json(publish_path, intent)
-    return intent
-
-
-def recover_publication(
-    publish_path: Path,
-    *,
-    plan_fingerprint: str,
-    version_vector: Mapping[str, int],
-) -> dict[str, object] | None:
-    if not publish_path.is_file():
-        return None
-    data = json.loads(publish_path.read_text(encoding="utf-8"))
-    if data.get("format") != "epubox-publish-1":
-        raise EpubValidationError("invalid_publish_intent", "Unknown publish intent format")
-    if data.get("plan_fingerprint") != plan_fingerprint or data.get("version_vector") != dict(
-        sorted(version_vector.items())
-    ):
-        return None
-    target = Path(str(data.get("target_path", "")))
-    target_hash = data.get("target_hash")
-    if not target.is_file() or not isinstance(target_hash, str) or _sha256_file(target) != target_hash:
-        return None
-    if data.get("state") != "completed":
-        data["state"] = "completed"
-        data["completed_at"] = _utc_now()
-        _atomic_json(publish_path, data)
-    return data
 
 
 def _actual_node(
@@ -922,95 +703,6 @@ def _visible_text(element: etree._Element, atom_nodes: set[etree._Element]) -> s
         parts.append(_visible_text(child, atom_nodes))
         parts.append(child.tail or "")
     return "".join(parts)
-
-
-def _compare_document(path: str, expected: bytes, actual: bytes) -> None:
-    expected_root = _parse_xml(expected, path)
-    actual_root = _parse_xml(actual, path)
-    if _tree_signature(expected_root) != _tree_signature(actual_root):
-        raise EpubValidationError("document_mismatch", f"Actual document differs from verified plan: {path}")
-
-
-def _tree_signature(element: ET.Element) -> tuple[object, ...]:
-    return (
-        element.tag,
-        tuple(sorted(element.attrib.items())),
-        element.text,
-        element.tail,
-        tuple(_tree_signature(child) for child in element),
-    )
-
-
-def _parse_xml(data: bytes, path: str) -> ET.Element:
-    try:
-        return ET.fromstring(data)
-    except ET.ParseError as error:
-        raise EpubValidationError("invalid_output_xml", f"Invalid output XML in {path}: {error}") from error
-
-
-def _reject_target_alias(target: Path, forbidden: Sequence[Path]) -> None:
-    resolved_target = target.resolve(strict=False)
-    for path in forbidden:
-        resolved_forbidden = path.resolve(strict=False)
-        if resolved_target == resolved_forbidden:
-            raise EpubValidationError("unsafe_output_path", f"Output aliases protected input: {path}")
-        if target.exists() and path.exists() and os.path.samefile(target, path):
-            raise EpubValidationError("unsafe_output_path", f"Output aliases protected input: {path}")
-
-
-@contextmanager
-def _target_lock(target: Path) -> Iterator[None]:
-    lock_path = target.with_name(f".{target.name}.lock")
-    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        if os.name == "posix":
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    finally:
-        if os.name == "posix":
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
-
-
-def _atomic_json(path: Path, value: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-            json.dump(value, file, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _fsync_directory(path: Path) -> None:
-    if os.name != "posix":
-        return
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 __all__ = [

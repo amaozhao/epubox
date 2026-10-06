@@ -10,7 +10,7 @@ import typer
 
 from engine.cli import RunOutcome, resume_book, translate_book
 from engine.services.atomic import StoreLocked
-from engine.services.resume_plan import plan_resume
+from engine.services.resume import plan_resume
 
 app = typer.Typer()
 
@@ -25,7 +25,9 @@ def translate(
     auto_extract: bool = typer.Option(True, "--auto-extract/--no-auto-extract"),
     provider: str = typer.Option("agnes", "--provider"),
     context_tokens: int = typer.Option(32768, "--context-tokens", min=1),
+    max_input_tokens: int = typer.Option(50000, "--max-input-tokens", min=1),
     max_output_tokens: int = typer.Option(4096, "--max-output-tokens", min=1),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="单个源片段的最大 token 数；默认读取环境配置。"),
     http_limit: int = typer.Option(0, "--http-limit", min=0),
     concurrency: int = typer.Option(2, "--concurrency", min=1),
     epubcheck: str | None = typer.Option(None, "--epubcheck-command"),
@@ -43,7 +45,9 @@ def translate(
             auto_extract=auto_extract,
             provider=provider,
             context_tokens=context_tokens,
+            max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
+            limit=limit,
             http_limit=http_limit,
             concurrency=concurrency,
             epubcheck=epubcheck,
@@ -129,6 +133,73 @@ def _progress_printer():
     def show(report: dict[str, Any]) -> None:
         nonlocal last
         phase = str(report.get("phase", "running"))
+        if "request_id" in report:
+            values = tuple(
+                report.get(key)
+                for key in (
+                    "request_id",
+                    "result_item_id",
+                    "result_status",
+                    "batch_status",
+                    "decision",
+                    "revised",
+                    "batch_issues",
+                    "reason",
+                    "accepted_units",
+                    "required_items",
+                    "translated_items",
+                    "reviewed_items",
+                    "needs_attention_units",
+                    "http_attempts",
+                    "input_tokens",
+                    "output_tokens",
+                    "actual_input_tokens",
+                    "actual_output_tokens",
+                    "elapsed_seconds",
+                )
+            )
+            key = (phase, report.get("execution_state"), *values)
+            if key == last:
+                return
+            last = key
+            decision = report.get("decision")
+            result = {
+                "no_change": "通过",
+                "pass": "通过",
+                "replace": "修订",
+                "needs_attention": "待处理",
+            }.get(
+                str(decision),
+                report.get("result_status", report.get("batch_status", report.get("execution_state", "-"))),
+            )
+            issues = report.get("batch_issues")
+            reason = report.get("reason")
+            if isinstance(reason, dict):
+                reason = reason.get("message") or reason.get("code") or str(reason)
+            reason = reason or ("；".join(map(str, issues)) if isinstance(issues, (list, tuple)) else None)
+            actual = ""
+            if type(report.get("actual_input_tokens")) is int or type(report.get("actual_output_tokens")) is int:
+                actual = (
+                    f"，本次实际输入={report.get('actual_input_tokens', '-')} tokens，"
+                    f"本次实际输出={report.get('actual_output_tokens', '-')} tokens"
+                )
+            typer.echo(
+                f"{phase}: 批次={report.get('request_id', '-')}，结果="
+                f"{result}，修订={'是' if report.get('revised') else '否'}，"
+                f"完成单元={report.get('accepted_units', 0)}，总项={report.get('required_items', 0)}，"
+                f"初译={report.get('translated_items', 0)}，校对={report.get('reviewed_items', 0)}，"
+                f"待处理单元={report.get('needs_attention_units', 0)}，"
+                f"耗时={float(report.get('elapsed_seconds', 0)):.1f}秒；"
+                f"正文估算={report.get('source_tokens', '-')} tokens，"
+                f"输入估算={report.get('estimated_input_tokens', '-')} tokens，"
+                f"输入预留={report.get('reserved_input_tokens', '-')} tokens，"
+                f"输出预留={report.get('reserved_output_tokens', '-')} tokens，"
+                f"实际累计输入={report.get('input_tokens', 0)} tokens，"
+                f"实际累计输出={report.get('output_tokens', 0)} tokens，HTTP={report.get('http_attempts', 0)}"
+                + actual
+                + (f"；原因={reason}" if reason else "")
+            )
+            return
         planned = report.get("planned", report.get("required_units", 0))
         succeeded = report.get("succeeded", report.get("accepted_units", 0))
         failed = report.get("failed", report.get("needs_attention_units", 0))
@@ -149,11 +220,11 @@ def _progress_printer():
             translated, reviewed, required_items, retrying, waiting = cast(tuple[int, int, int, int, int], details)
             key = (
                 phase,
-                succeeded * 20 // max(1, planned),
-                translated * 20 // max(1, required_items),
-                reviewed * 20 // max(1, required_items),
+                succeeded,
+                translated,
+                reviewed,
                 failed,
-                attempts // 50,
+                attempts,
                 report.get("execution_state"),
             )
             if key != last:
@@ -164,8 +235,7 @@ def _progress_printer():
                     f"局部问题={failed}，累计HTTP={attempts}"
                 )
             return
-        bucket = succeeded * 20 // max(1, planned)
-        key = (phase, bucket, failed, attempts // 50, report.get("execution_state"))
+        key = (phase, succeeded, planned, failed, attempts, report.get("execution_state"))
         if key == last:
             return
         last = key

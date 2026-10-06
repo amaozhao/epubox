@@ -148,7 +148,7 @@ def test_source_identity_change_before_snapshot_never_starts_the_new_hash(
     with pytest.raises(cli.IdentityMismatch, match="source EPUB identity changed"):
         cli.translate_book(source)
 
-    assert hash_calls == 1
+    assert hash_calls == 2
     assert model_sends == 0
     assert accounting.read_bytes() == b'{"http_attempts":31}'
     assert not (root / new_hash).exists()
@@ -170,23 +170,28 @@ def test_repeating_translate_command_reuses_the_same_prepared_run(
 ) -> None:
     source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
     seen_run_ids: list[str | None] = []
+    resumed: list[Path] = []
     checker = StubChecker()
     monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
     monkeypatch.setattr(cli, "checker_for_source", lambda *_args: checker)
 
     async def advance(actual_source, output, actual_work_root, config, actual_checker, **_kwargs):
         seen_run_ids.append(config.run_id)
-        if len(seen_run_ids) == 1:
-            prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
-            return cli.RunOutcome("paused", prepared.work_dir, "terms")
-        return cli.RunOutcome("paused", first.work_dir, "terms")
+        prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
+        return cli.RunOutcome("paused", prepared.work_dir, "terms")
+
+    async def resume(work_dir, *_args, **_kwargs):
+        resumed.append(work_dir)
+        return cli.RunOutcome("paused", work_dir, "terms")
 
     monkeypatch.setattr(cli, "_advance_source", advance)
+    monkeypatch.setattr(cli, "_advance_work_dir", resume)
     first = cli.translate_book(source)
     second = cli.translate_book(source)
 
     assert first.work_dir == second.work_dir
-    assert seen_run_ids == [first.work_dir.name, first.work_dir.name]
+    assert seen_run_ids == [first.work_dir.name]
+    assert resumed == [first.work_dir]
 
 
 def test_default_work_roots_separate_same_named_books_in_different_directories(
@@ -603,12 +608,15 @@ def test_outcome_report_is_derived_from_the_same_work_directory(tmp_path: Path, 
 
     def fake_report(store, **fields):
         calls.append((store.root, fields))
-        return store.root / "report.json"
+        path = store.root / "report.json"
+        path.write_text('{"http":{"actual_attempts":4}}')
+        return path
 
     monkeypatch.setattr(cli, "write_report", fake_report)
     result = cli._record(cli.RunOutcome("needs_attention", tmp_path, "translation"))
 
     assert result.report_path == tmp_path / "report.json"
+    assert result.http_attempts == 4
     assert calls[0][0] == tmp_path
     assert calls[0][1]["status"] == "needs_attention"
 

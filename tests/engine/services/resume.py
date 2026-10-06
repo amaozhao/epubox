@@ -6,8 +6,9 @@ from pathlib import Path
 
 from engine.epub.preparation import PreparationConfig
 from engine.services.preparation import prepare_translation
-from engine.services.resume_plan import plan_resume
+from engine.services.resume import plan_resume
 from engine.services.terms.planning import TERM_PLANNER_VERSION
+from tests.engine.agents.workflow import prepare_case
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
 
@@ -76,3 +77,15 @@ def test_preview_does_not_claim_publication_when_frozen_source_changes(tmp_path:
     assert preview.status == "needs_attention"
     assert preview.actions == ("repair_shared_identity",)
     assert "source.epub" in preview.reasons
+
+
+def test_unknown_prepared_marker_is_read_only_unsupported_without_conversion(tmp_path: Path) -> None:
+    case = prepare_case(tmp_path, "<p>First.</p>", ("First.",))
+    marker = case.session.store.root / "prepared.json"
+    marker.write_text('{"format":"epubox-prepared-1"}')
+    before = _tree(case.session.store.root)
+
+    preview = plan_resume(case.session.store.root)
+
+    assert preview.status == "unsupported_format" and preview.actions == ("start_new_run",)
+    assert before == _tree(case.session.store.root)

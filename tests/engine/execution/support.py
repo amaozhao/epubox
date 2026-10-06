@@ -10,7 +10,7 @@ from engine.services.store import RunStore
 from engine.services.terms.planning import TERM_PLANNER_VERSION
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
-from tests.engine.services.test_store_contracts import _bookplan, _frozen_store, _unit_record
+from tests.engine.services.contracts import _bookplan, _frozen_store, _unit_record
 
 
 class ScriptedTransport:

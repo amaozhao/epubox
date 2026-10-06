@@ -9,8 +9,8 @@ from engine.agents.runtime import TERM_PROMPT_VERSION, ModelRuntime, request_mes
 from engine.schemas.contracts import Attempt, RequestManifest, TermExtractionRecord
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite
 from engine.services.terms.runner import TermRunner
+from tests.engine.services.store import _prepare, _write_term_plan
 from tests.engine.services.terms.runner import _prepare as _prepare_term_run
-from tests.engine.services.test_store import _prepare, _write_term_plan
 
 
 @pytest.mark.asyncio

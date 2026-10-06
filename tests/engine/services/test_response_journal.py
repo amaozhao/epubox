@@ -12,7 +12,7 @@ from engine.schemas.contracts import (
 )
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite
 from engine.services.store import ModelResponseStage, RunStore
-from tests.engine.services.test_store import _prepare, _write_term_plan
+from tests.engine.services.store import _prepare, _write_term_plan
 
 
 def _request(store: RunStore, stage: ModelResponseStage) -> RequestManifest:

@@ -50,13 +50,22 @@ async def run_workflow(
     completed = {item.item_id for item in batch.items if _valid_saved(item, current.get(item.item_id), session, batch)}
     issues: list[str] = []
     translation_batches = ((batch, True),)
-    if completed:
+    if completed or any(_translation_epoch(record) for record in current.values()):
         replanned = pack_members(
             "translate",
             batch.items,
             prepared.glossary,
             index,
             _limits(prepared),
+            record_versions={
+                item.unit_id: max(
+                    _translation_epoch(current.get(candidate.item_id))
+                    for candidate in batch.items
+                    if candidate.unit_id == item.unit_id
+                )
+                for item in batch.items
+                if item.item_id not in completed
+            },
             completed=completed,
             tokenizer_model=str(prepared.plan.translation_config["model"]),
         )
@@ -85,7 +94,13 @@ async def run_workflow(
             session=session,
             save=save,
             records=current,
-            revisions=batch.manifest.revisions,
+            revisions={
+                item.unit_id: max(
+                    batch.manifest.revisions[item.unit_id],
+                    _review_epoch(current[item.item_id]),
+                )
+                for item in reviewable
+            },
         )
         issues.extend(review_issues)
     status = (
@@ -115,7 +130,11 @@ async def _translate_step(
     current = dict(records or {})
     issues: list[str] = []
     requested = tuple(
-        item for item in batch.items if not _valid_saved(item, current.get(item.item_id), session, batch)
+        item
+        for item in batch.items
+        if current.get(item.item_id) is None
+        or current[item.item_id].status == ItemStatus.PENDING
+        or not _valid_saved(item, current.get(item.item_id), session, batch)
     )
     if not requested:
         return current, issues
@@ -171,7 +190,14 @@ async def _translate_step(
             status=ItemStatus.LOCAL_VALID,
             target_projection=target,
             target_hash=canonical_hash(target),
-            checks={"translation_frame": _frame(batch)},
+            checks={
+                "translation_frame": _frame(batch),
+                **(
+                    {"translation_epoch": _translation_epoch(current.get(member.item_id))}
+                    if _translation_epoch(current.get(member.item_id))
+                    else {}
+                ),
+            },
             request_id=batch.manifest.request_id,
             next_action="review",
         )
@@ -297,6 +323,12 @@ async def _apply_corrections_step(
                             if "translation_frame" in prior.checks
                             else {}
                         ),
+                        **({"review_epoch": prior.checks["review_epoch"]} if "review_epoch" in prior.checks else {}),
+                        **(
+                            {"translation_epoch": prior.checks["translation_epoch"]}
+                            if "translation_epoch" in prior.checks
+                            else {}
+                        ),
                         "decision": result["decision"],
                         "checks": result["checks"],
                         "issues": result["issues"],
@@ -395,6 +427,20 @@ def _integer(config: Mapping[str, Any], name: str, default: int | None = None) -
     return value
 
 
+def _review_epoch(record: ItemRecord) -> int:
+    value = record.checks.get("review_epoch", 0)
+    if type(value) is not int or value < 0:
+        raise ValueError("saved review epoch must be a non-negative integer")
+    return value
+
+
+def _translation_epoch(record: ItemRecord | None) -> int:
+    value = record.checks.get("translation_epoch", 0) if record is not None else 0
+    if type(value) is not int or value < 0:
+        raise ValueError("saved translation epoch must be a non-negative integer")
+    return value
+
+
 def _valid_saved(
     member: RequestMember,
     record: ItemRecord | None,
@@ -408,6 +454,15 @@ def _valid_saved(
     if record.status == ItemStatus.PENDING and record.target_projection is None:
         _validate_record_frame(member, record, pending_batch)
         return False
+    if record.status == ItemStatus.NEEDS_ATTENTION:
+        batch = _saved_batch(session, member, record)
+        if record.target_projection is not None:
+            if record.target_hash != canonical_hash(record.target_projection):
+                raise ValueError("saved attention result is not hash-bound")
+            validate_member_target(member, record.target_projection)
+            if error := _target_error(member, record.target_projection, _wire_items(batch)[member.item_id]):
+                raise ValueError(f"saved attention result no longer passes local validation: {error}")
+        return True
     if record.status not in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE, ItemStatus.REVIEWED}:
         raise ValueError(f"saved result has no reusable workflow state: {member.item_id}/{record.status}")
     batch = _saved_batch(session, member, record)
@@ -435,12 +490,29 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
         members = tuple(session.index.members_by_id[value] for value in member_ids)
     except KeyError as error:
         raise ValueError("saved translation frame references an unknown member") from error
+    request_id = frame.get("request_id")
+    if not isinstance(request_id, str):
+        raise TypeError("saved translation frame has an invalid request ID")
+    request_path = session.store.root / "requests" / f"{request_id}.json"
+    request = session.store.read_request(request_id) if request_path.exists() else None
+    if request is not None and request.record_versions.get(member.unit_id) != _translation_epoch(record):
+        raise ValueError("saved result translation epoch differs from its request frame")
+    versions: dict[str, int] = {}
+    for value, saved_member in zip(member_ids, members, strict=True):
+        saved = (
+            record
+            if value == record.item_id
+            else ItemRecord.model_validate_json((session.store.root / "results" / f"{value}.json").read_bytes())
+        )
+        versions[saved_member.unit_id] = max(versions.get(saved_member.unit_id, 0), _translation_epoch(saved))
     packed = pack_members(
         "translate",
         members,
         session.prepared.glossary,
         session.index,
         _limits(session.prepared),
+        record_versions=request.record_versions if request is not None else versions,
+        plan_epochs=request.plan_epochs if request is not None else {member.unit_id: 0 for member in members},
         tokenizer_model=str(session.prepared.plan.translation_config["model"]),
     )
     if len(packed.batches) != 1 or packed.blocked:
@@ -451,6 +523,8 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
         or frame.get("request_id") != batch.manifest.request_id
         or frame.get("batch_hash") != canonical_hash(batch)
         or record.request_id != batch.manifest.request_id
+        or request is not None
+        and request.model_copy(update={"attempts": ()}) != batch.manifest
     ):
         raise ValueError("saved translation frame changed")
     session.verify_batch(batch)
@@ -551,7 +625,8 @@ def _failed(
     error: str,
     batch: MemberBatch | None,
 ) -> ItemRecord:
-    if prior is None:
+    translation_epoch = _translation_epoch(prior)
+    if prior is None or prior.status == ItemStatus.PENDING:
         if batch is None:
             raise ValueError("new failed records require their request identity")
         wire = _wire_items(batch)[member.item_id]
@@ -563,6 +638,11 @@ def _failed(
             term_applicability={str(term["term_id"]): term["role"] for term in terms},
             terms_hash=batch.manifest.terms_hashes[member.item_id],
             context_hash=batch.manifest.context_hashes[member.item_id],
+            checks={
+                "translation_frame": _frame(batch),
+                **({"translation_epoch": translation_epoch} if translation_epoch else {}),
+            },
+            request_id=batch.manifest.request_id,
         )
     base = prior
     return base.model_copy(
@@ -570,6 +650,7 @@ def _failed(
             "stage": stage,
             "status": ItemStatus.NEEDS_ATTENTION,
             "checks": dict(base.checks) | {"accepted": False, "error": error},
+            "failure": {"stage": stage, "code": f"{stage}_failed", "message": error},
             "next_action": None,
         }
     )
@@ -579,6 +660,15 @@ async def _save(callback: SaveCallback, record: ItemRecord) -> None:
     result = callback(record)
     if inspect.isawaitable(result):
         await result
+
+
+def _validate_saved_record(session: ReadySession, record: ItemRecord) -> None:
+    """Validate the canonical source frame carried by one durable body result."""
+    member = session.index.members_by_id.get(record.item_id)
+    if member is None or record.segment_id != record.item_id:
+        raise ValueError("saved result is not owned by the ready member inventory")
+    if record.status != ItemStatus.PENDING:
+        _saved_batch(session, member, record)
 
 
 __all__ = [

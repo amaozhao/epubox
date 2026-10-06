@@ -14,7 +14,7 @@ from pathlib import Path
 from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
-from engine.epub.derived_bindings import resolve_derived_navigation
+from engine.epub.bindings import resolve_derived_navigation
 from engine.epub.validation import EpubChecker, PackageInventory, ZipLimits, inspect_epub
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION

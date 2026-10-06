@@ -3,7 +3,7 @@ from pathlib import Path
 
 from engine.schemas.contracts import Attempt, RequestManifest, TermExtractionRecord, Usage
 from engine.services.report import write_report
-from tests.engine.services.test_store import _prepare, _write_term_plan
+from tests.engine.services.store import _prepare, _write_term_plan
 
 
 def test_paused_preparation_report_does_not_invent_book_or_cost(tmp_path: Path) -> None:
@@ -111,3 +111,18 @@ def test_report_counts_journaled_usage_before_attempt_finish(tmp_path: Path) -> 
     assert report["http"]["max_known_input_tokens"] == 50_001
     assert report["http"]["input_limit_violations"] == 1
     assert report["http"]["journal_recovered_usage_attempts"] == 1
+
+
+def test_atomic_report_reads_ready_and_body_journal_without_a_legacy_bookplan(tmp_path: Path) -> None:
+    from tests.engine.services.ready import prepared
+
+    store, ready = prepared(tmp_path)
+    report = json.loads(write_report(store, status="paused", phase="translation").read_text())
+
+    assert not (store.root / "bookplan.json").exists()
+    assert report["required_units"] == ready.plan.required_unit_count
+    assert report["accepted_units"] == 0
+    assert report["pending_items"] == len(ready.plan.member_hashes)
+    assert report["body"]["required_items"] == len(ready.plan.member_hashes)
+    assert report["body"]["http_attempts"] == 0
+    assert report["json_paths"]["results"] == str(store.root / "results")

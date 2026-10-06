@@ -6,7 +6,7 @@
 
 ## 1. 本轮范围与代码基线
 
-本文最初只形成迁移清单；当前 feature/preflight 已实现 T00—T16，包括原子准备、最终 ready 提交和可独立调用的三步正文 workflow。T17—T20 的逐阶段持久化、最终 EPUB 发布、CLI 贯通和全链路验收仍待实施。
+本文最初只形成迁移清单；当前 feature/preflight 已实现 T00—T19，包括原子准备、最终 ready 提交、三步正文 workflow、逐阶段持久化、最终 EPUB 发布和 CLI 贯通。T20 的真实全链路验收仍待实施。
 
 本次核查的提交：
 
@@ -19,11 +19,11 @@
 
 重要事实：main 已经包含 P1—P4 准备管线和大部分术语核心功能。后续不能把“迁移前置术语功能”理解为重新实现全部术语模块，也不能把当前分支整批覆盖到 main。
 
-feature/preflight 已从用户指定的 main 基线建立。translate → proofread → apply_corrections 的原子 workflow 已实施，但其 `save` 回调尚未由 T17 接入持久化，CLI 也未由 T19 切换到完整新链路。
+feature/preflight 已从用户指定的 main 基线建立。translate → proofread → apply_corrections 的原子 workflow 已实施；T17 已接入 `save` 持久化与响应回放，T19 已将 CLI 新任务切换到完整原子链路。
 
 ## 2. 当前翻译前实际执行顺序
 
-入口是 [engine/cli.py](../engine/cli.py) 的 translate_book()；准备阶段由 [preparation.py](../engine/services/preparation.py) 的 prepare_translation()/resume_preparation() 驱动。库接口新建任务时默认使用原子 strategy v3；当前 CLI 在 T19 前仍显式选择 strategy v2。
+入口是 [engine/cli.py](../engine/cli.py) 的 translate_book()；准备阶段由 [preparation.py](../engine/services/preparation.py) 的 prepare_translation()/resume_preparation() 驱动。库接口和 CLI 新建任务均默认使用原子 strategy v3；已有 strategy v2 任务保持原格式，不静默转成新计划。
 
 ```text
 读取命令参数、检查源文件和输出位置
@@ -83,7 +83,7 @@ P1 不调用模型；P2 和需要时的 P3 会调用模型；P4 是本地规划�
 
 - [engine/item/extractor.py](../engine/item/extractor.py)
 - [engine/item/structural_extractor.py](../engine/item/structure.py)
-- [engine/epub/derived_bindings.py](../engine/epub/derived_bindings.py)
+- [engine/epub/bindings.py](../engine/epub/bindings.py)
 - [engine/core/markup.py](../engine/core/markup.py)
 
 当前生成和保存的内容包括：
@@ -335,7 +335,7 @@ T13/T14 已完成可单独调用的纯规划接口：
 - `pack_requests(...)` 按资源、内容通道、原子相邻性及 S/I/R/M 预算顺序贪心合批，没有 8 项或 1200-token 隐藏上限，也不切开任何原子项。
 - 阶段已完成 ID 由调用方从断点传入；纯函数只返回 batches、boundaries、blocked 和 skipped，不写入或修改断点。单个 review 超限时，已保存初译仍由调用方保留。
 
-新库路径已将这些接口接入 P1—P4 和可独立调用的正文 workflow。通过预检的完整原子或安全 piece 被物化为 `RequestMember`，合批结果连同词表、映射和预检身份一起提交为 `AtomicPreparedInput`。旧 P4 只服务显式 strategy v2，旧 `bookplan.json` 不会被重解释为新原子计划。CLI 切换仍属于 T19。
+新库路径已将这些接口接入 P1—P4 和可独立调用的正文 workflow。通过预检的完整原子或安全 piece 被物化为 `RequestMember`，合批结果连同词表、映射和预检身份一起提交为 `AtomicPreparedInput`。旧 P4 只服务显式 strategy v2，旧 `bookplan.json` 不会被重解释为新原子计划。T19 已完成 CLI 切换。
 
 ## 13. 准备结果的最小交接接口
 
@@ -350,7 +350,7 @@ freeze_id、必要版本与哈希
 新 chunk 计划及每块相关术语的查询能力
 ```
 
-workflow 使用这份结果继续 translate → 保存当前稿 → 基于真实目标重新合批 proofread → apply_corrections。模型只接收本批实际需要的信息，完整身份与证据保存在本地。每项完成初译或校对后都调用调用方的 `save` 回调，持久化实现由 T17 接入。
+workflow 使用这份结果继续 translate → 保存当前稿 → 基于真实目标重新合批 proofread → apply_corrections。模型只接收本批实际需要的信息，完整身份与证据保存在本地。每项完成初译或校对后都调用调用方的 `save` 回调，持久化已由 T17 接入，恢复时先验证并回放落盘响应。
 
 对于已有已保存结果，只能在源身份、证据、作用域和配置检查一致时复用。改解析器或改原子归属后，需要明确适配；不能承诺旧 v2.5 JSON 自动兼容，也不能清空原资料后直接重跑。
 
@@ -456,4 +456,4 @@ workflow 使用这份结果继续 translate → 保存当前稿 → 基于真实
 - [resolution.py](../tests/engine/services/terms/resolution.py)
 - [freeze.py](../tests/engine/services/terms/freeze.py)
 
-本文同时保留最初盘点和当前迁移边界。T08/T11/T12 的已实现合同见 [terminology.md](terminology.md)，T13/T14 的正文请求合同见 [packing.md](packing.md)，T15/T16 的原子准备与三步接口见 [workflow.md](workflow.md)。逐阶段持久化、最终 EPUB、CLI 贯通和整本书验收仍按 T17—T20 继续。
+本文同时保留最初盘点和当前迁移边界。T08/T11/T12 的已实现合同见 [terminology.md](terminology.md)，T13/T14 的正文请求合同见 [packing.md](packing.md)，T15/T16 的原子准备与三步接口见 [workflow.md](workflow.md)。T17—T19 的逐阶段持久化、最终 EPUB 和 CLI 贯通已完成，交接见 [publication.md](publication.md)；整本书真实验收继续由 T20 完成。

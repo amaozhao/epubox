@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from engine.epub.derived_bindings import resolve_derived_navigation
+from engine.epub.bindings import resolve_derived_navigation
 from engine.schemas.bridge import AtomicDocument
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash, canonical_json_bytes, parse_contract

@@ -33,6 +33,16 @@ def write_report(
     book_path = store.root / "bookplan.json"
     book = store.read_bookplan() if book_path.exists() else None
     records = {unit_id: store.read_unit(unit_id) for unit_id in book.unit_ids} if book is not None else {}
+    atomic = None
+    atomic_required = None
+    atomic_records = {}
+    if (store.root / "prepared.json").is_file():
+        from engine.services.journal import BodyJournal
+
+        journal = BodyJournal(store)
+        atomic = journal.progress_snapshot()
+        atomic_required = journal.session.prepared.plan.required_unit_count
+        atomic_records = journal.records()
     requests = tuple(store.read_request(path.stem) for path in sorted((store.root / "requests").glob("*.json")))
     attempts = tuple(attempt for request in requests for attempt in request.attempts)
     actual = tuple(attempt for attempt in attempts if attempt.state != "reserved")
@@ -76,11 +86,19 @@ def write_report(
     extraction_records = (
         tuple(store.read_extraction(item.item_id) for item in term_plan.items) if term_plan is not None else ()
     )
-    unresolved: list[JsonValue] = [
-        {"unit_id": unit_id, "issues": list(record.unresolved_issues)}
-        for unit_id, record in records.items()
-        if record.unresolved_issues
-    ]
+    unresolved: list[JsonValue] = (
+        [
+            {"item_id": item_id, "issues": [record.failure]}
+            for item_id, record in atomic_records.items()
+            if record.failure is not None
+        ]
+        if atomic is not None
+        else [
+            {"unit_id": unit_id, "issues": list(record.unresolved_issues)}
+            for unit_id, record in records.items()
+            if record.unresolved_issues
+        ]
+    )
     checks: dict[str, JsonValue] = {}
     if book is not None:
         for document_id in book.document_hashes:
@@ -98,15 +116,25 @@ def write_report(
         "output_sha256": output_sha256 if status == "completed" else None,
         "reason": reason,
         "source_units": len(preparation.unit_documents),
-        "required_units": book.required_unit_count if book is not None else None,
-        "accepted_units": sum(
-            record.accepted_revision == record.revision or _current_derived(record, records)
-            for record in records.values()
+        "required_units": (
+            atomic_required if atomic is not None else book.required_unit_count if book is not None else None
         ),
-        "pending_items": sum(
-            item.status in {"pending", "in_flight", "retry_wait"}
-            for record in records.values()
-            for item in record.items.values()
+        "accepted_units": (
+            atomic["accepted_units"]
+            if atomic is not None
+            else sum(
+                record.accepted_revision == record.revision or _current_derived(record, records)
+                for record in records.values()
+            )
+        ),
+        "pending_items": (
+            atomic["pending_items"]
+            if atomic is not None
+            else sum(
+                item.status in {"pending", "in_flight", "retry_wait"}
+                for record in records.values()
+                for item in record.items.values()
+            )
         ),
         "unresolved_issues": unresolved,
         "http": {
@@ -134,6 +162,8 @@ def write_report(
         "json_paths": {
             "documents": str(store.root / "documents"),
             "units": str(store.root / "units"),
+            "results": str(store.root / "results"),
+            "prepared": str(store.root / "prepared.json"),
             "requests": str(store.root / "requests"),
             "glossary": str(store.root / "glossary.json"),
             "report": str(store.root / "report.json"),
@@ -168,6 +198,7 @@ def write_report(
             "warnings": list(glossary.warnings) if glossary is not None else [],
             "freeze_id": glossary.freeze_id if glossary is not None else None,
         },
+        "body": atomic,
         "reader_check": "not_run",
         "coherence_by_document": checks,
     }

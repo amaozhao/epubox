@@ -49,9 +49,9 @@
 | engine/epub/__init__.py | engine/epub/__init__.py | 1 | T00 | 工具固定名称 |
 | engine/epub/assembly.py | engine/epub/assembly.py | 220 | T07 | 保留 |
 | engine/epub/checker.py | engine/epub/checker.py | 31 | T18 | 保留 |
-| engine/epub/derived_bindings.py | engine/epub/bindings.py | 123 | T18 | 待实施 |
+| engine/epub/derived_bindings.py | engine/epub/bindings.py | 123 | T18 | 已完成 |
 | engine/epub/preparation.py | engine/epub/preparation.py | 260 | T02 | 保留 |
-| engine/epub/publication.py | engine/epub/publication.py；区分装配校验与正式提交 | 1024 | T18 | 待实施 |
+| engine/epub/publication.py | engine/epub/publication.py；engine/epub/verification.py；engine/epub/publish.py | 1024 | T18 | 已完成 |
 | engine/epub/validation.py | engine/epub/validation.py | 593 | T02 | 保留 |
 | engine/item/__init__.py | engine/item/__init__.py | 1 | T00 | 工具固定名称 |
 | engine/item/extractor.py | engine/item/extractor.py | 374 | T05 | 保留 |
@@ -69,7 +69,7 @@
 | engine/services/coherence.py | engine/services/coherence.py | 308 | T16 | 保留 |
 | engine/services/preparation_pipeline.py | engine/services/preparation.py | 520 | T15 | 完成 |
 | engine/services/report.py | engine/services/report.py | 198 | T19 | 保留 |
-| engine/services/resume_plan.py | engine/services/resume.py | 191 | T17 | 待实施 |
+| engine/services/resume_plan.py | engine/services/resume.py | 191 | T17 | 已完成 |
 | engine/services/store.py | engine/services/store.py | 951 | T17 | 保留 |
 | engine/services/term_candidates.py | engine/services/terms/candidates.py | 381 | T12 | 完成 |
 | engine/services/term_freeze.py | engine/services/terms/freeze.py | 541 | T12 | 完成 |
@@ -93,10 +93,10 @@
 | tests/engine/epub/__init__.py | tests/engine/epub/__init__.py | 0 | T00 | 工具固定名称 |
 | tests/engine/epub/book_factory.py | tests/engine/epub/factory.py | 65 | T02 | 完成 |
 | tests/engine/epub/test_assembly.py | tests/engine/epub/assembly.py | 8 | T07 | 完成 |
-| tests/engine/epub/test_checker.py | tests/engine/epub/checker.py | 31 | T18 | 待实施 |
-| tests/engine/epub/test_derived_bindings.py | tests/engine/epub/bindings.py | 86 | T20 | 待实施 |
+| tests/engine/epub/test_checker.py | tests/engine/epub/checker.py | 31 | T18 | 已完成 |
+| tests/engine/epub/test_derived_bindings.py | tests/engine/epub/bindings.py | 86 | T18 | 已完成 |
 | tests/engine/epub/test_preparation.py | tests/engine/epub/preparation.py | 210 | T02 | 完成 |
-| tests/engine/epub/test_publication.py | tests/engine/epub/publication.py | 537 | T18 | 待实施 |
+| tests/engine/epub/test_publication.py | tests/engine/epub/publication.py | 537 | T18 | 已完成 |
 | tests/engine/item/__init__.py | tests/engine/item/__init__.py | 0 | T00 | 工具固定名称 |
 | tests/engine/item/test_extractor.py | tests/engine/item/extractor.py | 338 | T05 | 完成 |
 | tests/engine/item/test_inline_planner.py | tests/engine/item/inline.py | 715 | T06 | 完成 |
@@ -108,11 +108,11 @@
 | tests/engine/services/__init__.py | tests/engine/services/__init__.py | 0 | T00 | 工具固定名称 |
 | tests/engine/services/test_coherence.py | tests/engine/services/coherence.py | 106 | T16 | 完成 |
 | tests/engine/services/test_preparation_pipeline.py | tests/engine/services/preparation.py；新原子准备验收见 preparing.py/ready.py | 433 | T15 | 完成 |
-| tests/engine/services/test_report.py | tests/engine/services/report.py | 113 | T19 | 待实施 |
+| tests/engine/services/test_report.py | tests/engine/services/report.py | 113 | T19 | 已完成 |
 | tests/engine/services/test_response_journal.py | tests/engine/services/response.py | 141 | T20 | 待实施 |
-| tests/engine/services/test_resume_plan.py | tests/engine/services/resume.py | 69 | T20 | 待实施 |
-| tests/engine/services/test_store.py | tests/engine/services/store.py | 522 | T17 | 待实施 |
-| tests/engine/services/test_store_contracts.py | tests/engine/services/contracts.py | 255 | T17 | 待实施 |
+| tests/engine/services/test_resume_plan.py | tests/engine/services/resume.py | 69 | T17 | 已完成 |
+| tests/engine/services/test_store.py | tests/engine/services/store.py | 522 | T17 | 已完成 |
+| tests/engine/services/test_store_contracts.py | tests/engine/services/contracts.py | 255 | T17 | 已完成 |
 | tests/engine/services/test_term_candidates.py | tests/engine/services/terms/candidates.py | 322 | T12 | 完成 |
 | tests/engine/services/test_term_freeze.py | tests/engine/services/terms/freeze.py | 358 | T12 | 完成 |
 | tests/engine/services/test_term_inputs.py | tests/engine/services/terms/inputs.py | 118 | T09 | 完成 |
@@ -194,3 +194,16 @@
 | engine/agents/workflow.py、tests/engine/agents/workflow.py | T16 | 原子初译、真实译文校对及修订应用，单词且≤1000行 |
 | engine/execution/*.py、tests/engine/execution/*.py | T16 | 旧执行器按原职责拆分的单词模块，每个文件≤1000行；__init__.py 为固定包名例外 |
 | docs/workflow.md | T15/T16 | 准备、ready 和三步 workflow 交接边界，单词且≤1000行 |
+
+## 第七阶段新增文件
+
+| 路径 | 责任 | 约束 |
+|---|---|---|
+| engine/services/journal.py、engine/services/custody.py、tests/engine/services/journal.py | T17 | 正文结果、证据校验、请求、响应、用量和回放，单词且≤1000行 |
+| engine/services/resume.py、tests/engine/services/resume.py | T17 | 只读恢复计划及原复合文件改名，单词且≤1000行 |
+| tests/engine/services/store.py、tests/engine/services/contracts.py | T17 | 原存储测试改名，单词且≤1000行 |
+| engine/epub/publish.py、engine/epub/verification.py、tests/engine/epub/publish.py | T18 | 原字节回填后的候选校验和事务发布，单词且≤1000行 |
+| engine/epub/bindings.py、tests/engine/epub/bindings.py、tests/engine/epub/checker.py、tests/engine/epub/publication.py | T18 | 原出版模块拆分及测试改名，单词且≤1000行 |
+| engine/execution/atomic.py、tests/engine/execution/atomic.py | T19 | 原子 workflow 调度与每批进度接线，单词且≤1000行 |
+| tests/engine/command.py、tests/engine/services/report.py | T19 | CLI 参数/进度及报告回归，单词且≤1000行 |
+| docs/publication.md | T17/T18/T19 | 正文恢复、出版、CLI 和验收边界，单词且≤1000行 |

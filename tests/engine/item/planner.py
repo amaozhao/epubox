@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import regex
 
-from engine.epub.derived_bindings import resolve_derived_navigation
+from engine.epub.bindings import resolve_derived_navigation
 from engine.item.context import (
     build_context,
     build_context_index,

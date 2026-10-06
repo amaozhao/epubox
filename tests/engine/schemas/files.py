@@ -19,7 +19,7 @@ def test_all_baseline_files_have_an_owner_and_current_stage_files_conform() -> N
     assert len({row[0] for row in rows}) == len(rows)
     for old, destination, _, owner, state in rows:
         assert owner in {f"T{number:02}" for number in range(21)}, old
-        if owner not in {f"T{number:02}" for number in range(17)}:
+        if owner not in {f"T{number:02}" for number in range(20)}:
             continue
         assert state != "待实施", old
         path = ROOT / destination.split("；", 1)[0]
@@ -96,6 +96,28 @@ def test_current_stage_new_files_and_documents_conform() -> None:
         ROOT / "tests/engine/agents/provider.py",
         ROOT / "tests/engine/agents/runtime.py",
         ROOT / "tests/engine/agents/workflow.py",
+        ROOT / "engine/services/journal.py",
+        ROOT / "engine/services/custody.py",
+        ROOT / "engine/services/resume.py",
+        ROOT / "tests/engine/services/journal.py",
+        ROOT / "tests/engine/services/resume.py",
+        ROOT / "tests/engine/services/store.py",
+        ROOT / "tests/engine/services/contracts.py",
+        ROOT / "engine/epub/bindings.py",
+        ROOT / "engine/epub/checker.py",
+        ROOT / "engine/epub/publication.py",
+        ROOT / "engine/epub/publish.py",
+        ROOT / "engine/epub/verification.py",
+        ROOT / "tests/engine/epub/bindings.py",
+        ROOT / "tests/engine/epub/checker.py",
+        ROOT / "tests/engine/epub/publication.py",
+        ROOT / "tests/engine/epub/publish.py",
+        ROOT / "engine/cli.py",
+        ROOT / "main.py",
+        ROOT / "tests/engine/cli.py",
+        ROOT / "tests/engine/command.py",
+        ROOT / "tests/main.py",
+        ROOT / "tests/engine/services/report.py",
         *sorted((ROOT / "engine/execution").glob("*.py")),
         *sorted((ROOT / "tests/engine/execution").glob("*.py")),
         *sorted((ROOT / "engine/schemas").glob("*.py")),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from engine.epub.derived_bindings import resolve_derived_navigation
+from engine.epub.bindings import resolve_derived_navigation
 from engine.item.extractor import extract_document
 
 
