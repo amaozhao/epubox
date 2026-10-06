@@ -137,6 +137,7 @@ def translate_book(
         "max_source_tokens": chunk_limit,
         "max_output_tokens": max_output_tokens,
         "input_budget_version": 2,
+        "output_budget_version": 3,
         "run_http_limit": http_limit,
         "concurrency": concurrency,
     }
@@ -374,6 +375,7 @@ def _expected_configs(config: PreparationConfig) -> tuple[tuple[dict[str, JsonVa
     )
     translation.pop("max_input_tokens", None)
     translation.pop("input_budget_version", None)
+    translation.pop("output_budget_version", None)
     translation.pop("rpm", None)
     legacy = replace(
         config,
@@ -382,7 +384,14 @@ def _expected_configs(config: PreparationConfig) -> tuple[tuple[dict[str, JsonVa
         adapter_version=ADAPTER_VERSION,
         extractor_version=EXTRACTOR_VERSION,
     )
-    return (current, (_frozen_extraction_config(legacy), _frozen_translation_config(legacy)))
+    previous = dict(current[1])
+    previous.pop("output_budget_version", None)
+    return (
+        current,
+        (current[0], previous),
+        (current[0], previous | {"output_budget_version": 2}),
+        (_frozen_extraction_config(legacy), _frozen_translation_config(legacy)),
+    )
 
 
 def _implicit_limit_match(

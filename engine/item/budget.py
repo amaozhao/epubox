@@ -93,6 +93,11 @@ def measure_budget(
         stage="translation" if stage == "translate" else "review",
         request_id=str(payload.get("request_id", "r00000000000000000000000000000000")),
     )
+    if limits.output_version == 3:
+        estimated_output = (
+            output_tokens + math.ceil(output_tokens * TOKENIZER_MARGIN_PERCENT / 100) + WRAPPER_HEADROOM_TOKENS
+        )
+        output_tokens = max(limits.output_tokens, estimated_output)
     context_tokens = input_reserve + output_tokens + limits.safety_tokens
     input_limit = min(limits.input_tokens, MAX_MODEL_INPUT_TOKENS)
     failures: list[str] = []
@@ -116,7 +121,7 @@ def measure_budget(
         review_targets=target_basis,
         failures=tuple(failures),
         identity=BudgetIdentity(
-            version=BUDGET_VERSION,
+            version=limits.output_version,
             tokenizer=tokenizer_name,
             tokenizer_version=tiktoken.__version__,
             tokenizer_model=tokenizer_model,
@@ -197,3 +202,6 @@ def _validate_items(items: Sequence[Mapping[str, Any]]) -> None:
             raise TypeError(f"budget item {item_id} target must be a non-empty string")
         if len(targets) == 2 and targets[0] != targets[1]:
             raise ValueError(f"budget item {item_id} has conflicting targets")
+
+
+__all__ = ["BUDGET_VERSION", "BudgetLimits", "BudgetResult", "measure_budget"]

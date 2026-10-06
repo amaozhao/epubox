@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -26,8 +26,11 @@ class BudgetLimits:
     context_tokens: int
     safety_tokens: int = 256
     target_ratio: float = 1.6
+    output_version: Literal[2, 3] = 2
 
     def __post_init__(self) -> None:
+        if type(self.output_version) is not int or self.output_version not in (2, 3):
+            raise ValueError("unsupported output budget version")
         integers = (self.source_tokens, self.input_tokens, self.output_tokens, self.context_tokens)
         if any(type(value) is not int or value < 1 for value in integers):
             raise ValueError("budget limits must be positive integers")
@@ -38,11 +41,17 @@ class BudgetLimits:
         if not math.isfinite(self.target_ratio) or self.target_ratio <= 0:
             raise ValueError("budget target ratio must be positive")
 
+    def to_dict(self) -> dict[str, int | float]:
+        values = asdict(self)
+        if self.output_version == 2:
+            values.pop("output_version")
+        return values
+
 
 class BudgetIdentity(FrozenModel):
     """Policy identity required to validate a saved budget."""
 
-    version: Literal[2]
+    version: Literal[2, 3]
     tokenizer: str = Field(min_length=1)
     tokenizer_version: str = Field(min_length=1)
     tokenizer_model: str = Field(min_length=1)
@@ -97,6 +106,8 @@ class BudgetResult(FrozenModel):
         )
         if self.input_reserve != expected_input:
             raise ValueError("input reserve does not match the saved budget policy")
+        if self.identity.version == 3 and self.output_tokens < self.identity.output_limit:
+            raise ValueError("output budget must reserve the configured provider cap")
         expected_context = self.input_reserve + self.output_tokens + self.identity.safety_tokens
         if self.context_tokens != expected_context:
             raise ValueError("context budget does not equal I + R + M")

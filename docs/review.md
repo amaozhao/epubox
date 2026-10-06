@@ -126,3 +126,17 @@ T16 接线同时需给 target/context 术语角色提供版本明确的提示语
 | heartbeat 显示初译批次而实际正在 review，保存日志缺少决策 | 按任务当前 request ID 关联实际预算与用量，逐项报告通过、修订或失败原因 |
 
 验证仅操作临时 EPUB 与工作目录，使用假 transport 和 StubChecker。真实模型、真实 EPUBCheck、小书语义闭环、大书只读预检及最后全仓文件审查继续属于 T20；本阶段没有操作用户现有书籍。
+
+
+## 提供书籍的真实测试修复
+
+用户授权以 `ai-side-hustle-playbook.epub` 直接测试；输入问题、最小测试副本和实际请求证据见 [validation.md](validation.md)。原书未修改，未完成任务没有生成成功成品。
+
+| 真实反例 | 修复及验证 |
+|---|---|
+| p/em、ol/li/a 后的保留空白被误判为错误 DOM 父级 | tail 仍从原子节点的原始 slot 取得字节，父级按原节点路径验证；comment/PI tails 保持原规则。19 个真实 markup 资源原样回填通过 |
+| 短标题 cap59/73、短 review cap198 导致完整 JSON 截断 | 新输出预算 v3 预留完整配置 cap 和分词差异余量，超额在 HTTP 前阻断；冻结的 v2 序列化与 ready 身份保持不变，未完成真实 v2 调度暂停 |
+| 模型响应已落盘，finish 从响应回读 prior usage 导致累计增量为0 | 响应落盘即记账，并按 request/attempt 恰好一次累计；重启、回放及 finish 不重复 |
+| 通用进度输出18/0 | snapshot 明确返回冻结的 required_units；真实恢复显示18/793 |
+
+全部修复后的最终全量 pytest **671 passed（128.92 秒）**；Ruff、格式、Pyright 与 diff 检查通过。独立代码审查 APPROVE（0 issues）、架构审查 CLEAR。真实旧任务 resume 未新增 HTTP；新版全书重跑等待用户选择。

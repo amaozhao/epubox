@@ -467,6 +467,7 @@ class BodyJournal:
     def progress_snapshot(self) -> dict[str, Any]:
         return {
             "required_items": len(self._records),
+            "required_units": self.session.prepared.plan.required_unit_count,
             "translated_items": self._translated,
             "reviewed_items": self._reviewed,
             "accepted_units": len(self._accepted_units),
@@ -657,6 +658,9 @@ class BodyJournal:
         response: dict[str, Any],
     ) -> None:
         self.store.save_model_response(stage, request_id, attempt_id, response)
+        request = self._requests[request_id]
+        attempt = next(value for value in request.attempts if value.attempt_id == attempt_id)
+        self._account_usage(request_id, attempt_id, self._usage(request, attempt))
         self._emit_response(stage, request_id, response, replayed=False)
 
     def _emit_response(self, stage: str, request_id: str, response: Mapping[str, Any], *, replayed: bool) -> None:
@@ -716,7 +720,6 @@ class BodyJournal:
     ) -> None:
         request = self._requests[request_id]
         prior = next(attempt for attempt in request.attempts if attempt.attempt_id == attempt_id)
-        prior_usage = self._usage(request, prior)
         updated = self.store.finish_attempt(
             request_id,
             attempt_id,
@@ -728,18 +731,20 @@ class BodyJournal:
             metadata=metadata,
         )
         current = next(attempt for attempt in updated.attempts if attempt.attempt_id == attempt_id)
-        current_usage = self._usage(updated, current)
         if prior.state == "reserved" and current.state != "reserved":
             self._actual_attempts += 1
             if updated.stage in {"translate", "review"}:
                 self._body_actual_attempts += 1
-        self._input_tokens += (current_usage.input_tokens if current_usage else 0) - (
-            prior_usage.input_tokens if prior_usage else 0
-        )
-        self._output_tokens += (current_usage.output_tokens if current_usage else 0) - (
-            prior_usage.output_tokens if prior_usage else 0
-        )
         self._requests[request_id] = updated
+        self._account_usage(request_id, attempt_id, self._usage(updated, current))
+
+    def _account_usage(self, request_id: str, attempt_id: str, usage: Usage | None) -> None:
+        key = (request_id, attempt_id)
+        if usage is None or key in self._accounted_usage:
+            return
+        self._accounted_usage.add(key)
+        self._input_tokens += usage.input_tokens
+        self._output_tokens += usage.output_tokens
 
     def _load_records(self) -> dict[str, ItemRecord]:
         result: dict[str, ItemRecord] = {}
@@ -772,7 +777,7 @@ class BodyJournal:
             for attempt in request.attempts
         )
         usages = tuple(
-            usage
+            (request.request_id, attempt.attempt_id, usage)
             for request in self._requests.values()
             for attempt in request.attempts
             for usage in (self._usage(request, attempt),)
@@ -782,10 +787,11 @@ class BodyJournal:
         self._body_actual_attempts = sum(attempt.state != "reserved" for attempt in body)
         self._run_attempts = len(attempts)
         self._body_attempts = len(body)
-        self._input_tokens = sum(usage.input_tokens for usage in usages)
-        self._output_tokens = sum(usage.output_tokens for usage in usages)
+        self._accounted_usage = {(request_id, attempt_id) for request_id, attempt_id, _ in usages}
+        self._input_tokens = sum(usage.input_tokens for _, _, usage in usages)
+        self._output_tokens = sum(usage.output_tokens for _, _, usage in usages)
         self._prior_input_breach = max(
-            (usage.input_tokens for usage in usages if usage.input_tokens > MAX_MODEL_INPUT_TOKENS),
+            (usage.input_tokens for _, _, usage in usages if usage.input_tokens > MAX_MODEL_INPUT_TOKENS),
             default=None,
         )
         self._translated = sum(record.target_projection is not None for record in self._records.values())

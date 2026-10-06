@@ -153,14 +153,21 @@ def test_persisted_response_replays_before_transport_after_finish_crash(tmp_path
                 records=journal.records(case.batch.manifest.item_ids),
             )
         )
+    after_response = journal.progress_snapshot()
+    assert (after_response["input_tokens"], after_response["output_tokens"]) == (11, 7)
+    assert after_response["required_units"] == case.prepared.plan.required_unit_count
 
     monkeypatch.setattr(case.session.store, "finish_attempt", original)
     resumed = BodyJournal(case.session.store)
+    assert resumed.progress_snapshot()["input_tokens"] == 11
+    assert resumed.progress_snapshot()["output_tokens"] == 7
     resumed.recover_results()
     translated_request = next(request for request in resumed._requests.values() if request.stage == "translate")
     assert translated_request.attempts[-1].state == "succeeded"
     assert translated_request.attempts[-1].usage is not None
     assert translated_request.attempts[-1].usage.input_tokens == 11
+    assert resumed.progress_snapshot()["input_tokens"] == 11
+    assert resumed.progress_snapshot()["output_tokens"] == 7
 
     async def second(kind, payload):
         calls.append(kind)
@@ -181,6 +188,8 @@ def test_persisted_response_replays_before_transport_after_finish_crash(tmp_path
 
     assert result.status == "completed" and calls == ["translate", "review"]
     assert resumed.progress_snapshot()["http_attempts"] == 2
+    assert resumed.progress_snapshot()["input_tokens"] == 22
+    assert resumed.progress_snapshot()["output_tokens"] == 14
 
 
 def test_reviewed_result_is_idempotent_and_cannot_roll_back(tmp_path) -> None:

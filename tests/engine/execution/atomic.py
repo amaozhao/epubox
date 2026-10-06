@@ -90,3 +90,12 @@ def test_shared_runtime_refills_configured_concurrency_without_double_ownership(
     )
     assert result.status == "translated"
     assert 1 < maximum <= 2
+
+
+def test_real_provider_pauses_legacy_output_budget_without_dispatch(tmp_path, monkeypatch):
+    case = prepare_case(tmp_path, "<p>First.</p>", ("First.",))
+    monkeypatch.setattr(BodyJournal, "runtime", lambda *args, **kwargs: object())
+    result = asyncio.run(run_translation(case.session.store.root))
+    assert result.status == "paused"
+    assert "output budget v2" in (result.reason or "")
+    assert result.http_attempts == 0

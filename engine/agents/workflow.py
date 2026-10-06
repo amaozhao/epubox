@@ -382,7 +382,8 @@ def _guard_common(
     limits = _limits(prepared)
     identity = batch.budget.identity
     if (
-        identity.source_limit != limits.source_tokens
+        identity.version != limits.output_version
+        or identity.source_limit != limits.source_tokens
         or identity.input_limit != min(limits.input_tokens, 50_000)
         or identity.output_limit != limits.output_tokens
         or identity.context_limit != limits.context_tokens

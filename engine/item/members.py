@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import asdict
 from itertools import pairwise
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -147,6 +146,8 @@ def materialize_members(inventories: Sequence[AtomicDocument], report: Preflight
 def _budget_limits_match(budget: BudgetResult, limits: Mapping[str, int | float]) -> bool:
     identity = budget.identity
     expected = dict(limits)
+    if identity.version != expected.pop("output_version", 2):
+        return False
     configured_input = expected.get("input_tokens")
     if type(configured_input) is not int:
         return False
@@ -487,7 +488,7 @@ def pack_members(
             "source": glossary.source_hash,
             "freeze": canonical_hash(glossary),
             "members": [canonical_hash(item) for item in values],
-            "limits": asdict(limits),
+            "limits": limits.to_dict(),
             "model": tokenizer_model,
             "targets": {item.item_id: canonical_hash((targets or {}).get(item.item_id)) for item in values},
             "revisions": {item.unit_id: (revisions or {}).get(item.unit_id, 0) for item in values},

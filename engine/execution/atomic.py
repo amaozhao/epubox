@@ -44,7 +44,13 @@ async def run_atomic(
             raise ValueError("frozen concurrency must be a positive integer")
         pending = iter(batches)
         active: dict[asyncio.Task, tuple[MemberBatch, float]] = {}
-        stopped: str | None = None
+        stopped: str | None = (
+            "output budget v2 requires a new v3 task before further provider requests"
+            if transport is None
+            and ready.plan.translation_config.get("output_budget_version", 2) == 2
+            and journal.progress_snapshot()["accepted_units"] < ready.plan.required_unit_count
+            else None
+        )
         errors: list[str] = []
 
         def emit(phase: str, batch: MemberBatch | None = None, elapsed: float = 0.0, **extra) -> None:

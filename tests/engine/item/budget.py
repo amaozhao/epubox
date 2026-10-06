@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -270,3 +271,26 @@ def test_review_output_reserves_the_actual_request_id_and_revision_envelope() ->
     expected += len(tokenizer.encode("你好。"))
 
     assert result.output_tokens == expected
+
+
+@pytest.mark.parametrize("stage", ["translate", "review"])
+def test_provider_cap_reserves_full_configured_output_for_short_json(stage: Literal["translate", "review"]) -> None:
+    request = payload(
+        stage, (item("AI Side Hustle Playbook", target="AI 副业实战指南" if stage == "review" else None),)
+    )
+    measured = measure_budget(stage=stage, payload=request, limits=limits(output_version=3))
+    assert measured.fits
+    assert measured.identity.version == 3
+    assert measured.output_tokens == 4096
+    assert measured.context_tokens == measured.input_reserve + 4096 + 256
+
+
+def test_new_output_policy_preserves_legacy_frozen_limits() -> None:
+    assert "output_version" not in limits().to_dict()
+    assert limits(output_version=3).to_dict()["output_version"] == 3
+    request = payload("translate", (item(),))
+    legacy = measure_budget(stage="translate", payload=request, limits=limits())
+    current = measure_budget(stage="translate", payload=request, limits=limits(output_version=3))
+    assert legacy.identity.version == 2
+    assert legacy.output_tokens < 4096
+    assert legacy.wire_hash != current.wire_hash

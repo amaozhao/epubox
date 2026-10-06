@@ -160,6 +160,10 @@ def _entry_span(
             span = _rawspan(lexical.source_span(start, end))
         except (KeyError, RangeError) as exc:
             raise FillError(f"registry slot has no verified source bytes: {entry.ref_id}") from exc
+        if slot.field == "tail" and special is None:
+            if paths.get(entry.parent_ref) != paths[slot.node_key][:-1]:
+                raise FillError(f"registry tail has the wrong DOM parent: {entry.ref_id}")
+            return span, entry.parent_ref
         return span, slot.node_key
     if "child_index" in hints:
         kind = hints.get("node_kind")

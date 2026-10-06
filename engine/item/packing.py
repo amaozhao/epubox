@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import asdict
 from typing import Any, Literal, cast
 
 from engine.item.budget import measure_budget
@@ -117,7 +116,7 @@ def pack_requests(
             "source": glossary.source_hash,
             "freeze": canonical_hash(glossary),
             "items": [canonical_hash(item) for item in values],
-            "limits": asdict(limits),
+            "limits": limits.to_dict(),
             "model": tokenizer_model,
             "targets": {item.item_id: canonical_hash(targets.get(item.item_id)) for item in values}
             if stage == "review" and targets is not None

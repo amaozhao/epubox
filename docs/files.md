@@ -207,3 +207,7 @@
 | engine/execution/atomic.py、tests/engine/execution/atomic.py | T19 | 原子 workflow 调度与每批进度接线，单词且≤1000行 |
 | tests/engine/command.py、tests/engine/services/report.py | T19 | CLI 参数/进度及报告回归，单词且≤1000行 |
 | docs/publication.md | T17/T18/T19 | 正文恢复、出版、CLI 和验收边界，单词且≤1000行 |
+
+## 真实书籍测试记录
+
+`docs/validation.md` 由 T20 记录已授权测试的原书诊断、测试副本、代码修复、实际请求和恢复证据。真实全书出版及最终全仓约束验收仍待完成；文档名称为单个单词且≤1000行。

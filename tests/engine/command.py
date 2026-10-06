@@ -52,6 +52,7 @@ def test_translate_freezes_atomic_versions_and_explicit_chunk_limit(
     assert config.extraction_config["strategy"] == ATOMIC_TERM_PLANNER_VERSION
     assert config.translation_config["prompt_version"] == "epubox-members-1"
     assert config.translation_config["input_budget_version"] == 2
+    assert config.translation_config["output_budget_version"] == 3
     assert config.translation_config["max_source_tokens"] == 5000
     assert config.translation_config["max_input_tokens"] == 24000
     assert config.translation_config["rpm"] == cli.settings.AGNES_TEXT_RPM
@@ -374,3 +375,33 @@ def test_atomic_retry_validates_then_adds_run_quota_then_reopens_review(
     )
 
     assert events == [("validate", (unit_id,)), ("budget", 2), ("retry", (unit_id,))]
+
+
+def test_v3_cli_pipeline_reserves_full_output_and_completed_resume_sends_nothing(tmp_path, monkeypatch):
+    from engine.services.journal import BodyJournal
+    from tests.engine.execution.atomic import answer
+
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>AI services.</p>"})
+    monkeypatch.setattr(cli, "build_run_model", lambda *args, **kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *args: StubChecker())
+    monkeypatch.setattr(cli.settings, "AGNES_TEXT_RPM", 1000)
+    original_runtime = BodyJournal.runtime
+    calls = []
+    events = []
+
+    async def transport(stage, request):
+        calls.append(request["request_id"])
+        return answer(stage, request)
+
+    def fake_runtime(self, model=None, transport_arg=None, *, progress=None, **kwargs):
+        return original_runtime(self, model=model, transport=transport, progress=progress)
+
+    monkeypatch.setattr(BodyJournal, "runtime", fake_runtime)
+    result = cli.translate_book(source, auto_extract=False, progress=events.append)
+    assert result.status == "completed"
+    requests = [event for event in events if event.get("event") == "request"]
+    assert requests and all(event["reserved_output_tokens"] == 4096 for event in requests)
+    before = len(calls)
+    repeated = cli.translate_book(source, auto_extract=False)
+    assert repeated.status == "completed"
+    assert len(calls) == before

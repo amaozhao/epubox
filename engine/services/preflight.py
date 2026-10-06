@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import zipfile
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -129,7 +128,7 @@ def preflight_atomic_resources(
         "version": BUDGET_VERSION,
         "preflight_version": PREFLIGHT_VERSION,
         "model": model,
-        "limits": asdict(limits),
+        "limits": limits.to_dict(),
         "pieces": tuple(piece.model_dump(mode="json") for piece in pieces),
     }
     budget_hash = canonical_hash(budget_payload)
@@ -145,7 +144,7 @@ def preflight_atomic_resources(
         )
     return PreflightReport(
         model=model,
-        limits=asdict(limits),
+        limits=limits.to_dict(),
         source_hash=next(iter(source_hashes)),
         resource_hashes={path: hashlib.sha256(raw_by_resource[path]).hexdigest() for path in sorted(paths)},
         map_hashes=map_hashes,

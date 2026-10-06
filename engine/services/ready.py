@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from engine.epub.bindings import resolve_derived_navigation
 from engine.schemas.bridge import AtomicDocument
@@ -38,6 +38,7 @@ def limits_from_config(config) -> BudgetLimits:
         context_tokens=context,
         safety_tokens=_int(config, "safety_margin", 256, zero=True),
         target_ratio=float(ratio),
+        output_version=cast(Literal[2, 3], _int(config, "output_budget_version", 2)),
     )
 
 

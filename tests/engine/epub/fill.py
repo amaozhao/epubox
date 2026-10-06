@@ -232,3 +232,17 @@ def test_invalid_saved_inventory_is_rejected_before_rendering() -> None:
     data["source_map"]["document_hash"] = "0" * 64
     with pytest.raises(ValidationError):
         AtomicDocument.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "body", ["<p>Before <em>inside</em>\n </p>", '<ol>\n<li><a href="#a">First</a>\n </li>\n</ol>']
+)
+def test_element_tail_whitespace_has_its_actual_parent(body: str) -> None:
+    raw = source(body)
+    inventory = extract_resource(raw, "OPS/chapter.xhtml", "book")
+    values = targets(inventory)
+    assert fill_resource(raw, inventory, values, identity=True) == raw
+    values = {key: value.replace("Before", "之前").replace("First", "第一") for key, value in values.items()}
+    result = fill_resource(raw, inventory, values)
+    assert b"\n " in result
+    assert "之前" in result.decode() or "第一" in result.decode()
