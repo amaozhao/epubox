@@ -148,7 +148,7 @@ def test_source_identity_change_before_snapshot_never_starts_the_new_hash(
     with pytest.raises(cli.IdentityMismatch, match="source EPUB identity changed"):
         cli.translate_book(source)
 
-    assert hash_calls == 2
+    assert hash_calls == 1
     assert model_sends == 0
     assert accounting.read_bytes() == b'{"http_attempts":31}'
     assert not (root / new_hash).exists()

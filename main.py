@@ -17,6 +17,7 @@ app = typer.Typer()
 
 @app.command("translate", help="完整翻译一本 EPUB，并保存可恢复的 JSON 进度。")
 def translate(
+    ctx: typer.Context,
     epub_path: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False, readable=True),
     language: str = typer.Option("Chinese", "--language", "-lg"),
     output: Path | None = typer.Option(None, "--output", "-o"),
@@ -37,6 +38,22 @@ def translate(
     if language.lower().replace("_", "-") not in {"chinese", "zh", "zh-cn", "zh-hans", "simplified chinese"}:
         raise typer.BadParameter("目前仅支持译为简体中文（zh-Hans）")
     try:
+        explicit = frozenset(
+            name
+            for name in (
+                "glossary",
+                "auto_extract",
+                "provider",
+                "context_tokens",
+                "max_input_tokens",
+                "max_output_tokens",
+                "limit",
+                "http_limit",
+                "concurrency",
+                "repair_terms",
+            )
+            if getattr(ctx.get_parameter_source(name), "name", None) == "COMMANDLINE"
+        )
         result = translate_book(
             epub_path,
             output=output,
@@ -54,6 +71,7 @@ def translate(
             overwrite=overwrite,
             repair_terms=repair_terms,
             progress=_progress_printer(),
+            explicit_options=explicit,
         )
     except StoreLocked as error:
         typer.echo("同一本书已有翻译进程在运行；请等它退出后，用相同命令继续。", err=True)

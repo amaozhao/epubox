@@ -270,3 +270,34 @@ def _translated(source: str) -> str:
         Event(kind="text", value="译文。" if event.value.strip() else event.value) if event.kind == "text" else event
         for event in parse_projection(source)
     )
+
+
+@pytest.mark.parametrize("hardlink", [False, True])
+def test_registered_original_alias_is_protected_even_after_original_changes(tmp_path, hardlink):
+    import hashlib
+
+    case = _case(tmp_path, "<p>Hello world.</p>", ("Hello world.",))
+    original = tmp_path / "original.epub"
+    original.write_bytes(b"original before its repaired snapshot")
+    status = original.stat()
+    path = case.session.store.root / "source.json"
+    hint = json.loads(path.read_text())
+    hint["aliases"] = [
+        {
+            "original_path": str(original.resolve()),
+            "source_hash": hashlib.sha256(original.read_bytes()).hexdigest(),
+            "st_dev": status.st_dev,
+            "st_ino": status.st_ino,
+        }
+    ]
+    path.write_text(json.dumps(hint))
+    original.write_bytes(b"changed original remains protected")
+    output = tmp_path / "alias.epub" if hardlink else original
+    if hardlink:
+        os.link(original, output)
+    before = output.read_bytes()
+    with pytest.raises(EpubValidationError, match="recorded original EPUB"):
+        validate_atomic_output(case.session.store, output)
+    with pytest.raises(EpubValidationError, match="recorded original EPUB"):
+        publish_atomic(case.session.store, output, StubChecker(), overwrite=True)
+    assert output.read_bytes() == before

@@ -159,14 +159,15 @@ def _reject_output(output: Path, root: Path, preparation: PreparationPlan) -> No
     resolved, workspace = output.resolve(strict=False), root.resolve(strict=True)
     if resolved == workspace or workspace in resolved.parents:
         raise EpubValidationError("unsafe_output_path", "Output must stay outside the translation work directory")
-    original, stored_inode = _source_hint(root, preparation)
-    if resolved == original:
-        raise EpubValidationError("unsafe_output_path", "Output aliases the recorded original EPUB")
-    if output.exists():
-        output_inode = _inode(output)
-        current_inode = _inode(original) if original.exists() else None
-        if output_inode in {stored_inode, current_inode}:
-            raise EpubValidationError("unsafe_output_path", "Output aliases the recorded original EPUB inode")
+    sources = (_source_hint(root, preparation), *_source_aliases(root))
+    for original, stored_inode in sources:
+        if resolved == original:
+            raise EpubValidationError("unsafe_output_path", "Output aliases the recorded original EPUB")
+        if output.exists():
+            output_inode = _inode(output)
+            current_inode = _inode(original) if original.exists() else None
+            if output_inode in {stored_inode, current_inode}:
+                raise EpubValidationError("unsafe_output_path", "Output aliases the recorded original EPUB inode")
     snapshot = root / "source.epub"
     if output.exists() and output.is_file() and file_hash(output) == file_hash(snapshot):
         raise EpubValidationError("unsafe_output_path", "Output is the source EPUB or an identical source copy")
@@ -181,7 +182,7 @@ def _source_hint(root: Path, preparation: PreparationPlan) -> tuple[Path, tuple[
             "invalid_source_hint", f"Original source record is missing or invalid: {error}"
         ) from error
     keys = {"format", "run_id", "source_hash", "original_path", "st_dev", "st_ino"}
-    if not isinstance(value, dict) or set(value) != keys:
+    if not isinstance(value, dict) or set(value) not in (keys, keys | {"aliases"}):
         raise EpubValidationError("invalid_source_hint", "Original source record fields are invalid")
     original = value["original_path"]
     device, inode = value["st_dev"], value["st_ino"]
@@ -200,6 +201,38 @@ def _source_hint(root: Path, preparation: PreparationPlan) -> tuple[Path, tuple[
     ):
         raise EpubValidationError("invalid_source_hint", "Original source record identity is invalid")
     return Path(original), (device, inode)
+
+
+def _source_aliases(root: Path) -> tuple[tuple[Path, tuple[int, int]], ...]:
+    value = strict_json_loads((root / "source.json").read_bytes())
+    if not isinstance(value, dict):
+        raise EpubValidationError("invalid_source_hint", "Original source record must be an object")
+    aliases = value.get("aliases", [])
+    if not isinstance(aliases, list):
+        raise EpubValidationError("invalid_source_hint", "Original source aliases must be an array")
+    result = []
+    for alias in aliases:
+        keys = {"original_path", "source_hash", "st_dev", "st_ino"}
+        if not isinstance(alias, dict) or set(alias) != keys:
+            raise EpubValidationError("invalid_source_hint", "Original source alias fields are invalid")
+        name, digest = alias["original_path"], alias["source_hash"]
+        device, inode = alias["st_dev"], alias["st_ino"]
+        if (
+            not isinstance(name, str)
+            or not name
+            or not Path(name).is_absolute()
+            or Path(name).resolve(strict=False) != Path(name)
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+            or type(device) is not int
+            or type(inode) is not int
+            or device < 0
+            or inode < 0
+        ):
+            raise EpubValidationError("invalid_source_hint", "Original source alias identity is invalid")
+        result.append((Path(name), (device, inode)))
+    return tuple(result)
 
 
 def _inode(path: Path) -> tuple[int, int]:

@@ -2,7 +2,7 @@
 
 日期：2026-10-06\
 分支：feature/preflight\
-状态：真实测试发现问题并已修复；旧预算任务暂停；用户已明确授权新版预算全书翻译，正在执行。本记录不表示 T20 全部完成。
+状态：2026-10-07 已通过普通命令自动续传完成中文 EPUB，真实 EPUBCheck 通过。下文保留历史诊断；本记录不表示 T20 全部完成。
 
 ## 输入及校验
 
@@ -60,3 +60,23 @@ DOM 修复相关测试 22 passed；当时全量测试 **666 passed（128.05 秒�
 修复要求草稿的hash与review epoch都匹配历史请求才可直接复用；否则从持久初译响应重建历史草稿。历史review还使用自身record_versions和plan_epochs。26个真实历史review请求的只读重建均通过；续跑保留全部94个已通过项并继续完成。
 
 新增共享review失败→重试→重启的回归通过；全量pytest **672 passed（126.91秒）**，独立代码审查APPROVE、架构审查CLEAR。新版全书仍在翻译，尚未出版。
+
+## 2026-10-07 普通命令续传及出版
+
+执行用户要求的命令，无附加参数：
+
+```sh
+.venv/bin/python main.py translate /Users/amaozhao/Downloads/epub/ai-side-hustle-playbook.epub
+```
+
+原书通过同名目录的 `active.json` 关联既有修复快照任务。`source.json` 保留快照主来源并追加用户原书别名，路径、哈希和 inode 都受保护；原书 SHA-256 仍为上文记录的 `bc1211…81149`。
+
+最后阻塞项是 `EPUB/text/ch005.xhtml` 的 head title，源文本与当前目标均为 `ch005.xhtml`。八次真实校对均认为无需修改，但协议错误地要求文件名也必须通过语言流畅度检查。修复仅在 metadata/head_title、无占位符、源与目标完全相等、且等于冻结资源文件名时允许 fluency/script 为 not_applicable；accuracy 仍必须通过。执行、响应回放和只读验证使用同一判断，普通正文不能套用此例外。
+
+普通命令保留既有译文，仅新增一次真实校对请求：793/793 项通过，累计 HTTP 从 424 增至 425，进程退出码 0。
+
+成品：`/Users/amaozhao/Downloads/epub/ai-side-hustle-playbook-cn.epub`，391307 字节，SHA-256 `b5f6fd325cd6c7e8cb2be578068b07a14e53fae0bf887eca785ef8efe5a6fb94`。发布记录中的真实 EPUBCheck 5.3.0：0 errors、0 fatals、0 warnings。此结果证明程序完成和 EPUB 结构有效，不代表人工逐句校审。
+
+最终全量 pytest **707 passed（136.00 秒）**；Ruff、165 个 Python 文件格式、Pyright（0 errors/0 warnings）、变更文件单词命名/≤1000 行和 diff 检查通过。独立代码审查 APPROVE（0 issues）、架构审查 CLEAR。
+
+随后再次执行完全相同的无参数命令，退出码 0，返回同一成品：793/793、累计 HTTP 仍为 425。过程仅本地核验已保存响应和出版证据，没有新增模型请求；成品哈希和原书哈希均保持不变。

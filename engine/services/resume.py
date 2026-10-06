@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from engine.agents.protocol import validate_translation_response
+from engine.agents.protocol import review_applicability, validate_translation_response
 from engine.agents.terms import validate_review_response
 from engine.item.members import MemberIndex, pack_members
 from engine.schemas.bridge import AtomicDocument
@@ -260,7 +260,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
             if record.status != ItemStatus.PENDING:
                 _atomic_record_frame(root, ready, record, members, index, requests)
             if record.status == ItemStatus.REVIEWED:
-                _atomic_review_proof(root, record, members, records, requests)
+                _atomic_review_proof(root, record, members, records, index, requests)
     except (CorruptRecord, OSError, TypeError, ValueError) as error:
         return ResumePlan("preparation", "needs_attention", ("repair_shared_identity",), (str(error),))
 
@@ -400,6 +400,7 @@ def _atomic_review_proof(
     record: ItemRecord,
     members: dict[str, RequestMember],
     records: dict[str, ItemRecord],
+    index: MemberIndex,
     requests: dict[str, RequestManifest],
 ) -> None:
     if record.stage != "reviewed" or record.failure is not None or record.next_action is not None:
@@ -424,8 +425,23 @@ def _atomic_review_proof(
     expected = {
         item_id: {
             "base_revision": review.revisions[review.item_unit_ids[item_id][0]],
-            "terminology_applicable": any(role == "target" for role in records[item_id].term_applicability.values()),
-            "bindings_applicable": bool(members[item_id].registry),
+            **review_applicability(
+                members[item_id],
+                index,
+                {
+                    "source": members[item_id].source_projection,
+                    "target": (
+                        members[item_id].source_projection
+                        if review.target_hashes[item_id] == canonical_hash(members[item_id].source_projection)
+                        else ""
+                    ),
+                    "terms": [{"role": role} for role in records[item_id].term_applicability.values()],
+                    "applicability": {
+                        "terminology": any(role == "target" for role in records[item_id].term_applicability.values()),
+                        "bindings": bool(members[item_id].registry),
+                    },
+                },
+            ),
         }
         for item_id in review.item_ids
     }

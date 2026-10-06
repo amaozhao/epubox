@@ -6,6 +6,7 @@ import json
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 MAX_RESPONSE_BYTES = 1_000_000
@@ -192,10 +193,10 @@ def _review_error(item: dict[str, Any], expected: Mapping[str, Any]) -> str | No
         return "checks must contain exactly accuracy, fluency, terminology, bindings, script"
     if any(not isinstance(value, str) or value not in CHECK_VALUES for value in checks.values()):
         return "invalid check value"
-    for name in ("accuracy", "fluency", "script"):
+    for name in ("accuracy",):
         if checks[name] == "not_applicable":
             return f"{name} cannot be not_applicable"
-    for name in ("terminology", "bindings"):
+    for name in ("fluency", "script", "terminology", "bindings"):
         if expected.get(f"{name}_applicable", True) and checks[name] == "not_applicable":
             return f"{name} is applicable"
 
@@ -208,6 +209,34 @@ def _review_error(item: dict[str, Any], expected: Mapping[str, Any]) -> str | No
         if blocking:
             return f"blocking check or issue: {', '.join(blocking)}"
     return None
+
+
+def review_applicability(member: Any, index: Any, wire: Mapping[str, Any]) -> dict[str, bool]:
+    terms = wire.get("terms")
+    if not isinstance(terms, list) or any(not isinstance(term, Mapping) for term in terms):
+        raise ProtocolError("review terms are invalid")
+    supplied = wire.get("applicability")
+    expected = {
+        "terminology": any(term.get("role") == "target" for term in terms),
+        "bindings": bool(member.registry),
+    }
+    if supplied != expected:
+        raise ProtocolError("review applicability differs from the trusted member")
+    source, target = wire.get("source"), wire.get("target")
+    resource = index.documents[member.document_id].resource.path
+    filename = (
+        member.kind == "head_title"
+        and member.channel == "metadata"
+        and not member.registry
+        and isinstance(source, str)
+        and source == member.source_projection == target == PurePosixPath(resource).name
+    )
+    return {
+        "terminology_applicable": expected["terminology"],
+        "bindings_applicable": expected["bindings"],
+        "fluency_applicable": not filename,
+        "script_applicable": not filename,
+    }
 
 
 def validate_coherence_response(

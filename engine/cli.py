@@ -116,6 +116,7 @@ def translate_book(
     overwrite: bool = False,
     repair_terms: bool = False,
     progress: ProgressCallback | None = None,
+    explicit_options: frozenset[str] | None = None,
 ) -> RunOutcome:
     """Start and advance all durable gates with one user command."""
     _emit_start(progress)
@@ -159,8 +160,27 @@ def translate_book(
         adapter_version=ATOMIC_ADAPTER_VERSION,
         extractor_version=ATOMIC_EXTRACTOR_VERSION,
     )
+    from engine.services.session import infer
+
+    explicit_options = explicit_options if explicit_options is not None else infer(locals())
     source_hash = _sha256_file(source)
     config = replace(config, expected_source_hash=source_hash)
+    if work_root is None:
+        from engine.services.session import find, validate_options
+
+        if active := find(source, source_hash):
+            validate_options(active, config, explicit_options)
+            completed = _completed_run_outcome(active, output)
+            if completed is not None:
+                return completed
+            return resume_book(
+                active,
+                output=output,
+                epubcheck=epubcheck,
+                overwrite=overwrite,
+                progress=progress,
+                _automatic=not explicit_options,
+            )
     work_root = _resolve_work_root(work_root) if work_root is not None else _default_work_root(source, source_hash)
     with AtomicStore(work_root / source_hash).lock(blocking=False):
         resumable_work_dir = None
@@ -184,6 +204,10 @@ def translate_book(
         model = build_run_model(provider, model_id, max_output_tokens=max_output_tokens)
         checker = checker_for_source(source, epubcheck)
         if resumable_work_dir is not None:
+            from engine.services.session import remember
+
+            if resumable_work_dir.is_relative_to(source.with_name(source.stem).resolve()):
+                remember(source, resumable_work_dir)
             return asyncio.run(
                 _advance_work_dir(
                     resumable_work_dir,
@@ -534,6 +558,7 @@ def resume_book(
     add_check_http: int = 0,
     repair_file: Path | None = None,
     authorization_id: str | None = None,
+    _automatic: bool = False,
 ) -> RunOutcome:
     """Resume only the saved source and run identities, without the original user term file."""
     work_dir = work_dir.resolve(strict=True)
@@ -580,7 +605,15 @@ def resume_book(
             authorization_id=authorization_id,
         )
         return asyncio.run(
-            _advance_work_dir(work_dir, output, checker, model=model, overwrite=overwrite, progress=progress)
+            _advance_work_dir(
+                work_dir,
+                output,
+                checker,
+                model=model,
+                overwrite=overwrite,
+                progress=progress,
+                automatic=_automatic,
+            )
         )
 
 
@@ -713,6 +746,10 @@ async def _advance_source(
         prepared = await prepare_translation(
             source, work_root, config, checker, model=model, progress=_preparation_progress(progress)
         )
+        from engine.services.session import remember
+
+        if prepared.work_dir.resolve().is_relative_to(source.with_name(source.stem).resolve()):
+            remember(source, prepared.work_dir)
     except StoreLocked:
         raise
     except Exception as error:
@@ -741,9 +778,14 @@ async def _advance_work_dir(
     model: object,
     overwrite: bool,
     progress: ProgressCallback | None = None,
+    automatic: bool = False,
 ) -> RunOutcome:
     try:
         prepared = await resume_preparation(work_dir, checker, model=model, progress=_preparation_progress(progress))
+        if automatic:
+            from engine.services.session import reopen
+
+            reopen(work_dir)
     except StoreLocked:
         raise
     except Exception as error:
@@ -904,13 +946,10 @@ def _emit_start(progress: ProgressCallback | None) -> None:
 def _write_source_hint(work_dir: Path, source: Path, source_hash: str, run_id: str) -> None:
     if work_dir.is_symlink():
         raise IdentityMismatch("run checkpoint must not be a symbolic link")
+    from engine.services.session import fingerprint, source_record
+
     source = source.resolve(strict=True)
-    before = source.stat()
-    digest = _sha256_file(source)
-    after = source.stat()
-    signature = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-    if signature != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-        raise IdentityMismatch("original source changed while recording its output protection")
+    digest, after = fingerprint(source)
     if digest != source_hash or work_dir.name != run_id:
         raise IdentityMismatch("source EPUB identity changed before the original-path record was created")
     data = {
@@ -923,12 +962,9 @@ def _write_source_hint(work_dir: Path, source: Path, source_hash: str, run_id: s
     }
     path = work_dir / "source.json"
     work_dir.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink():
-        raise IdentityMismatch("original source record must not be a symbolic link")
     encoded = canonical_json_bytes(data)
-    if path.exists():
-        if path.read_bytes() != encoded:
-            raise IdentityMismatch("original source identity differs from the frozen run")
+    if path.exists() or path.is_symlink():
+        source_record(path, data)
         return
     AtomicStore.atomic_write_bytes(path, encoded)
 

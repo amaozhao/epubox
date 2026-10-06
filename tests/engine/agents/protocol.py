@@ -15,6 +15,34 @@ def _terms(items: list[dict]) -> str:
     return json.dumps({"protocol": "epubox-terms-1", "request_id": "r1", "items": items})
 
 
+def test_review_allows_nonlanguage_checks_only_when_expected_identity_proves_them() -> None:
+    item = {
+        "item_id": "a",
+        "base_revision": 1,
+        "decision": "no_change",
+        "checks": {
+            "accuracy": "pass",
+            "fluency": "not_applicable",
+            "terminology": "not_applicable",
+            "bindings": "not_applicable",
+            "script": "not_applicable",
+        },
+        "issues": [],
+    }
+    raw = json.dumps({"protocol": "epubox-review-2", "request_id": "r2", "items": [item]})
+    filename = {
+        "a": {
+            "base_revision": 1,
+            "terminology_applicable": False,
+            "bindings_applicable": False,
+            "fluency_applicable": False,
+            "script_applicable": False,
+        }
+    }
+    assert validate_review_response(raw, "r2", filename).errors == {}
+    assert validate_review_response(raw, "r2", {"a": {"base_revision": 1}}).errors["a"] == "fluency is applicable"
+
+
 def test_terms_response_keeps_valid_items_and_reports_bad_candidates() -> None:
     candidate = {
         "source": "memory",

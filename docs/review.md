@@ -142,3 +142,11 @@ T16 接线同时需给 target/context 术语角色提供版本明确的提示语
 全部修复后的最终全量 pytest **671 passed（128.92 秒）**；Ruff、格式、Pyright 与 diff 检查通过。独立代码审查 APPROVE（0 issues）、架构审查 CLEAR。真实旧任务 resume 未新增 HTTP；用户已明确授权新版全书翻译，正在执行。
 
 真实新版任务进一步修复review历史epoch恢复：复用当前草稿必须同时匹配历史hash和review_epoch；历史重建携带自身record_versions/plan_epochs。26个真实历史review请求只读验证通过。新增回归后全量pytest **672 passed（126.91秒）**，独立代码审查APPROVE、架构审查CLEAR，原已通过的94项保持不变。
+
+## 2026-10-07 无参数续传和最终出版
+
+用户要求普通 `translate <原书>` 自动续传。新增同名书籍目录内的 active 索引，校验原书、检查点、快照和冻结配置；恢复只开放未完成 v3 正文项一次，已校对项及累计请求不重置。手动 resume 保留显式重试，显式冲突配置在请求和写入前拒绝。修复副本的任务必须保存原书别名，出版保护该路径和硬链接。
+
+真实最后一项 head title 是资源文件名，不涉及自然语言流畅度；仅严格匹配未变的冻结资源 basename 时允许对应校对检查为 not_applicable，accuracy 仍必需。初译、校对和保存流程保持不变。
+
+最终全量 pytest **707 passed（136.00 秒）**，仅两个已有 BeautifulSoup 文件名提示；Ruff、165 个 Python 文件格式、Pyright（0 errors/0 warnings）、变更文件单词命名/≤1000 行和 diff 检查通过。独立代码审查 **APPROVE（0 issues）**、架构审查 **CLEAR**。真实普通命令已完成793/793项，出版及真实 EPUBCheck 结果见 [validation.md](validation.md)。

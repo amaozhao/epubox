@@ -10,7 +10,7 @@ from time import monotonic
 from types import SimpleNamespace
 from typing import Any, cast
 
-from engine.agents.protocol import ProtocolError, validate_translation_response
+from engine.agents.protocol import ProtocolError, review_applicability, validate_translation_response
 from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS, ModelRuntime, RuntimePaused, wire_hash
 from engine.agents.terms import validate_review_response
 from engine.agents.workflow import _failed, _frame, _target_error, _validate_saved_record, _wire_items
@@ -200,10 +200,7 @@ class BodyJournal:
             expected = {
                 item.item_id: {
                     "base_revision": request.revisions[item.unit_id],
-                    "terminology_applicable": any(
-                        term.get("role") == "target" for term in _wire_items(batch)[item.item_id]["terms"]
-                    ),
-                    "bindings_applicable": bool(item.registry),
+                    **review_applicability(item, self.session.index, _wire_items(batch)[item.item_id]),
                 }
                 for item in batch.items
             }
@@ -946,13 +943,12 @@ class BodyJournal:
         draft = translation_result["target"]
         if review.target_hashes.get(record.item_id) != canonical_hash(draft):
             raise IdentityMismatch("review request does not prove the saved translation draft")
+        review_batch = self._review_batch(review)
+        wires = _wire_items(review_batch)
         expected = {
             item_id: {
                 "base_revision": review.revisions[review.item_unit_ids[item_id][0]],
-                "terminology_applicable": any(
-                    role == "target" for role in self._records[item_id].term_applicability.values()
-                ),
-                "bindings_applicable": bool(self.session.index.members_by_id[item_id].registry),
+                **review_applicability(self.session.index.members_by_id[item_id], self.session.index, wires[item_id]),
             }
             for item_id in review.item_ids
         }

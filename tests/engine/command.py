@@ -9,17 +9,51 @@ import typer
 from click import Group
 from typer.testing import CliRunner
 
+import main as main_module
 from engine import cli
 from engine.epub import publish as atomic_publish
-from engine.epub.preparation import prepare_book
+from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.execution.state import TranslationRunResult
+from engine.item.atoms import ADAPTER_VERSION, EXTRACTOR_VERSION
 from engine.services import journal as journal_module
+from engine.services.preparation import prepare_translation
+from engine.services.session import remember
 from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION
 from main import _progress_printer, app
 from tests.engine.agents.workflow import prepare_case
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
 from tests.engine.services.store import _prepare
+
+
+def active_case(tmp_path: Path, **translation):
+    source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>Original.</p>"})
+    config = {
+        "provider": "cr_proxy",
+        "model": cli.settings.CR_PROXY_MODEL,
+        "context_tokens": 8192,
+        "max_input_tokens": 9000,
+        "max_output_tokens": 2048,
+        "max_source_tokens": 3000,
+        "run_http_limit": 17,
+        "concurrency": 1,
+        "output_budget_version": 3,
+    } | translation
+    result = asyncio.run(
+        prepare_translation(
+            source,
+            source.with_suffix(""),
+            PreparationConfig(
+                auto_extract=False,
+                adapter_version=ADAPTER_VERSION,
+                extractor_version=EXTRACTOR_VERSION,
+                translation_config=config,
+            ),
+            StubChecker(),
+        )
+    )
+    remember(source, result.work_dir)
+    return source, result
 
 
 def test_translate_help_separates_source_input_and_output_limits() -> None:
@@ -29,6 +63,29 @@ def test_translate_help_separates_source_input_and_output_limits() -> None:
 
     assert result.exit_code == 0
     assert {"--limit", "--max-input-tokens", "--max-output-tokens"}.issubset(options)
+
+
+def test_translate_command_passes_only_commandline_configuration_sources(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"fixture")
+    seen = []
+
+    def translate(*_args, **kwargs):
+        seen.append(kwargs["explicit_options"])
+        return cli.RunOutcome("completed", tmp_path / "work", "publication", output_path=tmp_path / "book-cn.epub")
+
+    monkeypatch.setattr(main_module, "translate_book", translate)
+    runner = CliRunner()
+    assert runner.invoke(app, ["translate", str(source)]).exit_code == 0
+    assert (
+        runner.invoke(
+            app,
+            ["translate", str(source), "--provider", "agnes", "--http-limit", "0", "--no-auto-extract"],
+        ).exit_code
+        == 0
+    )
+
+    assert seen == [frozenset(), frozenset({"provider", "http_limit", "auto_extract"})]
 
 
 def test_translate_freezes_atomic_versions_and_explicit_chunk_limit(
@@ -206,6 +263,7 @@ def test_atomic_resume_uses_frozen_body_model_and_nondefault_output_cap(
         translation_config={"provider": "cr_proxy", "model": "body-model", "max_output_tokens": 8192},
     )
     built = []
+    automatic = []
     monkeypatch.setattr(cli, "RunStore", lambda *_args: SimpleNamespace(read_preparation=lambda: preparation))
     monkeypatch.setattr(cli, "checker_for_source", lambda *_args: object())
 
@@ -214,6 +272,7 @@ def test_atomic_resume_uses_frozen_body_model_and_nondefault_output_cap(
         return SimpleNamespace(id=model)
 
     async def resume(actual_work_dir, *_args, **_kwargs):
+        automatic.append(_kwargs["automatic"])
         return cli.RunOutcome("paused", actual_work_dir, "translation")
 
     monkeypatch.setattr(cli, "build_run_model", build)
@@ -222,6 +281,7 @@ def test_atomic_resume_uses_frozen_body_model_and_nondefault_output_cap(
 
     assert result.status == "paused"
     assert built == [("cr_proxy", "body-model", 8192)]
+    assert automatic == [False]
 
 
 def test_completed_resume_recovers_before_output_check_or_model_construction(
@@ -405,3 +465,137 @@ def test_v3_cli_pipeline_reserves_full_output_and_completed_resume_sends_nothing
     repeated = cli.translate_book(source, auto_extract=False)
     assert repeated.status == "completed"
     assert len(calls) == before
+
+
+def test_plain_translate_reopens_failed_review_and_skips_completed_translation(tmp_path, monkeypatch):
+    from engine.services.journal import BodyJournal
+    from tests.engine.execution.atomic import answer
+
+    source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>Original.</p>"})
+    monkeypatch.setattr(cli, "build_run_model", lambda *args, **kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *args: StubChecker())
+    monkeypatch.setattr(cli.settings, "AGNES_TEXT_RPM", 1000)
+    original_runtime = BodyJournal.runtime
+    calls = []
+    fail = True
+
+    async def transport(stage, request):
+        calls.append(stage)
+        response = answer(stage, request)
+        if stage == "review" and fail:
+            import json
+
+            data = json.loads(response["raw"])
+            for item in data["items"]:
+                item["checks"]["accuracy"] = "not_applicable"
+            response["raw"] = json.dumps(data)
+        return response
+
+    monkeypatch.setattr(
+        BodyJournal,
+        "runtime",
+        lambda self, model=None, **kwargs: original_runtime(
+            self, model=model, transport=transport, progress=kwargs.get("progress")
+        ),
+    )
+    first = cli.translate_book(source, auto_extract=False)
+    assert first.status == "needs_attention"
+    assert (source.with_suffix("") / "active.json").is_file()
+    before = calls.count("translate")
+    fail = False
+    second = cli.translate_book(source)
+    assert second.status == "completed"
+    assert second.work_dir == first.work_dir
+    assert calls.count("translate") == before
+    before = len(calls)
+    third = cli.translate_book(source)
+    assert third.status == "completed" and len(calls) == before
+
+
+def test_plain_translate_reuses_all_omitted_frozen_options(tmp_path, monkeypatch):
+    source, prepared = active_case(tmp_path)
+    calls = []
+
+    def resume(work_dir, **kwargs):
+        calls.append((work_dir, kwargs))
+        return cli.RunOutcome("needs_attention", work_dir, "translation")
+
+    monkeypatch.setattr(cli, "resume_book", resume)
+    result = cli.translate_book(source)
+
+    assert result.work_dir == prepared.work_dir
+    assert calls[0][0] == prepared.work_dir and calls[0][1]["_automatic"] is True
+
+
+def test_matching_explicit_option_resumes_without_automatic_retry(tmp_path, monkeypatch):
+    source, prepared = active_case(tmp_path)
+    calls = []
+
+    def resume(work_dir, **kwargs):
+        calls.append(kwargs["_automatic"])
+        return cli.RunOutcome("needs_attention", work_dir, "translation")
+
+    monkeypatch.setattr(cli, "resume_book", resume)
+    result = cli.translate_book(source, provider="cr_proxy", explicit_options=frozenset({"provider"}))
+
+    assert result.work_dir == prepared.work_dir
+    assert calls == [False]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "explicit"),
+    (
+        ({"provider": "agnes"}, "provider"),
+        ({"context_tokens": 32768}, "context_tokens"),
+        ({"max_input_tokens": 50000}, "max_input_tokens"),
+        ({"max_output_tokens": 4096}, "max_output_tokens"),
+        ({"limit": 2000}, "limit"),
+        ({"http_limit": 0}, "http_limit"),
+        ({"concurrency": 2}, "concurrency"),
+        ({"auto_extract": True}, "auto_extract"),
+        ({"repair_terms": True}, "repair_terms"),
+    ),
+)
+def test_active_session_rejects_each_explicit_conflicting_option_before_model(tmp_path, monkeypatch, kwargs, explicit):
+    source, prepared = active_case(tmp_path)
+    before = {
+        path.relative_to(prepared.work_dir): path.read_bytes()
+        for path in prepared.work_dir.rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(
+        cli,
+        "build_run_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("conflict must precede model creation")),
+    )
+
+    with pytest.raises(ValueError, match="active session conflicts|cannot replace"):
+        cli.translate_book(source, explicit_options=frozenset({explicit}), **kwargs)
+
+    after = {
+        path.relative_to(prepared.work_dir): path.read_bytes()
+        for path in prepared.work_dir.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_active_session_rejects_explicit_glossary_change(tmp_path):
+    source, _ = active_case(tmp_path)
+    glossary = tmp_path / "terms.json"
+    glossary.write_text('{"Original":"原文"}')
+
+    with pytest.raises(ValueError, match="explicit --glossary"):
+        cli.translate_book(source, glossary=glossary, explicit_options=frozenset({"glossary"}))
+
+
+def test_direct_api_infers_nondefault_provider_as_explicit(tmp_path):
+    source, _ = active_case(
+        tmp_path,
+        provider="agnes",
+        model=cli.settings.AGNES_MODEL,
+        rpm=cli.settings.AGNES_TEXT_RPM,
+    )
+
+    with pytest.raises(ValueError, match="explicit --provider"):
+        cli.translate_book(source, provider="cr_proxy")

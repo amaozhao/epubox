@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from engine.agents.protocol import ProtocolError, validate_translation_response
+from engine.agents.protocol import ProtocolError, review_applicability, validate_translation_response
 from engine.agents.runtime import ATOMIC_PROMPT_VERSION, ModelRuntime, RequestError
 from engine.agents.terms import validate_review_response
 from engine.core.quality import find_degenerate_translation, find_untranslated_english_texts
@@ -252,10 +252,7 @@ async def _proofread_step(
             expected = {
                 item.item_id: {
                     "base_revision": review_batch.manifest.revisions[item.unit_id],
-                    "terminology_applicable": any(
-                        term.get("role") == "target" for term in _wire_items(review_batch)[item.item_id]["terms"]
-                    ),
-                    "bindings_applicable": bool(item.registry),
+                    **review_applicability(item, index, _wire_items(review_batch)[item.item_id]),
                 }
                 for item in review_batch.items
             }

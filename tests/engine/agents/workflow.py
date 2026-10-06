@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import engine.agents.workflow as workflow_module
+from engine.agents.protocol import ProtocolError, review_applicability
 from engine.agents.runtime import ATOMIC_PROMPT_VERSION, ModelRuntime, ProviderError, request_messages
 from engine.agents.workflow import run_workflow
 from engine.epub.preparation import PreparationConfig
@@ -441,6 +442,81 @@ def test_atomic_prompt_is_explicit_and_versioned_without_changing_legacy_prompt(
     assert "mode required" in atomic_prompt and "keep_source" in atomic_prompt
     with pytest.raises(ValueError, match="unsupported atomic"):
         request_messages("translate", atomic | {"prompt_version": "epubox-members-99"})
+
+
+@pytest.mark.parametrize((("title", "status")), (("chapter.xhtml", "completed"), ("Chapter", "needs_attention")))
+def test_filename_head_title_allows_nonlanguage_review_checks_only_for_unchanged_basename(
+    tmp_path: Path, title: str, status: str
+) -> None:
+    markup = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>'
+        + title
+        + "</title></head><body><p>Body.</p></body></html>"
+    )
+    case = prepare_case(tmp_path, markup, (title,))
+    assert case.batch.items[0].kind == "head_title"
+
+    async def transport(kind, payload):
+        if kind == "translate":
+            items = [
+                {
+                    "item_id": item["item_id"],
+                    "target": item["source"] if item["source"] == "chapter.xhtml" else "章节",
+                }
+                for item in payload["items"]
+            ]
+            protocol = "epubox-text-1"
+        else:
+            items = [
+                {
+                    "item_id": item["item_id"],
+                    "base_revision": item["base_revision"],
+                    "decision": "no_change",
+                    "checks": {
+                        "accuracy": "pass",
+                        "fluency": "not_applicable",
+                        "terminology": "not_applicable",
+                        "bindings": "not_applicable",
+                        "script": "not_applicable",
+                    },
+                    "issues": [],
+                }
+                for item in payload["items"]
+            ]
+            protocol = "epubox-review-2"
+        return {"raw": json.dumps({"protocol": protocol, "request_id": payload["request_id"], "items": items})}
+
+    result = asyncio.run(
+        run_workflow(
+            case.prepared,
+            case.batch,
+            case.index,
+            runtime(transport),
+            session=case.session,
+            save=lambda _record: None,
+        )
+    )
+    assert result.status == status
+
+
+def test_filename_applicability_rejects_a_forged_false_term_flag(tmp_path: Path) -> None:
+    markup = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>chapter.xhtml</title></head>'
+        "<body><p>Body.</p></body></html>"
+    )
+    case = prepare_case(tmp_path, markup, ("chapter.xhtml",))
+    member = case.batch.items[0]
+    with pytest.raises(ProtocolError, match="applicability"):
+        review_applicability(
+            member,
+            case.index,
+            {
+                "source": "chapter.xhtml",
+                "target": "chapter.xhtml",
+                "terms": [{"role": "target"}],
+                "applicability": {"terminology": False, "bindings": False},
+            },
+        )
 
 
 def test_only_complete_workflow_is_a_supported_public_entry() -> None:
