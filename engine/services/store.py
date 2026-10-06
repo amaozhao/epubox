@@ -10,10 +10,10 @@ from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from engine.item.context import build_context_index, initial_derived_navigation, plan_unit
 from engine.item.extractor import validate_source_relations
 from engine.item.inline import events_to_projection, parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS, _atomize, _range_stacks, _segment_events, source_token_count
-from engine.item.unit_planner import build_context_index, initial_derived_navigation, plan_unit
 from engine.item.views import validate_source_views
 from engine.schemas.contracts import (
     BOOK_FORMAT,

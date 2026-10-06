@@ -11,7 +11,7 @@ from engine.epub.assembly import assemble_document, derive_navigation_projection
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.epub.publication import publish_book, recover_publication, validate_assembled_document
 from engine.epub.validation import EpubCheckResult, EpubValidationError
-from engine.item.unit_planner import plan_unit
+from engine.item.context import plan_unit
 from engine.schemas.contracts import (
     Attempt,
     BookPlan,

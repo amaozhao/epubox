@@ -24,8 +24,8 @@ from engine.epub.preparation import (
     _sha256_file,
 )
 from engine.epub.publication import publish_book, recover_publication
+from engine.item.context import PLANNER_VERSION
 from engine.item.planner import MAX_SOURCE_TOKENS
-from engine.item.unit_planner import PLANNER_VERSION
 from engine.orchestrator import (
     TranslationRunResult,
     import_repair_file,

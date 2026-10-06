@@ -77,3 +77,18 @@ SourceMap.node_spans 可自然嵌套，是源结构记录，不能直接当作�
 | 候选池改写证据/目标，或伪造额外冲突组后触发付费核对 | 从已提交提取记录重建标准候选池，比较候选、拒绝记录和冲突事实；只允许合法的核对状态字段 |
 
 本阶段测试只使用临时文件和假 transport。生产 P1—P4 与 CLI 接线仍由 T15/T19 负责，正文 workflow、逐阶段保存和 EPUB 出版仍按后续任务实施。
+
+## 第五阶段 T13/T14 验收
+
+基线 697bd14。全量 pytest **572 passed（51.14 秒）**；Ruff、129 个 Python 文件的格式、Pyright（0 errors/0 warnings）、文件约束和 diff 检查通过。独立代码审查 APPROVE，架构审查 WATCH；当前任务无剩余阻断。
+
+| 审查问题/反例 | 修正与验证 |
+|---|---|
+| 另一项 ItemRecord 仅改 item_id，可冒充当前保存目标 | 新整原子入口同时绑定 item_id/segment_id，核对目标 hash 并执行本地目标验证；旧 CutPlan 接口保持兼容 |
+| JSON manifest 改 revision/term IDs/term hash/context hash/input hash 后仍可通过 | RequestBatch 回读从完整载荷与原子重新计算各身份；校对 base_revision 与保存版本相等；布尔版本在转换成整数之前拒绝 |
+| 普通贪心把标题留在上一段末尾，拆开可同批的标题＋首段 | 一项前瞻只在标题与后续完整项能容纳、而整个候选不能容纳时在标题前结束；太大首段仍完整分组或报阻断 |
+| g excerpt 与源正文重复，候选集合每次扫描整个资源取前文 | 不重复发送已有 g 文字；初始化时按通道登记最近两份前文，候选仅读取缓存 |
+
+架构 WATCH：T08 的 PreflightPiece 还不能直接作为 SourceIndex/RequestBatch 的成员。T15 前需定义 piece-local registry、顺序、原父单元归属及合并回填合同，并由 T15—T17 的集成测试验证；不能通过强制类型转换绕过原子/来源校验。完整要求见 [packing.md](packing.md)。
+
+T16 接线同时需给 target/context 术语角色提供版本明确的提示语义，保留历史请求 wire_hash。当前规划接口不调用模型、不写断点，不修改真实书籍或已有成品。

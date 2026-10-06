@@ -273,11 +273,13 @@ class RequestManifest(FrozenModel):
     context_hashes: dict[str, str] = Field(default_factory=dict)
     attempts: tuple[Attempt, ...] = ()
 
-    @field_validator("record_versions", "plan_epochs", "revisions")
+    @field_validator("record_versions", "plan_epochs", "revisions", mode="before")
     @classmethod
     def validate_versions(cls, versions: dict[str, int]) -> dict[str, int]:
-        if any(version < 0 for version in versions.values()):
-            raise ValueError("request versions cannot be negative")
+        if not isinstance(versions, dict) or any(
+            type(version) is not int or version < 0 for version in versions.values()
+        ):
+            raise ValueError("request versions must be non-negative integers")
         return versions
 
     @field_validator("term_ids_by_item")

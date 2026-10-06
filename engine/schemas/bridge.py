@@ -270,6 +270,10 @@ class AtomicDocument(FrozenModel):
         return self
 
 
+def batch_item_hash(item: AtomicItem, freeze_id: str, wire_item, context_hash: str) -> str:
+    return canonical_hash({"atom": item, "freeze": freeze_id, "wire": wire_item, "context": context_hash})
+
+
 class RequestBatch(FrozenModel):
     format: Literal["epubox-batch-1"] = BATCH_FORMAT
     manifest: RequestManifest
@@ -317,6 +321,34 @@ class RequestBatch(FrozenModel):
                 or "context" in wire_item
             ):
                 raise ValueError("payload item differs from its whole source atom")
+            terms = wire_item.get("terms", [])
+            if not isinstance(terms, list):
+                raise ValueError("payload terms must identify every selected rule")  # noqa: TRY004 - Pydantic wraps ValueError.
+            selected: list[str] = []
+            for term in terms:
+                if not isinstance(term, dict):
+                    raise ValueError("payload terms must identify every selected rule")  # noqa: TRY004 - Pydantic wraps ValueError.
+                term_id = term.get("term_id")
+                if not isinstance(term_id, str) or not term_id:
+                    raise ValueError("payload terms must identify every selected rule")
+                selected.append(term_id)
+            term_ids = tuple(sorted(selected))
+            if len(set(term_ids)) != len(term_ids) or self.manifest.term_ids_by_item[item.item_id] != term_ids:
+                raise ValueError("manifest term IDs differ from payload terms")
+            context_hash = canonical_hash(self.payload.get("context", []))
+            if self.manifest.terms_hashes[item.item_id] != canonical_hash(terms):
+                raise ValueError("manifest terms hash differs from payload terms")
+            if self.manifest.context_hashes[item.item_id] != context_hash:
+                raise ValueError("manifest context hash differs from shared payload context")
+            if self.manifest.input_hashes[item.item_id] != batch_item_hash(
+                item, self.manifest.freeze_id or "", wire_item, context_hash
+            ):
+                raise ValueError("manifest input hash differs from its source atom and payload")
+            if self.manifest.stage == "review" and (
+                type(wire_item.get("base_revision")) is not int
+                or wire_item["base_revision"] != self.manifest.revisions[item.unit_id]
+            ):
+                raise ValueError("manifest revision differs from the saved review payload")
             if (
                 self.manifest.stage == "review"
                 and canonical_hash(wire_item.get("target")) != (self.manifest.target_hashes[item.item_id])

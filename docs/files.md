@@ -59,7 +59,7 @@
 | engine/item/planner.py | engine/item/planner.py | 899 | T14 | 保留 |
 | engine/item/source_views.py | engine/item/views.py | 226 | T05 | 完成 |
 | engine/item/structural_extractor.py | engine/item/structure.py；metadata.py/projection.py/policy.py 按源归属、元数据、投影与规则拆分 | 1592 | T05 | 完成 |
-| engine/item/unit_planner.py | engine/item/context.py | 728 | T13 | 待实施 |
+| engine/item/unit_planner.py | engine/item/context.py | 728 | T13 | 完成 |
 | engine/orchestrator.py | engine/orchestrator.py；按初译/校对/修订与保存分离，分别单词文件 | 2487 | T16 | 待实施 |
 | engine/schemas/__init__.py | engine/schemas/__init__.py | 1 | T00 | 工具固定名称 |
 | engine/schemas/contracts.py | engine/schemas/contracts.py；base.py/source.py/terms.py/run.py 按JSON、源、术语、执行职责拆分 | 1406 | T00 | 完成 |
@@ -100,7 +100,7 @@
 | tests/engine/item/__init__.py | tests/engine/item/__init__.py | 0 | T00 | 工具固定名称 |
 | tests/engine/item/test_extractor.py | tests/engine/item/extractor.py | 338 | T05 | 完成 |
 | tests/engine/item/test_inline_planner.py | tests/engine/item/inline.py | 715 | T06 | 完成 |
-| tests/engine/item/test_planner.py | tests/engine/item/planner.py | 357 | T14 | 待实施 |
+| tests/engine/item/test_planner.py | tests/engine/item/planner.py | 357 | T14 | 完成 |
 | tests/engine/item/test_source_token_cap.py | tests/engine/item/limits.py | 49 | T20 | 待实施 |
 | tests/engine/item/test_source_views.py | tests/engine/item/views.py | 185 | T05 | 完成 |
 | tests/engine/schemas/__init__.py | tests/engine/schemas/__init__.py | 0 | T00 | 工具固定名称 |
@@ -174,3 +174,12 @@
 | tests/engine/services/terms/candidates.py、tests/engine/services/terms/freeze.py、tests/engine/services/terms/resolution.py、tests/engine/services/terms/audit.py | T12 | 证据、终态和冻结测试，单词且≤1000行 |
 | tests/engine/agents/budget.py | T11 | 完整模型消息 token 预算测试，单词且≤1000行 |
 | docs/terminology.md | T08/T11/T12 | 本批次交接与验收，单词且≤1000行 |
+
+## 第五阶段新增文件
+
+| 路径 | 责任 | 约束 |
+|---|---|---|
+| engine/item/context.py、tests/engine/item/planner.py | T13 | 原正文术语与上下文规划模块改名及兼容测试，单词且≤1000行 |
+| engine/item/request.py、tests/engine/item/request.py | T13 | 原子正文的最小模型请求投影及反例，单词且≤1000行 |
+| engine/item/packing.py、tests/engine/item/packing.py | T14 | 完整原子项的顺序预算合批及反例，单词且≤1000行 |
+| docs/packing.md | T13/T14 | 本批次接口、边界与后续接线说明，单词且≤1000行 |

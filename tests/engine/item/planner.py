@@ -3,15 +3,15 @@ from __future__ import annotations
 import regex
 
 from engine.epub.derived_bindings import resolve_derived_navigation
-from engine.item.extractor import extract_document
-from engine.item.inline import parse_projection
-from engine.item.unit_planner import (
+from engine.item.context import (
     build_context,
     build_context_index,
     initial_derived_navigation,
     plan_unit,
     select_terms,
 )
+from engine.item.extractor import extract_document
+from engine.item.inline import parse_projection
 from engine.schemas.contracts import FrozenTerm, GlossarySnapshot, TermScope, canonical_hash
 
 

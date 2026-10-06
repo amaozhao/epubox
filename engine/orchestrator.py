@@ -27,6 +27,7 @@ from engine.agents.terms import validate_review_response
 from engine.core.quality import find_degenerate_translation
 from engine.core.tokens import count_tokens
 from engine.epub.assembly import derive_navigation_projection
+from engine.item.context import build_context, build_context_index, plan_unit
 from engine.item.inline import (
     Event,
     ProjectionError,
@@ -42,7 +43,6 @@ from engine.item.planner import (
     recommended_output_tokens,
     source_token_count,
 )
-from engine.item.unit_planner import build_context, build_context_index, plan_unit
 from engine.schemas.contracts import (
     Attempt,
     DocumentPlan,

@@ -19,7 +19,7 @@ def test_all_baseline_files_have_an_owner_and_current_stage_files_conform() -> N
     assert len({row[0] for row in rows}) == len(rows)
     for old, destination, _, owner, state in rows:
         assert owner in {f"T{number:02}" for number in range(21)}, old
-        if owner not in {f"T{number:02}" for number in range(13)}:
+        if owner not in {f"T{number:02}" for number in range(15)}:
             continue
         assert state != "待实施", old
         path = ROOT / destination.split("；", 1)[0]
@@ -76,6 +76,12 @@ def test_current_stage_new_files_and_documents_conform() -> None:
         ROOT / "tests/engine/services/terms/resolution.py",
         ROOT / "tests/engine/services/terms/audit.py",
         ROOT / "tests/engine/agents/budget.py",
+        ROOT / "engine/item/context.py",
+        ROOT / "engine/item/request.py",
+        ROOT / "engine/item/packing.py",
+        ROOT / "tests/engine/item/planner.py",
+        ROOT / "tests/engine/item/request.py",
+        ROOT / "tests/engine/item/packing.py",
         *sorted((ROOT / "engine/schemas").glob("*.py")),
     ]
     for path in files:

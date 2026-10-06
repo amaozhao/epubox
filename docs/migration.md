@@ -6,7 +6,7 @@
 
 ## 1. 本轮范围与代码基线
 
-本文最初只形成迁移清单；当前 feature/preflight 已完成 T00—T12 的选择性迁移和验证。T13—T20、生产接线、真实模型请求及最终 EPUB 发布仍不属于已完成范围。
+本文最初只形成迁移清单；当前 feature/preflight 已实现 T00—T14 的选择性迁移、原子正文请求投影和预算合批。T15—T20、生产接线、真实模型请求及最终 EPUB 发布仍不属于已完成范围。
 
 本次核查的提交：
 
@@ -198,7 +198,7 @@ keep_source 未提供 target 时，默认使用 source。未知字段、错误�
 - 每次派发前保存请求清单、预留 attempt，完成后保存响应和实际 usage。
 - 已预留次数与实际发出的 HTTP 次数分开统计。
 - 单项异常与其他项隔离；截断批次可以缩小后重试。
-- 使用已有响应回放，避免“模型已经返回，但状态未写完”导致再次付费。
+- 使用已有响应回放，避免“模型已经返回，但状态未写完”导致重复请求。
 - 限额或模型服务要求暂停时保存原因与状态，保留已完成结果。
 
 当前运行默认/限制：
@@ -224,7 +224,7 @@ batch_item_cap = min(256, max(1, output_tokens // 1300))
 
 当前分支的输入预算 v2 统计完整渲染消息，使用本地 tokenizer 计数，并预留 50% 分词差异和 256 tokens 包装空间；旧算法保留用于历史日志校验。派发同时检查冻结的输入上限、输出预留、模型上下文和 TPM。接口返回的实际输入超出程序限制时，会停止后续派发。派发前估算不等于服务端精确 token 数。
 
-T08 的通过记录是所有新术语派发的前置条件。执行器在真正预留 HTTP attempt 前重新核对源快照、准备记录、原子清单、映射、模型和预算身份；缺失或不匹配时暂停且不发请求。已保存的模型响应仍先在本地回放，不因凭据暂时缺失而重复付费。
+T08 的通过记录是所有新术语派发的前置条件。执行器在真正预留 HTTP attempt 前重新核对源快照、准备记录、原子清单、映射、模型和预算身份；缺失或不匹配时暂停且不发请求。已保存的模型响应仍先在本地回放，不因凭据暂时缺失而重复请求。
 
 请求清单、attempt、原始响应、提取记录、候选池和冻结词表仍分别保存在 JSON 文件中。reserved 表示已占用额度，sent/unknown/succeeded/failed 表示实际进入过网络边界的状态，两类计数不能互相替代。日志索引和源视图在进程内增量缓存，恢复时以落盘 JSON 为权威来源。
 
@@ -303,7 +303,7 @@ closed_with_gaps 当前可以形成带警告的词表并继续准备。这不能
 
 ## 12. P4：当前的翻译前计划，以及不能原样移植的部分
 
-依据：[preparation_pipeline.py](../engine/services/preparation_pipeline.py) 的 _advance() 后半段；[engine/item/unit_planner.py](../engine/item/unit_planner.py) 的 select_terms()/plan_unit()/initial_derived_navigation()。
+依据：[preparation_pipeline.py](../engine/services/preparation_pipeline.py) 的 _advance() 后半段；兼容路径位于 [context.py](../engine/item/context.py) 的 select_terms()/plan_unit()/initial_derived_navigation()；新原子请求接口位于 [request.py](../engine/item/request.py) 和 [packing.py](../engine/item/packing.py)。
 
 当前 P4 会：
 
@@ -321,10 +321,21 @@ closed_with_gaps 当前可以形成带警告的词表并继续准备。这不能
 
 - 用新原子 chunk 方案替换原先固定 1200-token 源片段规划。
 - p/table/em/i/ul/ol 整体不可拆，不得沿用旧拆分后再试图补回标签。
-- 在付费术语处理前，先做不依赖词表的原子大小与不可拆约束预检；词表冻结后再做完整请求预算检查。
+- 在术语模型请求前，先做不依赖词表的原子大小与不可拆约束预检；词表冻结后再做完整请求预算检查。
 - 正文模型请求只带相关词条和最多最近 1–2 个上下文片段，不复制全书词表、完整哈希和每项重复背景。
 - 术语作用域与证据 ID 必须和新结构映射一致；旧 Unit ID 不能未经转换直接写入新计划。
 - 对旧 workflow 提供稳定、精简的准备结果，不强迫它接收当前新执行器的全部状态对象。
+
+T13/T14 已完成可单独调用的纯规划接口：
+
+- `SourceIndex` 从原子清单建立受验证的文档、内容通道与阅读顺序索引。
+- `build_payload(stage, items, glossary, index, ...)` 构造完整候选载荷；整批共享最近最多两个前文，各自最多 400 字符，排除全部当前成员，不发送 XPath、源哈希、祖先结构或逐项重复背景。
+- 术语只选择当前目标或可见前文实际相关项，完整保留模式、大小写策略、别名和备注，并区分 target/context 角色。
+- review 必须读取调用方传入的当前已保存目标和 revision；它不会猜测初译内容。
+- `pack_requests(...)` 按资源、内容通道、原子相邻性及 S/I/R/M 预算顺序贪心合批，没有 8 项或 1200-token 隐藏上限，也不切开任何原子项。
+- 阶段已完成 ID 由调用方从断点传入；纯函数只返回 batches、boundaries、blocked 和 skipped，不写入或修改断点。单个 review 超限时，已保存初译仍由调用方保留。
+
+这些接口尚未接入生产 P1—P4、正文 workflow 或 CLI；接线分别属于 T15、T16 和 T19。当前旧 P4 继续服务既有格式，不能把独立规划测试解释为整本书已经使用新路径。
 
 ## 13. 准备结果的最小交接接口
 
@@ -341,7 +352,7 @@ freeze_id、必要版本与哈希
 
 workflow 使用这份结果继续 translate → proofread → apply_corrections → 保存。模型只接收本批实际需要的信息，完整身份与证据保存在本地。
 
-对于已有已付费结果，只能在源身份、证据、作用域和配置检查一致时复用。改解析器或改原子归属后，需要明确适配；不能承诺旧 v2.5 JSON 自动兼容，也不能清空原资料后直接重跑。
+对于已有已保存结果，只能在源身份、证据、作用域和配置检查一致时复用。改解析器或改原子归属后，需要明确适配；不能承诺旧 v2.5 JSON 自动兼容，也不能清空原资料后直接重跑。
 
 ## 14. 当前落盘文件
 
@@ -437,4 +448,4 @@ workflow 使用这份结果继续 translate → proofread → apply_corrections 
 - [resolution.py](../tests/engine/services/terms/resolution.py)
 - [freeze.py](../tests/engine/services/terms/freeze.py)
 
-本文同时保留最初盘点和当前迁移边界。T08/T11/T12 的已实现合同见 [terminology.md](terminology.md)；生产接线、正文 workflow 和整本书真实验收仍按 T15—T20 继续，不能由术语阶段测试替代。
+本文同时保留最初盘点和当前迁移边界。T08/T11/T12 的已实现合同见 [terminology.md](terminology.md)，T13/T14 的独立正文请求合同见 [packing.md](packing.md)；生产接线、正文 workflow 和整本书真实验收仍按 T15—T20 继续，不能由独立规划测试替代。

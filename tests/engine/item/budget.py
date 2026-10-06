@@ -233,3 +233,40 @@ def test_measured_budget_round_trips_into_the_frozen_batch_contract() -> None:
     data["manifest"]["wire_hash"] = measured.wire_hash
     batch = RequestBatch.model_validate(data)
     assert parse_contract(canonical_json_bytes(batch), RequestBatch, BATCH_FORMAT) == batch
+
+
+def test_review_output_reserves_the_actual_request_id_and_revision_envelope() -> None:
+    import json
+
+    import tiktoken
+
+    wire: dict[str, object] = dict(item("Hello.", target="你好。"))
+    wire["base_revision"] = 987_654_321
+    request = payload("review", (wire,))
+    request["request_id"] = "request-" + "abcdef" * 150
+    result = measure_budget(stage="review", payload=request, limits=limits())
+    envelope = {
+        "protocol": "epubox-review-2",
+        "request_id": request["request_id"],
+        "items": [
+            {
+                "item_id": "item-1",
+                "base_revision": wire["base_revision"],
+                "decision": "replace",
+                "checks": {
+                    "accuracy": "pass",
+                    "fluency": "pass",
+                    "terminology": "not_applicable",
+                    "bindings": "not_applicable",
+                    "script": "pass",
+                },
+                "issues": [],
+                "target": "",
+            }
+        ],
+    }
+    tokenizer = tiktoken.get_encoding("cl100k_base")
+    expected = len(tokenizer.encode(json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
+    expected += len(tokenizer.encode("你好。"))
+
+    assert result.output_tokens == expected

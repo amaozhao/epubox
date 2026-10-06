@@ -11,9 +11,9 @@ from engine import cli
 from engine.agents.runtime import PROMPT_VERSION, TERM_PROMPT_VERSION, ProviderError
 from engine.epub.preparation import PreparationConfig
 from engine.epub.validation import EpubCheckResult
+from engine.item.context import PLANNER_VERSION
 from engine.item.inline import Event, events_to_projection, parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS
-from engine.item.unit_planner import PLANNER_VERSION
 from engine.orchestrator import run_translation
 from engine.services.terms.planning import TERM_PLANNER_VERSION
 from tests.engine.epub.factory import make_epub

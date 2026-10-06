@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from engine.item.unit_planner import build_context_index, plan_unit
+from engine.item.context import build_context_index, plan_unit
 from engine.schemas.contracts import (
     Attempt,
     BookPlan,

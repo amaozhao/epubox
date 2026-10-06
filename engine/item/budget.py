@@ -91,6 +91,7 @@ def measure_budget(
         output_items,
         estimate_config,
         stage="translation" if stage == "translate" else "review",
+        request_id=str(payload.get("request_id", "r00000000000000000000000000000000")),
     )
     context_tokens = input_reserve + output_tokens + limits.safety_tokens
     input_limit = min(limits.input_tokens, MAX_MODEL_INPUT_TOKENS)

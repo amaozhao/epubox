@@ -132,7 +132,10 @@ def merge_segments(unit: Unit, plan: CutPlan, targets: Mapping[str, str] | Seque
 
 
 def batch_request(
-    items: Sequence[Any], config: PlannerConfig, *, stage: Literal["translation", "review"] = "translation"
+    items: Sequence[Any],
+    config: PlannerConfig,
+    *,
+    stage: Literal["translation", "review"] = "translation",
 ) -> tuple[tuple[Any, ...], ...]:
     """Greedily shrink transport batches while preserving the stable item order."""
     batches: list[tuple[Any, ...]] = []
@@ -475,7 +478,10 @@ def _inside_nav(document: DocumentPlan, unit: Unit, nav_paths: Sequence[tuple[in
 
 
 def estimate_request_tokens(
-    items: Sequence[Any], config: PlannerConfig, *, stage: Literal["translation", "review"] = "translation"
+    items: Sequence[Any],
+    config: PlannerConfig,
+    *,
+    stage: Literal["translation", "review"] = "translation",
 ) -> tuple[int, int]:
     """Return conservative input and output reservations for an actual request shape."""
     payload = _request_payload(items, stage)
@@ -501,10 +507,13 @@ def estimate_request_tokens(
 
 
 def recommended_output_tokens(
-    items: Sequence[Any], config: PlannerConfig, *, stage: Literal["translation", "review"] = "translation"
+    items: Sequence[Any],
+    config: PlannerConfig,
+    *,
+    stage: Literal["translation", "review"] = "translation",
+    request_id: str = "r00000000000000000000000000000000",
 ) -> int:
     """Return the per-request provider output cap used by planning and runtime."""
-    request_id = "r00000000000000000000000000000000"
     if stage == "translation":
         response = {
             "protocol": "epubox-text-1",
@@ -520,7 +529,7 @@ def recommended_output_tokens(
         "items": [
             {
                 "item_id": _item_id(item),
-                "base_revision": 0,
+                "base_revision": _field(item, "base_revision", default=0),
                 "decision": "replace",
                 "checks": {
                     "accuracy": "pass",

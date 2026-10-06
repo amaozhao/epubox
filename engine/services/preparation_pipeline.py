@@ -15,8 +15,8 @@ from engine.epub.preparation import (
     _frozen_translation_config,
     prepare_book,
 )
+from engine.item.context import build_context_index, initial_derived_navigation, plan_unit
 from engine.item.planner import PlanningError
-from engine.item.unit_planner import build_context_index, initial_derived_navigation, plan_unit
 from engine.schemas.contracts import (
     BookPlan,
     DocumentPlan,

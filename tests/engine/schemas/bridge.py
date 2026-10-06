@@ -15,6 +15,7 @@ from engine.schemas.bridge import (
     RequestBatch,
     SourceLocation,
     SourceMap,
+    batch_item_hash,
 )
 from engine.schemas.budget import BudgetIdentity, BudgetResult
 from engine.schemas.contracts import (
@@ -42,9 +43,10 @@ def atom() -> AtomicItem:
 
 def batch_data(stage: str = "translate", *, source_limit: int = 2000) -> dict:
     member = atom()
-    wire_item = {"item_id": member.item_id, "source": member.source_projection}
+    wire_item: dict[str, object] = {"item_id": member.item_id, "source": member.source_projection}
     if stage == "review":
         wire_item["target"] = "译文"
+        wire_item["base_revision"] = 0
     payload = {
         "protocol": "epubox-text-1" if stage == "translate" else "epubox-review-2",
         "request_id": "r1",
@@ -91,7 +93,7 @@ def batch_data(stage: str = "translate", *, source_limit: int = 2000) -> dict:
             "owner_kind": "translation_item",
             "owner_id": "i1",
             "item_ids": ("i1",),
-            "input_hashes": {"i1": "input"},
+            "input_hashes": {"i1": batch_item_hash(member, "freeze", wire_item, canonical_hash(payload["context"]))},
             "wire_hash": wire_hash(budget.stage, payload, budget.output_tokens),
             "record_versions": {"u1": 0},
             "item_unit_ids": {"i1": ("u1",)},
@@ -101,8 +103,8 @@ def batch_data(stage: str = "translate", *, source_limit: int = 2000) -> dict:
             "glossary_file_sha256": "glossary-file",
             "freeze_id": "freeze",
             "term_ids_by_item": {"i1": ()},
-            "terms_hashes": {"i1": "terms"},
-            "context_hashes": {"i1": "context"},
+            "terms_hashes": {"i1": canonical_hash([])},
+            "context_hashes": {"i1": canonical_hash(payload["context"])},
         },
     }
     if stage == "review":
