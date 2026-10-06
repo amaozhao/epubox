@@ -28,6 +28,7 @@ from engine.schemas.contracts import (
     TermExtractionRecord,
     UnitRecord,
     canonical_hash,
+    strict_json_loads,
 )
 from engine.schemas.ready import AtomicPreparedInput
 from engine.services.atomic import IdentityMismatch
@@ -55,12 +56,13 @@ class PreparationPipelineResult:
 
 @dataclass(frozen=True)
 class PreparationProgress:
-    phase: Literal["preflight", "terms", "resolution", "p4", "ready"]
+    phase: Literal["source_check", "preflight", "terms", "resolution", "p4", "ready"]
     planned: int
     succeeded: int
     failed: int
     pending: int
     http_attempts: int
+    notice: str | None = None
 
 
 type ProgressCallback = Callable[[PreparationProgress], None]
@@ -80,6 +82,29 @@ async def prepare_translation(
 ) -> PreparationPipelineResult:
     """Create P1 if needed, then advance the durable run through P4."""
     store, preparation, preparation_hash = _p1(source, work_root, config, checker)
+    if progress is not None and (store.root / "report.json").is_file():
+        try:
+            report = strict_json_loads((store.root / "report.json").read_bytes())
+        except ValueError:
+            report = None
+        diagnostic = report.get("source_validation") if isinstance(report, dict) else None
+        if isinstance(diagnostic, dict) and diagnostic.get("source_hash") == preparation.source_hash:
+            errors, fatals, warnings = diagnostic.get("errors"), diagnostic.get("fatals"), diagnostic.get("warnings")
+            if isinstance(errors, list) and isinstance(fatals, list) and isinstance(warnings, list):
+                progress(
+                    PreparationProgress(
+                        "source_check",
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        notice=(
+                            f"原书 EPUBCheck：{len(errors)} 个 ERROR、{len(fatals)} 个 FATAL、{len(warnings)} 个 WARNING；"
+                            f"已记录为原书问题，继续翻译。详情：{store.root / 'report.json'}"
+                        ),
+                    )
+                )
     return await _advance(
         store,
         preparation,

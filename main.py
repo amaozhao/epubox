@@ -3,6 +3,7 @@
 # Typer declares arguments and options with callable defaults.
 # ruff: noqa: B008
 
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -139,6 +140,15 @@ def _print_result(result: RunOutcome) -> None:
         typer.echo(f"已接受：{result.accepted_units}/{result.required_units}；累计HTTP：{result.http_attempts}")
     if result.status == "completed":
         typer.echo(f"输出：{result.output_path}")
+        if result.report_path:
+            report = json.loads(result.report_path.read_text())
+            verification = report.get("publication_verification") or {}
+            baseline = verification.get("baseline")
+            if isinstance(baseline, dict) and baseline.get("inherited_errors"):
+                typer.echo(
+                    f"成品保留原书 {baseline['inherited_errors']} 个 EPUBCheck 问题，未新增问题；"
+                    "EPUBCheck 仍未完全通过。详情见报告。"
+                )
         return
     if result.reason:
         typer.echo(result.reason, err=True)
@@ -151,6 +161,9 @@ def _progress_printer():
     def show(report: dict[str, Any]) -> None:
         nonlocal last
         phase = str(report.get("phase", "running"))
+        if isinstance(report.get("notice"), str):
+            typer.echo(report["notice"])
+            return
         if "request_id" in report:
             values = tuple(
                 report.get(key)

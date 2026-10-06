@@ -213,3 +213,5 @@
 `docs/validation.md` 由 T20 记录已授权测试的原书诊断、测试副本、代码修复、实际请求和恢复证据。提供的小书已完成真实全书出版；大书预检及最终全仓约束验收仍待完成；文档名称为单个单词且≤1000行。
 
 2026-10-07 新增 `engine/services/session.py`、`tests/engine/services/session.py`，负责原书任务定位、身份验证和无参数续传；单词命名且≤1000行。
+
+2026-10-07 新增 `engine/epub/diagnostics.py`、`tests/engine/epub/diagnostics.py`，负责源书及成品规范诊断的稳定位置比较；单词命名且≤1000行。

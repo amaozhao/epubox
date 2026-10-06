@@ -150,3 +150,11 @@ T16 接线同时需给 target/context 术语角色提供版本明确的提示语
 真实最后一项 head title 是资源文件名，不涉及自然语言流畅度；仅严格匹配未变的冻结资源 basename 时允许对应校对检查为 not_applicable，accuracy 仍必需。初译、校对和保存流程保持不变。
 
 最终全量 pytest **707 passed（136.00 秒）**，仅两个已有 BeautifulSoup 文件名提示；Ruff、165 个 Python 文件格式、Pyright（0 errors/0 warnings）、变更文件单词命名/≤1000 行和 diff 检查通过。独立代码审查 **APPROVE（0 issues）**、架构审查 **CLEAR**。真实普通命令已完成793/793项，出版及真实 EPUBCheck 结果见 [validation.md](validation.md)。
+
+## 2026-10-07 EPUBCheck 输入兼容
+
+按用户要求允许可安全解析源书保留已有规范问题；成品逐资源、稳定元素、QName、错误类型和消息核对重复次数，新增问题拒绝。原有引用诊断同样对照源书，资源及结构保护保留。真实输入和原样回填的临时候选验证见 [validation.md](validation.md)，本次不发模型请求。
+
+独立审查发现并修复：保存的 passed 状态不能绕过非零基线；基线格式、源/成品哈希、重复计数、错误内容、检查器及返回码一致；成品换路径时只归一化容器前缀。原书问题已解决的零基线保留快速恢复。warning-only 源诊断同样展示；损坏的派生 report 不阻断准备；旧流程恢复使用显式检查器且不建模型。
+
+源文件停止修改后的最终全量 pytest **735 passed（140.61 秒）**，仅两个已有 BeautifulSoup 文件名提示；Ruff、167 个 Python 文件格式、Pyright（0 errors/0 warnings）、变更文件单词命名/≤1000 行与 diff 检查通过。独立代码审查 **APPROVE（0 issues）**、架构审查 **CLEAR**。目录单 JSON 重构仅记录目标，尚未实施。

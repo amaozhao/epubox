@@ -21,6 +21,14 @@ def test_paused_preparation_report_does_not_invent_book_or_cost(tmp_path: Path) 
     assert report["reader_check"] == "not_run"
 
 
+def test_replaceable_report_with_invalid_display_json_is_regenerated(tmp_path: Path) -> None:
+    store, _ = _prepare(tmp_path)
+    (store.root / "report.json").write_text("{broken")
+    report = json.loads(write_report(store, status="paused", phase="terms").read_text())
+    assert report["status"] == "paused"
+    assert "source_validation" not in report
+
+
 def test_report_exposes_model_input_bounds_and_json_paths(tmp_path: Path) -> None:
     store, preparation = _prepare(tmp_path)
     item = _write_term_plan(store, preparation).items[0]

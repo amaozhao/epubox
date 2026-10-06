@@ -221,18 +221,18 @@ def inspect_epub(
     check_result = checker.check(source)  # type: ignore[attr-defined]
     if not isinstance(check_result, EpubCheckResult):
         raise TypeError("checker.check() must return EpubCheckResult")
-    if check_result.errors or check_result.fatals:
-        issues = [
-            ValidationIssue("source_epubcheck", line, "fatal" if line in check_result.fatals else "error")
-            for line in (*check_result.fatals, *check_result.errors)
-        ]
-        raise EpubValidationError(
-            "source_epubcheck_failed",
-            "Source EPUBCheck reported ERROR/FATAL",
-            issues=issues,
-        )
+    from engine.epub.diagnostics import validate
 
-    warnings = tuple(ValidationIssue("source_epubcheck_warning", line, "warning") for line in check_result.warnings)
+    validate(source, check_result)
+    warnings = tuple(
+        ValidationIssue(code, line, "warning")
+        for code, lines in (
+            ("source_epubcheck_fatal", check_result.fatals),
+            ("source_epubcheck_error", check_result.errors),
+            ("source_epubcheck_warning", check_result.warnings),
+        )
+        for line in lines
+    )
     return PackageInventory(
         source_hash=source_hash,
         epub_version=epub_version,

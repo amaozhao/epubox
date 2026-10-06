@@ -10,7 +10,8 @@ import pytest
 from engine.epub.assembly import assemble_document, derive_navigation_projection
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.epub.publication import publish_book, recover_publication, validate_assembled_document
-from engine.epub.validation import EpubCheckResult, EpubValidationError
+from engine.epub.validation import EpubCheckResult, EpubValidationError, inspect_epub
+from engine.epub.verification import stage_epub, verify_staged_epub
 from engine.item.context import plan_unit
 from engine.schemas.contracts import (
     Attempt,
@@ -30,6 +31,55 @@ class StubChecker:
     def check(self, path: Path) -> EpubCheckResult:
         assert path.is_file()
         return EpubCheckResult(("stub-epubcheck",), 0)
+
+
+def test_package_verification_allows_only_inherited_broken_references(tmp_path: Path) -> None:
+    bad = '<p><a href="absent.xhtml">Inherited</a></p>'
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": bad, "other.xhtml": "<p>Safe</p>"})
+    inventory = inspect_epub(source, "source-hash", checker=StubChecker())
+    staged = tmp_path / "staged.epub"
+    stage_epub(source, staged, {})
+
+    verified = verify_staged_epub(source, staged, inventory, {}, accepted_targets={}, checker=StubChecker())
+
+    assert any(issue.code == "missing_reference" for issue in verified.warnings)
+
+    with zipfile.ZipFile(source) as archive:
+        chapter = archive.read("OEBPS/chapter.xhtml").replace(b' href="absent.xhtml"', b"")
+        other = archive.read("OEBPS/other.xhtml").replace(b"<p>Safe</p>", b'<p><a href="absent.xhtml">Safe</a></p>')
+    replacements = {"OEBPS/chapter.xhtml": chapter, "OEBPS/other.xhtml": other}
+    stage_epub(source, staged, replacements)
+
+    with pytest.raises(EpubValidationError, match="Missing resource"):
+        verify_staged_epub(
+            source,
+            staged,
+            inventory,
+            replacements,
+            accepted_targets={path: {} for path in replacements},
+            checker=StubChecker(),
+        )
+
+
+def test_package_verification_rejects_a_new_broken_reference(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Safe</p>"})
+    inventory = inspect_epub(source, "source-hash", checker=StubChecker())
+    with zipfile.ZipFile(source) as archive:
+        chapter = archive.read("OEBPS/chapter.xhtml").replace(
+            b"<p>Safe</p>", b'<p><a href="absent.xhtml">Safe</a></p>'
+        )
+    staged = tmp_path / "staged.epub"
+    stage_epub(source, staged, {"OEBPS/chapter.xhtml": chapter})
+
+    with pytest.raises(EpubValidationError, match="Missing resource"):
+        verify_staged_epub(
+            source,
+            staged,
+            inventory,
+            {"OEBPS/chapter.xhtml": chapter},
+            accepted_targets={"OEBPS/chapter.xhtml": {}},
+            checker=StubChecker(),
+        )
 
 
 def _prepared(

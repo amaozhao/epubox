@@ -80,3 +80,13 @@ DOM 修复相关测试 22 passed；当时全量测试 **666 passed（128.05 秒�
 最终全量 pytest **707 passed（136.00 秒）**；Ruff、165 个 Python 文件格式、Pyright（0 errors/0 warnings）、变更文件单词命名/≤1000 行和 diff 检查通过。独立代码审查 APPROVE（0 issues）、架构审查 CLEAR。
 
 随后再次执行完全相同的无参数命令，退出码 0，返回同一成品：793/793、累计 HTTP 仍为 425。过程仅本地核验已保存响应和出版证据，没有新增模型请求；成品哈希和原书哈希均保持不变。
+
+## 2026-10-07 新书输入兼容验证
+
+用户反馈 `ai-agents-harnesses-foundations-langchain-langgraph.epub` 在启动后被源 EPUBCheck 拒绝。原书 ZIP 完整、XML 可解析，OPF 声明 EPUB 2.0，而正文包含 EPUB 3 标签和属性；真实检查器报出 2216 条 RSC-005 错误。
+
+修复后，在临时目录执行生产 P1：成功得到 parsed_ready，18 个正文资源、2104 个单元。使用原样回填的临时候选走生产成品验证和真实 EPUBCheck：2216 条原有问题全部匹配，实际 passed=false，没有新增问题。原书 SHA-256 `a6e6367e1bb10109641d640b11f4489c8e949da1a6fd0ebe58940aa93ceb0224` 保持不变；临时目录自动清理。
+
+此次仅验证解析和结构校验路径，没有发模型请求，也没有生成或声称已完成这本书的中文翻译。正式翻译仍使用用户原来的普通命令。
+
+最终全量 pytest **735 passed（140.61 秒）**；Ruff、167 个 Python 文件格式、Pyright（0 errors/0 warnings）、变更文件约束和 diff 检查通过。独立代码审查 APPROVE（0 issues）、架构审查 CLEAR。用户进一步提出目录仅保留解压内容和单 JSON，目标记录在 [publication.md](publication.md)，当前存储布局尚未重构。

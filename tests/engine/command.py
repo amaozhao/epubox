@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -24,6 +25,56 @@ from tests.engine.agents.workflow import prepare_case
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
 from tests.engine.services.store import _prepare
+
+
+def test_source_diagnostics_and_inherited_output_errors_are_visible(capsys, tmp_path):
+    message = "原书 EPUBCheck：1 个 ERROR；已记录为原书问题，继续翻译。"
+    _progress_printer()({"phase": "source_check", "notice": message})
+    assert message in capsys.readouterr().out
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"publication_verification": {"baseline": {"inherited_errors": 1}}}))
+    main_module._print_result(
+        cli.RunOutcome("completed", tmp_path, "publication", output_path=tmp_path / "book-cn.epub", report_path=report)
+    )
+    text = capsys.readouterr().out
+    assert "保留原书 1 个 EPUBCheck 问题" in text
+    assert "未新增问题" in text
+    assert "EPUBCheck 仍未完全通过" in text
+
+
+def test_legacy_completed_baseline_recovery_uses_explicit_checker_without_model(tmp_path, monkeypatch):
+    from engine.epub import verification as verification_module
+
+    work = tmp_path / "work"
+    work.mkdir()
+    source = make_epub(work / "source.epub")
+    (work / "publish.json").write_text("{}")
+    output = tmp_path / "book-cn.epub"
+    plan = SimpleNamespace(
+        unit_ids=("unit",), source_hash=hashlib.sha256(source.read_bytes()).hexdigest(), required_unit_count=1
+    )
+    store = SimpleNamespace(read_bookplan=lambda: plan, read_unit=lambda unit: SimpleNamespace(revision=1))
+    monkeypatch.setattr(cli, "RunStore", lambda root: store)
+    monkeypatch.setattr(cli, "canonical_hash", lambda value: "plan")
+    evidence = {"epubcheck": {"passed": False}, "baseline": {"inherited_errors": 1}}
+    monkeypatch.setattr(
+        cli,
+        "recover_publication",
+        lambda *args, **kwargs: {"target_path": str(output), "target_hash": "output", "verification": evidence},
+    )
+    calls = []
+
+    def verify(snapshot, target, proof, checker):
+        assert snapshot == source and target == output and proof is evidence
+        assert checker.command == ("explicit-checker",)
+        calls.append(True)
+
+    monkeypatch.setattr(verification_module, "verify_baseline", verify)
+    monkeypatch.setattr(cli, "build_run_model", lambda *args, **kwargs: pytest.fail("model constructed"))
+    outcome = cli.RunOutcome("completed", work, "publication", output_path=output)
+    monkeypatch.setattr(cli, "_completed_outcome", lambda *args: outcome)
+    assert cli._completed_run_outcome(work, output, "explicit-checker") is outcome
+    assert calls == [True]
 
 
 def active_case(tmp_path: Path, **translation):
@@ -294,7 +345,7 @@ def test_completed_resume_recovers_before_output_check_or_model_construction(
     preparation = SimpleNamespace(run_id="run", source_hash="a" * 64)
     completed = cli.RunOutcome("completed", work_dir, "publication", output_path=output)
     monkeypatch.setattr(cli, "RunStore", lambda *_args: SimpleNamespace(read_preparation=lambda: preparation))
-    monkeypatch.setattr(cli, "_completed_run_outcome", lambda actual, target: completed)
+    monkeypatch.setattr(cli, "_completed_run_outcome", lambda actual, target, epubcheck=None: completed)
     monkeypatch.setattr(
         cli,
         "build_run_model",

@@ -170,7 +170,7 @@ def translate_book(
 
         if active := find(source, source_hash):
             validate_options(active, config, explicit_options)
-            completed = _completed_run_outcome(active, output)
+            completed = _completed_run_outcome(active, output, epubcheck)
             if completed is not None:
                 return completed
             return resume_book(
@@ -193,7 +193,7 @@ def translate_book(
         ):
             config = replace(config, run_id=run_id)
             resumable_work_dir = work_root / source_hash / run_id
-            completed = _completed_run_outcome(resumable_work_dir, output)
+            completed = _completed_run_outcome(resumable_work_dir, output, epubcheck)
             if completed is not None:
                 return completed
         else:
@@ -504,7 +504,7 @@ def _superseded_empty_term_run(
     )
 
 
-def _completed_run_outcome(work_dir: Path, output: Path) -> RunOutcome | None:
+def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None = None) -> RunOutcome | None:
     publish_path = work_dir / "publish.json"
     if not publish_path.is_file():
         return None
@@ -513,7 +513,7 @@ def _completed_run_outcome(work_dir: Path, output: Path) -> RunOutcome | None:
         from engine.epub.publish import recover_atomic
         from engine.services.ready import read_ready
 
-        published = recover_atomic(store, output)
+        published = recover_atomic(store, output, checker=checker_for_source(work_dir / "source.epub", epubcheck))
         if published is None:
             return None
         count = read_ready(store).plan.required_unit_count
@@ -527,6 +527,18 @@ def _completed_run_outcome(work_dir: Path, output: Path) -> RunOutcome | None:
     )
     if published is None or Path(str(published["target_path"])).resolve() != output.resolve():
         return None
+    verification = published.get("verification")
+    if isinstance(verification, dict):
+        from engine.epub.verification import verify_baseline
+
+        if (
+            isinstance(verification.get("baseline"), dict)
+            and _sha256_file(work_dir / "source.epub") != plan.source_hash
+        ):
+            raise IdentityMismatch("source snapshot changed after publication")
+        verify_baseline(
+            work_dir / "source.epub", output, verification, checker_for_source(work_dir / "source.epub", epubcheck)
+        )
     return _completed_outcome(work_dir, output, plan.required_unit_count, str(published["target_hash"]))
 
 
@@ -574,7 +586,7 @@ def resume_book(
         from engine.epub.publish import validate_atomic_output
 
         validate_atomic_output(store, output)
-    completed = _completed_run_outcome(work_dir, output)
+    completed = _completed_run_outcome(work_dir, output, epubcheck)
     if completed is not None:
         return completed
     source = work_dir / preparation.source_path
@@ -922,6 +934,7 @@ def _preparation_progress(progress: ProgressCallback | None) -> Callable[[Prepar
                 "failed": event.failed,
                 "pending": event.pending,
                 "http_attempts": event.http_attempts,
+                "notice": event.notice,
             }
         )
 

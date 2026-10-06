@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Literal
 
 from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS
-from engine.schemas.contracts import JsonValue, UnitRecord, Usage, canonical_hash, canonical_json_bytes
+from engine.schemas.contracts import (
+    JsonValue,
+    UnitRecord,
+    Usage,
+    canonical_hash,
+    canonical_json_bytes,
+    strict_json_loads,
+)
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.store import RunStore
 
@@ -203,6 +210,19 @@ def write_report(
         "coherence_by_document": checks,
     }
     path = store.root / "report.json"
+    if path.is_file():
+        try:
+            previous = strict_json_loads(path.read_bytes())
+        except ValueError:
+            previous = None
+        diagnostic = previous.get("source_validation") if isinstance(previous, dict) else None
+        if isinstance(diagnostic, dict) and diagnostic.get("source_hash") == preparation.source_hash:
+            report["source_validation"] = diagnostic
+    publish_path = store.root / "publish.json"
+    if publish_path.is_file():
+        publication = strict_json_loads(publish_path.read_bytes())
+        if isinstance(publication, dict) and publication.get("target_hash") == output_sha256:
+            report["publication_verification"] = publication.get("verification")
     store._base.atomic_write_bytes(path, canonical_json_bytes(report))
     return path
 

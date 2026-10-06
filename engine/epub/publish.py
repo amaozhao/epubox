@@ -18,6 +18,7 @@ from engine.epub.verification import (
     publish_verified,
     recover_publication,
     stage_epub,
+    verify_baseline,
     verify_staged_epub,
 )
 from engine.schemas.contracts import PreparationPlan, canonical_hash, strict_json_loads
@@ -43,7 +44,7 @@ def publish_atomic(
     with store.lock():
         validate_atomic_output(store, output_path)
         session, targets = _targets(store)
-        recovered = _recover(store, output_path, session.prepared.plan, targets)
+        recovered = _recover(store, output_path, session.prepared.plan, targets, checker=checker)
         if recovered is not None:
             return recovered
         snapshot = store.root / "source.epub"
@@ -100,7 +101,7 @@ def publish_atomic(
     }
 
 
-def recover_atomic(store: RunStore, output_path: Path) -> dict[str, object] | None:
+def recover_atomic(store: RunStore, output_path: Path, checker: object | None = None) -> dict[str, object] | None:
     """Recover one already-verified atomic publication for the current results."""
     if not isinstance(store, RunStore):
         raise TypeError("atomic publication requires RunStore")
@@ -108,7 +109,7 @@ def recover_atomic(store: RunStore, output_path: Path) -> dict[str, object] | No
     with store.lock():
         validate_atomic_output(store, output_path)
         session, targets = _targets(store)
-        return _recover(store, output_path, session.prepared.plan, targets)
+        return _recover(store, output_path, session.prepared.plan, targets, checker=checker)
 
 
 def validate_atomic_output(store: RunStore, output_path: Path) -> None:
@@ -118,7 +119,7 @@ def validate_atomic_output(store: RunStore, output_path: Path) -> None:
     _reject_output(Path(output_path), store.root, store.read_preparation())
 
 
-def _recover(store, output_path, plan, targets) -> dict[str, object] | None:
+def _recover(store, output_path, plan, targets, *, checker: object | None = None) -> dict[str, object] | None:
     intent = recover_publication(
         store.root / "publish.json",
         plan_fingerprint=canonical_hash(plan),
@@ -134,9 +135,12 @@ def _recover(store, output_path, plan, targets) -> dict[str, object] | None:
         or not isinstance(verification, dict)
         or verification.get("output_hash") != target_hash
         or not isinstance(epubcheck, dict)
-        or epubcheck.get("passed") is not True
     ):
         raise EpubValidationError("invalid_publish_intent", "Atomic publication evidence is incomplete")
+    snapshot = store.root / "source.epub"
+    if "baseline" in verification and file_hash(snapshot) != plan.source_hash:
+        raise EpubValidationError("source_changed", "Source snapshot changed after publication")
+    verify_baseline(snapshot, output_path, verification, checker)
     return {"path": str(output_path), "sha256": target_hash, "verification": verification, "publish": intent}
 
 

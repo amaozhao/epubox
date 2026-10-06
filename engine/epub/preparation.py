@@ -21,7 +21,7 @@ from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.atoms import extract_resource
 from engine.item.extractor import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
 from engine.item.structure import select_primary_title
-from engine.schemas.contracts import JsonValue, PreparationPlan
+from engine.schemas.contracts import JsonValue, PreparationPlan, canonical_json_bytes
 from engine.services.atomic import AtomicStore, IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.terms.inputs import load_atomic_terms, load_user_terms
@@ -90,6 +90,13 @@ def prepare_book(
     store = RunStore(work_dir)
     with store.lock(blocking=False):
         inventory = inspect_epub(snapshot, source_hash, checker=checker, limits=config.zip_limits)
+        if inventory.epubcheck is not None and (not inventory.epubcheck.passed or inventory.epubcheck.warnings):
+            store._base.atomic_write_bytes(
+                work_dir / "report.json",
+                canonical_json_bytes(
+                    {"source_validation": {"source_hash": source_hash, **inventory.epubcheck.to_dict()}}
+                ),
+            )
         documents = []
         atomic = _atomic_config(config)
         with zipfile.ZipFile(snapshot) as archive:
