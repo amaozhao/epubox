@@ -381,7 +381,7 @@ class BodyJournal:
                 for item_id in item_ids
                 if self._records[item_id].status == ItemStatus.NEEDS_ATTENTION
                 or unknown
-                and self._records[item_id].status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
+                and self._records[item_id].status in {ItemStatus.PENDING, ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
             )
             for record in candidates:
                 if record.target_projection is not None:

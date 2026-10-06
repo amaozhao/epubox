@@ -346,6 +346,54 @@ def test_dispatched_attempt_without_a_response_pauses_resume_without_duplicate_t
     assert before["body_http_attempts"] == after["body_http_attempts"] == 1
 
 
+def test_explicit_retry_reopens_all_pending_members_of_a_shared_unknown_translation(tmp_path) -> None:
+    case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p><p>Third.</p>", ("First.", "Second.", "Third."))
+    journal = BodyJournal(case.session.store, case.session)
+    calls: list[str] = []
+
+    async def unknown(kind, _payload):
+        calls.append(kind)
+        raise OSError("provider outcome unknown")
+
+    runtime = journal.runtime(transport=unknown)
+
+    async def no_sleep(_seconds):
+        return None
+
+    runtime._sleep = no_sleep
+    manifest = case.batch.manifest.model_dump(mode="python") | {"output_tokens": case.batch.budget.output_tokens}
+    with pytest.raises(RuntimePaused, match="unknown provider outcome"):
+        asyncio.run(runtime.invoke("translate", case.batch.payload, manifest))
+
+    units = tuple(dict.fromkeys(item.unit_id for item in case.batch.items))
+    assert set(journal.validate_retry_units(units)) == set(case.batch.manifest.item_ids)
+    assert set(journal.retry_units(units)) == set(case.batch.manifest.item_ids)
+    assert journal.progress_snapshot()["body_http_attempts"] == 1
+
+    async def valid(kind, payload):
+        calls.append(kind)
+        return _answer(kind, payload)
+
+    completed = asyncio.run(
+        run_workflow(
+            journal.session.prepared,
+            case.batch,
+            journal.session.index,
+            journal.runtime(transport=valid),
+            session=journal.session,
+            save=journal.save,
+            records=journal.records(case.batch.manifest.item_ids),
+        )
+    )
+    assert completed.status == "completed" and calls == ["translate", "translate", "review"]
+    translation_requests = [request for request in journal._requests.values() if request.stage == "translate"]
+    assert len(translation_requests) == 2
+    assert sorted(attempt.state for request in translation_requests for attempt in request.attempts) == [
+        "failed",
+        "succeeded",
+    ]
+
+
 def test_authorized_body_quota_addition_survives_restart_without_resetting_attempts(tmp_path) -> None:
     case = _limited_case(tmp_path)
     journal = BodyJournal(case.session.store, case.session)
