@@ -7,7 +7,7 @@ adapter are implemented by their owning tasks; no new runner lives here.
 from __future__ import annotations
 
 from itertools import pairwise
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -270,7 +270,7 @@ class AtomicDocument(FrozenModel):
         return self
 
 
-def batch_item_hash(item: AtomicItem, freeze_id: str, wire_item, context_hash: str) -> str:
+def batch_item_hash(item: FrozenModel, freeze_id: str, wire_item, context_hash: str) -> str:
     return canonical_hash({"atom": item, "freeze": freeze_id, "wire": wire_item, "context": context_hash})
 
 
@@ -284,79 +284,95 @@ class RequestBatch(FrozenModel):
 
     @model_validator(mode="after")
     def validate_members(self) -> RequestBatch:
-        if self.manifest.stage not in {"translate", "review"}:
-            raise ValueError("body batches require translate or review stage")
-        if not self.items or tuple(item.item_id for item in self.items) != self.manifest.item_ids:
-            raise ValueError("ordered batch members must match the manifest")
-        if len({item.unit_id for item in self.items}) != len(self.items):
-            raise ValueError("an atomic Unit cannot appear twice in one batch")
-        if len({(item.document_id, item.channel) for item in self.items}) != 1:
-            raise ValueError("batch members must share a document and channel")
-        if any(left.ordinal >= right.ordinal for left, right in pairwise(self.items)):
-            raise ValueError("batch members must follow source reading order")
-        if any(len(fragment) > 400 for fragment in self.context):
-            raise ValueError("each shared context fragment is limited to 400 characters")
-        for item in self.items:
-            if self.manifest.item_unit_ids[item.item_id] != (item.unit_id,):
-                raise ValueError("batch item owner differs from the manifest")
-            if self.manifest.unit_document_ids[item.unit_id] != item.document_id:
-                raise ValueError("batch document owner differs from the manifest")
-        if self.budget.stage != self.manifest.stage or not self.budget.fits:
-            raise ValueError("batch requires a fitting budget for its current stage")
-        payload_hash = wire_hash(self.budget.stage, self.payload, self.budget.output_tokens)
-        if self.budget.wire_hash != payload_hash or self.manifest.wire_hash != payload_hash:
-            raise ValueError("batch budget and manifest must bind the complete payload")
-        if self.payload.get("request_id") != self.manifest.request_id:
-            raise ValueError("payload request identity differs from the manifest")
-        if self.payload.get("context", []) != list(self.context):
-            raise ValueError("payload must contain the batch's shared context exactly once")
-        wire_items = self.payload.get("items")
-        if not isinstance(wire_items, list) or len(wire_items) != len(self.items):
-            raise ValueError("payload must contain exactly the ordered batch members")
-        for item, wire_item in zip(self.items, wire_items, strict=True):
-            if (
-                not isinstance(wire_item, dict)
-                or wire_item.get("item_id") != item.item_id
-                or wire_item.get("source") != item.source_projection
-                or "context" in wire_item
+        return validate_batch_identity(self)
+
+
+def validate_batch_identity(batch: Any, *, allow_pieces: bool = False) -> Any:
+    if batch.manifest.stage not in {"translate", "review"}:
+        raise ValueError("body batches require translate or review stage")
+    if not batch.items or tuple(item.item_id for item in batch.items) != batch.manifest.item_ids:
+        raise ValueError("ordered batch members must match the manifest")
+    if not allow_pieces and len({item.unit_id for item in batch.items}) != len(batch.items):
+        raise ValueError("an atomic Unit cannot appear twice in one batch")
+    if len({(item.document_id, item.channel) for item in batch.items}) != 1:
+        raise ValueError("batch members must share a document and channel")
+    if allow_pieces:
+        for left, right in pairwise(batch.items):
+            if (left.ordinal, left.piece_index) >= (right.ordinal, right.piece_index):
+                raise ValueError("batch members must follow source and piece order")
+            if left.unit_id == right.unit_id and (
+                left.parent_item_id != right.parent_item_id
+                or left.parent_hash != right.parent_hash
+                or left.preflight_hash != right.preflight_hash
+                or left.piece_count != right.piece_count
+                or right.piece_index != left.piece_index + 1
             ):
-                raise ValueError("payload item differs from its whole source atom")
-            terms = wire_item.get("terms", [])
-            if not isinstance(terms, list):
+                raise ValueError("repeated Unit members require consecutive verified siblings")
+    elif any(left.ordinal >= right.ordinal for left, right in pairwise(batch.items)):
+        raise ValueError("batch members must follow source reading order")
+    if any(len(fragment) > 400 for fragment in batch.context):
+        raise ValueError("each shared context fragment is limited to 400 characters")
+    for item in batch.items:
+        if batch.manifest.item_unit_ids[item.item_id] != (item.unit_id,):
+            raise ValueError("batch item owner differs from the manifest")
+        if batch.manifest.unit_document_ids[item.unit_id] != item.document_id:
+            raise ValueError("batch document owner differs from the manifest")
+    if batch.budget.stage != batch.manifest.stage or not batch.budget.fits:
+        raise ValueError("batch requires a fitting budget for its current stage")
+    payload_hash = wire_hash(batch.budget.stage, batch.payload, batch.budget.output_tokens)
+    if batch.budget.wire_hash != payload_hash or batch.manifest.wire_hash != payload_hash:
+        raise ValueError("batch budget and manifest must bind the complete payload")
+    if batch.payload.get("request_id") != batch.manifest.request_id:
+        raise ValueError("payload request identity differs from the manifest")
+    if batch.payload.get("context", []) != list(batch.context):
+        raise ValueError("payload must contain the batch's shared context exactly once")
+    wire_items = batch.payload.get("items")
+    if not isinstance(wire_items, list) or len(wire_items) != len(batch.items):
+        raise ValueError("payload must contain exactly the ordered batch members")
+    for item, wire_item in zip(batch.items, wire_items, strict=True):
+        if (
+            not isinstance(wire_item, dict)
+            or wire_item.get("item_id") != item.item_id
+            or wire_item.get("source") != item.source_projection
+            or "context" in wire_item
+        ):
+            raise ValueError("payload item differs from its whole source atom")
+        terms = wire_item.get("terms", [])
+        if not isinstance(terms, list):
+            raise ValueError("payload terms must identify every selected rule")  # noqa: TRY004 - Pydantic wraps ValueError.
+        selected: list[str] = []
+        for term in terms:
+            if not isinstance(term, dict):
                 raise ValueError("payload terms must identify every selected rule")  # noqa: TRY004 - Pydantic wraps ValueError.
-            selected: list[str] = []
-            for term in terms:
-                if not isinstance(term, dict):
-                    raise ValueError("payload terms must identify every selected rule")  # noqa: TRY004 - Pydantic wraps ValueError.
-                term_id = term.get("term_id")
-                if not isinstance(term_id, str) or not term_id:
-                    raise ValueError("payload terms must identify every selected rule")
-                selected.append(term_id)
-            term_ids = tuple(sorted(selected))
-            if len(set(term_ids)) != len(term_ids) or self.manifest.term_ids_by_item[item.item_id] != term_ids:
-                raise ValueError("manifest term IDs differ from payload terms")
-            context_hash = canonical_hash(self.payload.get("context", []))
-            if self.manifest.terms_hashes[item.item_id] != canonical_hash(terms):
-                raise ValueError("manifest terms hash differs from payload terms")
-            if self.manifest.context_hashes[item.item_id] != context_hash:
-                raise ValueError("manifest context hash differs from shared payload context")
-            if self.manifest.input_hashes[item.item_id] != batch_item_hash(
-                item, self.manifest.freeze_id or "", wire_item, context_hash
-            ):
-                raise ValueError("manifest input hash differs from its source atom and payload")
-            if self.manifest.stage == "review" and (
-                type(wire_item.get("base_revision")) is not int
-                or wire_item["base_revision"] != self.manifest.revisions[item.unit_id]
-            ):
-                raise ValueError("manifest revision differs from the saved review payload")
-            if (
-                self.manifest.stage == "review"
-                and canonical_hash(wire_item.get("target")) != (self.manifest.target_hashes[item.item_id])
-            ):
-                raise ValueError("review payload target differs from its saved target identity")
-        if self.manifest.stage == "review" and self.budget.review_targets != "actual":
-            raise ValueError("a dispatchable review batch requires actual saved targets")
-        return self
+            term_id = term.get("term_id")
+            if not isinstance(term_id, str) or not term_id:
+                raise ValueError("payload terms must identify every selected rule")
+            selected.append(term_id)
+        term_ids = tuple(sorted(selected))
+        if len(set(term_ids)) != len(term_ids) or batch.manifest.term_ids_by_item[item.item_id] != term_ids:
+            raise ValueError("manifest term IDs differ from payload terms")
+        context_hash = canonical_hash(batch.payload.get("context", []))
+        if batch.manifest.terms_hashes[item.item_id] != canonical_hash(terms):
+            raise ValueError("manifest terms hash differs from payload terms")
+        if batch.manifest.context_hashes[item.item_id] != context_hash:
+            raise ValueError("manifest context hash differs from shared payload context")
+        if batch.manifest.input_hashes[item.item_id] != batch_item_hash(
+            item, batch.manifest.freeze_id or "", wire_item, context_hash
+        ):
+            raise ValueError("manifest input hash differs from its source atom and payload")
+        if batch.manifest.stage == "review" and (
+            type(wire_item.get("base_revision")) is not int
+            or wire_item["base_revision"] != batch.manifest.revisions[item.unit_id]
+        ):
+            raise ValueError("manifest revision differs from the saved review payload")
+        if (
+            batch.manifest.stage == "review"
+            and canonical_hash(wire_item.get("target")) != (batch.manifest.target_hashes[item.item_id])
+        ):
+            raise ValueError("review payload target differs from its saved target identity")
+    if batch.manifest.stage == "review" and batch.budget.review_targets != "actual":
+        raise ValueError("a dispatchable review batch requires actual saved targets")
+    return batch
 
 
 class PreflightCheck(FrozenModel):

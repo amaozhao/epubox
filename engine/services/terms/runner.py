@@ -19,7 +19,6 @@ from engine.agents.runtime import (
     wire_hash,
 )
 from engine.agents.terms import validate_terms_response
-from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import (
     Attempt,
     ExtractionItem,
@@ -467,15 +466,10 @@ class TermRunner:
 
     def _require_preflight(self) -> None:
         from engine.services.preflight import require_preflight
+        from engine.services.ready import limits_for
 
         config = self.preparation.translation_config
-        context = _positive_int(config.get("context_tokens"), 32768)
-        limits = BudgetLimits(
-            source_tokens=_positive_int(config.get("max_source_tokens"), 2000),
-            input_tokens=_positive_int(config.get("max_input_tokens"), context),
-            output_tokens=_positive_int(config.get("max_output_tokens"), 4096),
-            context_tokens=context,
-        )
+        limits = limits_for(self.preparation)
         paths = [
             self.store.root / "preparation.json",
             self.store.root / "source.epub",

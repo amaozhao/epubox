@@ -12,7 +12,7 @@ from engine.agents.models import (
     proofreader_fallback_model,
     proofreader_model,
 )
-from engine.agents.streaming_openai_like import StreamingOpenAILike
+from engine.agents.streaming import StreamingOpenAILike
 
 
 class TestStreamingOpenAILike:

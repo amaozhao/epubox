@@ -1,4 +1,4 @@
-"""T00 owns the complete inventory; later task files stay explicitly deferred."""
+"""T00 owns the inventory; implemented task files must satisfy its constraints."""
 
 from pathlib import Path
 
@@ -19,7 +19,7 @@ def test_all_baseline_files_have_an_owner_and_current_stage_files_conform() -> N
     assert len({row[0] for row in rows}) == len(rows)
     for old, destination, _, owner, state in rows:
         assert owner in {f"T{number:02}" for number in range(21)}, old
-        if owner not in {f"T{number:02}" for number in range(15)}:
+        if owner not in {f"T{number:02}" for number in range(17)}:
             continue
         assert state != "待实施", old
         path = ROOT / destination.split("；", 1)[0]
@@ -82,6 +82,22 @@ def test_current_stage_new_files_and_documents_conform() -> None:
         ROOT / "tests/engine/item/planner.py",
         ROOT / "tests/engine/item/request.py",
         ROOT / "tests/engine/item/packing.py",
+        ROOT / "engine/item/members.py",
+        ROOT / "tests/engine/item/members.py",
+        ROOT / "engine/services/preparation.py",
+        ROOT / "engine/services/ready.py",
+        ROOT / "tests/engine/services/preparation.py",
+        ROOT / "tests/engine/services/preparing.py",
+        ROOT / "tests/engine/services/ready.py",
+        ROOT / "engine/agents/streaming.py",
+        ROOT / "engine/agents/workflow.py",
+        ROOT / "tests/engine/agents/models.py",
+        ROOT / "tests/engine/agents/protocol.py",
+        ROOT / "tests/engine/agents/provider.py",
+        ROOT / "tests/engine/agents/runtime.py",
+        ROOT / "tests/engine/agents/workflow.py",
+        *sorted((ROOT / "engine/execution").glob("*.py")),
+        *sorted((ROOT / "tests/engine/execution").glob("*.py")),
         *sorted((ROOT / "engine/schemas").glob("*.py")),
     ]
     for path in files:

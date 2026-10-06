@@ -6,47 +6,15 @@ from pathlib import Path
 
 import pytest
 
-import engine.services.preparation_pipeline as pipeline_module
+import engine.services.preparation as pipeline_module
 from engine.agents.runtime import ProviderError
 from engine.epub.preparation import PreparationConfig
-from engine.schemas.budget import BudgetLimits
-from engine.services.preflight import prepare_preflight
-from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
+from engine.services.preparation import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.store import RunStore
 from engine.services.terms.planning import TERM_PLANNER_VERSION
 from engine.services.terms.runner import TermRunner, TermRunResult
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
-
-
-@pytest.fixture(autouse=True)
-def verified_preflight_for_legacy_pipeline_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
-    """T15 owns real wiring; legacy integration fixtures explicitly prepare T08."""
-    original = pipeline_module._p1
-
-    def verified(*args, **kwargs):
-        store, preparation, digest = original(*args, **kwargs)
-        config = preparation.translation_config
-
-        def configured(name, default):
-            value = config.get(name, default)
-            assert type(value) is int
-            return value
-
-        context = configured("context_tokens", 32768)
-        prepare_preflight(
-            store,
-            limits=BudgetLimits(
-                source_tokens=configured("max_source_tokens", 2000),
-                input_tokens=configured("max_input_tokens", context),
-                output_tokens=configured("max_output_tokens", 4096),
-                context_tokens=context,
-            ),
-            model=str(config.get("model", preparation.extraction_config["model"])),
-        )
-        return store, preparation, digest
-
-    monkeypatch.setattr(pipeline_module, "_p1", verified)
 
 
 def config(*, auto_extract: bool = True, user_terms_path: Path | None = None) -> PreparationConfig:
@@ -94,6 +62,27 @@ def test_disabled_extraction_reaches_ready_only_after_freeze_and_every_unit(tmp_
     assert store.read_glossary().extraction_status == "disabled"
     assert len(list((result.work_dir / "units").glob("*.json"))) == plan.required_unit_count
     assert (result.work_dir / "glossary" / "freeze.json").is_file()
+
+
+def test_completed_legacy_book_does_not_reenter_preflight(tmp_path: Path) -> None:
+    first = asyncio.run(
+        prepare_translation(
+            source_book(tmp_path),
+            tmp_path / "work",
+            config(auto_extract=False),
+            StubChecker(),
+        )
+    )
+    receipt = first.work_dir / "checks" / "preflight.json"
+    receipt.unlink()
+
+    async def forbidden(*_):
+        raise AssertionError("completed legacy preparation must not call a model")
+
+    resumed = asyncio.run(resume_preparation(first.work_dir, StubChecker(), term_transport=forbidden))
+
+    assert resumed.status == "ready" and resumed.bookplan == first.bookplan
+    assert not receipt.exists()
 
 
 def test_p4_builds_one_context_index_for_the_complete_unit_inventory(

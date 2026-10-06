@@ -5,8 +5,9 @@ import hashlib
 from pathlib import Path
 
 from engine.epub.preparation import PreparationConfig
-from engine.services.preparation_pipeline import prepare_translation
+from engine.services.preparation import prepare_translation
 from engine.services.resume_plan import plan_resume
+from engine.services.terms.planning import TERM_PLANNER_VERSION
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
 
@@ -25,7 +26,11 @@ def test_read_only_resume_plan_is_stable_and_sends_no_requests(tmp_path: Path) -
         prepare_translation(
             source,
             tmp_path / "work",
-            PreparationConfig(run_id="plan-preview", auto_extract=False),
+            PreparationConfig(
+                run_id="plan-preview",
+                auto_extract=False,
+                extraction_config={"strategy": TERM_PLANNER_VERSION},
+            ),
             StubChecker(),
         )
     )
@@ -54,7 +59,11 @@ def test_preview_does_not_claim_publication_when_frozen_source_changes(tmp_path:
         prepare_translation(
             source,
             tmp_path / "work",
-            PreparationConfig(run_id="identity-check", auto_extract=False),
+            PreparationConfig(
+                run_id="identity-check",
+                auto_extract=False,
+                extraction_config={"strategy": TERM_PLANNER_VERSION},
+            ),
             StubChecker(),
         )
     )

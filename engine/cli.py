@@ -44,7 +44,7 @@ from engine.schemas.contracts import (
 from engine.services.atomic import AtomicStore, IdentityMismatch, StoreLocked, safe_id
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.coherence import add_http_budget, retry_document_check
-from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
+from engine.services.preparation import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.report import write_report
 from engine.services.store import RunStore
 from engine.services.terms.inputs import load_user_terms

@@ -16,13 +16,16 @@ from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
 from engine.epub.derived_bindings import resolve_derived_navigation
 from engine.epub.validation import EpubChecker, PackageInventory, ZipLimits, inspect_epub
+from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
+from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
+from engine.item.atoms import extract_resource
 from engine.item.extractor import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
 from engine.item.structure import select_primary_title
 from engine.schemas.contracts import JsonValue, PreparationPlan
 from engine.services.atomic import AtomicStore, IdentityMismatch
 from engine.services.store import RunStore
-from engine.services.terms.inputs import load_user_terms
-from engine.services.terms.planning import TERM_PLANNER_VERSION
+from engine.services.terms.inputs import load_atomic_terms, load_user_terms
+from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION, TERM_PLANNER_VERSION
 
 _SAFE_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
@@ -88,6 +91,7 @@ def prepare_book(
     with store.lock(blocking=False):
         inventory = inspect_epub(snapshot, source_hash, checker=checker, limits=config.zip_limits)
         documents = []
+        atomic = _atomic_config(config)
         with zipfile.ZipFile(snapshot) as archive:
             manifest = {item.path: item for item in inventory.manifest}
             styles = {
@@ -100,14 +104,24 @@ def prepare_book(
             for resource_path in (path for path in paths if path):
                 item = manifest.get(resource_path)
                 media_type = item.media_type if item else _container_media_type(resource_path)
-                document = extract_document(
-                    archive.read(resource_path).decode("utf-8"),
-                    resource_path,
-                    source_hash,
-                    media_type=media_type,
-                    config={"book_title": book_title},
-                    styles=styles,
-                )
+                raw = archive.read(resource_path)
+                if atomic:
+                    document = extract_resource(
+                        raw,
+                        resource_path,
+                        source_hash,
+                        media_type=media_type,
+                        config={"book_title": book_title},
+                    ).document
+                else:
+                    document = extract_document(
+                        raw.decode("utf-8"),
+                        resource_path,
+                        source_hash,
+                        media_type=media_type,
+                        config={"book_title": book_title},
+                        styles=styles,
+                    )
                 if document.adapter_version != config.adapter_version:
                     raise ValueError(
                         f"Adapter version mismatch: {document.adapter_version} != {config.adapter_version}"
@@ -118,7 +132,8 @@ def prepare_book(
                     )
                 documents.append(document)
 
-        documents = list(resolve_derived_navigation(documents))
+        if not atomic:
+            documents = list(resolve_derived_navigation(documents))
         document_hashes = {document.document_id: store.write_document(document) for document in documents}
 
         by_resource = {document.resource.path: document for document in documents}
@@ -126,11 +141,14 @@ def prepare_book(
             by_resource[_manifest_path(inventory, item_id)].document_id for item_id in inventory.spine
         )
         unit_documents = {unit.unit_id: document.document_id for document in documents for unit in document.units}
-        terms, terms_hash = load_user_terms(
-            config.user_terms_path,
-            document_ids=document_hashes,
-            unit_ids=unit_documents,
-        )
+        if atomic:
+            terms, terms_hash = load_atomic_terms(config.user_terms_path, documents)
+        else:
+            terms, terms_hash = load_user_terms(
+                config.user_terms_path,
+                document_ids=document_hashes,
+                unit_ids=unit_documents,
+            )
         store.write_user_terms(terms)
         extraction_config = _frozen_extraction_config(config)
         preparation = PreparationPlan(
@@ -206,8 +224,9 @@ def _frozen_extraction_config(config: PreparationConfig) -> dict[str, JsonValue]
         raise ValueError("extraction_config auto_extract conflicts with PreparationConfig")
     extraction["auto_extract"] = config.auto_extract
 
-    strategy = extraction.get("strategy", TERM_PLANNER_VERSION)
-    if strategy != TERM_PLANNER_VERSION:
+    expected_strategy = ATOMIC_TERM_PLANNER_VERSION if _atomic_config(config) else TERM_PLANNER_VERSION
+    strategy = extraction.get("strategy", expected_strategy)
+    if strategy != expected_strategy:
         raise ValueError(f"unsupported terminology extraction strategy: {strategy!r}")
     extraction["strategy"] = strategy
 
@@ -254,11 +273,55 @@ def _frozen_extraction_config(config: PreparationConfig) -> dict[str, JsonValue]
 
 def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue]:
     translation = dict(config.translation_config)
+    if _atomic_config(config):
+        provider = translation.get("provider", "agnes")
+        if provider not in {"agnes", "cr_proxy"}:
+            raise ValueError(f"unsupported translation provider: {provider!r}")
+        default_model = settings.AGNES_MODEL if provider == "agnes" else settings.CR_PROXY_MODEL
+        defaults: dict[str, JsonValue] = {
+            "provider": provider,
+            "model": translation.get("model", default_model),
+            "target_language": translation.get("target_language", "zh-Hans"),
+            "max_source_tokens": settings.EPUB_CHUNK_MAX_TOKENS,
+            "context_tokens": 32_768,
+            "max_output_tokens": 4_096,
+            "prompt_version": "epubox-members-1",
+            "planner_version": "epubox-member-planner-1",
+            "input_budget_version": 2,
+        }
+        defaults["max_input_tokens"] = translation.get("context_tokens", defaults["context_tokens"])
+        for name, value in defaults.items():
+            translation.setdefault(name, value)
+        if translation["target_language"] != "zh-Hans":
+            raise ValueError(f"unsupported target language: {translation['target_language']!r}")
+        for name, expected in {
+            "prompt_version": "epubox-members-1",
+            "planner_version": "epubox-member-planner-1",
+            "input_budget_version": 2,
+        }.items():
+            if translation[name] != expected:
+                raise ValueError(f"unsupported atomic translation {name}: {translation[name]!r}")
+        for name in ("max_source_tokens", "context_tokens", "max_input_tokens", "max_output_tokens"):
+            value = translation[name]
+            if type(value) is not int or value < 1:
+                raise ValueError(f"translation_config {name} must be a positive integer")
+        for name in ("provider", "model", "target_language"):
+            if not isinstance(translation[name], str) or not translation[name]:
+                raise ValueError(f"translation_config {name} must be a non-empty string")
+        return translation
     prompt_version = translation.get("prompt_version", PROMPT_VERSION)
     if prompt_version != PROMPT_VERSION:
         raise ValueError(f"unsupported translation prompt version: {prompt_version!r}")
     translation["prompt_version"] = PROMPT_VERSION
     return translation
+
+
+def _atomic_config(config: PreparationConfig) -> bool:
+    atomic_adapter = config.adapter_version == ATOMIC_ADAPTER_VERSION
+    atomic_extractor = config.extractor_version == ATOMIC_EXTRACTOR_VERSION
+    if atomic_adapter != atomic_extractor:
+        raise ValueError("atomic adapter and extractor versions must be selected together")
+    return atomic_adapter
 
 
 __all__ = ["PreparationConfig", "PreparedBook", "prepare_book"]

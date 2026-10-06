@@ -1,7 +1,7 @@
 from agno.models.openai.like import OpenAILike
 
 from ..core.config import settings
-from .streaming_openai_like import StreamingOpenAILike
+from .streaming import StreamingOpenAILike
 
 
 def build_primary_model(max_completion_tokens: int | None = None):

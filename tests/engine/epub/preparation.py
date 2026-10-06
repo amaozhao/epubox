@@ -8,15 +8,17 @@ from pathlib import Path
 import pytest
 
 import engine.epub.preparation as preparation_module
-import engine.services.preparation_pipeline as pipeline_module
+import engine.services.preparation as pipeline_module
 from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.epub.validation import EpubCheckResult, EpubValidationError
+from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
+from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.extractor import extract_document
 from engine.services.atomic import IdentityMismatch
 from engine.services.store import RunStore
-from engine.services.terms.planning import TERM_PLANNER_VERSION, plan_term_extraction
+from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION, TERM_PLANNER_VERSION, plan_term_extraction
 from tests.engine.epub.factory import make_epub
 
 
@@ -203,6 +205,48 @@ def test_p1_freezes_the_provider_model_id_without_credentials(tmp_path: Path) ->
     assert config["provider"] == "cr_proxy"
     assert config["model"] == settings.CR_PROXY_MODEL
     assert not any("key" in name.casefold() for name in config)
+
+
+def test_atomic_p1_uses_raw_resources_and_freezes_member_budget(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub")
+    terms = tmp_path / "terms.json"
+    terms.write_text(
+        json.dumps([{"source": "resource", "target": "资源", "note": " preserve spacing "}]),
+        encoding="utf-8",
+    )
+    prepared = prepare_book(
+        source,
+        tmp_path / "work",
+        PreparationConfig(
+            run_id="atomic",
+            user_terms_path=terms,
+            adapter_version=ATOMIC_ADAPTER_VERSION,
+            extractor_version=ATOMIC_EXTRACTOR_VERSION,
+            translation_config={"model": "fake"},
+        ),
+        StubChecker(),
+    )
+    store = RunStore(prepared.work_dir)
+    documents = [store.read_document(document_id) for document_id in prepared.preparation.document_hashes]
+
+    assert {document.extractor_version for document in documents} == {ATOMIC_EXTRACTOR_VERSION}
+    assert prepared.preparation.extraction_config["strategy"] == ATOMIC_TERM_PLANNER_VERSION
+    assert prepared.preparation.user_terms[0].note == " preserve spacing "
+    assert prepared.preparation.translation_config == {
+        "model": "fake",
+        "provider": "agnes",
+        "target_language": "zh-Hans",
+        "max_source_tokens": settings.EPUB_CHUNK_MAX_TOKENS,
+        "context_tokens": 32768,
+        "max_input_tokens": 32768,
+        "max_output_tokens": 4096,
+        "prompt_version": "epubox-members-1",
+        "planner_version": "epubox-member-planner-1",
+        "input_budget_version": 2,
+    }
+    assert not any(
+        binding.get("kind") == "derived_navigation" for document in documents for binding in document.derived_bindings
+    )
 
 
 def test_p1_reuse_rejects_changed_user_terms(tmp_path: Path) -> None:

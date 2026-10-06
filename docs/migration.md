@@ -6,7 +6,7 @@
 
 ## 1. 本轮范围与代码基线
 
-本文最初只形成迁移清单；当前 feature/preflight 已实现 T00—T14 的选择性迁移、原子正文请求投影和预算合批。T15—T20、生产接线、真实模型请求及最终 EPUB 发布仍不属于已完成范围。
+本文最初只形成迁移清单；当前 feature/preflight 已实现 T00—T16，包括原子准备、最终 ready 提交和可独立调用的三步正文 workflow。T17—T20 的逐阶段持久化、最终 EPUB 发布、CLI 贯通和全链路验收仍待实施。
 
 本次核查的提交：
 
@@ -19,11 +19,11 @@
 
 重要事实：main 已经包含 P1—P4 准备管线和大部分术语核心功能。后续不能把“迁移前置术语功能”理解为重新实现全部术语模块，也不能把当前分支整批覆盖到 main。
 
-feature/preflight 已从用户指定的 main 基线建立。translate → proofread → apply_corrections 的正文行为仍由后续 T16/T17 负责，不能把术语阶段完成误报为正文 workflow 已接通。
+feature/preflight 已从用户指定的 main 基线建立。translate → proofread → apply_corrections 的原子 workflow 已实施，但其 `save` 回调尚未由 T17 接入持久化，CLI 也未由 T19 切换到完整新链路。
 
 ## 2. 当前翻译前实际执行顺序
 
-入口是 [engine/cli.py](../engine/cli.py) 的 translate_book()；准备阶段由 [preparation_pipeline.py](../engine/services/preparation_pipeline.py) 的 prepare_translation()/resume_preparation() 驱动。
+入口是 [engine/cli.py](../engine/cli.py) 的 translate_book()；准备阶段由 [preparation.py](../engine/services/preparation.py) 的 prepare_translation()/resume_preparation() 驱动。库接口新建任务时默认使用原子 strategy v3；当前 CLI 在 T19 前仍显式选择 strategy v2。
 
 ```text
 读取命令参数、检查源文件和输出位置
@@ -303,9 +303,9 @@ closed_with_gaps 当前可以形成带警告的词表并继续准备。这不能
 
 ## 12. P4：当前的翻译前计划，以及不能原样移植的部分
 
-依据：[preparation_pipeline.py](../engine/services/preparation_pipeline.py) 的 _advance() 后半段；兼容路径位于 [context.py](../engine/item/context.py) 的 select_terms()/plan_unit()/initial_derived_navigation()；新原子请求接口位于 [request.py](../engine/item/request.py) 和 [packing.py](../engine/item/packing.py)。
+依据：[preparation.py](../engine/services/preparation.py) 的 _advance() 与 _advance_atomic()；兼容路径位于 [context.py](../engine/item/context.py) 的 select_terms()/plan_unit()/initial_derived_navigation()；新原子成员与合批接口位于 [members.py](../engine/item/members.py)。
 
-当前 P4 会：
+显式 strategy v2 的兼容 P4 会：
 
 1. 读取冻结词表和文档映射。
 2. 建立上下文索引。
@@ -335,7 +335,7 @@ T13/T14 已完成可单独调用的纯规划接口：
 - `pack_requests(...)` 按资源、内容通道、原子相邻性及 S/I/R/M 预算顺序贪心合批，没有 8 项或 1200-token 隐藏上限，也不切开任何原子项。
 - 阶段已完成 ID 由调用方从断点传入；纯函数只返回 batches、boundaries、blocked 和 skipped，不写入或修改断点。单个 review 超限时，已保存初译仍由调用方保留。
 
-这些接口尚未接入生产 P1—P4、正文 workflow 或 CLI；接线分别属于 T15、T16 和 T19。当前旧 P4 继续服务既有格式，不能把独立规划测试解释为整本书已经使用新路径。
+新库路径已将这些接口接入 P1—P4 和可独立调用的正文 workflow。通过预检的完整原子或安全 piece 被物化为 `RequestMember`，合批结果连同词表、映射和预检身份一起提交为 `AtomicPreparedInput`。旧 P4 只服务显式 strategy v2，旧 `bookplan.json` 不会被重解释为新原子计划。CLI 切换仍属于 T19。
 
 ## 13. 准备结果的最小交接接口
 
@@ -350,7 +350,7 @@ freeze_id、必要版本与哈希
 新 chunk 计划及每块相关术语的查询能力
 ```
 
-workflow 使用这份结果继续 translate → proofread → apply_corrections → 保存。模型只接收本批实际需要的信息，完整身份与证据保存在本地。
+workflow 使用这份结果继续 translate → 保存当前稿 → 基于真实目标重新合批 proofread → apply_corrections。模型只接收本批实际需要的信息，完整身份与证据保存在本地。每项完成初译或校对后都调用调用方的 `save` 回调，持久化实现由 T17 接入。
 
 对于已有已保存结果，只能在源身份、证据、作用域和配置检查一致时复用。改解析器或改原子归属后，需要明确适配；不能承诺旧 v2.5 JSON 自动兼容，也不能清空原资料后直接重跑。
 
@@ -372,8 +372,14 @@ workflow 使用这份结果继续 translate → proofread → apply_corrections 
 | glossary/candidates.json | 候选池、冲突组及核对结果 |
 | glossary/freeze.json | 冻结身份、覆盖信息和快照载荷 |
 | glossary.json | 正文阶段使用的冻结词表 |
-| units/*.json | 当前 P4 生成的单元记录；新 chunk 方案需要适配 |
-| bookplan.json | 当前准备阶段的最终提交标志及索引 |
+| inventories/*.json | 原字节映射、原子项及安全切点 |
+| checks/preflight.json | 源、映射、原子、模型与 token 预算身份 |
+| members/*.json | 完整原子或通过预检的虚拟 piece |
+| batches/*.json | 已验证的 `epubox-batch-2` 初译合批计划 |
+| results/*.json | 每个 member 的来源所有权与初始执行状态 |
+| plans/book.json | Unit/member/batch 完整索引和导航派生关系 |
+| prepared.json | 新原子准备的最后提交标志；依赖回读成功后最后写入 |
+| units/*.json、bookplan.json | 显式 strategy v2 的旧记录和最终标志 |
 
 文件名称并不意味着必须把所有当前数据类型照搬进新分支；需要保留的是对应能力、可恢复性和身份校验。
 
@@ -388,7 +394,7 @@ workflow 使用这份结果继续 translate → proofread → apply_corrections 
 | candidates.py | 本次比较无差异 | 复用验证、用户优先和冲突分组 |
 | freeze.py | 本次比较无差异 | 复用冻结与词频规则 |
 | preparation.py | 当前分支增加阶段进度等改进，也包含翻译配置身份变化 | 选择性迁移前置进度，不盲目覆盖新解析方案 |
-| preparation_pipeline.py | 更细准备进度、批量初始化、内存进度快照及暂停原因 | 迁移必要优化，替换 P4 拆分接口 |
+| services/preparation.py | 保留准备进度、批量初始化、恢复与暂停原因 | 已选择性迁移，新默认 P4 使用原子 member 接口 |
 | runner.py | 日志索引/缓存、并发批次、批量请求与恢复计数等改进 | 已迁移并保留回归测试 |
 | resolution.py | 请求/恢复处理的增量修复 | 按差异核对后迁移，不重写已存在核对流程 |
 | store.py | 批量初始化、终态判定修复；还混有正文 chunk 新功能 | 只迁移准备阶段需要的存储能力，避免整文件覆盖 |
@@ -440,7 +446,9 @@ workflow 使用这份结果继续 translate → proofread → apply_corrections 
 
 现有测试参考：
 
-- [test_preparation_pipeline.py](../tests/engine/services/test_preparation_pipeline.py)
+- [preparation.py](../tests/engine/services/preparation.py)
+- [preparing.py](../tests/engine/services/preparing.py)
+- [workflow.py](../tests/engine/agents/workflow.py)
 - [inputs.py](../tests/engine/services/terms/inputs.py)
 - [planning.py](../tests/engine/services/terms/planning.py)
 - [runner.py](../tests/engine/services/terms/runner.py)
@@ -448,4 +456,4 @@ workflow 使用这份结果继续 translate → proofread → apply_corrections 
 - [resolution.py](../tests/engine/services/terms/resolution.py)
 - [freeze.py](../tests/engine/services/terms/freeze.py)
 
-本文同时保留最初盘点和当前迁移边界。T08/T11/T12 的已实现合同见 [terminology.md](terminology.md)，T13/T14 的独立正文请求合同见 [packing.md](packing.md)；生产接线、正文 workflow 和整本书真实验收仍按 T15—T20 继续，不能由独立规划测试替代。
+本文同时保留最初盘点和当前迁移边界。T08/T11/T12 的已实现合同见 [terminology.md](terminology.md)，T13/T14 的正文请求合同见 [packing.md](packing.md)，T15/T16 的原子准备与三步接口见 [workflow.md](workflow.md)。逐阶段持久化、最终 EPUB、CLI 贯通和整本书验收仍按 T17—T20 继续。

@@ -171,14 +171,14 @@ def build_payload(
     if glossary.source_hash != index.source_hash:
         raise ValueError("glossary and source index identities differ")
     index.validate_items(items)
-    contexts = tuple((item, _suffix(text, 400)) for item, text in index.preceding(items, context_count))
+    contexts = tuple((item, context_suffix(text, 400)) for item, text in index.preceding(items, context_count))
     review = _review_inputs(stage, items, targets, revisions)
 
     wire_items: list[dict[str, Any]] = []
     for item in items:
         validate_item_target(item, item.source_projection)
-        hints, constraints = _markers(item)
-        terms = _terms(item, glossary.terms, index, contexts)
+        hints, constraints = marker_fields(item)
+        terms = select_terms(item, glossary.terms, index, contexts)
         wire: dict[str, Any] = {
             "item_id": item.item_id,
             "source": item.source_projection,
@@ -197,7 +197,7 @@ def build_payload(
                     "terminology": any(term["role"] == "target" for term in terms),
                     "bindings": bool(item.registry),
                 },
-                bindings=_bindings(item, target),
+                bindings=target_bindings(item, target),
             )
         wire_items.append(wire)
 
@@ -242,11 +242,11 @@ def _review_inputs(
     return targets
 
 
-def _terms(
-    item: AtomicItem,
+def select_terms(
+    item: Any,
     terms: tuple[FrozenTerm, ...],
-    index: SourceIndex,
-    contexts: tuple[tuple[AtomicItem, str], ...],
+    index: Any,
+    contexts: tuple[tuple[Any, str], ...],
 ) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     source = index.text(item)
@@ -290,7 +290,7 @@ def _occurs(term: FrozenTerm, text: str) -> bool:
     return False
 
 
-def _markers(item: AtomicItem) -> tuple[dict[str, Any], dict[str, Any]]:
+def marker_fields(item: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     node_refs = {entry.source_node_key: ref_id for ref_id, entry in item.registry.items() if entry.kind == "g"}
     hints: dict[str, Any] = {}
     constraints: dict[str, Any] = {}
@@ -347,7 +347,7 @@ def _markers(item: AtomicItem) -> tuple[dict[str, Any], dict[str, Any]]:
     return hints, constraints
 
 
-def _bindings(item: AtomicItem, target: str) -> list[dict[str, str]]:
+def target_bindings(item: Any, target: str) -> list[dict[str, str]]:
     source_ranges, target_ranges = _ranges(item.source_projection), _ranges(target)
     bindings = [
         {"ref": ref_id, "source": text, "target": target_ranges[ref_id]} for ref_id, text in source_ranges.items()
@@ -387,7 +387,7 @@ def _prefix(value: str, limit: int) -> str:
     return "".join(selected)
 
 
-def _suffix(value: str, limit: int) -> str:
+def context_suffix(value: str, limit: int) -> str:
     matches = list(regex.finditer(r"\X", value))
     selected: list[str] = []
     size = 0

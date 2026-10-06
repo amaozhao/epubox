@@ -2,7 +2,7 @@
 
 日期：2026-10-06\
 实施分支：feature/preflight\
-状态：T00—T14 已完成并验收；T15—T20 共 6 个任务待实施。基线合同见 [baseline.md](baseline.md)，第二阶段交接见 [extraction.md](extraction.md)，第三阶段交接见 [translation.md](translation.md)，第四阶段交接见 [terminology.md](terminology.md)，第五阶段交接见 [packing.md](packing.md)，完整文件整改清单见 [files.md](files.md)。
+状态：T00—T16 已完成并验收；T17—T20 共 4 个任务待实施。基线合同见 [baseline.md](baseline.md)，第二阶段交接见 [extraction.md](extraction.md)，第三阶段交接见 [translation.md](translation.md)，第四阶段交接见 [terminology.md](terminology.md)，第五阶段交接见 [packing.md](packing.md)，第六阶段交接见 [workflow.md](workflow.md)，完整文件整改清单见 [files.md](files.md)。
 
 第一阶段验证：全量 pytest **428 passed（49.72 秒）**，Ruff/Pyright/diff 检查通过，CLI 帮助检查正常；独立代码审查 APPROVE、架构审查 CLEAR。修正及复核记录见 [review.md](review.md)。没有调用真实模型或操作真实书籍断点。
 
@@ -13,6 +13,8 @@
 第四阶段 T08/T11/T12 验证：全量 pytest **542 passed（53.02 秒）**，Ruff、格式、Pyright 和 diff 检查通过。交付：原子预检凭据、术语批量执行与恢复、候选证据和冻结流程已经实现。所有新派发统一校验冻结配置和 T08 凭据，已落盘响应可先本地回放；生产 P1—P4 接线仍属于 T15，本阶段没有把新流程接入 CLI。
 
 第五阶段 T13/T14 验证：全量 pytest **572 passed（51.14 秒）**；Ruff、129 个 Python 文件的格式检查、Pyright 和 diff 检查通过。交付为共享前文、相关术语/标记的最小请求投影，以及按完整请求预算的相邻原子合批。生产接线、角色提示和虚拟 piece 的准备交接仍归 T15/T16。
+
+第六阶段 T15/T16 已实施：新准备入口将原子预检、术语冻结、piece 实体化和完整合批提交为 `AtomicPreparedInput`，`prepared.json` 最后写入。原子 workflow 按初译、保存当前稿、使用真实目标重新合批校对、应用修订的顺序执行。最终全量 pytest **616 passed（59.70 秒）**；Ruff、154 个 Python 文件的格式、Pyright、文件约束与 diff 检查通过。独立代码审查 APPROVE、架构审查 CLEAR。
 
 ## 1. 唯一需求来源与范围
 
@@ -72,7 +74,7 @@ H 是 main 的历史祖先，不是要求再建立第三个实现分支。M 和 
 | E09 | [candidates.py](../engine/services/terms/candidates.py)、[freeze.py](../engine/services/terms/freeze.py) | M/D 核心候选、优先级、冲突分组及冻结相同 |
 | E10 | [runner.py](../engine/services/terms/runner.py)、[resolution.py](../engine/services/terms/resolution.py) | D 包含批次并发、索引、计量、暂停和回放修复 |
 | E11 | [runtime.py](../engine/agents/runtime.py)、[store.py](../engine/services/store.py) | 共用模型入口与持久化；D 混有正文新执行器相关改动，只取需要的部分 |
-| E12 | [preparation_pipeline.py](../engine/services/preparation_pipeline.py)：_advance | 已有 P1—P4；需保留术语准备，替换 P4 对旧分片方式的依赖 |
+| E12 | [preparation.py](../engine/services/preparation.py)：_advance | 已有 P1—P4；需保留术语准备，替换 P4 对旧分片方式的依赖 |
 | E13 | [context.py](../engine/item/context.py)：select_terms/build_context/plan_unit | 旧术语筛选仍供兼容路径使用；原子正文请求由 T13 的 request.py 构造 |
 | E14 | [assembly.py](../engine/epub/assembly.py)：assemble_document；[publication.py](../engine/epub/publication.py)：publish_book | 结构装配和出版检查已有，但整文档序列化不满足 head 原字节保留要求 |
 | E15 | [orchestrator.py](../engine/orchestrator.py)：_run_locked/_apply_review | M 是新的状态机，不能直接称为历史三步骤 workflow |
@@ -121,7 +123,7 @@ PreparedInput 是对现有 PreparationPipelineResult/最终 ready 索引的最�
 
 ## 4. 总任务表
 
-T00—T14 已实现；T15—T20 待实施。依赖列给出直接依赖，其他依赖由其传递得到。源提取、局部回填、原子预检、术语准备、正文请求投影与预算合批均可独立调用；生产准备管线、正文 workflow 和 CLI 接线仍由 T15/T16/T19 负责。
+T00—T16 已实现；T17—T20 待实施。依赖列给出直接依赖，其他依赖由其传递得到。新原子准备管线和三步 workflow 已可用固定夹具独立调用；逐阶段持久化、出版与 CLI 贯通仍由 T17—T19 负责。
 
 | ID | 独立交付 | 直接依赖 |
 |---|---|---|
@@ -218,7 +220,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 ### T08：模型请求前原子容量预检
 
 - **需求**：C§3/6，P§12。
-- **依赖/文件**：T01/T06/T07；E07 的规划入口及 preparation_pipeline 的预检接点，先提供可单独调用接口，实际总接线在 T15。
+- **依赖/文件**：T01/T06/T07；E07 的规划入口及 preparation 服务的预检接点，先提供可单独调用接口，实际总接线在 T15。
 - **交付**：列出全部原子项的大小、源位置、初步输入/输出需求及超限原因的准备诊断；普通虚拟文本块只使用 T05 登记的安全源切点选择满足预算的分组，不切配对引用或字符簇；通过结果绑定源/映射/原子清单哈希、chunk 配置及预算版本，供派发时验证。
 - **实施边界**：这一步不依赖自动词表，不调用模型。若原子本身过大，不能通过去掉上下文谎称解决；不能拆 p/table/list。完整词表导致的后续预算问题由 T14 再检查。
 - **独立验收**：2600-token 原子在 2000 上限下失败，在足够的 5000/模型额度下可继续；输出不足同样报错；违规原子仍保留映射；任一此类阻断存在时模型调用为零；配置/源身份变更使旧通过记录失效，不能伪造或沿用。
@@ -283,6 +285,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 - **交付**：SourceContext→原子预检→用户/自动术语→冻结→完整合批→PreparedInput 的准备入口与恢复入口。
 - **实施边界**：P4 使用新原子计划，不再调用旧拆分规则。必要资料全部持久化并回读后才写最终 ready 标志；不提前发正文请求。保留导航派生所需来源关系。
 - **独立验收**：任一早期失败没有模型越阶段调用；中途崩溃不会留下假 ready；已准备任务零术语 HTTP；closed_with_gaps 有警告且行为符合合同；P4 进度不是翻译完成数；准备输出不依赖 D 的正文人工兜底/恢复状态机。
+- **完成记录**：`preparation.py` 的新默认路径使用 `epubox-term-planner-3`，按原子预检→术语终态/冻结→请求成员实体化→完整预算合批的顺序准备。虚拟 piece 仅使用预检记录的安全边界，保留父项归属和局部 registry；合并时必须覆盖全部兄弟且通过父项完整 registry 验证。`write_ready()` 先持久化并回读 inventory/member/batch/result 依赖，最后原子写入 `prepared.json`。显式 strategy v2 仍读写旧 `bookplan.json`，不将旧计划重解释为新原子计划。
 
 ### T16：原 workflow 三步骤的最小适配
 
@@ -291,6 +294,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 - **交付**：RequestBatch→translate→保存初译→按实际目标调用 T14 重新检查/分组→proofread→apply_corrections→ItemResult。每个原子仍按原顺序经过三个步骤，保存点通过 T00 接口暴露，持久实现由 T17 接入。
 - **实施边界**：不恢复旧 HTML splitter/DomReplacer，不创建另一套 scheduler，不添加备用模型或多轮修复。执行接口要求与 RequestBatch 身份一致的 PreparedInput/ready 索引，未 ready 不调用模型；单元测试使用 T00 固定夹具，实际生产对象由 T15/T19 接通。结构化结果按 item_id 应用；有有效修订就实际替换。原子内容不因失败再次按内部标签切开。
 - **独立验收**：三个步骤按顺序执行；每项先有初译才校对；校对看到当前稿；有效修订确实改变结果并触发保存；无效修订/截断/缺项明确失败；不能把建议只存为 suggested_target 后 review 旧稿；不能将旧候选检查冒充为修订版检查。
+- **完成记录**：`agents/workflow.py` 要求物理回读验证的 `ReadySession`、`AtomicPreparedInput` 和 `MemberBatch` 身份一致后才允许模型请求。初译结果先通过回调暴露保存点；校对使用当前已保存译文重新合批；完整有效替换才改写当前目标。`epubox-members-1` 使用独立提示语义和 token 预算 v2，旧 wire 提示保持不变。回调的持久实现属于 T17；当前 CLI 的旧正文执行路径在 T19 前仍使用显式 strategy v2。
 
 ### T17：逐阶段保存、断点回放及旧资料边界
 
@@ -340,7 +344,7 @@ T07 必须先于 T08：不能还没证明这类文档能安全写回，就开始
 | 7 | T17 → T18 → T19 |
 | 8 | T20 |
 
-共享热点包括 contracts.py、store.py、runtime.py、preparation_pipeline.py 和 main.py。触及同一函数的任务串行实施；即使依赖图允许并行，也不能让两个任务各自修改共享协议。T00 定义接口，后续任务不能未经覆盖检查改名或扩大字段语义。
+共享热点包括 contracts.py、store.py、runtime.py、preparation.py 和 main.py。触及同一函数的任务串行实施；即使依赖图允许并行，也不能让两个任务各自修改共享协议。T00 定义接口，后续任务不能未经覆盖检查改名或扩大字段语义。
 
 每个任务独立提交时必须满足：
 

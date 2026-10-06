@@ -13,7 +13,7 @@ from engine.services.atomic import AtomicStore, StoreLocked
 from engine.services.coherence import load_budget_overrides
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
-from tests.engine.test_orchestrator import ready_store
+from tests.engine.execution.support import ready_store
 
 
 @pytest.mark.asyncio

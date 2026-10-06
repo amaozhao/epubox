@@ -12,7 +12,7 @@ from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import Attempt, RequestManifest, TermExtractionRecord
 from engine.services.preflight import prepare_preflight
-from engine.services.preparation_pipeline import resume_preparation
+from engine.services.preparation import resume_preparation
 from engine.services.store import RunStore
 from engine.services.terms.planning import TERM_PLANNER_VERSION, plan_term_extraction
 from engine.services.terms.runner import TermRunner

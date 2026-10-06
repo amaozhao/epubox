@@ -1,11 +1,11 @@
-"""The single P1-to-P4 production preparation path for v2.5."""
+"""The single P1-to-P4 production preparation path."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -15,6 +15,8 @@ from engine.epub.preparation import (
     _frozen_translation_config,
     prepare_book,
 )
+from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
+from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.context import build_context_index, initial_derived_navigation, plan_unit
 from engine.item.planner import PlanningError
 from engine.schemas.contracts import (
@@ -27,11 +29,13 @@ from engine.schemas.contracts import (
     UnitRecord,
     canonical_hash,
 )
+from engine.schemas.ready import AtomicPreparedInput
 from engine.services.atomic import IdentityMismatch
+from engine.services.preflight import PreflightDiagnostic, prepare_preflight
 from engine.services.store import RunStore
 from engine.services.terms.freeze import ResolutionDecision, freeze_terminology, prepare_candidate_pool
-from engine.services.terms.inputs import load_user_terms
-from engine.services.terms.planning import plan_term_extraction
+from engine.services.terms.inputs import load_atomic_terms, load_user_terms
+from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION, TERM_PLANNER_VERSION, plan_term_extraction
 from engine.services.terms.resolution import TermResolutionRunner
 from engine.services.terms.runner import TermRunner
 
@@ -39,16 +43,19 @@ from engine.services.terms.runner import TermRunner
 @dataclass(frozen=True)
 class PreparationPipelineResult:
     status: Literal["ready", "needs_attention", "paused"]
-    phase: Literal["terms", "resolution", "ready"]
+    phase: Literal["preflight", "terms", "resolution", "ready"]
     work_dir: Path
     run_id: str
     term_status: str
     bookplan: BookPlan | None = None
+    prepared: AtomicPreparedInput | None = None
+    reason: str | None = None
+    diagnostics: tuple[PreflightDiagnostic, ...] = ()
 
 
 @dataclass(frozen=True)
 class PreparationProgress:
-    phase: Literal["terms", "resolution", "p4", "ready"]
+    phase: Literal["preflight", "terms", "resolution", "p4", "ready"]
     planned: int
     succeeded: int
     failed: int
@@ -122,6 +129,40 @@ async def _advance(
     output_policy_hash: str,
     progress: ProgressCallback | None,
 ) -> PreparationPipelineResult:
+    if preparation.extraction_config.get("strategy") == ATOMIC_TERM_PLANNER_VERSION:
+        return await _advance_atomic(
+            store,
+            preparation,
+            preparation_hash,
+            term_transport=term_transport,
+            resolution_transport=resolution_transport,
+            model=model,
+            output_policy_hash=output_policy_hash,
+            progress=progress,
+        )
+    return await _advance_legacy(
+        store,
+        preparation,
+        preparation_hash,
+        term_transport=term_transport,
+        resolution_transport=resolution_transport,
+        model=model,
+        output_policy_hash=output_policy_hash,
+        progress=progress,
+    )
+
+
+async def _advance_legacy(
+    store: RunStore,
+    preparation: PreparationPlan,
+    preparation_hash: str,
+    *,
+    term_transport: Any,
+    resolution_transport: Any,
+    model: Any,
+    output_policy_hash: str,
+    progress: ProgressCallback | None,
+) -> PreparationPipelineResult:
     bookplan_path = store.root / "bookplan.json"
     if bookplan_path.exists():
         ready = store.read_bookplan()
@@ -142,6 +183,7 @@ async def _advance(
             ready,
         )
 
+    _ensure_preflight(store, preparation)
     documents = _documents(store, preparation)
     plan_path = store.root / "glossary" / "plan.json"
     if plan_path.exists():
@@ -340,9 +382,211 @@ async def _advance(
     )
 
 
+async def _advance_atomic(
+    store: RunStore,
+    preparation: PreparationPlan,
+    preparation_hash: str,
+    *,
+    term_transport: Any,
+    resolution_transport: Any,
+    model: Any,
+    output_policy_hash: str,
+    progress: ProgressCallback | None,
+) -> PreparationPipelineResult:
+    from engine.epub.derived_bindings import resolve_derived_navigation
+    from engine.item.members import MemberIndex, materialize_members, pack_members
+    from engine.services.ready import limits_for, read_ready, write_ready
+    from engine.services.terms.planning import plan_atomic_terms
+    from engine.services.terms.storage import atomic_documents
+
+    if (store.root / "prepared.json").is_file():
+        prepared = read_ready(store)
+        if prepared.plan.output_policy_hash != output_policy_hash:
+            raise IdentityMismatch("resume output policy differs from the committed ready plan")
+        count = len(prepared.plan.member_hashes)
+        _emit(progress, PreparationProgress("ready", count, count, 0, 0, _http_attempts(store)))
+        return PreparationPipelineResult(
+            "needs_attention" if prepared.glossary.extraction_status == "closed_with_gaps" else "ready",
+            "ready",
+            store.root,
+            preparation.run_id,
+            prepared.glossary.extraction_status,
+            prepared=prepared,
+        )
+
+    report = _ensure_preflight(store, preparation)
+    if report.check is None:
+        failed = sum(diagnostic.status == "blocked" for diagnostic in report.diagnostics)
+        _emit(
+            progress,
+            PreparationProgress(
+                "preflight",
+                len(report.diagnostics),
+                len(report.diagnostics) - failed,
+                failed,
+                0,
+                _http_attempts(store),
+            ),
+        )
+        return PreparationPipelineResult(
+            "needs_attention",
+            "preflight",
+            store.root,
+            preparation.run_id,
+            "preflight_blocked",
+            reason=f"atomic preflight blocked {failed} item(s)",
+            diagnostics=tuple(diagnostic for diagnostic in report.diagnostics if diagnostic.status == "blocked"),
+        )
+
+    inventories = atomic_documents(store)
+    documents = tuple(inventory.document for inventory in inventories)
+    plan_path = store.root / "glossary" / "plan.json"
+    if plan_path.is_file():
+        term_plan = store.read_term_plan()
+        store.write_term_plan(term_plan)
+    else:
+        extraction = preparation.extraction_config
+        term_plan = plan_atomic_terms(
+            inventories,
+            preparation.user_terms,
+            source_hash=preparation.source_hash,
+            preparation_hash=preparation_hash,
+            auto_extract=_bool(extraction, "auto_extract", True),
+            max_primary_chars=_integer(extraction, "max_primary_chars", 12_000),
+            adjacent_context_views=_integer(extraction, "adjacent_context_views", 2),
+            context_chars=_integer(extraction, "context_chars", 400),
+            extraction_identity=extraction,
+            item_http_limit=_integer(extraction, "item_http_limit", 6),
+            resolution_group_limit=_integer(extraction, "resolution_group_limit", 20),
+        ).plan
+        store.write_term_plan(term_plan)
+
+    _initialize_extraction_records(store, term_plan)
+    _emit(progress, _term_progress(store, term_plan))
+    freeze_path = store.root / "glossary" / "freeze.json"
+    term_status = "frozen"
+    if not freeze_path.is_file():
+        term_result = await _with_progress(
+            TermRunner(store, model=model, transport=term_transport).run(),
+            progress,
+            lambda: _term_progress(store, term_plan),
+        )
+        term_status = term_result.status
+        if term_result.status == "paused":
+            return PreparationPipelineResult("paused", "terms", store.root, preparation.run_id, term_result.status)
+        records = {item.item_id: store.read_extraction(item.item_id) for item in term_plan.items}
+        pool_path = store.root / "glossary" / "candidates.json"
+        pool = (
+            store.read_candidate_pool()
+            if pool_path.is_file()
+            else store.save_candidate_pool(
+                prepare_candidate_pool(
+                    term_plan,
+                    records,
+                    preparation.user_terms,
+                    preparation.unit_documents,
+                    documents,
+                )
+            )
+        )
+        if pool.extraction_status == "open":
+            resolver = TermResolutionRunner(store, model=model, transport=resolution_transport or term_transport)
+            resolution = await _with_progress(resolver.run(), progress, lambda: _resolution_progress(store))
+            if resolution.status == "paused":
+                return PreparationPipelineResult("paused", "resolution", store.root, preparation.run_id, term_status)
+            decisions = resolver.decisions()
+            pool = store.read_candidate_pool()
+            frozen = freeze_terminology(
+                term_plan,
+                records,
+                preparation.user_terms,
+                preparation.unit_documents,
+                documents,
+                extraction_config_hash=canonical_hash(preparation.extraction_config),
+                resolution_decisions=decisions,
+                candidate_pool_version=pool.record_version + 1,
+                resolution_response_ids=pool.consumed_response_ids,
+            )
+            store.save_candidate_pool(frozen.candidate_pool, expected_record_version=pool.record_version)
+        else:
+            frozen = freeze_terminology(
+                term_plan,
+                records,
+                preparation.user_terms,
+                preparation.unit_documents,
+                documents,
+                extraction_config_hash=canonical_hash(preparation.extraction_config),
+                resolution_decisions=_stored_decisions(pool.conflict_groups),
+                candidate_pool_version=pool.record_version,
+                resolution_response_ids=pool.consumed_response_ids,
+            )
+            if frozen.candidate_pool != pool:
+                raise IdentityMismatch("closed candidate pool cannot replay its freeze input")
+        store.write_freeze(frozen.freeze_intent)
+        store.write_glossary(frozen.glossary)
+    else:
+        freeze = store.read_freeze()
+        glossary = GlossarySnapshot.model_validate(freeze.snapshot_payload.model_dump(mode="python"))
+        store.write_glossary(glossary)
+        term_status = glossary.extraction_status
+
+    glossary = store.read_glossary()
+    members = materialize_members(inventories, report)
+    index = MemberIndex(inventories, report, members)
+    limits = limits_for(preparation)
+    tokenizer = str(preparation.translation_config["model"])
+    resolved = resolve_derived_navigation(documents)
+    derived_sources = {
+        str(binding["unit_id"]): str(binding["source_unit_id"])
+        for document in resolved
+        for binding in document.derived_bindings
+        if binding.get("kind") == "derived_navigation"
+    }
+    derived_members = {member.item_id for member in members if member.unit_id in derived_sources}
+    packing = pack_members(
+        "translate", members, glossary, index, limits, completed=derived_members, tokenizer_model=tokenizer
+    )
+    failed = len(packing.blocked)
+    _emit(
+        progress,
+        PreparationProgress("p4", len(members), len(members) - failed, failed, 0, _http_attempts(store)),
+    )
+    if not packing.ready:
+        return PreparationPipelineResult(
+            "needs_attention",
+            "preflight",
+            store.root,
+            preparation.run_id,
+            glossary.extraction_status,
+            reason=f"body packing blocked {failed} member(s)",
+        )
+    prepared = write_ready(
+        store,
+        inventories,
+        report,
+        members,
+        packing,
+        output_policy_hash=output_policy_hash,
+        derived_sources=derived_sources,
+    )
+    _emit(
+        progress,
+        PreparationProgress("ready", len(members), len(members), 0, 0, _http_attempts(store)),
+    )
+    return PreparationPipelineResult(
+        "needs_attention" if glossary.extraction_status == "closed_with_gaps" else "ready",
+        "ready",
+        store.root,
+        preparation.run_id,
+        term_status,
+        prepared=prepared,
+    )
+
+
 def _p1(
     source: Path, work_root: Path, config: PreparationConfig, checker: object
 ) -> tuple[RunStore, PreparationPlan, str]:
+    config = _pipeline_config(config)
     source = source.resolve(strict=True)
     source_hash = _sha256(source)
     if config.run_id:
@@ -351,11 +595,15 @@ def _p1(
         if preparation_path.exists():
             store = RunStore(root)
             preparation = store.read_preparation()
-            terms, terms_hash = load_user_terms(
-                config.user_terms_path,
-                document_ids=preparation.document_hashes,
-                unit_ids=preparation.unit_documents,
-            )
+            documents = _documents(store, preparation)
+            if preparation.extraction_config.get("strategy") == ATOMIC_TERM_PLANNER_VERSION:
+                terms, terms_hash = load_atomic_terms(config.user_terms_path, documents)
+            else:
+                terms, terms_hash = load_user_terms(
+                    config.user_terms_path,
+                    document_ids=preparation.document_hashes,
+                    unit_ids=preparation.unit_documents,
+                )
             if (
                 preparation.source_hash != source_hash
                 or preparation.run_id != config.run_id
@@ -370,6 +618,33 @@ def _p1(
     store = RunStore(prepared.work_dir)
     preparation = store.read_preparation()
     return store, preparation, _sha256(store.root / "preparation.json")
+
+
+def _pipeline_config(config: PreparationConfig) -> PreparationConfig:
+    strategy = config.extraction_config.get("strategy")
+    if strategy == TERM_PLANNER_VERSION:
+        return config
+    if strategy not in {None, ATOMIC_TERM_PLANNER_VERSION}:
+        return config
+    extraction = dict(config.extraction_config)
+    extraction["strategy"] = ATOMIC_TERM_PLANNER_VERSION
+    return replace(
+        config,
+        extraction_config=extraction,
+        adapter_version=ATOMIC_ADAPTER_VERSION,
+        extractor_version=ATOMIC_EXTRACTOR_VERSION,
+    )
+
+
+def _ensure_preflight(store: RunStore, preparation: PreparationPlan):
+    from engine.services.ready import limits_for
+
+    config = preparation.translation_config
+    return prepare_preflight(
+        store,
+        limits=limits_for(preparation),
+        model=str(config.get("model", preparation.extraction_config.get("model", ""))),
+    )
 
 
 def _documents(store: RunStore, preparation: PreparationPlan) -> tuple[DocumentPlan, ...]:

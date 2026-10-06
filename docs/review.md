@@ -92,3 +92,19 @@ SourceMap.node_spans 可自然嵌套，是源结构记录，不能直接当作�
 架构 WATCH：T08 的 PreflightPiece 还不能直接作为 SourceIndex/RequestBatch 的成员。T15 前需定义 piece-local registry、顺序、原父单元归属及合并回填合同，并由 T15—T17 的集成测试验证；不能通过强制类型转换绕过原子/来源校验。完整要求见 [packing.md](packing.md)。
 
 T16 接线同时需给 target/context 术语角色提供版本明确的提示语义，保留历史请求 wire_hash。当前规划接口不调用模型、不写断点，不修改真实书籍或已有成品。
+
+## 第六阶段 T15/T16 验收
+
+基线 48de8ab。全量 pytest **616 passed（59.70 秒）**；Ruff、154 个 Python 文件的格式、Pyright（0 errors/0 warnings）、阶段文件约束与暂存 diff 检查通过。独立代码审查 APPROVE（0 issues），架构审查 CLEAR。
+
+| 审查问题/反例 | 修正与验证 |
+|---|---|
+| T08 piece 与完整 AtomicItem 的来源类型不兼容 | 新 member/batch-2 合同保存原父单元、稳定范围、局部 registry 和兄弟顺序；完整合并后再以父 registry 校验，硬原子不拆 |
+| 配置输入 60000，而预算有效上限 50000 导致准备后期失败 | 物化身份按同一模型实际输入上限比较；公共 prepare 路径和伪造边界回归通过 |
+| 更改 ready 父成员映射、添加未知 inventory 仍被接受 | 回读重建父成员关系并要求全部源 inventory/member/batch/result 文件集精确一致 |
+| 动态请求改词条或去掉本可容纳的前文，重算哈希后仍可执行 | ReadySession 从冻结源、词表、目标和版本重建第一个能容纳的规范载荷，逐次尝试派发前比较 |
+| 单独调用步骤绕过原计划，或用旧 review 接受新稿 | run_workflow 为唯一公开执行入口；内部步骤核对模型/容量，应用前绑定当前目标与 review hash |
+| A 已保存后 B/C 重组，后续续跑错误拒绝合法的新上下文 | 保存并重建 canonical translation frame，校对保留初译来源，第三次运行不重复初译 |
+| 恢复快路径忽略新的输出策略 | 新策略与已提交 ready 的策略身份不一致时拒绝恢复 |
+
+旧调度/执行器仅作职责与文件拆分，公开兼容入口和既有 JSON 保留；单词命名和每文件≤1000行已覆盖本批责任文件。实际断点落盘与原始响应回放继续由 T17 实施，最终 EPUB 和 CLI 新路径分别由 T18/T19 实施。所有验证使用临时资料和假 transport。

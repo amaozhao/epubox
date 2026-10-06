@@ -152,13 +152,9 @@ def _ordered_ids(preparation) -> tuple[str, ...]:
 
 
 def _limits(store: RunStore, config: dict[str, JsonValue]) -> BudgetLimits:
-    context = store._config_int(config, "context_tokens", 32_768)
-    return BudgetLimits(
-        source_tokens=store._config_int(config, "max_source_tokens", 2_000),
-        input_tokens=store._config_int(config, "max_input_tokens", context),
-        output_tokens=store._config_int(config, "max_output_tokens", 4_096),
-        context_tokens=context,
-    )
+    from engine.services.ready import limits_from_config
+
+    return limits_from_config(config)
 
 
 def _model(preparation) -> str:
