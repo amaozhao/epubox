@@ -19,7 +19,7 @@ def test_all_baseline_files_have_an_owner_and_current_stage_files_conform() -> N
     assert len({row[0] for row in rows}) == len(rows)
     for old, destination, _, owner, state in rows:
         assert owner in {f"T{number:02}" for number in range(21)}, old
-        if owner not in {f"T{number:02}" for number in range(6)}:
+        if owner not in {f"T{number:02}" for number in range(8)} | {"T09", "T10"}:
             continue
         assert state != "待实施", old
         path = ROOT / destination.split("；", 1)[0]
@@ -50,6 +50,15 @@ def test_current_stage_new_files_and_documents_conform() -> None:
         ROOT / "tests/engine/item/atoms.py",
         ROOT / "tests/engine/item/extractor.py",
         ROOT / "tests/engine/item/views.py",
+        ROOT / "engine/epub/fill.py",
+        ROOT / "tests/engine/epub/fill.py",
+        ROOT / "tests/engine/item/markers.py",
+        ROOT / "tests/engine/item/inline.py",
+        ROOT / "tests/engine/epub/assembly.py",
+        ROOT / "engine/services/terms/inputs.py",
+        ROOT / "engine/services/terms/planning.py",
+        ROOT / "tests/engine/services/terms/inputs.py",
+        ROOT / "tests/engine/services/terms/planning.py",
         *sorted((ROOT / "engine/schemas").glob("*.py")),
     ]
     for path in files:

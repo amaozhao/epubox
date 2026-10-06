@@ -16,7 +16,7 @@ from engine.epub.validation import EpubCheckResult, EpubValidationError
 from engine.item.extractor import extract_document
 from engine.services.atomic import IdentityMismatch
 from engine.services.store import RunStore
-from engine.services.term_planning import TERM_PLANNER_VERSION, plan_term_extraction
+from engine.services.terms.planning import TERM_PLANNER_VERSION, plan_term_extraction
 from tests.engine.epub.factory import make_epub
 
 

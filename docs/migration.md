@@ -105,7 +105,7 @@ P1 不调用模型；P2 和需要时的 P3 会调用模型；P4 是本地规划�
 
 ## 6. P1：用户词表输入与规则标准化
 
-依据：[engine/services/term_inputs.py](../engine/services/term_inputs.py) 的 load_user_terms()；数据约束位于 [engine/schemas/contracts.py](../engine/schemas/contracts.py)。
+依据：[engine/services/term_inputs.py](../engine/services/terms/inputs.py) 的 load_user_terms()；数据约束位于 [engine/schemas/contracts.py](../engine/schemas/contracts.py)。
 
 支持两种 JSON 输入：
 
@@ -157,7 +157,7 @@ keep_source 未提供 target 时，默认使用 source。未知字段、错误�
 
 ## 7. P2：术语提取计划
 
-依据：[engine/services/term_planning.py](../engine/services/term_planning.py) 的 plan_term_extraction()、_ordered_primary_views()、_groups()、_context_ranges()。
+依据：[engine/services/term_planning.py](../engine/services/terms/planning.py) 的 plan_term_extraction()、_ordered_primary_views()、_groups()、_context_ranges()。
 
 当前能力：
 
@@ -426,8 +426,8 @@ workflow 使用这份结果继续 translate → proofread → apply_corrections 
 现有测试参考：
 
 - [test_preparation_pipeline.py](../tests/engine/services/test_preparation_pipeline.py)
-- [test_term_inputs.py](../tests/engine/services/test_term_inputs.py)
-- [test_term_planning.py](../tests/engine/services/test_term_planning.py)
+- [test_term_inputs.py](../tests/engine/services/terms/inputs.py)
+- [test_term_planning.py](../tests/engine/services/terms/planning.py)
 - [test_term_runner.py](../tests/engine/services/test_term_runner.py)
 - [test_term_candidates.py](../tests/engine/services/test_term_candidates.py)
 - [test_term_resolution.py](../tests/engine/services/test_term_resolution.py)

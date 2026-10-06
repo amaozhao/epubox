@@ -12,8 +12,8 @@ from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.schemas.contracts import Attempt, RequestManifest, TermExtractionRecord
 from engine.services.preparation_pipeline import resume_preparation
 from engine.services.store import RunStore
-from engine.services.term_planning import TERM_PLANNER_VERSION, plan_term_extraction
 from engine.services.term_runner import TermRunner
+from engine.services.terms.planning import TERM_PLANNER_VERSION, plan_term_extraction
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
 

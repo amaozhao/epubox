@@ -119,6 +119,21 @@ def _derive_unit_views(
             entry = unit.registry.get(ref_id)
             if entry is None or entry.kind != ref_id[:1]:
                 raise SourceViewError(f"{unit.unit_id}: projection marker {ref_id!r} has no matching registry entry")
+            if entry.boundary_type == "literal_marker" and entry.hints.get("slot_id"):
+                marker_start = int(entry.hints["start"])
+                marker_end = int(entry.hints["end"])
+                if fragment_index < len(fragments):
+                    fragment = fragments[fragment_index]
+                    position = fragment.start + fragment_offset
+                    if (
+                        fragment.slot.slot_id == entry.hints["slot_id"]
+                        and position == marker_start
+                        and marker_end <= fragment.end
+                    ):
+                        fragment_offset += marker_end - marker_start
+                        if fragment_offset == fragment.end - fragment.start:
+                            fragment_index += 1
+                            fragment_offset = 0
             if entry.kind in {"x", "b"} or entry.hints.get("source_view_boundary") == "paragraph":
                 flush()
             if event.value[0] == "+":

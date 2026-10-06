@@ -5,12 +5,18 @@ from pathlib import Path
 
 import pytest
 
+from engine.item.atoms import extract_resource
 from engine.schemas.contracts import canonical_hash
-from engine.services.term_inputs import load_user_terms
+from engine.services.terms.inputs import load_atomic_terms, load_user_terms
 
 
 def load(path: Path | None):  # type: ignore[no-untyped-def]
-    return load_user_terms(path, document_ids={"d1", "d2"}, unit_ids={"u1", "u2"})
+    return load_user_terms(
+        path,
+        document_ids={"d1", "d2"},
+        unit_ids={"u1", "u2"},
+        unit_documents={"u1": "d1", "u2": "d2"},
+    )
 
 
 def test_missing_configuration_is_an_explicit_empty_snapshot() -> None:
@@ -100,15 +106,68 @@ def test_scope_ids_and_shapes_must_match_this_book(tmp_path: Path, scope: dict[s
         load(path)
 
 
-def test_loader_does_not_modify_user_file_and_preserves_conflicting_rules(tmp_path: Path) -> None:
+def test_loader_does_not_modify_user_file_and_rejects_overlapping_conflicting_rules(tmp_path: Path) -> None:
     path = tmp_path / "terms.json"
     path.write_text('[{"source":"memory","target":"内存"},{"source":"memory","target":"记忆"}]', encoding="utf-8")
     before = path.read_bytes()
 
-    terms, _ = load(path)
+    with pytest.raises(ValueError, match="conflicting user terminology rules"):
+        load(path)
 
     assert path.read_bytes() == before
-    assert {(term.source, term.target) for term in terms} == {("memory", "内存"), ("memory", "记忆")}
+
+
+def test_same_source_with_different_targets_is_allowed_in_disjoint_scopes(tmp_path: Path) -> None:
+    path = tmp_path / "terms.json"
+    path.write_text(
+        json.dumps(
+            [
+                {"source": "memory", "target": "内存", "scope": {"kind": "units", "unit_ids": ["u1"]}},
+                {"source": "memory", "target": "记忆", "scope": {"kind": "units", "unit_ids": ["u2"]}},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    terms, _ = load(path)
+
+    assert {(term.target, term.scope.unit_ids) for term in terms} == {("内存", ("u1",)), ("记忆", ("u2",))}
+
+
+def test_atomic_loader_validates_real_document_and_preserves_complete_note(tmp_path: Path) -> None:
+    inventory = extract_resource(
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><p>OpenAI</p></body></html>',
+        "OPS/chapter.xhtml",
+        "source-sha",
+    )
+    unit_id = inventory.document.units[0].unit_id
+    note = "  First line.\n    Markdown detail stays indented.\n"
+    path = tmp_path / "terms.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "source": "OpenAI",
+                    "mode": "keep_source",
+                    "scope": {"kind": "units", "unit_ids": [unit_id]},
+                    "note": note,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    terms, atomic_hash = load_atomic_terms(path, (inventory.document,))
+    legacy, legacy_hash = load_user_terms(
+        path,
+        document_ids={inventory.document.document_id},
+        unit_ids={unit_id},
+    )
+
+    assert terms[0].target == "OpenAI"
+    assert terms[0].note == note
+    assert legacy[0].note == note.strip()
+    assert atomic_hash != legacy_hash
 
 
 def test_illegal_structure_is_rejected(tmp_path: Path) -> None:

@@ -11,8 +11,8 @@ from engine.agents.runtime import ProviderError
 from engine.epub.preparation import PreparationConfig
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.store import RunStore
-from engine.services.term_planning import TERM_PLANNER_VERSION
 from engine.services.term_runner import TermRunner, TermRunResult
+from engine.services.terms.planning import TERM_PLANNER_VERSION
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
 

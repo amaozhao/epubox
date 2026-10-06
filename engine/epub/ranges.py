@@ -79,6 +79,7 @@ class ResourceIndex:
     encoding: str
     nodes: dict[tuple[int, ...], NodeSpan]
     slots: tuple[SlotSpan, ...]
+    specials: dict[tuple[tuple[int, ...], int, str], RawSpan] = field(default_factory=dict)
 
     def replay(self) -> bytes:
         return self.raw
@@ -194,6 +195,7 @@ class _Builder:
     offsets: tuple[int, ...]
     byte_to_char: dict[int, int]
     nodes: dict[tuple[int, ...], NodeSpan] = field(default_factory=dict)
+    specials: dict[tuple[tuple[int, ...], int, str], RawSpan] = field(default_factory=dict)
     parts: dict[tuple[tuple[int, ...], str, str | None, int | None], list[CharSpan]] = field(default_factory=dict)
     stack: list[_Frame] = field(default_factory=list)
     cdata: bool = False
@@ -245,19 +247,25 @@ class _Builder:
                 raise RangeError("child element has no lexical sibling index")
             parent.last_child = ("element", frame.path, frame.parent_raw_index)
 
-    def comment(self) -> None:
-        self._special_child("comment")
+    def comment(self, parser: Any) -> None:
+        self._special_child(parser, "comment", "-->")
 
-    def pi(self) -> None:
-        self._special_child("pi")
+    def pi(self, parser: Any) -> None:
+        self._special_child(parser, "pi", "?>")
 
-    def _special_child(self, kind: str) -> None:
+    def _special_child(self, parser: Any, kind: str, terminator: str) -> None:
         if not self.stack:
             return
         parent = self.stack[-1]
         raw_index = parent.next_raw_child
         parent.next_raw_child += 1
         parent.last_child = (kind, parent.path, raw_index)
+        start = parser.CurrentByteIndex
+        char_start = self._char(start)
+        char_end = self.parsed.text.find(terminator, char_start)
+        if char_end < 0:
+            raise RangeError(f"unterminated XML {kind}")
+        self.specials[(parent.path, raw_index, kind)] = RawSpan(start, self.offsets[char_end + len(terminator)])
 
     def text_event(self, parser: Any, value: str) -> None:
         if not value or not self.stack:
@@ -370,8 +378,8 @@ def index_resource(parsed: ParsedResource) -> ResourceIndex:
     parser.StartElementHandler = lambda name, attrs: builder.start(parser, name, attrs)
     parser.EndElementHandler = lambda name: builder.end(parser, name)
     parser.CharacterDataHandler = lambda value: builder.text_event(parser, value)
-    parser.CommentHandler = lambda _value: builder.comment()
-    parser.ProcessingInstructionHandler = lambda _target, _value: builder.pi()
+    parser.CommentHandler = lambda _value: builder.comment(parser)
+    parser.ProcessingInstructionHandler = lambda _target, _value: builder.pi(parser)
     parser.StartCdataSectionHandler = builder.start_cdata
     parser.EndCdataSectionHandler = lambda: builder.set_cdata(False)
     parser.ExternalEntityRefHandler = lambda context, base, system, public: _external(parser, context, system, public)
@@ -387,7 +395,7 @@ def index_resource(parsed: ParsedResource) -> ResourceIndex:
         SlotSpan(path, field_name, "".join(char.text for char in chars), tuple(chars), attribute, special)
         for (path, field_name, attribute, special), chars in builder.parts.items()
     )
-    return ResourceIndex(parsed.raw, parsed.text, parsed.encoding, builder.nodes, slots)
+    return ResourceIndex(parsed.raw, parsed.text, parsed.encoding, builder.nodes, slots, builder.specials)
 
 
 def _offsets(parsed: ParsedResource) -> tuple[int, ...]:

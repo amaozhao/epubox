@@ -12,6 +12,7 @@ from lxml import etree  # type: ignore[attr-defined]
 from engine.epub.parsing import NCX_NAMESPACE, OPF_NAMESPACE, XHTML_NAMESPACE, ParsedResource, parse_resource
 from engine.epub.ranges import RangeError, ResourceIndex, index_resource
 from engine.item.extractor import _to_document_plan
+from engine.item.inline import Event, events_to_projection, literal_marker_spans
 from engine.item.planner import _false_sentence_boundary
 from engine.item.policy import _BLOCK_TAGS, _SEMANTIC_TAGS, _effective_language
 from engine.item.structure import OwnerKind, SlotField, _Extractor, _Slot
@@ -26,7 +27,7 @@ from engine.schemas.bridge import (
 )
 from engine.schemas.contracts import Unit
 from engine.schemas.internal import DocumentPlan as StructuralDocument
-from engine.schemas.internal import ResourceRecord, SlotRange
+from engine.schemas.internal import RegistryEntry, ResourceRecord, SlotRange
 
 EXTRACTOR_VERSION = "epubox-atomic-1"
 ADAPTER_VERSION = "epubox-bytes-1"
@@ -213,6 +214,52 @@ class _AtomicExtractor(_Extractor):
             if slot.field == "attribute" and not slot.ranges and not self._attribute_allowed(slot):
                 slot.ranges.append(SlotRange(start=0, end=len(slot.source_value), owner_kind="out_of_scope"))
         super()._extract_attributes()
+        self._protect_attribute_markers()
+
+    def _protect_attribute_markers(self) -> None:
+        rewritten: list[Any] = []
+        for unit in self.units:
+            if unit.kind != "attribute":
+                rewritten.append(unit)
+                continue
+            slot = self.slots[unit.slot_ids[0]]
+            spans = literal_marker_spans(slot.source_value)
+            if not spans:
+                rewritten.append(unit)
+                continue
+            events: list[Event] = []
+            registry: dict[str, RegistryEntry] = {}
+            cursor = 0
+            for index, (start, end) in enumerate(spans, 1):
+                if start > cursor:
+                    events.append(Event(kind="text", value=slot.source_value[cursor:start]))
+                ref = f"x{index}"
+                registry[ref] = RegistryEntry(
+                    ref_id=ref,
+                    kind="x",
+                    source_node_key=slot.node_key,
+                    parent_ref=slot.node_key,
+                    movement="locked",
+                    source_text=slot.source_value[start:end],
+                    hints={"slot_id": slot.slot_id, "start": str(start), "end": str(end)},
+                    boundary_type="literal_marker",
+                )
+                events.append(Event(kind="marker", value=f"={ref}"))
+                cursor = end
+            if cursor < len(slot.source_value):
+                events.append(Event(kind="text", value=slot.source_value[cursor:]))
+            if not any(event.kind == "text" and event.value.strip() for event in events):
+                slot.ranges[:] = [SlotRange(start=0, end=len(slot.source_value), owner_kind="protected")]
+                continue
+            rewritten.append(
+                unit.model_copy(
+                    update={
+                        "source_projection": events_to_projection(events),
+                        "registry": registry,
+                    }
+                )
+            )
+        self.units[:] = rewritten
 
     def _attribute_allowed(self, slot: _Slot) -> bool:
         node = self._element_for_key(slot.node_key)

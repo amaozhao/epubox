@@ -11,6 +11,7 @@ from typing import Literal
 import regex
 
 from engine.core.markup import UnsafeMarkupError, find_by_element_path, parse_xml_safely, qname_local_name
+from engine.schemas.bridge import AtomicDocument
 from engine.schemas.contracts import (
     DocumentPlan,
     ExtractionItem,
@@ -25,6 +26,8 @@ from engine.schemas.contracts import (
 )
 
 TERM_PLANNER_VERSION = "epubox-term-planner-2"
+ATOMIC_TERM_PLANNER_VERSION = "epubox-term-planner-3"
+type Lane = Literal["narrative", "table", "note", "navigation", "attribute", "metadata", "independent"]
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,80 @@ def plan_term_extraction(
     extraction_identity: Mapping[str, JsonValue],
     item_http_limit: int = 6,
     resolution_group_limit: int = 20,
+) -> TermPlanningResult:
+    """Plan a legacy saved DocumentPlan without changing its stable item identities."""
+    return _plan_terms(
+        documents,
+        user_terms,
+        source_hash=source_hash,
+        preparation_hash=preparation_hash,
+        auto_extract=auto_extract,
+        max_primary_chars=max_primary_chars,
+        adjacent_context_views=adjacent_context_views,
+        reading_edges=reading_edges,
+        context_chars=context_chars,
+        extraction_identity=extraction_identity,
+        item_http_limit=item_http_limit,
+        resolution_group_limit=resolution_group_limit,
+        planner_version=TERM_PLANNER_VERSION,
+    )
+
+
+def plan_atomic_terms(
+    inventories: Sequence[AtomicDocument],
+    user_terms: tuple[UserTerm, ...],
+    *,
+    source_hash: str,
+    preparation_hash: str,
+    auto_extract: bool = True,
+    max_primary_chars: int = 12_000,
+    adjacent_context_views: int = 2,
+    context_chars: int = 400,
+    extraction_identity: Mapping[str, JsonValue],
+    item_http_limit: int = 6,
+    resolution_group_limit: int = 20,
+) -> TermPlanningResult:
+    """Plan terminology windows from validated whole-atom inventories."""
+    if adjacent_context_views > 2:
+        raise ValueError("atomic terminology context allows at most two preceding fragments")
+    if context_chars > 400:
+        raise ValueError("atomic terminology context fragments cannot exceed 400 characters")
+    documents = tuple(inventory.document for inventory in inventories)
+    lanes = {inventory.document.document_id: _atomic_lanes(inventory) for inventory in inventories}
+    return _plan_terms(
+        documents,
+        user_terms,
+        source_hash=source_hash,
+        preparation_hash=preparation_hash,
+        auto_extract=auto_extract,
+        max_primary_chars=max_primary_chars,
+        adjacent_context_views=adjacent_context_views,
+        reading_edges=(),
+        context_chars=context_chars,
+        extraction_identity=extraction_identity,
+        item_http_limit=item_http_limit,
+        resolution_group_limit=resolution_group_limit,
+        planner_version=ATOMIC_TERM_PLANNER_VERSION,
+        atomic_lanes=lanes,
+    )
+
+
+def _plan_terms(
+    documents: Sequence[DocumentPlan],
+    user_terms: tuple[UserTerm, ...],
+    *,
+    source_hash: str,
+    preparation_hash: str,
+    auto_extract: bool,
+    max_primary_chars: int,
+    adjacent_context_views: int,
+    reading_edges: tuple[tuple[str, str], ...],
+    context_chars: int,
+    extraction_identity: Mapping[str, JsonValue],
+    item_http_limit: int,
+    resolution_group_limit: int,
+    planner_version: str,
+    atomic_lanes: Mapping[str, Mapping[str, Lane]] | None = None,
 ) -> TermPlanningResult:
     """Cover every persisted primary source view exactly once without I/O or model calls."""
     if max_primary_chars <= 0:
@@ -98,25 +175,33 @@ def plan_term_extraction(
     for document in documents:
         primary = [view for view in ordered_views if view.document_id == document.document_id]
         unit_lanes = _unit_lanes(document)
-        view_lanes: dict[str, Literal["narrative", "table", "note", "navigation", "independent"]] = {
-            view_id: unit_lanes[unit.unit_id]
-            for unit in document.units
-            for view_id in unit.source_view_ids
-            if view_id in document.source_views
-        }
+        view_lanes: dict[str, Lane] = (
+            dict(atomic_lanes[document.document_id])
+            if atomic_lanes is not None
+            else {
+                view_id: unit_lanes[unit.unit_id]
+                for unit in document.units
+                for view_id in unit.source_view_ids
+                if view_id in document.source_views
+            }
+        )
         for group in _groups(primary, max_primary_chars, view_lanes):
             primary_ids = tuple(dict.fromkeys(part.view.view_id for part in group))
             ranges = tuple({"view_id": part.view.view_id, "start": part.start, "end": part.end} for part in group)
-            context_ranges = _context_ranges(
-                document,
-                group,
-                views_by_id,
-                units_by_id,
-                view_predecessors,
-                view_successors,
-                adjacent_context_views,
-                reading_edges,
-                context_chars,
+            context_ranges = (
+                _preceding_ranges(primary, group, view_lanes, adjacent_context_views, context_chars)
+                if atomic_lanes is not None
+                else _context_ranges(
+                    document,
+                    group,
+                    views_by_id,
+                    units_by_id,
+                    view_predecessors,
+                    view_successors,
+                    adjacent_context_views,
+                    reading_edges,
+                    context_chars,
+                )
             )
             context_ids = tuple(dict.fromkeys(str(context_range["view_id"]) for context_range in context_ranges))
             selected_terms = tuple(
@@ -150,11 +235,11 @@ def plan_term_extraction(
             item_id = (
                 "te-"
                 + canonical_hash(
-                    {"version": TERM_PLANNER_VERSION, "document_id": document.document_id, "primary_ranges": ranges}
+                    {"version": planner_version, "document_id": document.document_id, "primary_ranges": ranges}
                 )[:24]
             )
             input_payload = {
-                "version": TERM_PLANNER_VERSION,
+                "version": planner_version,
                 "item_id": item_id,
                 "document_id": document.document_id,
                 "primary": [
@@ -251,7 +336,7 @@ class _PrimaryRange:
 def _groups(
     views: Sequence[SourceTextView],
     max_chars: int,
-    view_lanes: Mapping[str, Literal["narrative", "table", "note", "navigation", "independent"]],
+    view_lanes: Mapping[str, Lane],
 ) -> tuple[tuple[_PrimaryRange, ...], ...]:
     groups: list[tuple[_PrimaryRange, ...]] = []
     current: list[_PrimaryRange] = []
@@ -293,6 +378,63 @@ def _split_view(view: SourceTextView, max_chars: int) -> tuple[_PrimaryRange, ..
         parts.append(_PrimaryRange(view, start, end))
         start = end
     return tuple(parts)
+
+
+def _atomic_lanes(inventory: AtomicDocument) -> dict[str, Lane]:
+    structural = _unit_lanes(inventory.document)
+    lanes: dict[str, Lane] = {}
+    for item in inventory.items:
+        lane: Lane
+        if item.channel != "body":
+            lane = item.channel
+        elif item.atomic_tag == "table" or structural[item.unit_id] == "table":
+            lane = "table"
+        elif structural[item.unit_id] == "note":
+            lane = "note"
+        else:
+            lane = "narrative"
+        for view_id in item.source_view_ids:
+            if view_id in inventory.document.source_views:
+                lanes[view_id] = lane
+    return lanes
+
+
+def _preceding_ranges(
+    views: Sequence[SourceTextView],
+    group: tuple[_PrimaryRange, ...],
+    view_lanes: Mapping[str, Lane],
+    count: int,
+    chars: int,
+) -> tuple[dict[str, JsonValue], ...]:
+    if not count or not chars:
+        return ()
+    primary_ids = {part.view.view_id for part in group}
+    lane = view_lanes[group[0].view.view_id]
+    first_index = next(index for index, view in enumerate(views) if view.view_id == group[0].view.view_id)
+    ranges: list[dict[str, JsonValue]] = []
+    if group[0].start:
+        ranges.append(
+            {
+                "view_id": group[0].view.view_id,
+                "start": _tail_start(group[0].view.text, group[0].start, chars),
+                "end": group[0].start,
+            }
+        )
+    preceding = [
+        view
+        for view in reversed(views[:first_index])
+        if view.view_id not in primary_ids and view_lanes[view.view_id] == lane
+    ][: count - len(ranges)]
+    ranges[:0] = [
+        {
+            "view_id": view.view_id,
+            "start": _tail_start(view.text, len(view.text), chars),
+            "end": len(view.text),
+        }
+        for view in reversed(preceding)
+        if view.text
+    ]
+    return tuple(ranges)
 
 
 def _context_ranges(
@@ -515,7 +657,7 @@ def _link_units(
 
 def _unit_lanes(
     document: DocumentPlan,
-) -> dict[str, Literal["narrative", "table", "note", "navigation", "independent"]]:
+) -> dict[str, Lane]:
     independent = {
         "attribute",
         "metadata",
@@ -529,7 +671,7 @@ def _unit_lanes(
         tree = parse_xml_safely(document.source_markup)
     except UnsafeMarkupError:
         tree = None
-    lanes: dict[str, Literal["narrative", "table", "note", "navigation", "independent"]] = {}
+    lanes: dict[str, Lane] = {}
     for unit in document.units:
         kind = unit.kind.casefold()
         if kind in {"nav", "navigation"}:
@@ -588,4 +730,10 @@ def _contains(text: str, spelling: str, casefold: bool) -> bool:
     return re.search(left + re.escape(spelling) + right, text, re.IGNORECASE if casefold else 0) is not None
 
 
-__all__ = ["TERM_PLANNER_VERSION", "TermPlanningResult", "plan_term_extraction"]
+__all__ = [
+    "ATOMIC_TERM_PLANNER_VERSION",
+    "TERM_PLANNER_VERSION",
+    "TermPlanningResult",
+    "plan_atomic_terms",
+    "plan_term_extraction",
+]

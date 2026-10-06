@@ -30,10 +30,10 @@ from engine.schemas.contracts import (
 from engine.services.atomic import IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.term_freeze import ResolutionDecision, freeze_terminology, prepare_candidate_pool
-from engine.services.term_inputs import load_user_terms
-from engine.services.term_planning import plan_term_extraction
 from engine.services.term_resolution import TermResolutionRunner
 from engine.services.term_runner import TermRunner
+from engine.services.terms.inputs import load_user_terms
+from engine.services.terms.planning import plan_term_extraction
 
 
 @dataclass(frozen=True)

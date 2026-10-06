@@ -11,7 +11,7 @@ from engine.schemas.contracts import (
 )
 from engine.services.term_candidates import CandidateProposal, EvidenceProposal, validate_candidate_proposals
 from engine.services.term_freeze import ResolutionDecision, freeze_terminology, prepare_candidate_pool
-from engine.services.term_planning import plan_term_extraction
+from engine.services.terms.planning import plan_term_extraction
 
 EXTRACTION_IDENTITY = {
     "strategy": "chapter-windows",

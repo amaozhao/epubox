@@ -22,7 +22,7 @@ from engine.schemas.contracts import ItemStatus, Unit, UnitRecord, canonical_has
 from engine.services.atomic import StoreError
 from engine.services.preparation_pipeline import prepare_translation
 from engine.services.store import RunStore
-from engine.services.term_planning import TERM_PLANNER_VERSION
+from engine.services.terms.planning import TERM_PLANNER_VERSION
 from main import _progress_printer
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker

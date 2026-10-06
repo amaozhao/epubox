@@ -9,7 +9,7 @@ from engine.item.planner import (
     validate_cut_plan,
 )
 from engine.item.structure import extract_document
-from tests.engine.item.test_inline_planner import make_unit
+from tests.engine.item.inline import make_unit
 
 
 def test_source_fragment_cap_splits_a_long_unit_independently_of_request_context() -> None:

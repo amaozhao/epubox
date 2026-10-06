@@ -47,8 +47,8 @@ from engine.services.coherence import add_http_budget, retry_document_check
 from engine.services.preparation_pipeline import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.report import write_report
 from engine.services.store import RunStore
-from engine.services.term_inputs import load_user_terms
-from engine.services.term_planning import TERM_PLANNER_VERSION
+from engine.services.terms.inputs import load_user_terms
+from engine.services.terms.planning import TERM_PLANNER_VERSION
 
 type RunStatus = Literal["completed", "paused", "needs_attention", "failed"]
 type ProgressCallback = Callable[[dict[str, Any]], None]

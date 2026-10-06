@@ -169,3 +169,10 @@ def test_html_and_semantic_tree_mismatch_are_refused() -> None:
 
     with pytest.raises(RangeError, match="QName differs"):
         index.bind_document(document.model_copy(update={"nodes": nodes}))
+
+
+def test_comment_and_processing_instruction_have_verified_raw_spans() -> None:
+    raw = f'<html xmlns="{XHTML}"><body>A<!--keep--><?go value?>B</body></html>'.encode()
+    index = index_resource(parse_resource(raw, "application/xhtml+xml"))
+
+    assert [raw[span.start : span.end] for span in index.specials.values()] == [b"<!--keep-->", b"<?go value?>"]

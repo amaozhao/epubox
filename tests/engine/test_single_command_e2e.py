@@ -15,7 +15,7 @@ from engine.item.inline import Event, events_to_projection, parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS
 from engine.item.unit_planner import PLANNER_VERSION
 from engine.orchestrator import run_translation
-from engine.services.term_planning import TERM_PLANNER_VERSION
+from engine.services.terms.planning import TERM_PLANNER_VERSION
 from tests.engine.epub.factory import make_epub
 
 

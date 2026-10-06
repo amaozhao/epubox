@@ -2,11 +2,13 @@
 
 日期：2026-10-06\
 实施分支：feature/preflight\
-状态：T00—T05 已完成并验收；其余 15 个任务待实施。基线合同见 [baseline.md](baseline.md)，第二阶段交接见 [extraction.md](extraction.md)，完整文件整改清单见 [files.md](files.md)。
+状态：T00—T07、T09/T10 已完成并验收；其余 11 个任务待实施。基线合同见 [baseline.md](baseline.md)，第二阶段交接见 [extraction.md](extraction.md)，第三阶段交接见 [translation.md](translation.md)，完整文件整改清单见 [files.md](files.md)。
 
 第一阶段验证：全量 pytest **428 passed（49.72 秒）**，Ruff/Pyright/diff 检查通过，CLI 帮助检查正常；独立代码审查 APPROVE、架构审查 CLEAR。修正及复核记录见 [review.md](review.md)。没有调用付费模型或操作真实书籍断点。
 
 第二阶段 T03/T04/T05 验证：全量 pytest **481 passed（47.55 秒）**，Ruff、格式、Pyright 与 diff 检查通过；独立代码审查 APPROVE、架构审查 CLEAR。交付为严格资源解析、原字节映射和完整原子源清单；中文回填和生产管线接通仍按后续任务实施。
+
+第三阶段 T06/T07/T09/T10 验证：全量 pytest **505 passed（49.81 秒）**，Ruff、格式、Pyright 与 diff 检查通过；独立代码审查 APPROVE、架构审查 CLEAR。交付为标记验证、原字节中文局部回填、用户词表适配和 v3 术语窗口；T08 及付费执行、生产接线仍由后续任务完成。
 
 ## 1. 唯一需求来源与范围
 
@@ -62,7 +64,7 @@ H 是 main 的历史祖先，不是要求再建立第三个实现分支。M 和 
 | E05 | [extractor.py](../engine/item/extractor.py)：extract_document/_to_document_plan；[source_views.py](../engine/item/views.py) | 文档、源槽位、证据视图及结构关系 |
 | E06 | [inline.py](../engine/item/inline.py)：parse_projection/validate_projection | g/x 标记、清单、嵌套及边界校验，可复用 |
 | E07 | [planner.py](../engine/item/planner.py)：PlannerConfig/plan_unit/recommended_output_tokens | M 的 MAX_SOURCE_TOKENS=1200 和递归分片不能继续作为新规则 |
-| E08 | [term_inputs.py](../engine/services/term_inputs.py)、[term_planning.py](../engine/services/term_planning.py) | M/D 核心输入与提取规划相同，避免重写 |
+| E08 | [term_inputs.py](../engine/services/terms/inputs.py)、[term_planning.py](../engine/services/terms/planning.py) | M/D 核心输入与提取规划相同，避免重写 |
 | E09 | [term_candidates.py](../engine/services/term_candidates.py)、[term_freeze.py](../engine/services/term_freeze.py) | M/D 核心候选、优先级、冲突分组及冻结相同 |
 | E10 | [term_runner.py](../engine/services/term_runner.py)、[term_resolution.py](../engine/services/term_resolution.py) | D 包含批次并发、索引、计量、暂停和回放修复 |
 | E11 | [runtime.py](../engine/agents/runtime.py)、[store.py](../engine/services/store.py) | 共用模型入口与持久化；D 混有正文新执行器相关改动，只取需要的部分 |
@@ -115,7 +117,7 @@ PreparedInput 是对现有 PreparationPipelineResult/最终 ready 索引的最�
 
 ## 4. 总任务表
 
-T00—T05 已完成；其余任务待实施。依赖列给出直接依赖，其他依赖由其传递得到。T01 的纯预算/配置已经实现，新源提取接口已经交付；CLI 的 --limit、生产准备管线与正文采用新预算仍由 T19/T15/T14/T16 负责。
+T00—T07、T09/T10 已完成；其余任务待实施。依赖列给出直接依赖，其他依赖由其传递得到。源提取、局部回填与术语计划已可独立调用；CLI 的 --limit、生产准备管线与正文采用新预算仍由 T19/T15/T14/T16 负责。
 
 | ID | 独立交付 | 直接依赖 |
 |---|---|---|

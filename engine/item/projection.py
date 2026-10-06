@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from lxml import etree  # type: ignore[attr-defined]
 
 from engine.core.markup import qname_local_name
-from engine.item.inline import Event, events_to_projection
+from engine.item.inline import Event, events_to_projection, literal_marker_spans
 from engine.item.planner import MAX_SOURCE_TOKENS, source_token_count
 from engine.item.policy import _BLOCK_TAGS, _CJK_RE, _HINT_LIMIT, _LATIN_RE, _bounded, _stable_id
 from engine.schemas.internal import RegistryEntry, SlotRange, Unit, canonical_hash
@@ -290,22 +290,25 @@ def _emit_slot(
             "protected" if force_protected else "whitespace",
         )
         return
+    protected = [(start, end, "literal_marker", "protected") for start, end in literal_marker_spans(value)] + [
+        (match.start(), match.end(), "existing_chinese", "out_of_scope") for match in _CJK_RE.finditer(value)
+    ]
     cursor = 0
-    for match in _CJK_RE.finditer(value):
-        if match.start() > cursor:
-            self._emit_text_range(slot, cursor, match.start(), unit_id, events)
+    for start, end, boundary_type, owner_kind in sorted(protected):
+        if start > cursor:
+            self._emit_text_range(slot, cursor, start, unit_id, events)
         self._emit_protected_text(
             slot,
-            match.start(),
-            match.end(),
+            start,
+            end,
             events,
             registry,
             counter,
             parent_ref,
-            "existing_chinese",
-            "out_of_scope",
+            boundary_type,
+            owner_kind,
         )
-        cursor = match.end()
+        cursor = end
     if cursor < len(value):
         self._emit_text_range(slot, cursor, len(value), unit_id, events)
     if any(item.owner_unit_id == unit_id for item in slot.ranges):

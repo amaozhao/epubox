@@ -32,7 +32,7 @@ from engine.schemas.contracts import (
 )
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, StoreLocked
 from engine.services.store import RunStore
-from engine.services.term_planning import plan_term_extraction
+from engine.services.terms.planning import plan_term_extraction
 from tests.engine.epub.factory import make_epub
 from tests.engine.schemas.contracts import make_document
 

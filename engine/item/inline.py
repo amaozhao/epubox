@@ -7,11 +7,13 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from engine.schemas.bridge import AtomicItem
 from engine.schemas.internal import Event
 
 LEFT = "⟦"
 RIGHT = "⟧"
 _MARKER = re.compile(r"(?:(?P<edge>[+-])(?P<range>[gb][A-Za-z0-9_.:-]+)|=(?P<atom>x[A-Za-z0-9_.:-]+))\Z")
+_LITERAL_MARKER = re.compile(r"⟦(?:[+-][gb][A-Za-z0-9_.:-]+|=x[A-Za-z0-9_.:-]+)⟧")
 
 
 class ProjectionError(ValueError):
@@ -97,6 +99,18 @@ def projection_identities(projection: str | Iterable[Event]) -> tuple[str, ...]:
     return tuple(_shape(events, "projection")["ordered"])
 
 
+def literal_marker_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Locate source text that could otherwise impersonate generated markers."""
+    return tuple((match.start(), match.end()) for match in _LITERAL_MARKER.finditer(text))
+
+
+def validate_item_target(item: AtomicItem, target: str) -> tuple[Event, ...]:
+    """Validate one model target against its frozen atomic item."""
+    if not isinstance(item, AtomicItem):
+        raise TypeError("target validation requires an AtomicItem")
+    return validate_projection(item, target, item.registry)
+
+
 def validate_projection(
     unit: Any,
     target: str | None = None,
@@ -122,7 +136,7 @@ def validate_projection(
     target_shape = _shape(target_events, "target")
 
     refs = _registry(registry if registry is not None else _field(unit, "registry", default={}))
-    if not _unit_allows_markers(unit) and target_shape["inventory"]:
+    if target_shape["inventory"] and not _unit_allows_markers(unit, refs, source_shape["inventory"]):
         raise ProjectionError("plain text and metadata units cannot contain control markers")
     if not isinstance(unit, str) and set(refs) != source_shape["inventory"]:
         raise ProjectionError("unit registry does not exactly match its source projection")
@@ -138,8 +152,14 @@ def validate_projection(
             raise ProjectionError(f"unknown registry reference: {ref}")
         if entry is not None and _ref_kind(entry, ref) != expected_kind:
             raise ProjectionError(f"registry kind mismatch for {ref}")
+        if entry is not None:
+            _validate_literal_marker(entry, ref)
         if source_shape["parents"][ref] != target_shape["parents"][ref]:
             raise ProjectionError(f"reference moved across parent or boundary: {ref}")
+
+    literals = {ref for ref in source_shape["inventory"] if _field(refs.get(ref), "boundary_type") == "literal_marker"}
+    if literals and _literal_text_zones(source_events, literals) != _literal_text_zones(target_events, literals):
+        raise ProjectionError("text moved across a literal marker boundary")
 
     if any(ref.startswith("b") for ref in source_shape["inventory"]):
         if _boundary_domain_sequence(source_shape, refs) != _boundary_domain_sequence(target_shape, refs):
@@ -247,6 +267,17 @@ def _validate_xml_text(events: Sequence[Event]) -> None:
                 raise ProjectionError(f"target contains an XML-invalid character: U+{code:04X}")
 
 
+def _literal_text_zones(events: Sequence[Event], literals: set[str]) -> frozenset[int]:
+    zone = 0
+    occupied: set[int] = set()
+    for event in events:
+        if event.kind == "text" and event.value.strip():
+            occupied.add(zone)
+        elif event.kind == "marker" and event.value.startswith("=") and event.value[1:] in literals:
+            zone += 1
+    return frozenset(occupied)
+
+
 def _registry(raw: Any) -> dict[str, Any]:
     if raw is None:
         return {}
@@ -264,6 +295,23 @@ def _registry(raw: Any) -> dict[str, Any]:
 def _ref_kind(entry: Any, ref: str) -> str:
     kind = _field(entry, "kind", "ref_kind", default=ref[0])
     return str(getattr(kind, "value", kind)).lower()[0]
+
+
+def _validate_literal_marker(entry: Any, ref: str) -> None:
+    if _field(entry, "boundary_type") != "literal_marker":
+        return
+    hints = _field(entry, "hints", default={})
+    text = _field(entry, "source_text")
+    try:
+        start = int(hints["start"])
+        end = int(hints["end"])
+        slot_id = hints["slot_id"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProjectionError(f"literal marker {ref} has invalid source hints") from exc
+    if not isinstance(slot_id, str) or not slot_id or start < 0 or end <= start:
+        raise ProjectionError(f"literal marker {ref} has invalid source hints")
+    if not isinstance(text, str) or _LITERAL_MARKER.fullmatch(text) is None:
+        raise ProjectionError(f"literal marker {ref} does not preserve marker-shaped source text")
 
 
 def _validate_locked_order(source: Mapping[str, Any], target: Mapping[str, Any], refs: Mapping[str, Any]) -> None:
@@ -319,11 +367,15 @@ def _validate_locked_order(source: Mapping[str, Any], target: Mapping[str, Any],
             raise ProjectionError(f"locked reference order changed: {expected}")
 
 
-def _unit_allows_markers(unit: Any) -> bool:
+def _unit_allows_markers(unit: Any, refs: Mapping[str, Any], inventory: set[str]) -> bool:
     if isinstance(unit, str):
         return True
     kind = str(_field(unit, "unit_type", "kind", default="")).lower()
-    return not any(word in kind for word in ("attribute", "metadata", "navigation", "plain", "opf"))
+    if not any(word in kind for word in ("attribute", "metadata", "navigation", "plain", "opf")):
+        return True
+    return bool(inventory) and all(
+        ref.startswith("x") and _field(refs.get(ref), "boundary_type") == "literal_marker" for ref in inventory
+    )
 
 
 def _field(value: Any, *names: str, default: Any = None) -> Any:

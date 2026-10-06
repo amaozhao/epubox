@@ -21,8 +21,8 @@ from engine.item.structure import select_primary_title
 from engine.schemas.contracts import JsonValue, PreparationPlan
 from engine.services.atomic import AtomicStore, IdentityMismatch
 from engine.services.store import RunStore
-from engine.services.term_inputs import load_user_terms
-from engine.services.term_planning import TERM_PLANNER_VERSION
+from engine.services.terms.inputs import load_user_terms
+from engine.services.terms.planning import TERM_PLANNER_VERSION
 
 _SAFE_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 

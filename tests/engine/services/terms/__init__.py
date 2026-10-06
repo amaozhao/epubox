@@ -1,0 +1,1 @@
+"""Terminology service tests."""

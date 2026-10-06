@@ -45,3 +45,19 @@
 | 空 alt、空 CDATA、长 UTF-16 CDATA+CRLF 的映射遗漏 | 保留空 lexical slot，不生成空项/零长编辑；CDATA 行结束按 XML 规则对应，原文重放逐字节相同 |
 
 SourceMap.node_spans 可自然嵌套，是源结构记录，不能直接当作提交补丁；T07 使用原字节和已验证目标实现真正中文回填，不能以零编辑重放冒充回填验收。
+
+## 第三阶段 T06/T07/T09/T10 验收
+
+基线 4546ccd。全量 pytest **505 passed（49.81 秒）**；Ruff、格式检查、Pyright（0 errors/0 warnings）和 diff 检查通过。独立 code-reviewer 为 APPROVE（0 issues），独立 architect 为 CLEAR。
+
+交接 API、兼容和后续接线边界见 [translation.md](translation.md)。回填只返回 bytes、不发布文件，术语规划不调用模型，没有增加新依赖或执行器。
+
+| 审查问题/反例 | 修正与验证 |
+|---|---|
+| 长 table/p 同一视图拆为多个术语窗口后，后续窗口丢失最接近的前文 | 将 current.start 前同视图的字素完整≤400字符范围作最近前文；与其他同通道前文合计≤2，不与 primary 重叠 |
+| 负责文件仍用 test_inline_planner/test_assembly/test_quality 等复合名称，旧链接和清单未同步 | 完成单词改名、imports 与发现同步；inputs/planning 移入 terms/；相对文档链接和阶段文件规则测试通过 |
+| 字面控制标记或保护对象可被 model target 破坏/跨项引用 | source literal x、完整 registry/event 边界检查与 item_id 配对回归均通过 |
+| 保存 registry 指向另一项 code/slot，可恢复错误来源 | 回填前验证 source parent、slot/subtree、原字面值、原顺序和当前 item 的实际字节范围；跨项重定向拒绝 |
+| head description quote、嵌套 img alt、实体或 CDATA 在回填时损坏 | 属性按 region.type 处理，父子合并唯一补丁；未改实体原字节复制；root/g叶 CDATA 保壳、]]>合法编码，mixed不确定输入明确拒绝 |
+
+本批次完成单独可测试的中文局部回填。生产准备、HTTP 批次共享上下文、逐阶段保存和最终 EPUB 出版分别继续由 T15/T11/T17/T18 接通；不能将独立 bytes 回填测试声称为整本书已翻译出版。

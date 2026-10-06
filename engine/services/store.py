@@ -53,7 +53,7 @@ from engine.schemas.contracts import (
     validate_term_scopes,
 )
 from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite, safe_id
-from engine.services.term_planning import plan_term_extraction
+from engine.services.terms.planning import plan_term_extraction
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 USER_TERMS_FORMAT = "epubox-user-terms-1"

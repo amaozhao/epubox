@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from itertools import pairwise
 
+import pytest
+
+from engine.item.atoms import extract_resource
 from engine.item.extractor import extract_document
 from engine.schemas.contracts import (
     DocumentPlan,
@@ -19,7 +22,7 @@ from engine.schemas.contracts import (
     canonical_hash,
     source_view_hash_payload,
 )
-from engine.services.term_planning import plan_term_extraction
+from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION, plan_atomic_terms, plan_term_extraction
 
 EXTRACTION_IDENTITY = {
     "strategy": "full-primary-coverage",
@@ -559,3 +562,148 @@ def test_long_primary_view_splits_on_sentence_or_grapheme_boundaries_without_gap
         primary = item.primary_ranges[0]
         for context in item.context_ranges:
             assert bound(context, "end") <= bound(primary, "start") or bound(context, "start") >= bound(primary, "end")
+
+
+def test_atomic_plan_uses_only_two_closest_preceding_fragments_in_the_same_lane() -> None:
+    inventory = extract_resource(
+        (
+            b'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+            b"<head><title>Metadata</title></head><body>"
+            b"<p>First body.</p><p>Second body.</p><p>Third body.</p><p>Fourth body.</p>"
+            b"<table><tr><td>Table value</td></tr></table>"
+            b'<aside epub:type="endnote">First note.</aside><aside epub:type="endnote">Second note.</aside>'
+            b'<p title="Tooltip">Fifth body.</p></body></html>'
+        ),
+        "OPS/chapter.xhtml",
+        "source-sha",
+    )
+    result = plan_atomic_terms(
+        (inventory,),
+        (),
+        source_hash="source-sha",
+        preparation_hash="prep-sha",
+        extraction_identity=EXTRACTION_IDENTITY,
+        max_primary_chars=12,
+    )
+    views = inventory.document.source_views
+    item = next(
+        item for item in result.plan.items if any(views[view_id].text == "Fourth body." for view_id in item.view_ids)
+    )
+
+    assert [views[view_id].text for view_id in item.context_refs] == ["Second body.", "Third body."]
+    assert all(
+        len(views[str(part["view_id"])].text[bound(part, "start") : bound(part, "end")]) <= 400
+        for part in item.context_ranges
+    )
+    table = next(
+        item for item in result.plan.items if any(views[view_id].text == "Table value" for view_id in item.view_ids)
+    )
+    second_note = next(
+        item for item in result.plan.items if any(views[view_id].text == "Second note." for view_id in item.view_ids)
+    )
+    fifth = next(
+        item for item in result.plan.items if any(views[view_id].text == "Fifth body." for view_id in item.view_ids)
+    )
+    tooltip = next(
+        item for item in result.plan.items if any(views[view_id].text == "Tooltip" for view_id in item.view_ids)
+    )
+    assert table.context_refs == ()
+    assert [views[view_id].text for view_id in second_note.context_refs] == ["First note."]
+    assert [views[view_id].text for view_id in fifth.context_refs] == ["Third body.", "Fourth body."]
+    assert tooltip.context_refs == ()
+
+
+def test_atomic_term_windows_cover_primary_text_once_without_splitting_atomic_items() -> None:
+    text = "A numbered terminology sentence e\u0301. " * 1_000
+    inventory = extract_resource(
+        f'<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><table><tr><td>{text}</td></tr></table></body></html>'.encode(),
+        "OPS/chapter.xhtml",
+        "source-sha",
+    )
+    before = inventory.items
+    result = plan_atomic_terms(
+        (inventory,),
+        (),
+        source_hash="source-sha",
+        preparation_hash="prep-sha",
+        extraction_identity=EXTRACTION_IDENTITY,
+    )
+    views = inventory.document.source_views
+    ranges = [part for item in result.plan.items for part in item.primary_ranges]
+    by_view: dict[str, list[tuple[int, int]]] = {}
+    for part in ranges:
+        by_view.setdefault(str(part["view_id"]), []).append((bound(part, "start"), bound(part, "end")))
+
+    assert inventory.items == before
+    assert len(result.plan.items) >= 3
+    for view_id, intervals in by_view.items():
+        ordered = sorted(intervals)
+        assert ordered[0][0] == 0
+        assert ordered[-1][1] == len(views[view_id].text)
+        assert all(left[1] == right[0] for left, right in pairwise(ordered))
+    assert all(
+        sum(bound(part, "end") - bound(part, "start") for part in item.primary_ranges) <= 12_000
+        for item in result.plan.items
+    )
+    split_items = [item for item in result.plan.items if item.view_ids == (next(iter(by_view)),)]
+    for item in split_items[1:]:
+        assert len(item.context_ranges) == 1
+        context = item.context_ranges[0]
+        primary = item.primary_ranges[0]
+        assert context["view_id"] == primary["view_id"]
+        assert bound(context, "end") == bound(primary, "start")
+        assert 0 < bound(context, "end") - bound(context, "start") <= 400
+        context_text = text[bound(context, "start") : bound(context, "end")]
+        assert context_text and not context_text.startswith("\u0301")
+        assert all(
+            bound(context, "end") <= bound(member, "start") or bound(context, "start") >= bound(member, "end")
+            for member in item.primary_ranges
+            if context["view_id"] == member["view_id"]
+        )
+
+
+def test_atomic_plan_has_a_new_strategy_identity_and_bounded_context_contract() -> None:
+    inventory = extract_resource(
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head/><body><p>One</p><p>Two</p></body></html>',
+        "OPS/chapter.xhtml",
+        "source-sha",
+    )
+    atomic = plan_atomic_terms(
+        (inventory,),
+        (),
+        source_hash="source-sha",
+        preparation_hash="prep-sha",
+        extraction_identity=EXTRACTION_IDENTITY,
+    )
+    assert ATOMIC_TERM_PLANNER_VERSION == "epubox-term-planner-3"
+    assert (
+        atomic.plan.items[0].item_id
+        != plan_term_extraction(
+            (inventory.document,),
+            (),
+            source_hash="source-sha",
+            preparation_hash="prep-sha",
+            extraction_identity=EXTRACTION_IDENTITY,
+        )
+        .plan.items[0]
+        .item_id
+    )
+
+    with pytest.raises(ValueError, match="at most two"):
+        plan_atomic_terms(
+            (inventory,),
+            (),
+            source_hash="source-sha",
+            preparation_hash="prep-sha",
+            extraction_identity=EXTRACTION_IDENTITY,
+            adjacent_context_views=3,
+        )
+    with pytest.raises(ValueError, match="400"):
+        plan_atomic_terms(
+            (inventory,),
+            (),
+            source_hash="source-sha",
+            preparation_hash="prep-sha",
+            extraction_identity=EXTRACTION_IDENTITY,
+            context_chars=401,
+        )

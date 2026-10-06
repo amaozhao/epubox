@@ -73,8 +73,8 @@
 | engine/services/store.py | engine/services/store.py | 951 | T17 | 保留 |
 | engine/services/term_candidates.py | engine/services/terms/candidates.py | 381 | T12 | 待实施 |
 | engine/services/term_freeze.py | engine/services/terms/freeze.py | 541 | T12 | 待实施 |
-| engine/services/term_inputs.py | engine/services/terms/inputs.py | 97 | T09 | 待实施 |
-| engine/services/term_planning.py | engine/services/terms/planning.py | 591 | T10 | 待实施 |
+| engine/services/term_inputs.py | engine/services/terms/inputs.py | 97 | T09 | 完成 |
+| engine/services/term_planning.py | engine/services/terms/planning.py | 591 | T10 | 完成 |
 | engine/services/term_resolution.py | engine/services/terms/resolution.py | 585 | T12 | 待实施 |
 | engine/services/term_runner.py | engine/services/terms/runner.py | 568 | T11 | 待实施 |
 | main.py | main.py | 178 | T02 | 保留 |
@@ -88,18 +88,18 @@
 | tests/engine/agents/test_provider.py | tests/engine/agents/provider.py | 20 | T16 | 待实施 |
 | tests/engine/agents/test_runtime_protocol.py | tests/engine/agents/runtime.py | 980 | T16 | 待实施 |
 | tests/engine/core/__init__.py | tests/engine/core/__init__.py | 0 | T00 | 工具固定名称 |
-| tests/engine/core/test_quality.py | tests/engine/core/quality.py | 27 | T06 | 待实施 |
+| tests/engine/core/test_quality.py | tests/engine/core/quality.py | 27 | T06 | 完成 |
 | tests/engine/core/test_tokens.py | tests/engine/core/tokens.py | 13 | T01 | 完成 |
 | tests/engine/epub/__init__.py | tests/engine/epub/__init__.py | 0 | T00 | 工具固定名称 |
 | tests/engine/epub/book_factory.py | tests/engine/epub/factory.py | 65 | T02 | 完成 |
-| tests/engine/epub/test_assembly.py | tests/engine/epub/assembly.py | 8 | T07 | 待实施 |
+| tests/engine/epub/test_assembly.py | tests/engine/epub/assembly.py | 8 | T07 | 完成 |
 | tests/engine/epub/test_checker.py | tests/engine/epub/checker.py | 31 | T18 | 待实施 |
 | tests/engine/epub/test_derived_bindings.py | tests/engine/epub/bindings.py | 86 | T20 | 待实施 |
 | tests/engine/epub/test_preparation.py | tests/engine/epub/preparation.py | 210 | T02 | 完成 |
 | tests/engine/epub/test_publication.py | tests/engine/epub/publication.py | 537 | T18 | 待实施 |
 | tests/engine/item/__init__.py | tests/engine/item/__init__.py | 0 | T00 | 工具固定名称 |
 | tests/engine/item/test_extractor.py | tests/engine/item/extractor.py | 338 | T05 | 完成 |
-| tests/engine/item/test_inline_planner.py | tests/engine/item/inline.py | 715 | T06 | 待实施 |
+| tests/engine/item/test_inline_planner.py | tests/engine/item/inline.py | 715 | T06 | 完成 |
 | tests/engine/item/test_planner.py | tests/engine/item/planner.py | 357 | T14 | 待实施 |
 | tests/engine/item/test_source_token_cap.py | tests/engine/item/limits.py | 49 | T20 | 待实施 |
 | tests/engine/item/test_source_views.py | tests/engine/item/views.py | 185 | T05 | 完成 |
@@ -115,8 +115,8 @@
 | tests/engine/services/test_store_contracts.py | tests/engine/services/contracts.py | 255 | T17 | 待实施 |
 | tests/engine/services/test_term_candidates.py | tests/engine/services/terms/candidates.py | 322 | T12 | 待实施 |
 | tests/engine/services/test_term_freeze.py | tests/engine/services/terms/freeze.py | 358 | T12 | 待实施 |
-| tests/engine/services/test_term_inputs.py | tests/engine/services/terms/inputs.py | 118 | T09 | 待实施 |
-| tests/engine/services/test_term_planning.py | tests/engine/services/terms/planning.py | 561 | T10 | 待实施 |
+| tests/engine/services/test_term_inputs.py | tests/engine/services/terms/inputs.py | 118 | T09 | 完成 |
+| tests/engine/services/test_term_planning.py | tests/engine/services/terms/planning.py | 561 | T10 | 完成 |
 | tests/engine/services/test_term_rejection_audit.py | tests/engine/services/terms/audit.py | 139 | T12 | 待实施 |
 | tests/engine/services/test_term_resolution.py | tests/engine/services/terms/resolution.py | 489 | T12 | 待实施 |
 | tests/engine/services/test_term_response_journal.py | tests/engine/services/terms/response.py | 184 | T11 | 待实施 |
@@ -153,3 +153,12 @@
 | engine/item/atoms.py、tests/engine/item/atoms.py | T05 | 原子提取/覆盖/反例，单词且≤1000行 |
 | engine/item/metadata.py、engine/item/projection.py、engine/item/policy.py | T05 | 原有职责拆分，单词且≤1000行 |
 | docs/extraction.md | T05 | 本阶段交接合同与验收记录，单词且≤1000行 |
+
+## 第三阶段新增文件
+
+| 路径 | 责任 | 约束 |
+|---|---|---|
+| engine/epub/fill.py、tests/engine/epub/fill.py | T07 | 原字节局部回填/反例，单词且≤1000行 |
+| tests/engine/item/markers.py | T06 | 目标标记与字面标记反例，单词且≤1000行 |
+| engine/services/terms/__init__.py、tests/engine/services/terms/__init__.py | T09/T10 | 明确的Python包固定名称例外 |
+| docs/translation.md | T06/T07/T09/T10 | 本批次交接与验收，单词且≤1000行 |
