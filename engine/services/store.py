@@ -869,7 +869,7 @@ class RunStore:
                         request_id,
                         manifest.item_ids,
                         version=version,
-                        sources=self.read_response_sources(manifest) if version == "epubox-wire-4" else None,
+                        sources=self.read_response_sources(manifest) if version in wire.SLOT_VERSIONS else None,
                     )
                 }
             )

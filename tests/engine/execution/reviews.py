@@ -23,7 +23,9 @@ from tests.engine.epub.preparation import StubChecker
 from tests.engine.execution.atomic import answer
 
 
-@pytest.mark.parametrize("failure", ("checks", "missing", "timeout", "replacement", "duplicate", "needs_attention"))
+@pytest.mark.parametrize(
+    "failure", ("checks", "missing", "timeout", "truncated", "replacement", "duplicate", "needs_attention")
+)
 def test_failed_reviews_retry_twice_after_later_content_without_retranslation(tmp_path, failure):
     case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p>", ("First.", "Second."))
     failed_item = case.batch.items[0].item_id
@@ -47,6 +49,8 @@ def test_failed_reviews_retry_twice_after_later_content_without_retranslation(tm
         if kind == "review" and failed_item in ids and reviewed[failed_item] <= 2:
             if failure == "timeout":
                 raise TimeoutError("review timed out")
+            if failure == "truncated":
+                return {"raw": '{"items":[' + '"accuracy",' * 754, "finish_reason": "length"}
             value = json.loads(response["raw"])
             item = next(item for item in value["items"] if item["item_id"] == failed_item)
             if failure == "missing":
@@ -69,7 +73,7 @@ def test_failed_reviews_retry_twice_after_later_content_without_retranslation(tm
     assert result.status == "translated"
     assert reviewed[failed_item] == 3 and len(set(request_ids)) == 3
     assert all(count == 1 for count in translated.values())
-    assert reviewed[case.batch.items[1].item_id] == (3 if failure == "timeout" else 1)
+    assert reviewed[case.batch.items[1].item_id] == (3 if failure in {"timeout", "truncated"} else 1)
     saved = BodyJournal(case.session.store)
     assert saved.records()[failed_item].status == ItemStatus.REVIEWED
     before = sum(translated.values()) + sum(reviewed.values())

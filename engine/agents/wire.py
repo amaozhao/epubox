@@ -10,8 +10,9 @@ from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from typing import Any
 
-VERSION = "epubox-wire-4"
-VERSIONS = ("epubox-wire-2", "epubox-wire-3", VERSION)
+VERSION = "epubox-wire-5"
+VERSIONS = ("epubox-wire-2", "epubox-wire-3", "epubox-wire-4", VERSION)
+SLOT_VERSIONS = ("epubox-wire-4", VERSION)
 
 _PROTOCOLS = {"translate": "epubox-text-1", "review": "epubox-review-2"}
 _REF = re.compile(r"[gbx][A-Za-z0-9_.:-]+\Z")
@@ -32,6 +33,22 @@ _PROMPTS_V4 = {
     + ' Translate every item into simplified Chinese. Return {"protocol":"epubox-text-1","request_id":...,"items":[{"item_id":...,"target":{"1":"..."}}]}. Return every item without HTML wrappers, source text or commentary.',
     "review": _COMMON_V4
     + ' Compare each source and the supplied compact target, including contents bound to matching markers. Return {"protocol":"epubox-review-2","request_id":...,"items":[...]}. Return every item exactly once. Each item requires item_id, supplied base_revision, decision, checks and issues. checks requires accuracy, fluency, terminology, bindings and script, each pass/fail/uncertain or not_applicable only when applicability permits; script is pass or fail for Chinese, never not_applicable. issues contains {code,severity,message}; severity is minor/major/critical. no_change requires all applicable checks passed and no unresolved major/critical issue, and has no target. Use replace for correctable issues and return target as the complete source-numbered slot object. Otherwise use needs_attention without target. Chinese need not preserve English plural inflections. Subjective synonym or register preferences are not major unless meaning or a required term is violated. Keep issue messages concise and omit analysis.',
+}
+_PROMPTS_V5 = {
+    "translate": _PROMPTS_V4["translate"],
+    "review": _PROMPTS_V4["review"]
+    + " Source and target t labels are not book tags; they only identify text positions. "
+    "An older target may have no t labels: this is not a bindings error. "
+    "Use slot_ids, not b/g/x IDs, as the exact replacement keys; never merge slots across empty tags. "
+    "Read the whole paragraph for meaning. Evaluate protected structure using only g/b/x markers. "
+    "No missing-content issue may be inferred from an opaque x marker. "
+    "Example no_change item (copy the actual request_id, item_id and base_revision): "
+    '{"protocol":"epubox-review-2","request_id":"REQUEST_ID","items":[{"item_id":"1",'
+    '"base_revision":0,"decision":"no_change","checks":{"accuracy":"pass","fluency":"pass",'
+    '"terminology":"pass","bindings":"pass","script":"pass"},"issues":[]}]}. '
+    "For replace, use the same complete envelope and include target with ALL slot_ids. "
+    "Return only final JSON; close every object and array; do not repeat keys or append commentary. "
+    "Use at most two concise issues per item; do not copy applicability or input fields into the response.",
 }
 
 
@@ -135,14 +152,20 @@ def messages(
                 item[field] = encode_projection(item[field])
         if kind == "review":
             item.pop("bindings", None)
-        if version in {"epubox-wire-3", VERSION}:
+        if version in {"epubox-wire-3", *SLOT_VERSIONS}:
             for hint in item.get("hints", {}).values():
                 if isinstance(hint, dict) and hint.get("class") == "code":
                     hint.pop("readonly", None)
                     hint.pop("excerpt", None)
         _compact_item(item)
-        if version == VERSION and isinstance(source, str):
+        if version in SLOT_VERSIONS and isinstance(source, str):
             item["source"] = _encode_slotted_source(source)
+            if version == VERSION and kind == "review":
+                layout = _slot_layout(source)
+                item["slot_ids"] = [str(number) for number in range(1, layout.count("text") + 1)]
+                target = payload["items"][index - 1].get("target")
+                if isinstance(target, str) and layout == _slot_layout(target):
+                    item["target"] = _encode_slotted_source(target)
     if not physical.get("context"):
         physical.pop("context", None)
     return (
@@ -154,6 +177,8 @@ def messages(
                 else _PROMPTS_V3[kind]
                 if version == "epubox-wire-3"
                 else _PROMPTS_V4[kind]
+                if version == "epubox-wire-4"
+                else _PROMPTS_V5[kind]
             ),
         },
         {
@@ -177,8 +202,8 @@ def decode(
         raise ValueError("compact wire supports only translate/review responses")
     if version not in VERSIONS:
         raise ValueError("unknown compact wire version")
-    if version == VERSION and not isinstance(sources, Mapping):
-        raise TypeError("epubox-wire-4 decode requires source projections")
+    if version in SLOT_VERSIONS and not isinstance(sources, Mapping):
+        raise TypeError(f"{version} decode requires source projections")
     from engine.agents.protocol import strict_loads
 
     try:
@@ -202,7 +227,7 @@ def decode(
             item["item_id"] = canonical_id or f"unknown-wire:{short_id}"
         if "target" in item:
             try:
-                if version == VERSION:
+                if version in SLOT_VERSIONS:
                     if canonical_id is None or sources is None:
                         raise ValueError("target has no matching source")
                     item["target"] = _decode_slots(sources[canonical_id], item["target"])
@@ -294,6 +319,16 @@ def _compact_item(item: dict[str, Any]) -> None:
     constraints = item.get("constraints")
     if isinstance(constraints, dict) and _default_constraints(item.get("source"), constraints):
         item.pop("constraints")
+
+
+def _slot_layout(projection: str) -> tuple[str, ...]:
+    from engine.item.inline import parse_projection
+
+    return tuple(
+        event.value if event.kind == "marker" else "text"
+        for event in parse_projection(projection)
+        if event.kind == "marker" or event.value.strip()
+    )
 
 
 def _encode_slotted_source(projection: str) -> str:

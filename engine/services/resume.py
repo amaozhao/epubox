@@ -548,7 +548,7 @@ def _atomic_response(root: Path, request: RequestManifest) -> dict:
                 request.request_id,
                 request.item_ids,
                 version=version,
-                sources=RunStore(root).read_response_sources(request) if version == "epubox-wire-4" else None,
+                sources=RunStore(root).read_response_sources(request) if version in physical.SLOT_VERSIONS else None,
             )
         return response
     raise ValueError("reviewed result lacks succeeded response file")
