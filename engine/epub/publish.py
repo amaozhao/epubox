@@ -12,6 +12,7 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 from engine.epub.fill import fill_resource
 from engine.epub.parsing import OPF_NAMESPACE, XHTML_NAMESPACE, parse_resource
 from engine.epub.ranges import RawSpan, SlotSpan, index_resource
+from engine.epub.upgrade import upgrade_package
 from engine.epub.validation import EpubValidationError, inspect_epub
 from engine.epub.verification import (
     file_hash,
@@ -47,7 +48,10 @@ def publish_atomic(
         session, targets = _targets(store)
         recovered = _recover(store, output_path, session.prepared.plan, targets, checker=checker)
         if recovered is not None:
-            return recovered
+            proof = recovered.get("verification")
+            if isinstance(proof, dict) and proof.get("epub_version") == "3.0":
+                return recovered
+            overwrite = True
         snapshot = state.snapshot(store.root)
         inventory = inspect_epub(snapshot, session.prepared.plan.source_hash, checker=checker)
         replacements: dict[str, bytes] = {}
@@ -64,6 +68,9 @@ def publish_atomic(
                     )
                 replacements[path] = rendered
                 accepted[path] = owned
+        replacements = upgrade_package(snapshot, inventory, replacements)
+        for path in replacements:
+            accepted.setdefault(path, {})
         staged = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
         try:
             stage_epub(
@@ -71,6 +78,7 @@ def publish_atomic(
                 staged,
                 replacements,
                 source_directory=store.root / "source" if state.compact(store.root) else None,
+                allow_additions=True,
             )
             verification = verify_staged_epub(
                 snapshot,
@@ -80,6 +88,7 @@ def publish_atomic(
                 accepted_targets=accepted,
                 checker=checker,
                 expected_language=_LANGUAGE,
+                upgraded=True,
             )
             current_session, current_targets = _targets(store)
             if current_session.prepared != session.prepared or current_targets != targets:
@@ -144,7 +153,7 @@ def _recover(store, output_path, plan, targets, *, checker: object | None = None
     ):
         raise EpubValidationError("invalid_publish_intent", "Atomic publication evidence is incomplete")
     snapshot = state.snapshot(store.root)
-    if "baseline" in verification and file_hash(snapshot) != plan.source_hash:
+    if file_hash(snapshot) != plan.source_hash:
         raise EpubValidationError("source_changed", "Source snapshot changed after publication")
     verify_baseline(snapshot, output_path, verification, checker)
     return {"path": str(output_path), "sha256": target_hash, "verification": verification, "publish": intent}

@@ -176,6 +176,7 @@ def inspect_epub(
     *,
     checker: EpubChecker | object,
     limits: ZipLimits = DEFAULT_ZIP_LIMITS,
+    for_output: bool = False,
 ) -> PackageInventory:
     """Validate an immutable source snapshot and return its complete package inventory."""
     with zipfile.ZipFile(source) as archive:
@@ -192,7 +193,7 @@ def inspect_epub(
 
         opf = _parse_xml_bytes(_read_bytes(archive, opf_path), opf_path)
         epub_version = (opf.attrib.get("version") or "").strip()
-        if not epub_version.startswith(("2", "3")):
+        if not re.fullmatch(r"[23](?:\.\d+){0,2}", epub_version):
             raise EpubValidationError("unsupported_epub_version", f"Unsupported EPUB version: {epub_version!r}")
 
         manifest = _manifest_items(opf, opf_path, entries)
@@ -209,7 +210,7 @@ def inspect_epub(
             else next((item.path for item in manifest if item.media_type == "application/x-dtbncx+xml"), None)
         )
 
-        blockers = _support_blockers(archive, opf, opf_path, manifest, spine, entries)
+        blockers = _support_blockers(archive, opf, opf_path, manifest, spine, entries, for_output=for_output)
         if blockers:
             raise EpubValidationError("unsupported_source", blockers[0].message, issues=blockers)
         obfuscated = _obfuscated_fonts(archive, manifest, entries)
@@ -465,6 +466,8 @@ def _support_blockers(
     manifest: tuple[ManifestItem, ...],
     spine: tuple[str, ...],
     entries: Mapping[str, int],
+    *,
+    for_output: bool = False,
 ) -> tuple[ValidationIssue, ...]:
     issues: list[ValidationIssue] = []
     manifest_by_id = {item.item_id: item for item in manifest}
@@ -483,7 +486,7 @@ def _support_blockers(
         issues.append(ValidationIssue("signature", "Signed EPUB relationships are not supported"))
     if any(item.media_overlay and item.item_id in spine for item in manifest):
         issues.append(ValidationIssue("media_overlay", "Synchronized media overlays are not supported"))
-    if any("scripted" in item.properties for item in manifest):
+    if not for_output and any("scripted" in item.properties for item in manifest):
         issues.append(ValidationIssue("scripted_content", "Script-generated reading content is not supported"))
 
     for item_id in spine:

@@ -414,6 +414,13 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
         published = recover_atomic(store, output, checker=checker_for_source(state.snapshot(work_dir), epubcheck))
         if published is None:
             return None
+        proof = published.get("verification")
+        if not isinstance(proof, dict) or proof.get("epub_version") != "3.0":
+            from engine.epub.publish import publish_atomic
+
+            published = publish_atomic(
+                store, output, checker_for_source(state.snapshot(work_dir), epubcheck), overwrite=True
+            )
         count = read_ready(store).plan.required_unit_count
         return _completed_outcome(work_dir, output, count, str(published["sha256"]))
     plan = store.read_bookplan()
@@ -429,14 +436,16 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
     if isinstance(verification, dict):
         from engine.epub.verification import verify_baseline
 
-        if (
-            isinstance(verification.get("baseline"), dict)
-            and _sha256_file(state.snapshot(work_dir)) != plan.source_hash
-        ):
+        if _sha256_file(state.snapshot(work_dir)) != plan.source_hash:
             raise IdentityMismatch("source snapshot changed after publication")
         verify_baseline(
             state.snapshot(work_dir), output, verification, checker_for_source(state.snapshot(work_dir), epubcheck)
         )
+        if verification.get("epub_version") != "3.0":
+            converted = publish_book(
+                store, output, checker_for_source(state.snapshot(work_dir), epubcheck), overwrite=True
+            )
+            return _completed_outcome(work_dir, output, plan.required_unit_count, str(converted["sha256"]))
     return _completed_outcome(work_dir, output, plan.required_unit_count, str(published["target_hash"]))
 
 

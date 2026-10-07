@@ -44,12 +44,12 @@
 1. 回读 ready、全部 reviewed parent target 和不可变 `source.epub`。
 2. 要求目标集合与原始 inventory 完全一致，不允许漏项或额外项。
 3. 通过 `fill_resource` 按已验证的原字节区间回填正文、属性和导航目标。
-4. 只对白名单语言字段做字节局部更新：XHTML 根元素的 `lang`/`xml:lang`，以及 OPF 主 `dc:language`。
-5. 从源快照建立候选 EPUB；图片、CSS、JS、字体及其他未替换资源复制原始内容。
-6. 校验资源清单、EPUB 版本、OPF 路径、spine、字体混淆、文档结构、内部引用、语言字段、目标证据和 EPUBCheck 结果。
+4. 对语言字段做字节局部更新，再按第 9 节统一组装成 EPUB 3.0；源回填校验在格式转换前完成。
+5. 从源快照建立候选 EPUB；图片、CSS、JS、字体及其他未替换资源复制原始内容。仅在没有可复用目录时新增必需的 EPUB 3 导航文件。
+6. 校验原始资源和 manifest 身份、EPUB 3.0 版本、OPF 路径、spine 及 linear、字体混淆、转换文档、内部引用、语言字段、目标证据和 EPUBCheck 结果；成品不能保留 ERROR/FATAL。
 7. 再次核对源哈希和正文结果没有变化，然后写发布意图并原子提交到目标路径。
 
-默认目标位于原 EPUB 旁，名称为 `<stem>-cn.epub`。源快照、准备记录或它们的硬链接/别名不能作为输出；已有目标只有显式 `overwrite` 才能替换。候选校验失败时不会覆盖旧成品。`publish.json` 绑定计划指纹、每个目标的版本向量、目标路径和目标哈希，因此进程在提交附近中断后可以核对并恢复同一次发布。
+默认目标位于原 EPUB 旁，名称为 `<stem>-cn.epub`。源快照、准备记录或它们的硬链接/别名不能作为输出；无归属的已有目标只有显式 `overwrite` 才能替换。已绑定当前计划、版本向量和文件哈希的历史成品可以自动重组为 EPUB 3.0；候选校验失败时不会覆盖旧成品。`publish.json` 绑定计划指纹、每个目标的版本向量、目标路径和目标哈希，因此进程在提交附近中断后可以核对并恢复同一次发布。
 
 ## 4. CLI 接线
 
@@ -110,3 +110,17 @@ T20 仍需完成：全量工程检查、真实 EPUBCheck、小书真实三步翻
 EPUB toc/page-list/landmarks 中的锚点标签按导航字段提取，锁定包装结构；普通正文 p/table/em/i/ul/ol 的不可拆规则保留。可匹配的导航从正文标题派生，未匹配标签仍进入翻译；没有漏掉目录标签。
 
 派生项保存的blocked_dependency状态不携带模型translation_frame。恢复必须精确匹配冻结依赖记录；普通初译/校对项仍要求规范frame和实际持久响应证据。依赖标题完成后，派生目标在回填时生成，不伪造模型响应或额外请求。
+
+## 9. 翻译后的 EPUB 3.0 组装
+
+EPUB 标准自 2.0 开始。输入兼容 EPUB 2.x（包括 2.0、2.0.1 标记）和 EPUB 3.x，输出统一为 OPF `version="3.0"`；OEBPS/OPF 1.x 是不同的前身格式，不以改版本号的方式伪称为 EPUB 1 支持。
+
+格式转换共用 `upgrade_package`，在原始回填和目标证据验证后执行，不改动源快照、冻结 JSON、译文或模型响应。它规范 OPF 元数据、UTC modified 时间、旧角色及排序属性和封面声明，删除旧版 manifest 属性，并根据真实内容补齐必要的 properties。已有有效 EPUB 3.0 尽量保持原字节。
+
+优先复用已有 XHTML 目录；没有时按已翻译 NCX 的层级和链接生成 nav，NCX 目录为空时使用已翻译 spine 标题。保留原 NCX、章节顺序、linear、资源路径、ID、字体和图片。新增资源只允许必需的 nav；中文导航的固定标题使用“目录”等中文标签，不新增模型请求。
+
+旧 XHTML DOCTYPE 转换成 HTML5 DOCTYPE；受信任命名实体改成数值引用，以保持 XML 文本语义。CDATA、注释和处理指令不重写。旧的 namespaced `epub:prefix`（包括 namespace 别名）只在根标签中删除或合并为标准 prefix，CSS、脚本和代码保持原内容。表单、事件处理和 switch 所需的输出 manifest 声明按内容推导；既有不支持动态脚本等源格式的输入边界不变。
+
+最终候选必须通过 EPUBCheck，ERROR/FATAL 为零。原书诊断继续保存在 state.json，但不再作为新成品保留错误的理由。旧成品自动升级前必须验证发布归属、源哈希、目标哈希和旧校验证据；失败保留旧成品。重启还会检查实际 OPF 版本与干净校验记录的一致性。
+
+真实验证：`agentic-ai-platform-engineering-rethinking.epub` 的 2213 ERROR 降至 0 ERROR、0 FATAL、0 WARNING；仅修改 20 个条目，复用已有目录。另使用已完成的中文 `systems-thinking-agentic-ai-software-architects-cn.epub` 验证组装，正文及保护内容语义不变、未修改资源逐字节一致，输出同样为 EPUB 3.0 且 EPUBCheck 零错误。验证在临时目录进行，未重新翻译或修改原始文件。

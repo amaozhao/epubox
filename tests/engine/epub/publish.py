@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
+import engine.epub.publish as publish_module
 from engine.agents.workflow import run_workflow
 from engine.core.markup import parse_xml_bytes
 from engine.epub.diagnostics import compare
@@ -298,6 +299,18 @@ class BaselineChecker:
         return _epub_error(path)
 
 
+def _legacy_publish(monkeypatch: pytest.MonkeyPatch, case: ReadyCase, output: Path, checker: object):
+    original = publish_module.verify_staged_epub
+
+    def verify(*args, **kwargs):
+        kwargs.pop("upgraded", None)
+        return original(*args, **kwargs, upgraded=False)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publish_module, "verify_staged_epub", verify)
+        return publish_atomic(case.session.store, output, checker)
+
+
 def _resolved_proof(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
     source = make_epub(tmp_path / "broken.epub", {"chapter.xhtml": '<p data-test="1">English.</p>'})
     output = make_epub(tmp_path / "resolved.epub", {"chapter.xhtml": "<p>中文。</p>"})
@@ -338,7 +351,7 @@ def test_resolved_epubcheck_baseline_rejects_invalid_identity_and_count(
         verify_baseline(source, output, verification)
 
 
-def test_atomic_publish_allows_inherited_epubcheck_errors_and_rechecks_recovery(
+def test_atomic_publish_rejects_inherited_epubcheck_errors_without_an_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case = _case(tmp_path, '<p data-test="1">Hello world.</p>', ("Hello world.",))
@@ -349,15 +362,12 @@ def test_atomic_publish_allows_inherited_epubcheck_errors_and_rechecks_recovery(
     checker = BaselineChecker()
     output = tmp_path / "inherited-cn.epub"
 
-    published = publish_atomic(case.session.store, output, checker)
+    with pytest.raises(EpubValidationError, match="Upgraded EPUB 3.0 still has EPUBCheck ERROR/FATAL"):
+        publish_atomic(case.session.store, output, checker)
 
-    verification = published["verification"]
-    assert isinstance(verification, dict)
-    assert verification["epubcheck"]["passed"] is False
-    assert verification["baseline"]["inherited_errors"] == 1
     assert checker.calls == 2
-    assert recover_atomic(case.session.store, output, checker) == published
-    assert checker.calls == 4
+    assert not output.exists()
+    assert not list(tmp_path.glob(".*.candidate.epub"))
 
 
 @pytest.mark.parametrize("tamper", ["removed", "forged", "epubcheck", "passed", "message", "command", "returncode"])
@@ -370,7 +380,7 @@ def test_atomic_recovery_rejects_missing_or_forged_inherited_error_evidence(
     }
     monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
     output = tmp_path / "tampered-cn.epub"
-    publish_atomic(case.session.store, output, BaselineChecker())
+    _legacy_publish(monkeypatch, case, output, BaselineChecker())
     path = case.session.store.root / "publish.json"
     intent = json.loads(path.read_text())
     baseline = intent["verification"]["baseline"]
@@ -395,6 +405,42 @@ def test_atomic_recovery_rejects_missing_or_forged_inherited_error_evidence(
         recover_atomic(case.session.store, output, BaselineChecker())
 
 
+def test_atomic_publish_repacks_a_verified_historical_artifact_as_clean_epub3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _case(tmp_path, '<p data-test="1">Hello world.</p>', ("Hello world.",))
+    targets = {
+        item.item_id: item.source_projection for inventory in case.index.inventories for item in inventory.items
+    }
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+
+    class ResolvedChecker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def check(self, path: Path) -> EpubCheckResult:
+            self.calls += 1
+            return _epub_error(path) if self.calls == 1 else EpubCheckResult(("stub",), 0)
+
+    output = tmp_path / "historical-cn.epub"
+    historical = _legacy_publish(monkeypatch, case, output, ResolvedChecker())
+    with zipfile.ZipFile(output) as archive:
+        old_contents = {path: archive.read(path) for path in archive.namelist()}
+    old_verification = historical["verification"]
+    assert isinstance(old_verification, dict) and "epub_version" not in old_verification
+    assert old_verification["baseline"]["source_epubcheck"]["passed"] is False
+
+    published = publish_atomic(case.session.store, output, StubChecker())
+
+    verification = published["verification"]
+    assert isinstance(verification, dict)
+    assert verification["epub_version"] == "3.0"
+    assert verification["epubcheck"]["passed"] is True
+    assert "baseline" not in verification
+    with zipfile.ZipFile(output) as archive:
+        assert {path: archive.read(path) for path in archive.namelist()} == old_contents
+
+
 def test_atomic_recovery_checks_source_hash_for_a_resolved_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -416,7 +462,9 @@ def test_atomic_recovery_checks_source_hash_for_a_resolved_baseline(
     output = tmp_path / "resolved-cn.epub"
     published = publish_atomic(case.session.store, output, checker)
     verification = published["verification"]
-    assert isinstance(verification, dict) and verification["baseline"]["inherited_errors"] == 0
+    assert isinstance(verification, dict)
+    assert verification["epubcheck"]["passed"] is True
+    assert verification["epub_version"] == "3.0"
     snapshot = case.session.store.root / "source.epub"
     snapshot.chmod(0o644)
     snapshot.write_bytes(snapshot.read_bytes() + b"changed")

@@ -38,6 +38,7 @@ class PackageVerification:
     checked_documents: tuple[str, ...]
     warnings: tuple[ValidationIssue, ...] = ()
     baseline: dict[str, object] | None = None
+    epub_version: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -48,6 +49,8 @@ class PackageVerification:
         }
         if self.baseline is not None:
             value["baseline"] = self.baseline
+        if self.epub_version is not None:
+            value["epub_version"] = self.epub_version
         return value
 
 
@@ -57,14 +60,20 @@ def stage_epub(
     replacements: Mapping[str, bytes],
     *,
     source_directory: Path | None = None,
+    allow_additions: bool = False,
 ) -> str:
     """Create a candidate EPUB while preserving every untouched ZIP member."""
     staged_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(source_snapshot) as source:
         names = set(source.namelist())
         unknown = set(replacements) - names
-        if unknown:
+        if unknown and not allow_additions:
             raise EpubValidationError("unknown_replacement", f"Replacement is not in source EPUB: {min(unknown)}")
+        if unknown:
+            from engine.epub.validation import _validate_package_path
+
+            for path in unknown:
+                _validate_package_path(path)
         with zipfile.ZipFile(staged_path, "w") as target:
             mimetype = (
                 replacements["mimetype"]
@@ -90,6 +99,8 @@ def stage_epub(
                 copied.create_system = info.create_system
                 copied.flag_bits = info.flag_bits & ~0x1
                 target.writestr(copied, data, compress_type=info.compress_type)
+            for path in sorted(unknown):
+                target.writestr(path, replacements[path], compress_type=zipfile.ZIP_DEFLATED)
     return file_hash(staged_path)
 
 
@@ -127,17 +138,37 @@ def verify_staged_epub(
     accepted_targets: Mapping[str, Mapping[str, str]],
     checker: object,
     expected_language: str | None = None,
+    upgraded: bool = False,
 ) -> PackageVerification:
     output_hash = file_hash(staged_path)
-    output_inventory = inspect_epub(staged_path, output_hash, checker=checker)
-    if output_inventory.epub_version != source_inventory.epub_version:
+    output_inventory = inspect_epub(staged_path, output_hash, checker=checker, for_output=True)
+    if upgraded and output_inventory.epub_version != "3.0":
+        raise EpubValidationError("epub_version_changed", "Upgraded output must be EPUB 3.0")
+    if not upgraded and output_inventory.epub_version != source_inventory.epub_version:
         raise EpubValidationError("epub_version_changed", "Output EPUB version differs from source")
-    if set(output_inventory.entries) != set(source_inventory.entries):
+    added = set(output_inventory.entries) - set(source_inventory.entries)
+    if (set(source_inventory.entries) - set(output_inventory.entries)) or (
+        added and (not upgraded or added != {output_inventory.nav_path} or not added <= set(expected_documents))
+    ):
         raise EpubValidationError("resource_inventory_changed", "Output resource inventory differs from source")
     if output_inventory.opf_path != source_inventory.opf_path:
         raise EpubValidationError("opf_changed", "Output package document path differs from source")
     if output_inventory.spine != source_inventory.spine:
         raise EpubValidationError("spine_changed", "Output reading order differs from source")
+    if output_inventory.spine_linear != source_inventory.spine_linear:
+        raise EpubValidationError("spine_changed", "Output linear reading order differs from source")
+    output_items = {item.item_id: item for item in output_inventory.manifest}
+    for item in source_inventory.manifest:
+        current = output_items.get(item.item_id)
+        if (
+            current is None
+            or current.path != item.path
+            or current.media_type
+            not in {item.media_type, "application/xhtml+xml" if item.media_type == "text/html" else item.media_type}
+        ):
+            raise EpubValidationError(
+                "resource_inventory_changed", "Original manifest resource changed during upgrade"
+            )
     if output_inventory.obfuscated_fonts != source_inventory.obfuscated_fonts:
         raise EpubValidationError("font_obfuscation_changed", "Font obfuscation resources changed")
 
@@ -163,12 +194,20 @@ def verify_staged_epub(
     source_result = source_inventory.epubcheck
     if result is None or source_result is None:
         raise EpubValidationError("missing_epubcheck", "EPUBCheck evidence is missing")
+    if upgraded and not result.passed:
+        raise EpubValidationError(
+            "epubcheck_failed",
+            "Upgraded EPUB 3.0 still has EPUBCheck ERROR/FATAL: "
+            + next(iter((*result.fatals, *result.errors)), "checker failed"),
+        )
     baseline = (
         compare(source_snapshot, staged_path, source_result, result)
-        if not source_result.passed or not result.passed
+        if not upgraded and (not source_result.passed or not result.passed)
         else None
     )
-    return PackageVerification(output_hash, result, tuple(sorted(expected_documents)), tuple(warnings), baseline)
+    return PackageVerification(
+        output_hash, result, tuple(sorted(expected_documents)), tuple(warnings), baseline, "3.0" if upgraded else None
+    )
 
 
 def publish_verified(
@@ -236,6 +275,21 @@ def verify_baseline(
     epubcheck = verification.get("epubcheck")
     if not isinstance(epubcheck, dict) or type(epubcheck.get("passed")) is not bool:
         raise EpubValidationError("invalid_publish_intent", "Atomic publication evidence is incomplete")
+    if verification.get("epub_version") == "3.0":
+        if (
+            epubcheck.get("passed") is not True
+            or type(epubcheck.get("returncode")) is not int
+            or epubcheck.get("returncode") != 0
+            or epubcheck.get("errors") != []
+            or epubcheck.get("fatals") != []
+        ):
+            raise EpubValidationError("invalid_publish_intent", "EPUB 3.0 publication evidence is inconsistent")
+        with zipfile.ZipFile(output_path) as archive:
+            from engine.epub.validation import _container_rootfiles
+
+            rootfiles = _container_rootfiles(_parse_xml(archive.read("META-INF/container.xml"), "container.xml"))
+            if len(rootfiles) != 1 or _parse_xml(archive.read(rootfiles[0]), rootfiles[0]).get("version") != "3.0":
+                raise EpubValidationError("invalid_publish_intent", "Published package is not EPUB 3.0")
     baseline = verification.get("baseline")
     if baseline is None and epubcheck["passed"] is True:
         return

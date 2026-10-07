@@ -209,3 +209,7 @@ P4 的真实阻塞结果现在附带文件路径、成员 ID 和具体预算失�
 直接运行原 translate 命令完成实书续传：新增一次初译和一次校对，4230/4230 接受、待处理为零，累计 HTTP 867。生成原书同目录下的 `systems-thinking-agentic-ai-software-architects-cn.epub`。ZIP 完整性、mimetype 首项未压缩、zh-Hans 语言标记及 Java 段落原始字节一致性检查通过。
 
 验证包含全量 915 项测试、最新 75 项相关回归及独立审查。V5 初译和校对物理请求固定哈希不变；保存响应后尚未提交译文的崩溃窗口，在新请求物理预算超限时仍先回放旧 V5 响应，不新增 HTTP。Ruff、格式及 Pyright 检查通过。
+
+## 19. 出版时统一升级 EPUB 3.0
+
+原子和既有 workflow 出版均在译文回填验证后统一处理包元数据、导航和旧 XHTML 语法，最终输出 OPF 3.0；新成品必须通过 EPUBCheck 零 ERROR/FATAL。原书和翻译断点继续保留原身份。已有经过验证的旧成品再次运行普通 translate 命令会直接重新组装，不重新调用翻译接口。细则及实书证据见 [publication.md 第 9 节](publication.md#9-翻译后的-epub-30-组装)。

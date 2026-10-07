@@ -70,11 +70,19 @@ def test_legacy_completed_baseline_recovery_uses_explicit_checker_without_model(
         calls.append(True)
 
     monkeypatch.setattr(verification_module, "verify_baseline", verify)
+
+    def repack(saved_store, target, checker, *, overwrite):
+        assert saved_store is store and target == output and overwrite
+        assert checker.command == ("explicit-checker",) and calls == [True]
+        calls.append("repacked")
+        return {"sha256": "epub3-output"}
+
+    monkeypatch.setattr(cli, "publish_book", repack)
     monkeypatch.setattr(cli, "build_run_model", lambda *args, **kwargs: pytest.fail("model constructed"))
     outcome = cli.RunOutcome("completed", work, "publication", output_path=output)
     monkeypatch.setattr(cli, "_completed_outcome", lambda *args: outcome)
     assert cli._completed_run_outcome(work, output, "explicit-checker") is outcome
-    assert calls == [True]
+    assert calls == [True, "repacked"]
 
 
 def active_case(tmp_path: Path, **translation):

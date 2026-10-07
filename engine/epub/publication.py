@@ -8,6 +8,7 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name, serialize_xml
 from engine.epub.assembly import assemble_document, derive_navigation_projection
+from engine.epub.upgrade import upgrade_package
 from engine.epub.validation import (
     EpubValidationError,
     PackageInventory,
@@ -225,12 +226,16 @@ def publish_book(
             source_to_target=sidecar,
             changeset=changesets.get(path, {}),
         )
+    replacements = upgrade_package(snapshot, inventory, replacements)
+    for path in replacements:
+        accepted_by_resource.setdefault(path, {})
     staged_path = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
     stage_epub(
         snapshot,
         staged_path,
         replacements,
         source_directory=store.root / "source" if state.compact(store.root) else None,
+        allow_additions=True,
     )
     verification = verify_staged_epub(
         snapshot,
@@ -240,6 +245,7 @@ def publish_book(
         accepted_targets=accepted_by_resource,
         checker=checker,
         expected_language=None if identity else "zh-Hans",
+        upgraded=True,
     )
     if not identity:
         current_records = {unit_id: store.read_unit(unit_id) for unit_id in plan.unit_ids}
