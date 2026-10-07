@@ -13,6 +13,7 @@ from engine.agents.protocol import ProtocolError, review_applicability, validate
 from engine.agents.runtime import ATOMIC_PROMPT_VERSION, ModelRuntime, RequestError
 from engine.agents.terms import validate_review_response
 from engine.core.quality import find_degenerate_translation, find_untranslated_english_texts
+from engine.item.citations import script_text_without_retained_titles
 from engine.item.inline import plain_text
 from engine.item.members import MemberIndex, pack_members, validate_member_target
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash
@@ -620,7 +621,7 @@ def _target_error(member: RequestMember, target: str, wire: Mapping[str, Any]) -
     source_text, target_text = plain_text(member.source_projection), plain_text(target)
     if degeneration := find_degenerate_translation(source_text, target_text):
         return degeneration
-    script_text = target_text
+    script_text = script_text_without_retained_titles(member.source_projection, target, member.registry)
     for term in wire.get("terms", ()):
         if isinstance(term, Mapping) and term.get("role") == "target":
             spelling = _source_variant(term, source_text) if term.get("mode") == "keep_source" else term.get("target")

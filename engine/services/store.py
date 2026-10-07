@@ -53,6 +53,7 @@ from engine.schemas.contracts import (
     validate_cut_plan_coverage,
     validate_term_scopes,
 )
+from engine.schemas.members import RequestMember
 from engine.services import state
 from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite, safe_id
 
@@ -861,9 +862,27 @@ class RunStore:
             raise IdentityMismatch("model response identity does not match its request attempt")
         if version is not None:
             return record.response.model_copy(
-                update={"raw": wire.decode(stage, record.response.raw, request_id, manifest.item_ids)}
+                update={
+                    "raw": wire.decode(
+                        stage,
+                        record.response.raw,
+                        request_id,
+                        manifest.item_ids,
+                        version=version,
+                        sources=self.read_response_sources(manifest) if version == "epubox-wire-4" else None,
+                    )
+                }
             )
         return record.response
+
+    def read_response_sources(self, manifest: RequestManifest) -> dict[str, str]:
+        sources: dict[str, str] = {}
+        for item_id in manifest.item_ids:
+            member = RequestMember.model_validate_json(state.read(self._path("members", item_id)))
+            if member.item_id != item_id:
+                raise IdentityMismatch("response source member identity changed")
+            sources[item_id] = member.source_projection
+        return sources
 
     def save_term_response(self, request_id: str, attempt_id: str, envelope: Mapping[str, object]) -> None:
         self.save_model_response("terms", request_id, attempt_id, envelope)

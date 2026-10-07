@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +8,6 @@ import pytest
 from engine.agents import wire
 from engine.agents.runtime import ModelRuntime, model_input_budget, request_messages
 from engine.agents.workflow import run_workflow
-from engine.item.inline import Event, events_to_projection, parse_projection
 from engine.schemas.contracts import Attempt, ItemStatus
 from engine.services import state
 from engine.services.atomic import IdentityMismatch
@@ -44,8 +44,9 @@ def make_case(tmp_path):
 
 @pytest.mark.parametrize("tamper_stage", ("translate", "review"))
 @pytest.mark.parametrize("crash", (False, True))
+@pytest.mark.parametrize("replace", (False, True))
 def test_real_provider_adapter_saves_physical_wire_and_replays_canonical_results(
-    tmp_path, tamper_stage, crash, monkeypatch
+    tmp_path, tamper_stage, crash, replace, monkeypatch
 ):
     case = make_case(tmp_path)
     journal = BodyJournal(case.session.store, case.session)
@@ -73,14 +74,16 @@ def test_real_provider_adapter_saves_physical_wire_and_replays_canonical_results
             if kind == "translate":
                 items = []
                 for item in payload["items"]:
-                    target = events_to_projection(
-                        Event(kind="text", value="译文。") if event.kind == "text" else event
-                        for event in parse_projection(wire.decode_projection(item["source"]))
-                    )
-                    items.append({"item_id": item["item_id"], "target": wire.encode_projection(target)})
+                    target = {slot: "译文。" for slot in re.findall(r"<t(\d+)>", item["source"])}
+                    items.append({"item_id": item["item_id"], "target": target})
             else:
                 assert "bindings" not in payload["items"][0]
-                items = [review_item(item, decision="no_change") for item in payload["items"]]
+                items = [
+                    review_item(item, decision="replace" if replace else "no_change") for item in payload["items"]
+                ]
+                if replace:
+                    for item, decision in zip(payload["items"], items, strict=True):
+                        decision["target"] = {slot: "修订译文。" for slot in re.findall(r"<t(\d+)>", item["source"])}
             raw = json.dumps({"protocol": payload["protocol"], "request_id": payload["request_id"], "items": items})
             sent[payload["request_id"]] = (kwargs["messages"], kwargs["max_tokens"], raw)
             return SimpleNamespace(
@@ -308,7 +311,7 @@ def test_code_hint_content_is_never_sent_even_for_a_tiny_request():
             item = json.loads(message)["items"][0]
             assert item["item_id"] == "1" and item["source"] == "<x1/>"
             raw = json.dumps(
-                {"protocol": "epubox-text-1", "request_id": "code", "items": [{"item_id": "1", "target": "<x1/>"}]}
+                {"protocol": "epubox-text-1", "request_id": "code", "items": [{"item_id": "1", "target": {}}]}
             )
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=raw), finish_reason="stop")],
@@ -327,4 +330,5 @@ def test_code_hint_content_is_never_sent_even_for_a_tiny_request():
     result = asyncio.run(
         runtime.invoke("translate", payload, {"request_id": "code", "item_ids": ["u-code"], "output_tokens": 100})
     )
-    assert result["metadata"]["wire_version"] == "epubox-wire-3"
+    assert result["metadata"]["wire_version"] == wire.VERSION
+    assert json.loads(result["raw"])["items"][0]["target"] == "⟦=x1⟧"

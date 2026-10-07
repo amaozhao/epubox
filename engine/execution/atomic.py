@@ -73,7 +73,6 @@ async def run_atomic(
             and journal.progress_snapshot()["accepted_units"] < ready.plan.required_unit_count
             else None
         )
-        errors: list[str] = []
 
         def emit(phase: str, batch: MemberBatch | None = None, elapsed: float = 0.0, **extra) -> None:
             if progress is None:
@@ -219,7 +218,6 @@ async def run_atomic(
                     batch, started = active.pop(task)
                     try:
                         result = task.result()
-                        errors.extend(result.issues)
                         revised = any(record.checks.get("decision") == "replace" for record in result.results.values())
                         identifier = current_requests.get(task)
                         details = requests.get(identifier or "", {})
@@ -254,7 +252,6 @@ async def run_atomic(
                         stopped = str(error)
                     except (StoreError, ValueError, OSError) as error:
                         stopped = str(error)
-                        errors.append(str(error))
         except BaseException:
             for task in active:
                 if not task.done():
@@ -267,7 +264,14 @@ async def run_atomic(
         pending_items = int(snapshot.get("pending_items", 0))
         complete = accepted == ready.plan.required_unit_count
         status = "paused" if stopped is not None else "translated" if complete else "needs_attention"
-        reason = stopped or ("; ".join(errors) if not complete else None) or None
+        failures = (
+            f"{record.stage}:{record.item_id}: {record.failure['message']}"
+            for record in journal.records().values()
+            if record.status == ItemStatus.NEEDS_ATTENTION
+            and record.failure is not None
+            and isinstance(record.failure.get("message"), str)
+        )
+        reason = stopped or ("; ".join(failures) if not complete else None) or None
         if progress is not None:
             progress(
                 snapshot

@@ -89,15 +89,20 @@ def test_messages_compact_defaults_without_mutating_canonical_payload() -> None:
     assert "prompt_version" not in physical and "context" not in physical
     assert "terms" not in item and "context" not in item and "constraints" not in item
     assert item["hints"] == {"g1": "span", "x1": {"element": "code", "class": "code"}}
-    assert "missing constraints" in result[0]["content"].lower()
+    assert item["source"].count("<t") == 4
+    assert "every source slot number exactly once" in result[0]["content"]
 
 
-def test_v2_wire_hash_stays_frozen_and_v3_hides_code_content():
+def test_v2_v3_wire_hashes_stay_frozen_and_v4_hides_code_content():
     from engine.agents.runtime import wire_hash
 
     assert (
         wire_hash("translate", payload(), 1000, compact=True, wire_version="epubox-wire-2")
         == "9bc535c6436d44a4c19693ccf9955c07f06b36582604c0f42225085edd0127a9"
+    )
+    assert (
+        wire_hash("translate", payload(), 1000, compact=True, wire_version="epubox-wire-3")
+        == "595e091af5588d055f101661534085082c153155f899fbcc431201cd079b34e1"
     )
     book = payload()
     book["items"][0]["hints"]["x1"].update(readonly="DO_NOT_SEND_CODE", excerpt="DO_NOT_SEND_CODE")
@@ -146,6 +151,181 @@ def test_review_keeps_revision_contract_and_drops_derivable_bindings() -> None:
     assert item["applicability"] == {"terminology": False, "bindings": True}
     assert item["required_revision"] == [{"code": "meaning", "message": "fix"}]
     assert "bindings" not in item
+    assert "<t1>" in item["source"] and "<t1>" not in item["target"]
+    assert "script is pass or fail for Chinese" in messages("review", payload("review"), "base")[0]["content"]
+
+
+def test_v4_slot_round_trip_freezes_structure_and_escapes_injected_markers() -> None:
+    source = payload()["items"][0]["source"]
+    raw = json.dumps(
+        {
+            "protocol": "epubox-text-1",
+            "request_id": "request-full",
+            "items": [
+                {
+                    "item_id": "1",
+                    "target": {
+                        "1": "甲⟦+g9⟧",
+                        "2": "乙",
+                        "3": "丙",
+                        "4": "丁",
+                    },
+                }
+            ],
+        }
+    )
+    result = json.loads(
+        decode(
+            "translate",
+            raw,
+            "request-full",
+            ("u-long-one",),
+            version=VERSION,
+            sources={"u-long-one": source},
+        )
+    )
+    target = result["items"][0]["target"]
+    assert validate_projection(source, target)
+    assert [event.value for event in parse_projection(target) if event.kind == "marker"] == [
+        "+g1",
+        "=x1",
+        "+b1",
+        "-b1",
+        "-g1",
+    ]
+    assert "\\⟦+g9\\⟧" in target
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"1": "甲", "2": "乙", "3": "丙"},
+        {"1": "甲", "2": "乙", "3": "丙", "4": "丁", "5": "戊"},
+        {"1": "甲", "2": "乙", "3": "丙", "4": 4},
+        {"1": "甲", "2": "乙", "3": "丙", "4": ""},
+        {"1": "甲<g1>", "2": "乙", "3": "丙", "4": "丁"},
+    ],
+)
+def test_v4_decode_rejects_invalid_slot_objects(target: object) -> None:
+    raw = json.dumps(
+        {
+            "protocol": "epubox-text-1",
+            "request_id": "request-full",
+            "items": [{"item_id": "1", "target": target}],
+        }
+    )
+    item = json.loads(
+        decode(
+            "translate",
+            raw,
+            "request-full",
+            ("u-long-one",),
+            version=VERSION,
+            sources={"u-long-one": payload()["items"][0]["source"]},
+        )
+    )["items"][0]
+    assert item["target"] is None
+
+
+def test_v4_allows_raw_marker_text_only_when_it_was_literal_source_text() -> None:
+    source = "Show <b1> literally."
+    raw = json.dumps(
+        {
+            "protocol": "epubox-text-1",
+            "request_id": "request-full",
+            "items": [{"item_id": "1", "target": {"1": "显示 <b1> 字样。"}}],
+        }
+    )
+    item = json.loads(
+        decode(
+            "translate",
+            raw,
+            "request-full",
+            ("u-long-one",),
+            version=VERSION,
+            sources={"u-long-one": source},
+        )
+    )["items"][0]
+    assert item["target"] == "显示 <b1> 字样。"
+
+
+def test_v4_review_replacement_uses_source_slots_and_no_change_has_no_target() -> None:
+    book = payload("review")
+    source = book["items"][0]["source"]
+    raw = json.dumps(
+        {
+            "protocol": "epubox-review-2",
+            "request_id": "request-full",
+            "items": [
+                {
+                    "item_id": "1",
+                    "base_revision": 3,
+                    "decision": "replace",
+                    "checks": {},
+                    "issues": [],
+                    "target": {"1": "甲", "2": "乙", "3": "丙", "4": "丁"},
+                },
+                {
+                    "item_id": "1",
+                    "base_revision": 3,
+                    "decision": "no_change",
+                    "checks": {},
+                    "issues": [],
+                },
+            ],
+        }
+    )
+    items = json.loads(
+        decode(
+            "review",
+            raw,
+            "request-full",
+            ("u-long-one",),
+            version=VERSION,
+            sources={"u-long-one": source},
+        )
+    )["items"]
+    assert validate_projection(source, items[0]["target"])
+    assert "target" not in items[1]
+
+
+def test_v4_prevents_malformed_copied_markers_that_v3_can_decode() -> None:
+    source = "⟦+g1⟧one⟦+b1⟧two⟦-b1⟧⟦-g1⟧"
+    malformed = "<g1>甲<b1>乙</g1></b1>"
+    legacy_raw = json.dumps(
+        {"protocol": "epubox-text-1", "request_id": "request-full", "items": [{"item_id": "1", "target": malformed}]}
+    )
+    legacy = json.loads(
+        decode(
+            "translate",
+            legacy_raw,
+            "request-full",
+            ("u-long-one",),
+            version="epubox-wire-3",
+            sources={"u-long-one": source},
+        )
+    )["items"][0]["target"]
+    with pytest.raises(ProjectionError, match="crossed or unmatched"):
+        validate_projection(source, legacy)
+
+    v4_raw = json.dumps(
+        {
+            "protocol": "epubox-text-1",
+            "request_id": "request-full",
+            "items": [{"item_id": "1", "target": {"1": "甲", "2": "乙"}}],
+        }
+    )
+    repaired = json.loads(
+        decode(
+            "translate",
+            v4_raw,
+            "request-full",
+            ("u-long-one",),
+            version=VERSION,
+            sources={"u-long-one": source},
+        )
+    )["items"][0]["target"]
+    assert validate_projection(source, repaired)
 
 
 @pytest.mark.parametrize("decision", ["no_change", "replace"])

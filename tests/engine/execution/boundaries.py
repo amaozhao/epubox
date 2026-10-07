@@ -6,7 +6,7 @@ from zipfile import ZipFile
 import pytest
 from lxml import etree  # type: ignore[attr-defined]
 
-from engine.agents.runtime import model_input_budget, request_messages
+from engine.agents.runtime import request_messages
 from engine.cli import _write_source_hint
 from engine.epub.fill import fill_resource
 from engine.epub.publish import publish_atomic
@@ -33,12 +33,8 @@ def test_boundary_failure_retries_without_weakening_fill_validation(tmp_path, su
         validate_member_target(item, BAD)
     validate_member_target(item, GOOD)
     physical = request_messages("translate", case.batch.payload, compact=True)
-    assert "never duplicate its hinted content" in physical[0]["content"]
-    assert "keep originally nonempty ranges nonempty" in physical[0]["content"]
-    assert (
-        model_input_budget("translate", case.batch.payload, compact=True)["cl100k_tokens"]
-        < model_input_budget("translate", case.batch.payload)["cl100k_tokens"]
-    )
+    assert "marker structure is reconstructed locally" in physical[0]["content"]
+    assert "every source slot number exactly once with a nonempty translated string" in physical[0]["content"]
     calls = Counter()
     events = []
 

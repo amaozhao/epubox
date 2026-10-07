@@ -542,7 +542,14 @@ def _atomic_response(root: Path, request: RequestManifest) -> dict:
             continue
         response = saved.response.model_dump(mode="python")
         if version is not None:
-            response["raw"] = physical.decode(request.stage, saved.response.raw, request.request_id, request.item_ids)
+            response["raw"] = physical.decode(
+                request.stage,
+                saved.response.raw,
+                request.request_id,
+                request.item_ids,
+                version=version,
+                sources=RunStore(root).read_response_sources(request) if version == "epubox-wire-4" else None,
+            )
         return response
     raise ValueError("reviewed result lacks succeeded response file")
 

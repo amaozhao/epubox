@@ -548,12 +548,8 @@ class ModelRuntime:
             physical_budget = model_input_budget(
                 kind, payload, algorithm_version=self._input_budget_version, compact=True
             )
-            protected_code = any(
-                isinstance(hint, Mapping) and hint.get("class") == "code"
-                for item in payload["items"]
-                for hint in item.get("hints", {}).values()
-            )
-            if protected_code or physical_budget["cl100k_tokens"] < budget["cl100k_tokens"]:
+            protected_structure = any(item.get("hints") or item.get("constraints") for item in payload["items"])
+            if protected_structure or physical_budget["cl100k_tokens"] < budget["cl100k_tokens"]:
                 budget, compact = physical_budget, True
         estimated_input_tokens = budget["estimated_input_tokens"]
         if estimated_input_tokens > MAX_MODEL_INPUT_TOKENS:
@@ -763,6 +759,17 @@ class ModelRuntime:
                 )
                 if usage is not None and usage.input_tokens > MAX_MODEL_INPUT_TOKENS:
                     self._actual_input_limit_breached = usage.input_tokens
-                return response | {"raw": wire.decode(kind, raw, request_id, item_ids)} if compact else response
+                if compact:
+                    return response | {
+                        "raw": wire.decode(
+                            kind,
+                            raw,
+                            request_id,
+                            item_ids,
+                            version=wire.VERSION,
+                            sources={item["item_id"]: item["source"] for item in payload["items"]},
+                        )
+                    }
+                return response
 
         raise AssertionError("unreachable")
