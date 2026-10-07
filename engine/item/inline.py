@@ -170,6 +170,64 @@ def validate_projection(
     return target_events
 
 
+def normalize_empty_closes(source_projection: str, target_projection: str) -> str:
+    """Drop only duplicate closes after a preserved source-empty g range."""
+    try:
+        source_events = validate_projection(source_projection)
+        source_shape = _shape(source_events, "source")
+        target_events = parse_projection(target_projection)
+    except ProjectionError:
+        return target_projection
+
+    empty = {
+        event.value[1:]
+        for index, event in enumerate(source_events[:-1])
+        if event.kind == "marker"
+        and event.value.startswith("+g")
+        and source_events[index + 1].kind == "marker"
+        and source_events[index + 1].value == f"-{event.value[1:]}"
+    }
+    if not empty:
+        return target_projection
+
+    stack: list[str] = []
+    preserved: set[tuple[str, tuple[str, ...]]] = set()
+    redundant: set[int] = set()
+    for index, event in enumerate(target_events):
+        if event.kind != "marker" or event.value.startswith("="):
+            continue
+        ref = event.value[1:]
+        if event.value.startswith("+"):
+            stack.append(ref)
+            continue
+        if stack and stack[-1] == ref:
+            parent = tuple(stack[:-1])
+            if (
+                ref in empty
+                and index > 0
+                and target_events[index - 1].kind == "marker"
+                and target_events[index - 1].value == f"+{ref}"
+                and source_shape["parents"][ref] == parent
+            ):
+                preserved.add((ref, parent))
+            stack.pop()
+            continue
+        parent = tuple(stack)
+        if ref in empty and source_shape["parents"][ref] == parent and (ref, parent) in preserved:
+            redundant.add(index)
+            continue
+        return target_projection
+
+    if not redundant:
+        return target_projection
+    cleaned = events_to_projection(event for index, event in enumerate(target_events) if index not in redundant)
+    try:
+        validate_projection(source_projection, cleaned)
+    except ProjectionError:
+        return target_projection
+    return cleaned
+
+
 def _event(raw: Event | Sequence[Any] | Mapping[str, Any]) -> Event:
     if isinstance(raw, Event):
         return raw

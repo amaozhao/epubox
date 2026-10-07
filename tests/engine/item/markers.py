@@ -6,7 +6,14 @@ import pytest
 
 from engine.agents.protocol import validate_translation_response
 from engine.item.atoms import extract_resource
-from engine.item.inline import Event, ProjectionError, events_to_projection, parse_projection, validate_item_target
+from engine.item.inline import (
+    Event,
+    ProjectionError,
+    events_to_projection,
+    normalize_empty_closes,
+    parse_projection,
+    validate_item_target,
+)
 
 XHTML = "http://www.w3.org/1999/xhtml"
 
@@ -139,3 +146,23 @@ def test_pure_protected_content_needs_no_model_item_and_xml_controls_are_rejecte
     )
     with pytest.raises(ProjectionError, match="XML-invalid"):
         validate_item_target(attribute, target)
+
+
+def test_only_redundant_closes_for_source_empty_groups_are_normalized() -> None:
+    source_projection = "Before ⟦=x1⟧⟦+g1⟧⟦-g1⟧ after."
+    target = "之前 ⟦=x1⟧\\⟦-g1\\⟧⟦+g1⟧⟦-g1⟧ 之后。⟦-g1⟧"
+    assert normalize_empty_closes(source_projection, target) == target.removesuffix("⟦-g1⟧")
+
+    unchanged = (
+        ("⟦+g1⟧source⟦-g1⟧", "⟦+g1⟧译文⟦-g1⟧⟦-g1⟧"),
+        (
+            "⟦+g1⟧⟦-g1⟧⟦+g2⟧source⟦-g2⟧",
+            "⟦+g1⟧⟦-g1⟧⟦+g2⟧⟦-g1⟧译文⟦-g2⟧",
+        ),
+        (source_projection, "译文⟦-g1⟧"),
+        ("⟦+b1⟧⟦-b1⟧", "⟦+b1⟧⟦-b1⟧⟦-b1⟧"),
+        (source_projection, "译文⟦+g1⟧内容⟦-g1⟧⟦-g1⟧"),
+        ("⟦+g1⟧⟦+g2⟧⟦-g1⟧⟦-g2⟧", target),
+    )
+    for source_value, target_value in unchanged:
+        assert normalize_empty_closes(source_value, target_value) == target_value

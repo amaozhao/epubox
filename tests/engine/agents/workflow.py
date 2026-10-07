@@ -329,11 +329,16 @@ async def test_truncated_translation_and_ready_mismatch_dispatch_no_review_or_ht
 
 
 @pytest.mark.asyncio
-async def test_unknown_response_item_rejects_the_batch_without_review(case: ReadyCase) -> None:
+async def test_unknown_response_item_does_not_discard_a_valid_known_item(case: ReadyCase) -> None:
     calls: list[str] = []
 
     async def transport(kind, payload):
         calls.append(kind)
+        if kind == "review":
+            items = [review_item(item, decision="no_change") for item in payload["items"]]
+            return {
+                "raw": json.dumps({"protocol": "epubox-review-2", "request_id": payload["request_id"], "items": items})
+            }
         items = [
             {"item_id": payload["items"][0]["item_id"], "target": "你好，世界。"},
             {"item_id": "unknown", "target": "未知"},
@@ -348,8 +353,9 @@ async def test_unknown_response_item_rejects_the_batch_without_review(case: Read
         session=case.session,
         save=lambda _record: None,
     )
-    assert result.status == "needs_attention" and calls == ["translate"]
-    assert result.results[case.batch.items[0].item_id].target_projection is None
+    assert result.status == "completed" and calls == ["translate", "review"]
+    assert result.results[case.batch.items[0].item_id].target_projection == "你好，世界。"
+    assert any("ignored unknown item IDs: unknown" in issue for issue in result.issues)
 
 
 @pytest.mark.asyncio

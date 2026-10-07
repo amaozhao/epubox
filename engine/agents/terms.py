@@ -13,6 +13,7 @@ from engine.agents.protocol import (
     _valid_xml_text,
     strict_loads,
 )
+from engine.item.inline import normalize_empty_closes
 
 _CATEGORIES = {"term", "person", "organization", "product", "abbreviation", "other"}
 
@@ -287,6 +288,9 @@ def validate_review_response(
         if error:
             errors[item_id] = error
         else:
+            source = expected_items[item_id].get("source_projection")
+            if quality["decision"] == "replace" and isinstance(source, str):
+                quality["target"] = normalize_empty_closes(source, quality["target"])
             accepted[item_id] = quality | {"term_suggestions": valid_suggestions}
     return ReviewValidation(
         accepted,

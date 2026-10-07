@@ -141,6 +141,7 @@ async def _translate_step(
         return current, issues
     if requested != batch.items:
         raise ValueError("translation step requires a batch containing only pending members")
+    batch_error = None
     try:
         response = await runtime.invoke(
             "translate",
@@ -151,13 +152,16 @@ async def _translate_step(
         if response.get("finish_reason") in {"length", "max_tokens"}:
             raise ProtocolError("translation response was truncated")
         parsed = validate_translation_response(
-            response["raw"], batch.manifest.request_id, {item.item_id for item in batch.items}
+            response["raw"], batch.manifest.request_id, {item.item_id: item.source_projection for item in batch.items}
         )
         if parsed.unknown:
-            raise ProtocolError(f"translation response contains unknown item IDs: {', '.join(parsed.unknown)}")
+            issues.append(
+                f"translate:{batch.manifest.request_id}: ignored unknown item IDs: {', '.join(parsed.unknown)}"
+            )
     except (KeyError, ProtocolError, RequestError, TypeError, ValueError) as error:
         parsed = None
-        issues.append(f"translate:{batch.manifest.request_id}: {error}")
+        batch_error = f"translate:{batch.manifest.request_id}: {error}"
+        issues.append(batch_error)
 
     wires = _wire_items(batch)
     changed: list[ItemRecord] = []
@@ -165,7 +169,7 @@ async def _translate_step(
         error = None
         target = None
         if parsed is None:
-            error = issues[-1]
+            error = batch_error
         elif member.item_id in parsed.accepted:
             target = parsed.accepted[member.item_id]["target"]
             error = _target_error(member, target, wires[member.item_id])
@@ -257,13 +261,16 @@ async def _proofread_step(
             expected = {
                 item.item_id: {
                     "base_revision": review_batch.manifest.revisions[item.unit_id],
+                    "source_projection": item.source_projection,
                     **review_applicability(item, index, _wire_items(review_batch)[item.item_id]),
                 }
                 for item in review_batch.items
             }
             parsed = validate_review_response(response["raw"], review_batch.manifest.request_id, expected)
             if parsed.unknown:
-                raise ProtocolError(f"review response contains unknown item IDs: {', '.join(parsed.unknown)}")
+                issues.append(
+                    f"review:{review_batch.manifest.request_id}: ignored unknown item IDs: {', '.join(parsed.unknown)}"
+                )
             if any(value.get("term_suggestions") for value in parsed.accepted.values()):
                 raise ProtocolError("atomic review response cannot add terminology suggestions")
         except (KeyError, ProtocolError, RequestError, TypeError, ValueError) as error:

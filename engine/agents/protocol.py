@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
+from engine.item.inline import normalize_empty_closes
+
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_JSON_DEPTH = 64
 MAX_JSON_NODES = 100_000
@@ -138,7 +140,11 @@ def _collect_items(
     return accepted, errors, tuple(dict.fromkeys(unknown)), counts
 
 
-def validate_translation_response(raw: str | bytes, request_id: str, expected_item_ids: set[str]) -> BatchValidation:
+def validate_translation_response(
+    raw: str | bytes, request_id: str, expected_item_ids: set[str] | Mapping[str, str]
+) -> BatchValidation:
+    sources = expected_item_ids if isinstance(expected_item_ids, Mapping) else {}
+    expected_item_ids = set(expected_item_ids)
     items = _validate_root(strict_loads(raw), "epubox-text-1", request_id)
     candidates, errors, unknown, _ = _collect_items(items, expected_item_ids)
     accepted: dict[str, dict[str, Any]] = {}
@@ -152,6 +158,8 @@ def validate_translation_response(raw: str | bytes, request_id: str, expected_it
         elif not _valid_xml_text(target):
             errors[item_id] = "target contains invalid XML characters"
         else:
+            if item_id in sources:
+                target = normalize_empty_closes(sources[item_id], target)
             accepted[item_id] = {"item_id": item_id, "target": target}
     missing = tuple(sorted(expected_item_ids - set(candidates) - set(errors)))
     return BatchValidation(accepted, errors, missing, unknown)

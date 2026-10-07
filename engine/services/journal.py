@@ -140,9 +140,9 @@ class BodyJournal:
             try:
                 if response.finish_reason in {"length", "max_tokens"}:
                     raise ProtocolError("translation response was truncated")
-                parsed = validate_translation_response(response.raw, request.request_id, set(request.item_ids))
-                if parsed.unknown:
-                    raise ProtocolError("translation response contains unknown item IDs")
+                parsed = validate_translation_response(
+                    response.raw, request.request_id, self._source_projections(request)
+                )
             except (KeyError, ProtocolError, TypeError, ValueError) as error:
                 parsed, batch_error = None, str(error)
             recovered: list[ItemRecord] = []
@@ -203,6 +203,7 @@ class BodyJournal:
             expected = {
                 item.item_id: {
                     "base_revision": request.revisions[item.unit_id],
+                    "source_projection": item.source_projection,
                     **review_applicability(item, self.session.index, _wire_items(batch)[item.item_id]),
                 }
                 for item in batch.items
@@ -212,7 +213,7 @@ class BodyJournal:
                 if response.finish_reason in {"length", "max_tokens"}:
                     raise ProtocolError("review response was truncated")
                 parsed = validate_review_response(response.raw, request.request_id, expected)
-                if parsed.unknown or any(value.get("term_suggestions") for value in parsed.accepted.values()):
+                if any(value.get("term_suggestions") for value in parsed.accepted.values()):
                     raise ProtocolError("review response changed its closed batch protocol")
             except (KeyError, ProtocolError, TypeError, ValueError) as error:
                 parsed, batch_error = None, str(error)
@@ -301,7 +302,6 @@ class BodyJournal:
         return self.records()
 
     def retry_units(self, unit_ids: Sequence[str], *, retry_unknown: bool = True) -> tuple[str, ...]:
-        """Explicitly reopen failed review state while preserving its proven draft and counters."""
         selected = tuple(unit_ids)
         permitted = set(self.validate_retry_units(selected, retry_unknown=retry_unknown))
         reopened: list[str] = []
@@ -550,7 +550,9 @@ class BodyJournal:
             response = self._response(request)
             if response is None:
                 continue
-            accepted = validate_translation_response(response.raw, request.request_id, set(request.item_ids)).accepted
+            accepted = validate_translation_response(
+                response.raw, request.request_id, self._source_projections(request)
+            ).accepted
             target = accepted.get(item_id, {}).get("target")
             if isinstance(target, str) and canonical_hash(target) == target_hash:
                 return current.model_copy(
@@ -879,9 +881,7 @@ class BodyJournal:
         response = self._response(request)
         if response is None:
             raise IdentityMismatch("saved draft lacks its persisted translation response")
-        parsed = validate_translation_response(response.raw, request.request_id, set(request.item_ids))
-        if parsed.unknown:
-            raise IdentityMismatch("translation response contains unknown item IDs")
+        parsed = validate_translation_response(response.raw, request.request_id, self._source_projections(request))
         result = parsed.accepted.get(record.item_id)
         if (
             result is None
@@ -936,10 +936,8 @@ class BodyJournal:
             raise IdentityMismatch("reviewed result lacks a succeeded persisted response")
         if translation.request_id not in self._translations:
             parsed_translation = validate_translation_response(
-                translated.raw, translation.request_id, set(translation.item_ids)
+                translated.raw, translation.request_id, self._source_projections(translation)
             )
-            if parsed_translation.unknown:
-                raise IdentityMismatch("translation response contains unknown item IDs")
             self._translations[translation.request_id] = parsed_translation.accepted
         translation_result = self._translations[translation.request_id].get(record.item_id)
         if translation_result is None:
@@ -952,15 +950,14 @@ class BodyJournal:
         expected = {
             item_id: {
                 "base_revision": review.revisions[review.item_unit_ids[item_id][0]],
+                "source_projection": self.session.index.members_by_id[item_id].source_projection,
                 **review_applicability(self.session.index.members_by_id[item_id], self.session.index, wires[item_id]),
             }
             for item_id in review.item_ids
         }
         if review.request_id not in self._reviews:
             parsed_review = validate_review_response(reviewed.raw, review.request_id, expected)
-            if parsed_review.unknown or any(
-                value.get("term_suggestions") for value in parsed_review.accepted.values()
-            ):
+            if any(value.get("term_suggestions") for value in parsed_review.accepted.values()):
                 raise IdentityMismatch("review response changed its closed batch protocol")
             self._reviews[review.request_id] = parsed_review.accepted
         decision = self._reviews[review.request_id].get(record.item_id)
@@ -995,6 +992,9 @@ class BodyJournal:
 
     def _result_path(self, item_id: str) -> Path:
         return self.store.root / "results" / f"{safe_id(item_id)}.json"
+
+    def _source_projections(self, request: RequestManifest) -> dict[str, str]:
+        return {item_id: self.session.index.members_by_id[item_id].source_projection for item_id in request.item_ids}
 
 
 __all__ = ["BodyJournal"]

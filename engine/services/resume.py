@@ -389,9 +389,11 @@ def _atomic_record_frame(
         raise ValueError("saved result terminology or context identity changed")
     if record.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
         response = _atomic_response(root, request)
-        parsed = validate_translation_response(response["raw"], request.request_id, set(request.item_ids))
-        if parsed.unknown:
-            raise ValueError("translation response contains unknown item IDs")
+        parsed = validate_translation_response(
+            response["raw"],
+            request.request_id,
+            {item_id: members[item_id].source_projection for item_id in request.item_ids},
+        )
         translated = parsed.accepted.get(record.item_id)
         if (
             translated is None
@@ -421,16 +423,17 @@ def _atomic_review_proof(
     translated = _atomic_response(root, translation)
     reviewed = _atomic_response(root, review)
     translated_result = validate_translation_response(
-        translated["raw"], translation.request_id, set(translation.item_ids)
+        translated["raw"],
+        translation.request_id,
+        {item_id: members[item_id].source_projection for item_id in translation.item_ids},
     )
-    if translated_result.unknown:
-        raise ValueError("translation response contains unknown item IDs")
     initial = translated_result.accepted.get(record.item_id)
     if initial is None or review.target_hashes.get(record.item_id) != canonical_hash(initial["target"]):
         raise ValueError("reviewed result lacks translation target proof")
     expected = {
         item_id: {
             "base_revision": review.revisions[review.item_unit_ids[item_id][0]],
+            "source_projection": members[item_id].source_projection,
             **review_applicability(
                 members[item_id],
                 index,
@@ -452,7 +455,7 @@ def _atomic_review_proof(
         for item_id in review.item_ids
     }
     reviewed_result = validate_review_response(reviewed["raw"], review.request_id, expected)
-    if reviewed_result.unknown or any(value.get("term_suggestions") for value in reviewed_result.accepted.values()):
+    if any(value.get("term_suggestions") for value in reviewed_result.accepted.values()):
         raise ValueError("review response changed its closed batch protocol")
     decision = reviewed_result.accepted.get(record.item_id)
     if (
