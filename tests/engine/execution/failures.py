@@ -35,11 +35,13 @@ def test_unknown_timeout_skips_only_affected_items_and_translates_later_batches(
             transport=transport,
         )
     )
-    assert result.status == "needs_attention"
+    expected_status = "translated" if stage == "review" else "needs_attention"
+    assert result.status == expected_status
     assert timed_out and result.accepted_units > 0
     assert len({request_id for _, request_id in calls}) >= 3
     records = BodyJournal(case.session.store).records()
-    assert all(records[item].status == ItemStatus.NEEDS_ATTENTION for item in timed_out)
+    expected_item_status = ItemStatus.REVIEWED if stage == "review" else ItemStatus.NEEDS_ATTENTION
+    assert all(records[item].status == expected_item_status for item in timed_out)
     assert any(record.status == ItemStatus.REVIEWED for record in records.values())
     accepted = {key: record for key, record in records.items() if record.status == ItemStatus.REVIEWED}
     before = len(calls)
@@ -50,7 +52,7 @@ def test_unknown_timeout_skips_only_affected_items_and_translates_later_batches(
             transport=transport,
         )
     )
-    assert again.status == "needs_attention" and len(calls) == before
+    assert again.status == expected_status and len(calls) == before
     restored = BodyJournal(case.session.store).records()
     assert {key: restored[key] for key in accepted} == accepted
 
@@ -89,8 +91,9 @@ def test_three_unknown_body_requests_do_not_pause_later_batches(tmp_path, stage)
         return answer(kind, payload)
 
     result = asyncio.run(run_translation(prepared.work_dir, transport=transport))
-    assert result.status == "needs_attention" and len(failed_requests) == 3
+    assert result.status == ("translated" if stage == "review" else "needs_attention") and len(failed_requests) == 3
     assert result.accepted_units > 0
     records = BodyJournal(RunStore(prepared.work_dir)).records()
-    assert all(records[item].status == ItemStatus.NEEDS_ATTENTION for item in failed_items)
+    expected_item_status = ItemStatus.REVIEWED if stage == "review" else ItemStatus.NEEDS_ATTENTION
+    assert all(records[item].status == expected_item_status for item in failed_items)
     assert any(record.status == ItemStatus.REVIEWED for record in records.values())

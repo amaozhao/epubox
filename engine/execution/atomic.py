@@ -11,6 +11,7 @@ from typing import Any
 from engine.agents.runtime import RuntimePaused
 from engine.agents.workflow import run_workflow
 from engine.execution.state import TranslationRunResult
+from engine.schemas.contracts import ItemStatus
 from engine.schemas.members import MemberBatch
 from engine.services import state
 from engine.services.atomic import StoreError
@@ -46,6 +47,8 @@ async def run_atomic(
         if type(configured) is not int or configured < 1:
             raise ValueError("frozen concurrency must be a positive integer")
         pending = iter(batches)
+        review_failures: set[str] = set()
+        review_retry_round = 0
         active: dict[asyncio.Task, tuple[MemberBatch, float]] = {}
         stopped: str | None = (
             "output budget v2 requires a new v3 task before further provider requests"
@@ -96,6 +99,12 @@ async def run_atomic(
 
             def save(record):
                 journal.save(record)
+                if (
+                    record.status == ItemStatus.NEEDS_ATTENTION
+                    and record.stage == "review"
+                    and record.target_projection is not None
+                ):
+                    review_failures.add(record.item_id)
                 request_id = record.checks.get("review_request_id", record.request_id)
                 details = requests.get(request_id, {}) if isinstance(request_id, str) else {}
                 if progress is not None:
@@ -137,6 +146,46 @@ async def run_atomic(
                         continue
                     active[asyncio.create_task(execute(batch))] = (batch, monotonic())
                 if not active:
+                    if stopped is None and review_retry_round < 2:
+                        records = journal.records()
+                        units = set()
+                        for unit_id in {session.index.members_by_id[item].unit_id for item in review_failures}:
+                            failed = [
+                                records[item]
+                                for item in ready.plan.unit_members[unit_id]
+                                if records[item].status == ItemStatus.NEEDS_ATTENTION
+                            ]
+                            if failed and all(
+                                record.item_id in review_failures
+                                and record.stage == "review"
+                                and record.target_projection is not None
+                                for record in failed
+                            ):
+                                units.add(unit_id)
+                        groups = [
+                            {unit for owners in request.item_unit_ids.values() for unit in owners}
+                            for request in journal._requests.values()
+                            if request.stage in {"translate", "review"} and journal._ambiguous(request)
+                        ]
+                        while units:
+                            blocked = set().union(*(group for group in groups if group & units and not group <= units))
+                            if not blocked:
+                                break
+                            units.difference_update(blocked)
+                        if units:
+                            reopened = set(journal.retry_units(tuple(sorted(units))))
+                            review_retry_round += 1
+                            pending = iter(
+                                batch for batch in batches if reopened.intersection(batch.manifest.item_ids)
+                            )
+                            if progress:
+                                progress(
+                                    {
+                                        "phase": "review",
+                                        "notice": f"校对自动重试：第 {review_retry_round}/2 轮，{len(units)} 个单元；复用已保存初译。",
+                                    }
+                                )
+                            continue
                     break
                 done, _ = await asyncio.wait(active, timeout=15, return_when=asyncio.FIRST_COMPLETED)
                 if not done:
@@ -191,13 +240,14 @@ async def run_atomic(
         pending_items = int(snapshot.get("pending_items", 0))
         complete = accepted == ready.plan.required_unit_count
         status = "paused" if stopped is not None else "translated" if complete else "needs_attention"
+        reason = stopped or ("; ".join(errors) if not complete else None) or None
         if progress is not None:
             progress(
                 snapshot
                 | {
                     "phase": "translation",
                     "execution_state": "stopped",
-                    "reason": stopped or "; ".join(errors) or None,
+                    "reason": reason,
                 }
             )
         return TranslationRunResult(
@@ -207,5 +257,5 @@ async def run_atomic(
             pending_items=pending_items,
             http_attempts=int(snapshot.get("http_attempts", 0)),
             predicted_http_requests=2 * len(batches),
-            reason=stopped or "; ".join(errors) or None,
+            reason=reason,
         )

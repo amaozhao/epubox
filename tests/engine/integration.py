@@ -166,9 +166,7 @@ def test_same_translate_command_resumes_without_resending_saved_translations(
     fail_review = True
 
     async def transport(stage, payload):
-        nonlocal fail_review
         if stage == "review" and fail_review:
-            fail_review = False
             raise ProviderError("review temporarily unavailable", status_code=401)
         if stage == "translate":
             translated.extend(item["item_id"] for item in payload["items"])
@@ -209,11 +207,13 @@ def test_same_translate_command_resumes_without_resending_saved_translations(
     monkeypatch.setattr(cli, "run_translation", fake_model_run)
     monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
     monkeypatch.setattr(cli, "checker_for_source", lambda *_args: StubChecker())
+    monkeypatch.setattr(cli.settings, "AGNES_TEXT_RPM", 1000)
 
     first = cli.translate_book(source, output=output, auto_extract=False, concurrency=1)
     first_translated = set(translated)
     assert first.status == "needs_attention" and first_translated
 
+    fail_review = False
     second = cli.translate_book(source, output=output)
 
     assert second.status == "completed"
