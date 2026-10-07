@@ -305,7 +305,8 @@ def validate_batch_identity(batch: Any, *, allow_pieces: bool = False) -> Any:
                 or left.parent_hash != right.parent_hash
                 or left.preflight_hash != right.preflight_hash
                 or left.piece_count != right.piece_count
-                or right.piece_index != left.piece_index + 1
+                or not batch.manifest.sparse
+                and right.piece_index != left.piece_index + 1
             ):
                 raise ValueError("repeated Unit members require consecutive verified siblings")
     elif any(left.ordinal >= right.ordinal for left, right in pairwise(batch.items)):

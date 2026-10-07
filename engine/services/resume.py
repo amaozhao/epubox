@@ -363,6 +363,7 @@ def _compact_request_proofs(root, ready, members, records, index, requests) -> N
                 record_versions=request.record_versions,
                 plan_epochs=request.plan_epochs,
                 tokenizer_model=str(ready.plan.translation_config["model"]),
+                sparse=request.sparse,
             )
             if (
                 len(packed.batches) != 1
@@ -416,6 +417,7 @@ def _atomic_record_frame(
         record_versions=request.record_versions,
         plan_epochs=request.plan_epochs,
         tokenizer_model=str(ready.plan.translation_config["model"]),
+        sparse=request.sparse,
     )
     if len(packed.batches) != 1 or packed.blocked:
         raise ValueError("saved translation frame is not a canonical fitting batch")

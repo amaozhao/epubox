@@ -336,6 +336,7 @@ class MemberIndex:
         items: tuple[RequestMember, ...],
         *,
         relaxed_adjacency: bool = False,
+        sparse: bool = False,
     ) -> None:
         if not items or len({item.item_id for item in items}) != len(items):
             raise ValueError("request candidates must be non-empty and unique")
@@ -344,7 +345,13 @@ class MemberIndex:
         if len({(item.document_id, item.channel) for item in items}) != 1:
             raise ValueError("request candidates must share one document and channel")
         for left, right in pairwise(items):
-            if not (self.adjacent(left, right) if relaxed_adjacency else _adjacent(left, right)):
+            if not (
+                self._lane_positions[right.item_id] > self._lane_positions[left.item_id]
+                if sparse
+                else self.adjacent(left, right)
+                if relaxed_adjacency
+                else _adjacent(left, right)
+            ):
                 raise ValueError("request candidates must follow adjacent source reading order")
 
     def adjacent(self, left: RequestMember, right: RequestMember) -> bool:
@@ -365,8 +372,9 @@ class MemberIndex:
         count: int,
         *,
         relaxed_adjacency: bool = False,
+        sparse: bool = False,
     ) -> tuple[tuple[RequestMember, str], ...]:
-        self.validate_items(items, relaxed_adjacency=relaxed_adjacency)
+        self.validate_items(items, relaxed_adjacency=relaxed_adjacency, sparse=sparse)
         if type(count) is not int or not 0 <= count <= 2:
             raise ValueError("context_count must be 0, 1, or 2")
         return self._previous[items[0].item_id][-count:] if count else ()
@@ -384,18 +392,20 @@ def build_member_payload(
     context_count: int = 2,
     compact_constraints: bool = False,
     relaxed_adjacency: bool = False,
+    sparse: bool = False,
 ) -> dict[str, Any]:
     if stage not in {"translate", "review"} or not request_id:
         raise ValueError("member payload requires a supported stage and request ID")
     if glossary.source_hash != index.source_hash:
         raise ValueError("glossary and member index identities differ")
-    index.validate_items(items, relaxed_adjacency=relaxed_adjacency)
+    index.validate_items(items, relaxed_adjacency=relaxed_adjacency, sparse=sparse)
     contexts = tuple(
         (item, context_suffix(text, 400))
         for item, text in index.preceding(
             items,
             context_count,
             relaxed_adjacency=relaxed_adjacency,
+            sparse=sparse,
         )
     )
     review = _member_review(stage, items, targets, revisions)
@@ -452,11 +462,14 @@ def fit_member_payload(
     targets: Mapping[str, ItemRecord] | None = None,
     revisions: Mapping[str, int] | None = None,
     tokenizer_model: str = "gpt-3.5-turbo",
+    sparse: bool = False,
 ) -> tuple[dict[str, Any], BudgetResult]:
     """Keep fitting legacy requests unchanged; compact only an otherwise blocked singleton."""
     payload: dict[str, Any] = {}
     budget: BudgetResult | None = None
     for count, compact in ((2, False), (1, False), (0, False), (0, True)):
+        if sparse and count:
+            continue
         if compact and len(items) != 1 and not limits.minimum_source_tokens:
             break
         if not compact and budget is not None and not payload["context"]:
@@ -472,6 +485,7 @@ def fit_member_payload(
             context_count=count,
             compact_constraints=compact,
             relaxed_adjacency=bool(limits.minimum_source_tokens),
+            sparse=sparse,
         )
         if limits.output_version == 5:
             payload["wire_version"] = "epubox-wire-5"
@@ -536,6 +550,7 @@ def pack_members(
     plan_epochs: Mapping[str, int] | None = None,
     completed: Collection[str] = (),
     tokenizer_model: str = "gpt-3.5-turbo",
+    sparse: bool = False,
 ) -> MemberPackingResult:
     members = tuple(items)
     if stage not in {"translate", "review"}:
@@ -570,7 +585,11 @@ def pack_members(
     blocked: list[BlockedItem] = []
     skipped: list[str] = []
     batch: MemberBatch | None = None
-    adjacent = index.adjacent if limits.minimum_source_tokens else _adjacent
+
+    def adjacent(left: RequestMember, right: RequestMember) -> bool:
+        if sparse:
+            return left.document_id == right.document_id and left.channel == right.channel
+        return index.adjacent(left, right) if limits.minimum_source_tokens else _adjacent(left, right)
 
     def close(reason: BoundaryReason, failures: tuple[str, ...] = ()) -> None:
         nonlocal batch
@@ -593,6 +612,8 @@ def pack_members(
             "versions": {item.unit_id: (record_versions or {}).get(item.unit_id, 0) for item in values},
             "epochs": {item.unit_id: (plan_epochs or {}).get(item.unit_id, 0) for item in values},
         }
+        if sparse:
+            identity["sparse"] = True
         request_id = "tx-" + canonical_hash(identity)[:32]
         return fit_member_payload(
             stage,
@@ -606,11 +627,13 @@ def pack_members(
             if stage == "review" and revisions is not None
             else None,
             tokenizer_model=tokenizer_model,
+            sparse=sparse,
         )
 
     for position, item in enumerate(members):
         if item.item_id in completed:
-            close("completed")
+            if not sparse:
+                close("completed")
             skipped.append(item.item_id)
             continue
         if batch is not None and not adjacent(batch.items[-1], item):
@@ -647,7 +670,9 @@ def pack_members(
             proposed = (item,)
             payload, budget = candidate(proposed)
         if budget.fits:
-            batch = _batch(proposed, glossary, glossary_hash, payload, budget, revisions, record_versions, plan_epochs)
+            batch = _batch(
+                proposed, glossary, glossary_hash, payload, budget, revisions, record_versions, plan_epochs, sparse
+            )
         else:
             close("blocked", budget.failures)
             blocked.append(
@@ -708,7 +733,15 @@ def pack_members(
             payload, budget = candidate(combined_items)
             if budget.fits:
                 merged = _batch(
-                    combined_items, glossary, glossary_hash, payload, budget, revisions, record_versions, plan_epochs
+                    combined_items,
+                    glossary,
+                    glossary_hash,
+                    payload,
+                    budget,
+                    revisions,
+                    record_versions,
+                    plan_epochs,
+                    sparse,
                 )
                 final = boundaries[right_position]
                 batches[left_position] = merged
@@ -745,6 +778,7 @@ def pack_members(
                         revisions,
                         record_versions,
                         plan_epochs,
+                        sparse,
                     )
                     right = _batch(
                         right_items,
@@ -755,6 +789,7 @@ def pack_members(
                         revisions,
                         record_versions,
                         plan_epochs,
+                        sparse,
                     )
                     break
             else:
@@ -774,7 +809,12 @@ def pack_members(
                     ),
                 )
             position += 1
-        if limits.output_version == 5 and stage == "translate" and not any((record_versions or {}).values()):
+        if (
+            limits.output_version == 5
+            and stage == "translate"
+            and not sparse
+            and not any((record_versions or {}).values())
+        ):
             fitting_batches: list[MemberBatch] = []
             fitting_boundaries: list[BatchBoundary] = []
             for value, boundary in zip(batches, boundaries, strict=True):
@@ -855,6 +895,7 @@ def _batch(
     revisions: Mapping[str, int] | None,
     versions: Mapping[str, int] | None,
     epochs: Mapping[str, int] | None,
+    sparse: bool = False,
 ) -> MemberBatch:
     wire = {entry["item_id"]: entry for entry in payload["items"]}
     context_hash = canonical_hash(payload["context"])
@@ -869,6 +910,7 @@ def _batch(
             for item in items
         },
         wire_hash=budget.wire_hash,
+        sparse=sparse,
         record_versions={item.unit_id: (versions or {}).get(item.unit_id, 0) for item in items},
         item_unit_ids={item.item_id: (item.unit_id,) for item in items},
         unit_document_ids={item.unit_id: item.document_id for item in items},

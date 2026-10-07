@@ -463,6 +463,7 @@ class ReadySession:
         self.index.validate_items(
             batch.items,
             relaxed_adjacency=bool(capacity.minimum_source_tokens),
+            sparse=batch.manifest.sparse,
         )
         if (
             batch.manifest.freeze_id != prepared.glossary.freeze_id
@@ -500,6 +501,7 @@ class ReadySession:
             targets=targets,
             revisions=batch.manifest.revisions if batch.manifest.stage == "review" else None,
             tokenizer_model=_model(prepared.preparation),
+            sparse=batch.manifest.sparse,
         )
         if expected_payload != batch.payload:
             raise IdentityMismatch("workflow payload differs from its frozen source, terms or context")

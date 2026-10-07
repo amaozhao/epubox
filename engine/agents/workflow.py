@@ -45,14 +45,14 @@ async def run_workflow(
     """Run one ready translation batch through the historical three steps."""
     if session.verify() != prepared or session.index is not index:
         raise ValueError("workflow requires the physically verified ready session values")
-    session.verify_batch(batch, initial=True)
+    session.verify_batch(batch, initial=not batch.manifest.sparse)
     _guard_ready(prepared, batch, index, runtime)
     if records is not None and not set(records).issubset(batch.manifest.item_ids):
         raise ValueError("saved results contain members outside the supplied translation batch")
     current = dict(records or {})
     completed = {item.item_id for item in batch.items if _valid_saved(item, current.get(item.item_id), session, batch)}
     issues: list[str] = []
-    translation_batches = ((batch, True),)
+    translation_batches = ((batch, not batch.manifest.sparse),)
     if completed or any(_translation_epoch(record) for record in current.values()):
         replanned = pack_members(
             "translate",
@@ -71,6 +71,7 @@ async def run_workflow(
             },
             completed=completed,
             tokenizer_model=str(prepared.plan.translation_config["model"]),
+            sparse=batch.manifest.sparse,
         )
         if replanned.blocked:
             raise ValueError("saved translation checkpoint cannot replan the remaining ready members")
@@ -104,6 +105,7 @@ async def run_workflow(
                 )
                 for item in reviewable
             },
+            sparse=batch.manifest.sparse,
         )
         issues.extend(review_issues)
     status = (
@@ -224,6 +226,7 @@ async def _proofread_step(
     save: SaveCallback,
     records: Mapping[str, ItemRecord],
     revisions: Mapping[str, int],
+    sparse: bool = False,
 ) -> tuple[dict[str, ItemRecord], list[str]]:
     """Repack review against the actual saved targets, then apply each decision."""
     current = dict(records)
@@ -237,6 +240,7 @@ async def _proofread_step(
         targets={item.item_id: current[item.item_id] for item in members},
         revisions={item.unit_id: revisions[item.unit_id] for item in members},
         tokenizer_model=str(prepared.plan.translation_config["model"]),
+        sparse=sparse,
     )
     issues: list[str] = []
     blocked_records: list[ItemRecord] = []
@@ -359,7 +363,9 @@ def _guard_ready(prepared: AtomicPreparedInput, batch: MemberBatch, index: Membe
     if batch.manifest.stage != "translate":
         raise ValueError("workflow entry requires a translation batch")
     _guard_common(prepared, batch, index, runtime)
-    if prepared.plan.batch_hashes.get(batch.manifest.request_id) != canonical_hash(batch):
+    if not batch.manifest.sparse and prepared.plan.batch_hashes.get(batch.manifest.request_id) != canonical_hash(
+        batch
+    ):
         raise ValueError("translation batch differs from the committed ready plan")
 
 
@@ -466,6 +472,10 @@ def _valid_saved(
     if record.item_id != member.item_id or record.segment_id != member.item_id:
         raise ValueError("saved result identity differs from its request member")
     if record.status == ItemStatus.PENDING and record.target_projection is None:
+        if pending_batch.manifest.sparse:
+            pending_batch = next(
+                value for value in session._prepared_batches.values() if member.item_id in value.manifest.item_ids
+            )
         _validate_record_frame(member, record, pending_batch)
         return False
     if record.status == ItemStatus.NEEDS_ATTENTION:
@@ -559,6 +569,7 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
         record_versions=request.record_versions if request is not None else versions,
         plan_epochs=request.plan_epochs if request is not None else {member.unit_id: 0 for member in members},
         tokenizer_model=str(session.prepared.plan.translation_config["model"]),
+        sparse=request.sparse if request is not None else False,
     )
     if len(packed.batches) != 1 or packed.blocked:
         raise ValueError("saved translation frame is not a canonical fitting batch")

@@ -260,6 +260,7 @@ class RequestManifest(FrozenModel):
     item_ids: tuple[str, ...]
     input_hashes: dict[str, str]
     wire_hash: str = Field(min_length=1)
+    sparse: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     record_versions: dict[str, int] = Field(default_factory=dict)
     item_unit_ids: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     unit_document_ids: dict[str, str] = Field(default_factory=dict)
@@ -289,6 +290,8 @@ class RequestManifest(FrozenModel):
 
     @model_validator(mode="after")
     def validate_owner(self) -> RequestManifest:
+        if self.sparse and self.stage not in {"translate", "review"}:
+            raise ValueError("only body workflow requests may regroup checkpoint members")
         if not self.item_ids or len(self.item_ids) != len(set(self.item_ids)):
             raise ValueError("request item_ids must be non-empty and unique")
         if len({attempt.attempt_id for attempt in self.attempts}) != len(self.attempts):

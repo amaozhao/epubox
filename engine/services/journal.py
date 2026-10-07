@@ -461,6 +461,7 @@ class BodyJournal:
             record_versions=request.record_versions,
             plan_epochs=request.plan_epochs,
             tokenizer_model=_text(self.session.prepared.plan.translation_config, "model"),
+            sparse=request.sparse,
         )
         if len(packed.batches) != 1 or packed.blocked:
             raise IdentityMismatch("persisted translation request is no longer a canonical fitting batch")
@@ -499,6 +500,7 @@ class BodyJournal:
             record_versions=request.record_versions,
             plan_epochs=request.plan_epochs,
             tokenizer_model=_text(self.session.prepared.plan.translation_config, "model"),
+            sparse=request.sparse,
         )
         if len(packed.batches) != 1 or packed.blocked:
             raise IdentityMismatch("persisted review request is no longer a canonical fitting batch")

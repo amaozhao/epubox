@@ -9,11 +9,13 @@ from time import monotonic
 from typing import Any
 
 from engine.agents.runtime import RuntimePaused
-from engine.agents.workflow import run_workflow
+from engine.agents.workflow import _review_epoch, _translation_epoch, run_workflow
 from engine.execution.state import TranslationRunResult
+from engine.item.members import pack_members
 from engine.schemas.contracts import ItemStatus
 from engine.schemas.members import MemberBatch
 from engine.services.atomic import StoreError
+from engine.services.ready import limits_for
 from engine.services.store import RunStore
 
 
@@ -58,7 +60,7 @@ async def run_atomic(
         configured = ready.plan.translation_config.get("concurrency", 2)
         if type(configured) is not int or configured < 1:
             raise ValueError("frozen concurrency must be a positive integer")
-        pending = iter(batches)
+        pending = iter(_pending_batches(journal, batches))
         retry_failures: set[str] = set()
         retry_round = 0
         active: dict[asyncio.Task, tuple[MemberBatch, float]] = {}
@@ -197,9 +199,7 @@ async def run_atomic(
                         if units:
                             reopened = set(journal.retry_units(tuple(sorted(units))))
                             retry_round += 1
-                            pending = iter(
-                                batch for batch in batches if reopened.intersection(batch.manifest.item_ids)
-                            )
+                            pending = iter(_pending_batches(journal, batches, reopened))
                             if progress:
                                 progress(
                                     {
@@ -287,6 +287,58 @@ async def run_atomic(
             predicted_http_requests=2 * len(batches),
             reason=reason,
         )
+
+
+def _pending_batches(journal, initial, selected=None) -> tuple[MemberBatch, ...]:
+    """Regroup a checkpoint by HTML, channel and next step, preserving completed members."""
+    records = journal.records()
+    if selected is None and all(
+        records[item].status == ItemStatus.PENDING and not _translation_epoch(records[item])
+        for batch in initial
+        for item in batch.manifest.item_ids
+    ):
+        return tuple(initial)
+    session = journal.session
+    lanes = {}
+    for member in session.index.members:
+        record = records[member.item_id]
+        if (
+            selected is not None
+            and member.item_id not in selected
+            or record.status not in {ItemStatus.PENDING, ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
+            or member.unit_id in session.prepared.plan.derived_sources
+        ):
+            continue
+        key = (member.document_id, member.channel, record.target_projection is not None)
+        epoch = _review_epoch(record) if record.target_projection is not None else _translation_epoch(record)
+        for members, epochs in lanes.setdefault(key, []):
+            if epochs.get(member.unit_id, epoch) == epoch:
+                members.append(member)
+                epochs[member.unit_id] = epoch
+                break
+        else:
+            lanes[key].append(([member], {member.unit_id: epoch}))
+    batches = []
+    for members, _ in (group for groups in lanes.values() for group in groups):
+        versions = {}
+        for member in members:
+            versions[member.unit_id] = max(
+                versions.get(member.unit_id, 0), _translation_epoch(records[member.item_id])
+            )
+        packed = pack_members(
+            "translate",
+            members,
+            session.prepared.glossary,
+            session.index,
+            limits_for(session.prepared.preparation),
+            record_versions=versions,
+            tokenizer_model=str(session.prepared.plan.translation_config["model"]),
+            sparse=True,
+        )
+        if packed.blocked:
+            raise ValueError("checkpoint members exceed the saved request capacity")
+        batches.extend(packed.batches)
+    return tuple(batches)
 
 
 def _structural_failure(record) -> bool:
