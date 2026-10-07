@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pytest
 
-from engine.agents.runtime import RuntimePaused
+from engine.agents.runtime import RequestError, RuntimePaused
 from engine.agents.workflow import run_workflow
 from engine.epub.preparation import PreparationConfig
 from engine.execution.repair import run_translation
@@ -343,7 +343,7 @@ def test_fabricated_reviewed_result_is_rejected_even_with_a_self_consistent_hash
 
 
 @pytest.mark.parametrize("outcome", ("sent", "unknown"))
-def test_dispatched_attempt_without_a_response_pauses_resume_without_duplicate_transport(tmp_path, outcome) -> None:
+def test_dispatched_attempt_without_response_is_local_error_without_duplicate_transport(tmp_path, outcome) -> None:
     case = prepare_case(tmp_path, "<p>First.</p>", ("First.",))
     journal = BodyJournal(case.session.store, case.session)
     calls = 0
@@ -365,7 +365,7 @@ def test_dispatched_attempt_without_a_response_pauses_resume_without_duplicate_t
 
     runtime._sleep = no_sleep
     manifest = case.batch.manifest.model_dump(mode="python") | {"output_tokens": case.batch.budget.output_tokens}
-    expected = HardCrash if outcome == "sent" else RuntimePaused
+    expected = HardCrash if outcome == "sent" else RequestError
     with pytest.raises(expected):
         asyncio.run(runtime.invoke("translate", case.batch.payload, manifest))
     before = BodyJournal(case.session.store).progress_snapshot()
@@ -374,7 +374,7 @@ def test_dispatched_attempt_without_a_response_pauses_resume_without_duplicate_t
         raise AssertionError("ambiguous provider outcome must not be resent")
 
     resumed = BodyJournal(case.session.store)
-    with pytest.raises(RuntimePaused, match="unknown provider outcome"):
+    with pytest.raises(RequestError, match="unknown provider outcome"):
         asyncio.run(resumed.runtime(transport=forbidden).invoke("translate", case.batch.payload, manifest))
     after = resumed.progress_snapshot()
     assert calls == 1
@@ -398,7 +398,7 @@ def test_explicit_retry_reopens_all_pending_members_of_a_shared_unknown_translat
 
     runtime._sleep = no_sleep
     manifest = case.batch.manifest.model_dump(mode="python") | {"output_tokens": case.batch.budget.output_tokens}
-    with pytest.raises(RuntimePaused, match="unknown provider outcome"):
+    with pytest.raises(RequestError, match="unknown provider outcome"):
         asyncio.run(runtime.invoke("translate", case.batch.payload, manifest))
 
     units = tuple(dict.fromkeys(item.unit_id for item in case.batch.items))

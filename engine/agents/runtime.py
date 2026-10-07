@@ -284,6 +284,7 @@ class ModelRuntime:
         max_transport_retries: int = 2,
         cooldown_seconds: float = 10.0,
         max_service_failures: int = 3,
+        shared_service_failures: bool = True,
         request_timeout_seconds: float = 120.0,
         model_max_output_tokens: int | None = None,
         provider_output_token_field: Literal["max_tokens", "max_completion_tokens"] | None = None,
@@ -326,6 +327,7 @@ class ModelRuntime:
         self._max_transport_retries = max_transport_retries
         self._cooldown_seconds = cooldown_seconds
         self._max_service_failures = max_service_failures
+        self._shared_service_failures = shared_service_failures
         self._service_failures = 0
         self._actual_input_limit_breached = prior_input_limit_breach
         self._input_budget_version = input_budget_version
@@ -643,9 +645,11 @@ class ModelRuntime:
                         sent_at=sent_at,
                         finished_at=_utc_now(),
                     )
-                    if status_code in {401, 402, 403}:
+                    if self._shared_service_failures and status_code in {401, 402, 403}:
                         raise RuntimePaused(error_text, status_code=status_code) from exc
-                    if status_code is None or status_code == 429 or status_code >= 500:
+                    if self._shared_service_failures and (
+                        status_code is None or status_code == 429 or status_code >= 500
+                    ):
                         self._service_failures += 1
                         if self._service_failures >= self._max_service_failures:
                             raise RuntimePaused(
@@ -687,7 +691,8 @@ class ModelRuntime:
                     )
                     raise error
 
-                self._service_failures = 0
+                if self._shared_service_failures:
+                    self._service_failures = 0
                 metadata = _provider_metadata(metadata_value, finish_reason)
                 raw = result["raw"]
                 response = {

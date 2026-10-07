@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from engine.agents.protocol import ProtocolError, review_applicability, validate_translation_response
-from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS, ModelRuntime, RuntimePaused, wire_hash
+from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS, ModelRuntime, RequestError, RuntimePaused, wire_hash
 from engine.agents.terms import validate_review_response
 from engine.agents.workflow import _failed, _frame, _target_error, _validate_saved_record, _wire_items
 from engine.epub.assembly import derive_navigation_projection
@@ -426,13 +426,13 @@ class BodyJournal:
             ),
             prior_input_limit_breach=self._prior_input_breach,
             input_budget_version=2,
+            shared_service_failures=False,
         )
         if runtime.model_id != model_id:
             raise IdentityMismatch("configured provider resolved to a different frozen model")
         return runtime
 
     def parent_targets(self, require_complete: bool = True) -> dict[str, str]:
-        """Merge reviewed siblings and derive navigation labels from their title source."""
         self.session.verify()
         records = self._records
         members = self.session.index.members
@@ -658,7 +658,7 @@ class BodyJournal:
             self._emit_response(stage, manifest.request_id, response.model_dump(mode="python"), replayed=True)
             return response.model_dump(mode="python")
         if self._ambiguous(manifest):
-            raise RuntimePaused("body request has an unknown provider outcome without a persisted response")
+            raise RequestError("body request has an unknown provider outcome without a persisted response")
         return None
 
     def _persist(
@@ -697,7 +697,7 @@ class BodyJournal:
     def _reserve(self, request_id: str, attempt) -> None:
         self.session.verify()
         if self._ambiguous(self._requests[request_id]):
-            raise RuntimePaused("body request has an unknown provider outcome without a persisted response")
+            raise RequestError("body request has an unknown provider outcome without a persisted response")
         if self._run_limit and self._run_attempts >= self._run_limit:
             raise RuntimePaused("frozen body request limit is exhausted")
         self._requests[request_id] = self.store.reserve_attempt(request_id, attempt)

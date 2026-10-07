@@ -163,12 +163,12 @@ def test_same_translate_command_resumes_without_resending_saved_translations(
     source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
     output = tmp_path / "translated.epub"
     translated: list[str] = []
-    pause_review = True
+    fail_review = True
 
     async def transport(stage, payload):
-        nonlocal pause_review
-        if stage == "review" and pause_review:
-            pause_review = False
+        nonlocal fail_review
+        if stage == "review" and fail_review:
+            fail_review = False
             raise ProviderError("review temporarily unavailable", status_code=401)
         if stage == "translate":
             translated.extend(item["item_id"] for item in payload["items"])
@@ -210,11 +210,11 @@ def test_same_translate_command_resumes_without_resending_saved_translations(
     monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
     monkeypatch.setattr(cli, "checker_for_source", lambda *_args: StubChecker())
 
-    first = cli.translate_book(source, output=output, work_root=tmp_path / "work", auto_extract=False, concurrency=1)
+    first = cli.translate_book(source, output=output, auto_extract=False, concurrency=1)
     first_translated = set(translated)
-    assert first.status == "paused" and first_translated
+    assert first.status == "needs_attention" and first_translated
 
-    second = cli.translate_book(source, output=output, work_root=tmp_path / "work", auto_extract=False, concurrency=1)
+    second = cli.translate_book(source, output=output)
 
     assert second.status == "completed"
     assert second.work_dir == first.work_dir

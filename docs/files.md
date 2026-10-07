@@ -123,7 +123,7 @@
 | tests/engine/services/test_term_runner.py | tests/engine/services/terms/runner.py；并发与存储边界测试拆入 execution.py、storage.py | 653 | T11 | 完成 |
 | tests/engine/test_cli.py | tests/engine/cli.py | 563 | T02 | 完成 |
 | tests/engine/test_orchestrator.py | tests/engine/execution/translation.py；其余执行职责测试位于 execution/ 下单词文件 | 2095 | T16 | 完成 |
-| tests/engine/test_single_command_e2e.py | tests/engine/integration.py | 221 | T20 | 待实施 |
+| tests/engine/test_single_command_e2e.py | tests/engine/integration.py | 221 | T20 | 完成 |
 | tests/engine/test_structural_adversarial.py | tests/engine/adversarial.py | 208 | T20 | 待实施 |
 | tests/test_image.jpg | tests/image.jpg | 94 | T20 | 待实施 |
 | tests/test_main.py | tests/main.py | 106 | T02 | 完成 |
