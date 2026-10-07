@@ -396,8 +396,9 @@ def _locate(path: Path) -> tuple[Path, str] | None:
             continue
         if not relative.parts or relative.parts[0] in {_SOURCE, _STATE}:
             return None
-        _load(parent)
-        return parent, relative.as_posix()
+        root = parent.resolve()
+        _load(root)
+        return root, relative.as_posix()
     return None
 
 

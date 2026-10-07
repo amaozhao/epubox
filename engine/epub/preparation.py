@@ -371,21 +371,29 @@ def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue
             "context_tokens": 32_768,
             "max_output_tokens": 4_096,
             "prompt_version": "epubox-members-1",
-            "planner_version": "epubox-member-planner-1",
+            "planner_version": "epubox-member-planner-2",
             "input_budget_version": 2,
         }
         defaults["max_input_tokens"] = translation.get("context_tokens", defaults["context_tokens"])
         for name, value in defaults.items():
             translation.setdefault(name, value)
+        if translation["planner_version"] == "epubox-member-planner-2":
+            translation.setdefault("output_budget_version", 5)
+            translation.setdefault("minimum_source_tokens", settings.EPUB_CHUNK_MIN_TOKENS)
         if translation["target_language"] != "zh-Hans":
             raise ValueError(f"unsupported target language: {translation['target_language']!r}")
         for name, expected in {
             "prompt_version": "epubox-members-1",
-            "planner_version": "epubox-member-planner-1",
             "input_budget_version": 2,
         }.items():
             if translation[name] != expected:
                 raise ValueError(f"unsupported atomic translation {name}: {translation[name]!r}")
+        if translation["planner_version"] not in {"epubox-member-planner-1", "epubox-member-planner-2"}:
+            raise ValueError(f"unsupported atomic translation planner_version: {translation['planner_version']!r}")
+        if translation["planner_version"] == "epubox-member-planner-2":
+            minimum = translation["minimum_source_tokens"]
+            if type(minimum) is not int or minimum < 1:
+                raise ValueError("translation_config minimum_source_tokens must be a positive integer")
         for name in ("max_source_tokens", "context_tokens", "max_input_tokens", "max_output_tokens"):
             value = translation[name]
             if type(value) is not int or value < 1:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -47,7 +47,13 @@ def limits_from_config(config) -> BudgetLimits:
         context_tokens=context,
         safety_tokens=_int(config, "safety_margin", 256, zero=True),
         target_ratio=float(ratio),
-        output_version=cast(Literal[2, 3, 4], _int(config, "output_budget_version", 2)),
+        output_version=cast(Literal[2, 3, 4, 5], _int(config, "output_budget_version", 2)),
+        minimum_source_tokens=(
+            _int(config, "minimum_source_tokens", 500)
+            if config.get("planner_version") == "epubox-member-planner-2"
+            else 0
+        ),
+        source_tolerance_tokens=(1000 if config.get("planner_version") == "epubox-member-planner-2" else 0),
     )
 
 
@@ -60,10 +66,13 @@ def write_ready(
     *,
     output_policy_hash: str = "preserve-source-resources-1",
     derived_sources: Mapping[str, str] | None = None,
-) -> AtomicPreparedInput:
+    progress: Callable[[str], None] | None = None,
+) -> ReadySession:
     """Write dependencies, verify them, then atomically create prepared.json last."""
     from engine.schemas.members import MemberBatch, RequestMember
 
+    if progress:
+        progress("准备：核对原文、词表与预检记录。")
     preparation, _ = store._trusted_preparation_documents()
     freeze, glossary = store._trusted_frozen_glossary(preparation)
     current = require_preflight(store, limits_for(preparation), _model(preparation))
@@ -81,19 +90,24 @@ def write_ready(
     if tuple(members) != tuple(index.items_by_id.values()):
         raise IdentityMismatch("ready members differ from the verified materialization")
     derived_ids = {member.item_id for member in members if member.unit_id in expected_derived}
-    expected = pack_members(
-        "translate",
-        tuple(members),
-        glossary,
-        index,
-        limits_for(preparation),
-        completed=derived_ids,
-        tokenizer_model=_model(preparation),
-    )
-    if packing != expected:
-        raise IdentityMismatch("ready batches differ from the frozen complete request plan")
+    if not state.compact(store.root):
+        if progress:
+            progress(f"准备：复核 {len(members)} 个片段的请求计划。")
+        expected = pack_members(
+            "translate",
+            tuple(members),
+            glossary,
+            index,
+            limits_for(preparation),
+            completed=derived_ids,
+            tokenizer_model=_model(preparation),
+        )
+        if packing != expected:
+            raise IdentityMismatch("ready batches differ from the frozen complete request plan")
     _terminal_requests(store)
-    with store.lock():
+    if progress:
+        progress(f"准备：批量保存 {len(members)} 个片段、{len(packing.batches)} 个请求批次。")
+    with store.lock(), state.batch(store.root):
         for member in members:
             _immutable(
                 store.root / "members" / f"{safe_id(member.item_id)}.json", member, RequestMember, "epubox-member-1"
@@ -138,14 +152,21 @@ def write_ready(
         ready = AtomicPreparedInput(preparation=preparation, glossary=glossary, plan=plan, preflight=current.check)
         _immutable(store.root / "plans" / "book.json", plan, AtomicPlan, "epubox-plan-1")
         _initial_results(store, ready, members, packing.batches)
-        _verify(store, ready)
+        if progress:
+            progress("准备：验证保存后的请求与回填关系。")
+        checkpoint = ReadySession.__new__(ReadySession)
+        checkpoint.store = store
+        signature = checkpoint._fingerprint(include_prepared=False)
+        _verify(store, ready, progress=progress)
         _immutable(store.root / "prepared.json", ready, AtomicPreparedInput, "epubox-prepared-2")
-    return read_ready(store)
+        session = ReadySession._verified(store, ready, index, packing.batches, signature)
+    session.verify()
+    return session
 
 
-def _read_ready(store: RunStore):
+def _read_ready(store: RunStore, progress: Callable[[str], None] | None = None):
     ready = _read(store.root / "prepared.json", AtomicPreparedInput, "epubox-prepared-2")
-    index, batches = _verify(store, ready)
+    index, batches = _verify(store, ready, progress=progress)
     return ready, index, batches
 
 
@@ -174,10 +195,12 @@ def navigation_sources(inventories: Sequence[AtomicDocument]) -> dict[str, str]:
     }
 
 
-def _verify(store: RunStore, ready: AtomicPreparedInput):
+def _verify(store: RunStore, ready: AtomicPreparedInput, progress: Callable[[str], None] | None = None):
     from engine.item.members import MemberIndex, pack_members
     from engine.schemas.members import MemberBatch, RequestMember
 
+    if progress:
+        progress("准备：验证原文快照和预检记录。")
     preparation, _ = store._trusted_preparation_documents()
     freeze, glossary = store._trusted_frozen_glossary(preparation)
     if preparation != ready.preparation or glossary != ready.glossary or freeze.freeze_id != ready.plan.freeze_id:
@@ -216,6 +239,8 @@ def _verify(store: RunStore, ready: AtomicPreparedInput):
         ):
             raise IdentityMismatch("atomic ready materialized member changed")
     derived = {member.item_id for member in members if member.unit_id in ready.plan.derived_sources}
+    if progress:
+        progress(f"准备：复核 {len(members)} 个片段的完整请求预算。")
     expected = pack_members(
         "translate",
         members,
@@ -230,6 +255,8 @@ def _verify(store: RunStore, ready: AtomicPreparedInput):
         or {batch.manifest.request_id: canonical_hash(batch) for batch in expected.batches} != ready.plan.batch_hashes
     ):
         raise IdentityMismatch("atomic ready request plan changed")
+    if progress:
+        progress("准备：核对已保存的成员、批次与初始断点。")
     _exact_files(store.root / "batches", set(ready.plan.batch_hashes))
     for batch in expected.batches:
         if (
@@ -372,16 +399,42 @@ __all__ = [
 class ReadySession:
     """Reuse one verified source index while immutable dependency stats agree."""
 
-    def __init__(self, store: RunStore):
+    def __init__(self, store: RunStore, progress: Callable[[str], None] | None = None):
         self.store = store
         self._signature = self._fingerprint()
         self._checkpoint = self._quick_fingerprint()
         self._saved_batches: dict[tuple[object, ...], MemberBatch] = {}
         self._frame_requests: dict[tuple[str, int], RequestManifest] = {}
-        self.prepared, self.index, batches = _read_ready(store)
+        self.prepared, self.index, batches = _read_ready(store, progress)
         self._prepared_batches = {batch.manifest.request_id: batch for batch in batches}
         if self._signature != self._fingerprint():
             raise IdentityMismatch("ready dependencies changed during workflow verification")
+
+    @classmethod
+    def _verified(
+        cls,
+        store: RunStore,
+        prepared: AtomicPreparedInput,
+        index: MemberIndex,
+        batches: Sequence[MemberBatch],
+        signature: tuple,
+    ) -> ReadySession:
+        """Carry the just-verified in-memory plan across the preparation/translation handoff."""
+        self = cls.__new__(cls)
+        self.store = store
+        self._saved_batches = {}
+        self._frame_requests = {}
+        self.prepared = prepared
+        self.index = index
+        self._prepared_batches = {batch.manifest.request_id: batch for batch in batches}
+        if (
+            self._fingerprint(include_prepared=False) != signature
+            or _read(store.root / "prepared.json", AtomicPreparedInput, "epubox-prepared-2") != prepared
+        ):
+            raise IdentityMismatch("ready dependencies changed during preparation handoff")
+        self._signature = self._fingerprint()
+        self._checkpoint = self._quick_fingerprint()
+        return self
 
     def verify(self) -> AtomicPreparedInput:
         checkpoint = self._quick_fingerprint()
@@ -406,7 +459,11 @@ class ReadySession:
         from engine.item.budget import measure_budget
 
         prepared = self.verify()
-        self.index.validate_items(batch.items)
+        capacity = limits_for(prepared.preparation)
+        self.index.validate_items(
+            batch.items,
+            relaxed_adjacency=bool(capacity.minimum_source_tokens),
+        )
         if (
             batch.manifest.freeze_id != prepared.glossary.freeze_id
             or batch.manifest.glossary_file_sha256 != canonical_hash(prepared.glossary)
@@ -419,7 +476,7 @@ class ReadySession:
                 raise IdentityMismatch("workflow batch uses an unprepared member")
         if initial and prepared.plan.batch_hashes.get(batch.manifest.request_id) != canonical_hash(batch):
             raise IdentityMismatch("workflow initial batch differs from the ready plan")
-        from engine.item.members import build_member_payload
+        from engine.item.members import fit_member_payload
 
         targets = None
         if batch.manifest.stage == "review":
@@ -433,33 +490,23 @@ class ReadySession:
                     target_projection=wire["target"],
                     target_hash=canonical_hash(wire["target"]),
                 )
-        expected_payload = None
-        for count in (2, 1, 0):
-            candidate = build_member_payload(
-                batch.manifest.stage,
-                batch.items,
-                prepared.glossary,
-                self.index,
-                request_id=batch.manifest.request_id,
-                targets=targets,
-                revisions=batch.manifest.revisions if batch.manifest.stage == "review" else None,
-                context_count=count,
-            )
-            candidate_budget = measure_budget(
-                stage=batch.manifest.stage,
-                payload=candidate,
-                limits=limits_for(prepared.preparation),
-                tokenizer_model=_model(prepared.preparation),
-            )
-            if candidate_budget.fits or not candidate["context"]:
-                expected_payload = candidate
-                break
+        expected_payload, _ = fit_member_payload(
+            batch.manifest.stage,
+            batch.items,
+            prepared.glossary,
+            self.index,
+            capacity,
+            request_id=batch.manifest.request_id,
+            targets=targets,
+            revisions=batch.manifest.revisions if batch.manifest.stage == "review" else None,
+            tokenizer_model=_model(prepared.preparation),
+        )
         if expected_payload != batch.payload:
             raise IdentityMismatch("workflow payload differs from its frozen source, terms or context")
         measured = measure_budget(
             stage=batch.manifest.stage,
             payload=batch.payload,
-            limits=limits_for(prepared.preparation),
+            limits=capacity,
             tokenizer_model=_model(prepared.preparation),
         )
         if not measured.fits or measured != batch.budget:
@@ -467,7 +514,7 @@ class ReadySession:
         if batch.payload.get("prompt_version") != prepared.plan.translation_config.get("prompt_version"):
             raise IdentityMismatch("workflow prompt differs from the frozen task")
 
-    def _fingerprint(self):
+    def _fingerprint(self, *, include_prepared: bool = True):
         root = self.store.root
         paths = [
             state.snapshot(root),
@@ -480,6 +527,7 @@ class ReadySession:
                     "plans/book.json",
                     "checks/preflight.json",
                 )
+                if include_prepared or value != "prepared.json"
             ),
         ]
         for directory in ("documents", "inventories", "members", "batches", "glossary"):

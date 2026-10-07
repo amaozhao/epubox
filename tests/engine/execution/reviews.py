@@ -122,7 +122,7 @@ def test_exhausted_review_keeps_draft_and_blocks_publication_without_source_fall
 
 def test_new_failure_in_split_unit_does_not_reopen_old_terminal_sibling(tmp_path):
     source = make_epub(
-        tmp_path / "source.epub", {"chapter.xhtml": "This is a loose sentence with several English words. " * 8}
+        tmp_path / "source.epub", {"chapter.xhtml": "This is a loose sentence with several English words. " * 12}
     )
     preparation = asyncio.run(
         prepare_translation(
@@ -135,6 +135,8 @@ def test_new_failure_in_split_unit_does_not_reopen_old_terminal_sibling(tmp_path
                 extractor_version=EXTRACTOR_VERSION,
                 translation_config={
                     "model": "gpt-3.5-turbo",
+                    "planner_version": "epubox-member-planner-1",
+                    "output_budget_version": 4,
                     "max_source_tokens": 100,
                     "max_input_tokens": 50_000,
                     "max_output_tokens": 10_000,

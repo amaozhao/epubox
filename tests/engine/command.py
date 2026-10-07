@@ -160,7 +160,7 @@ def test_translate_freezes_atomic_versions_and_explicit_chunk_limit(
     assert config.extraction_config["strategy"] == ATOMIC_TERM_PLANNER_VERSION
     assert config.translation_config["prompt_version"] == "epubox-members-1"
     assert config.translation_config["input_budget_version"] == 2
-    assert config.translation_config["output_budget_version"] == 4
+    assert config.translation_config["output_budget_version"] == 5
     assert config.translation_config["max_source_tokens"] == 5000
     assert config.translation_config["max_input_tokens"] == 24000
     assert config.translation_config["rpm"] == cli.settings.AGNES_TEXT_RPM
@@ -272,6 +272,9 @@ def test_atomic_batch_progress_keeps_estimates_reserves_and_actual_usage_distinc
 
     printer(report | {"request_id": "tx-2", "decision": "no_change", "revised": False, "batch_issues": []})
     assert "结果=通过，修订=否" in capsys.readouterr().out
+    printer(report | {"phase": "workflow", "source_channel": "metadata", "source_tokens": 4})
+    output = capsys.readouterr().out
+    assert "元数据估算=4 tokens" in output and "正文估算=" not in output
 
 
 def test_progress_hides_item_transport_and_waiting_events_but_keeps_batch_errors(capsys) -> None:

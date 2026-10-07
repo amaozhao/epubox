@@ -13,7 +13,6 @@ from engine.agents.workflow import run_workflow
 from engine.execution.state import TranslationRunResult
 from engine.schemas.contracts import ItemStatus
 from engine.schemas.members import MemberBatch
-from engine.services import state
 from engine.services.atomic import StoreError
 from engine.services.store import RunStore
 
@@ -37,7 +36,7 @@ async def run_atomic(
         session = journal.session
         ready = session.prepared
         journal.recover_results()
-        if reopen_attention and ready.plan.translation_config.get("output_budget_version", 2) in {3, 4}:
+        if reopen_attention and ready.plan.translation_config.get("output_budget_version", 2) in {3, 4, 5}:
             records = journal.records()
             units = {
                 unit_id
@@ -53,10 +52,7 @@ async def run_atomic(
                 progress({"phase": "recovery", "notice": f"恢复：正文断点处理完成，重试 {len(units)} 个单元。"})
         order = {document: index for index, document in enumerate(session.index.document_order)}
         batches = sorted(
-            (
-                MemberBatch.model_validate_json(state.read(store.root / "batches" / f"{identifier}.json"))
-                for identifier in ready.plan.batch_hashes
-            ),
+            session._prepared_batches.values(),
             key=lambda batch: (order[batch.items[0].document_id], batch.items[0].ordinal, batch.items[0].piece_index),
         )
         configured = ready.plan.translation_config.get("concurrency", 2)
@@ -230,6 +226,7 @@ async def run_atomic(
                                     key: details[key]
                                     for key in (
                                         "source_tokens",
+                                        "source_channel",
                                         "estimated_input_tokens",
                                         "reserved_input_tokens",
                                         "reserved_output_tokens",

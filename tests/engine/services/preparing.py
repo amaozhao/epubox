@@ -112,7 +112,13 @@ def test_virtual_preflight_pieces_are_packed_as_distinct_members(tmp_path: Path)
         prepare_translation(
             source,
             tmp_path / "work",
-            atomic_config(max_source_tokens=100, context_tokens=8192, max_input_tokens=8192),
+            atomic_config(
+                max_source_tokens=100,
+                context_tokens=8192,
+                max_input_tokens=8192,
+                planner_version="epubox-member-planner-1",
+                output_budget_version=4,
+            ),
             StubChecker(),
         )
     )
@@ -138,7 +144,13 @@ def test_blocked_hard_atom_stops_before_term_http_or_ready(tmp_path: Path) -> No
         prepare_translation(
             source,
             tmp_path / "work",
-            atomic_config(max_source_tokens=40, context_tokens=8192, max_input_tokens=8192),
+            atomic_config(
+                max_source_tokens=40,
+                context_tokens=8192,
+                max_input_tokens=8192,
+                planner_version="epubox-member-planner-1",
+                output_budget_version=4,
+            ),
             StubChecker(),
             term_transport=forbidden,
         )

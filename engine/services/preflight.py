@@ -13,7 +13,7 @@ from pydantic import Field
 from engine.epub.fill import fill_resource
 from engine.epub.parsing import parse_resource
 from engine.epub.ranges import index_resource
-from engine.item.atoms import _LEGACY_EXTRACTOR_VERSION, _safe_boundaries, extract_resource
+from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS, _safe_boundaries, extract_resource
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.budget import measure_budget
 from engine.item.inline import events_to_projection, parse_projection
@@ -296,6 +296,9 @@ def _piece(
     wire = [{"item_id": piece_id, "source": source}]
     translate_payload = base | {"protocol": "epubox-text-1", "items": wire}
     review_payload = base | {"protocol": "epubox-review-2", "items": wire}
+    if limits.output_version == 5:
+        translate_payload["prompt_version"] = "epubox-members-1"
+        review_payload["prompt_version"] = "epubox-members-1"
     return PreflightPiece(
         piece_id=piece_id,
         item_id=item.item_id,
@@ -499,7 +502,7 @@ def _prepared_documents(root: Path, preparation: PreparationPlan) -> tuple[Docum
 def _extractor_version(document: DocumentPlan) -> str:
     return (
         document.extractor_version
-        if document.extractor_version in {ATOMIC_EXTRACTOR_VERSION, _LEGACY_EXTRACTOR_VERSION}
+        if document.extractor_version in _SUPPORTED_EXTRACTOR_VERSIONS
         else ATOMIC_EXTRACTOR_VERSION
     )
 

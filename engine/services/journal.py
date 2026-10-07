@@ -517,16 +517,31 @@ class BodyJournal:
             and _saved_epoch(current, "review_epoch") == review_epoch
         ):
             return current
-        for request in self._requests.values():
+        preferred = self._requests.get(current.request_id or "")
+        preferred_is_proof = current.status in {
+            ItemStatus.LOCAL_VALID,
+            ItemStatus.CANDIDATE,
+            ItemStatus.REVIEWED,
+        }
+        requests = (
+            *((preferred,) if preferred is not None else ()),
+            *(request for request in self._requests.values() if request is not preferred),
+        )
+        for request in requests:
             if request.stage != "translate" or item_id not in request.item_ids:
                 continue
             response = self._response(request)
             if response is None:
                 continue
-            sources = self._source_projections(request)
             try:
-                accepted = validate_translation_response(response.raw, request.request_id, sources).accepted
+                if request.request_id not in self._translations:
+                    self._translations[request.request_id] = validate_translation_response(
+                        response.raw, request.request_id, self._source_projections(request)
+                    ).accepted
+                accepted = self._translations[request.request_id]
             except ProtocolError:
+                if request is preferred and preferred_is_proof:
+                    raise
                 # A failed historical response cannot prove a draft; a later retry may.
                 continue
             target = accepted.get(item_id, {}).get("target")
@@ -568,6 +583,7 @@ class BodyJournal:
                 "request_id": manifest.request_id,
                 "item_ids": manifest.item_ids,
                 "source_tokens": measured.source_tokens,
+                "source_channel": self.session.index.members_by_id[manifest.item_ids[0]].channel,
                 "estimated_input_tokens": estimated,
                 "reserved_input_tokens": reserved,
                 "reserved_output_tokens": measured.output_tokens,
@@ -833,8 +849,11 @@ class BodyJournal:
         response = self._response(request)
         if response is None:
             raise IdentityMismatch("saved draft lacks its persisted translation response")
-        parsed = validate_translation_response(response.raw, request.request_id, self._source_projections(request))
-        result = parsed.accepted.get(record.item_id)
+        if request.request_id not in self._translations:
+            self._translations[request.request_id] = validate_translation_response(
+                response.raw, request.request_id, self._source_projections(request)
+            ).accepted
+        result = self._translations[request.request_id].get(record.item_id)
         if (
             result is None
             or record.target_projection != result["target"]

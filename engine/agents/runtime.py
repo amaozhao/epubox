@@ -549,7 +549,11 @@ class ModelRuntime:
                 kind, payload, algorithm_version=self._input_budget_version, compact=True
             )
             protected_structure = any(item.get("hints") or item.get("constraints") for item in payload["items"])
-            if protected_structure or physical_budget["cl100k_tokens"] < budget["cl100k_tokens"]:
+            if (
+                protected_structure
+                or payload.get("wire_version") == wire.VERSION
+                or physical_budget["cl100k_tokens"] < budget["cl100k_tokens"]
+            ):
                 budget, compact = physical_budget, True
         estimated_input_tokens = budget["estimated_input_tokens"]
         if estimated_input_tokens > MAX_MODEL_INPUT_TOKENS:

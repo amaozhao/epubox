@@ -5,8 +5,7 @@ from __future__ import annotations
 import zipfile
 from typing import TYPE_CHECKING
 
-from engine.item.atoms import _LEGACY_EXTRACTOR_VERSION, extract_resource
-from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
+from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS, extract_resource
 from engine.schemas.bridge import AtomicDocument
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import DocumentPlan, JsonValue, PreparationPlan, TermExtractionPlan, parse_contract
@@ -28,7 +27,7 @@ def write_plan(store: RunStore, plan: TermExtractionPlan) -> str:
 
     trusted, documents = store._preparation_documents()
     versions = {document.extractor_version for document in documents.values()}
-    atomic = len(versions) == 1 and versions <= {ATOMIC_EXTRACTOR_VERSION, _LEGACY_EXTRACTOR_VERSION}
+    atomic = len(versions) == 1 and versions <= _SUPPORTED_EXTRACTOR_VERSIONS
     if atomic:
         inventories = (
             canonical_documents(store, trusted, documents)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import engine.item.views as views_module
 from engine.item.structure import extract_document
 from engine.item.views import SourceViewError, derive_source_views, validate_source_views
 from engine.schemas.contracts import (
@@ -163,6 +164,23 @@ def test_slot_ownership_mismatch_is_rejected() -> None:
 
     with pytest.raises(SourceViewError, match="slot ownership disagrees"):
         derive_source_views(bad_document)
+
+
+def test_document_indexes_are_built_once_per_derivation(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = _plan("<p>one</p><p>two</p><p>three</p>")
+    original = views_module._source_view_index
+    calls = 0
+
+    def counting_index(document: DocumentPlan):
+        nonlocal calls
+        calls += 1
+        return original(document)
+
+    monkeypatch.setattr(views_module, "_source_view_index", counting_index)
+
+    derive_source_views(document)
+
+    assert calls == 1
 
 
 def test_validation_replays_source_instead_of_trusting_a_recomputed_view_hash() -> None:

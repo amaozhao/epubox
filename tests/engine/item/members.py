@@ -171,9 +171,9 @@ def test_member_payload_and_packing_use_piece_identity_and_shared_context() -> N
 @pytest.mark.parametrize(
     ("version", "expected"),
     (
-        (2, "c939c319a9d78c09bb3f2fbc23918db1009893716569db583f05747848bf0773"),
-        (3, "51c54c9af2a35aada35c9824029f402a4da18701705c639edfc24118a21579cb"),
-        (4, "22f7f2d3f396d4335619e5f8f727704365f36f5a235fb3fdbcfbf3f48524aaff"),
+        (2, "fdf1efad0b273758501cd24a2bfa1b1f9be3f17cb20fe1e41cd653eb63c1a6ee"),
+        (3, "b68df0fbefc901668014cf9e3d8153310fa55cd669b71e0b8a013dff4ebba032"),
+        (4, "6da1636fde660286e82dc48c3a4bc4f424149f9a34bdf31194eb276ddaf2011c"),
     ),
 )
 def test_packing_preserves_budget_version_identities(version: Literal[2, 3, 4], expected: str) -> None:
@@ -223,7 +223,7 @@ def test_packing_hashes_stable_identity_components_once(monkeypatch: pytest.Monk
     )
 
     assert packed.ready
-    assert canonical_hash(packed) == "42952b6c0a1c2e44d6665ca99aaadc10ee206dffe31e67aacd75dc60b1de9678"
+    assert canonical_hash(packed) == "3219eb1ac551bd11147cbce7de8ed2cf2c26bbfd2664c81fff87d485d1c50f58"
     assert set(calls.values()) == {1}
     assert limit_calls == 1
 
@@ -271,7 +271,7 @@ def test_heading_priority_and_saved_versions_affect_member_request_identity() ->
         [heading.item_id, following.item_id],
     ]
     assert packed.boundaries[0].reason == "heading"
-    assert canonical_hash(packed) == "8576aecb36f110cad6a1a2ad9bf09e12f3b05bd10eb90814a1bdbe4d1d90cd02"
+    assert canonical_hash(packed) == "b7f3bc6080b7c2d286a221c3d9b94b009612aa9e9ebd5c7750c6eb19753b2a7a"
 
     baseline = pack_members("translate", members, frozen, index, limits()).batches[0].manifest.request_id
     versioned = (

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
+from pathlib import PurePosixPath
 from typing import Any, cast
 
 import regex
@@ -29,11 +30,13 @@ from engine.schemas.contracts import Unit
 from engine.schemas.internal import DocumentPlan as StructuralDocument
 from engine.schemas.internal import RegistryEntry, ResourceRecord, SlotRange
 
-EXTRACTOR_VERSION = "epubox-atomic-2"
+EXTRACTOR_VERSION = "epubox-atomic-3"
 ADAPTER_VERSION = "epubox-bytes-1"
 DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
 EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
-_LEGACY_EXTRACTOR_VERSION = "epubox-atomic-1"
+_LEGACY_EXTRACTOR_VERSION = "epubox-atomic-2"
+_SUPPORTED_EXTRACTOR_VERSIONS = frozenset({"epubox-atomic-1", _LEGACY_EXTRACTOR_VERSION, EXTRACTOR_VERSION})
+_NAVIGATION_EXTRACTOR_VERSIONS = frozenset({_LEGACY_EXTRACTOR_VERSION, EXTRACTOR_VERSION})
 _NAVIGATION_TYPES = frozenset({"toc", "page-list", "landmarks"})
 
 
@@ -92,6 +95,11 @@ class _AtomicExtractor(_Extractor):
         if self.parsed.kind == "xhtml":
             for head in root.findall(f"{{{XHTML_NAMESPACE}}}head"):
                 for title in head.findall(f"{{{XHTML_NAMESPACE}}}title"):
+                    if (
+                        self.extractor_version == EXTRACTOR_VERSION
+                        and "".join(title.itertext()).strip() == PurePosixPath(self.resource_path).stem
+                    ):
+                        continue
                     self._make_whole_content_unit(title, self._translate_state_chain(title), "head_title")
             bodies = root.findall(f"{{{XHTML_NAMESPACE}}}body")
             if len(bodies) != 1:
@@ -170,7 +178,7 @@ class _AtomicExtractor(_Extractor):
         if self._is_hard(node) or not translated and not self._has_translate_yes(node):
             self._mark_subtree(node, "protected")
             return
-        if self.extractor_version == EXTRACTOR_VERSION and self._navigation_type(node):
+        if self.extractor_version in _NAVIGATION_EXTRACTOR_VERSIONS and self._navigation_type(node):
             self._extract_navigation(node)
             return
         if self._is_atom(node):
@@ -433,7 +441,7 @@ def extract_resource(
         prefix = "genuine HTML: " if parsed.kind == "html" else ""
         raise RangeError(prefix + "; ".join(parsed.diagnostics))
     index = index_resource(parsed)
-    if extractor_version not in {EXTRACTOR_VERSION, _LEGACY_EXTRACTOR_VERSION}:
+    if extractor_version not in _SUPPORTED_EXTRACTOR_VERSIONS:
         raise ValueError(f"unsupported atomic extractor version: {extractor_version}")
     draft = _AtomicExtractor(parsed, resource_path, source_hash, media_type, config or {}, extractor_version)
     document = _to_document_plan(draft.extract())

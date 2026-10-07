@@ -67,6 +67,7 @@ class Settings(BaseSettings):
 
     # EPUB 分块配置
     EPUB_CHUNK_MAX_TOKENS: PositiveInt = 2000
+    EPUB_CHUNK_MIN_TOKENS: PositiveInt = 500
 
     # 日志设置
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"

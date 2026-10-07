@@ -36,7 +36,9 @@ class ReadyCase:
     session: ReadySession
 
 
-def prepare_case(root: Path, body: str, projections: tuple[str, ...]) -> ReadyCase:
+def prepare_case(
+    root: Path, body: str, projections: tuple[str, ...], *, output_budget_version: int | None = None
+) -> ReadyCase:
     source = make_epub(root / "source.epub", {"chapter.xhtml": body})
     result = asyncio.run(
         prepare_translation(
@@ -53,7 +55,8 @@ def prepare_case(root: Path, body: str, projections: tuple[str, ...]) -> ReadyCa
                     "max_input_tokens": 50_000,
                     "max_output_tokens": 10_000,
                     "context_tokens": 60_000,
-                },
+                }
+                | ({"output_budget_version": output_budget_version} if output_budget_version is not None else {}),
             ),
             StubChecker(),
         )

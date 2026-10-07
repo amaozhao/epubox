@@ -14,7 +14,7 @@ from engine.schemas.contracts import (
     source_view_hash_payload,
 )
 from engine.schemas.internal import DocumentPlan as ExtractedDocument
-from engine.schemas.internal import SourceSlot, Unit
+from engine.schemas.internal import SlotRange, SourceSlot, Unit
 
 SOURCE_VIEW_RULE_VERSION = "epubox-source-view-2"
 
@@ -45,15 +45,25 @@ class _OwnedFragment:
     domain_node_key: str
 
 
+@dataclass(frozen=True)
+class _SourceViewIndex:
+    node_by_path: dict[tuple[int, ...], str]
+    special_tail_parents: dict[str, str]
+    owned_ranges: dict[tuple[str, str], tuple[SlotRange, ...]]
+    owned_slot_ids: dict[str, frozenset[str]]
+    slot_positions: dict[str, int]
+
+
 def derive_source_views(document: ExtractedDocument) -> SourceViewDerivation:
     """Build source views without reparsing XML or changing source ownership."""
 
     views: dict[str, SourceTextView] = {}
     unit_views: dict[str, tuple[str, ...]] = {}
     gaps: list[SourceViewGap] = []
+    index = _source_view_index(document)
 
     for unit in document.units:
-        unit_result, unit_gaps = _derive_unit_views(document, unit)
+        unit_result, unit_gaps = _derive_unit_views(document, unit, index)
         for view in unit_result:
             if view.view_id in views:
                 raise SourceViewError(f"duplicate source view identity: {view.view_id}")
@@ -76,9 +86,9 @@ def validate_source_views(document: DocumentPlan) -> None:
 
 
 def _derive_unit_views(
-    document: ExtractedDocument, unit: Unit
+    document: ExtractedDocument, unit: Unit, index: _SourceViewIndex
 ) -> tuple[tuple[SourceTextView, ...], tuple[SourceViewGap, ...]]:
-    fragments = _owned_fragments(document, unit)
+    fragments = _owned_fragments(document, unit, index)
     fragment_index = 0
     fragment_offset = 0
     text_parts: list[str] = []
@@ -186,34 +196,50 @@ def _derive_unit_views(
     return tuple(views), tuple(gaps)
 
 
-def _owned_fragments(document: ExtractedDocument, unit: Unit) -> tuple[_OwnedFragment, ...]:
+def _source_view_index(document: ExtractedDocument) -> _SourceViewIndex:
+    owned_ranges: dict[tuple[str, str], list[SlotRange]] = {}
+    owned_slot_ids: dict[str, set[str]] = {}
+    for slot_id, slot in document.source_slots.items():
+        for part in slot.ranges:
+            if part.owner_kind == "unit" and part.owner_unit_id is not None:
+                owned_ranges.setdefault((part.owner_unit_id, slot_id), []).append(part)
+                owned_slot_ids.setdefault(part.owner_unit_id, set()).add(slot_id)
+    return _SourceViewIndex(
+        node_by_path={node.element_path: node.node_key for node in document.nodes.values()},
+        special_tail_parents={
+            str(boundary["slot_id"]): str(boundary["parent_node_key"])
+            for boundary in document.boundaries
+            if boundary.get("kind") == "non_element_tail"
+            and isinstance(boundary.get("slot_id"), str)
+            and isinstance(boundary.get("parent_node_key"), str)
+        },
+        owned_ranges={key: tuple(parts) for key, parts in owned_ranges.items()},
+        owned_slot_ids={unit_id: frozenset(slot_ids) for unit_id, slot_ids in owned_slot_ids.items()},
+        slot_positions={slot_id: position for position, slot_id in enumerate(document.source_slots)},
+    )
+
+
+def _owned_fragments(document: ExtractedDocument, unit: Unit, index: _SourceViewIndex) -> tuple[_OwnedFragment, ...]:
     fragments: list[_OwnedFragment] = []
     listed = set(unit.slot_ids)
-    node_by_path = {node.element_path: node.node_key for node in document.nodes.values()}
-    special_tail_parents = {
-        str(boundary["slot_id"]): str(boundary["parent_node_key"])
-        for boundary in document.boundaries
-        if boundary.get("kind") == "non_element_tail"
-        and isinstance(boundary.get("slot_id"), str)
-        and isinstance(boundary.get("parent_node_key"), str)
-    }
-    for slot_id, slot in document.source_slots.items():
-        owns_unit = any(part.owner_kind == "unit" and part.owner_unit_id == unit.unit_id for part in slot.ranges)
-        if owns_unit != (slot_id in listed):
-            raise SourceViewError(f"{unit.unit_id}: slot ownership disagrees with slot_ids for {slot_id}")
+    known_slots = {slot_id for slot_id in listed if slot_id in document.source_slots}
+    mismatched = index.owned_slot_ids.get(unit.unit_id, frozenset()) ^ known_slots
+    if mismatched:
+        slot_id = min(mismatched, key=index.slot_positions.__getitem__)
+        raise SourceViewError(f"{unit.unit_id}: slot ownership disagrees with slot_ids for {slot_id}")
 
     for slot_id in unit.slot_ids:
         slot = document.source_slots.get(slot_id)
         if slot is None:
             raise SourceViewError(f"{unit.unit_id}: unknown source slot {slot_id}")
-        owned = [part for part in slot.ranges if part.owner_kind == "unit" and part.owner_unit_id == unit.unit_id]
+        owned = index.owned_ranges.get((unit.unit_id, slot_id), ())
         if not owned:
             raise SourceViewError(f"{unit.unit_id}: source slot {slot_id} has no range owned by the Unit")
         if slot.field == "tail":
             node = document.nodes.get(slot.node_key)
-            domain_node_key = special_tail_parents.get(slot_id)
+            domain_node_key = index.special_tail_parents.get(slot_id)
             if domain_node_key is None:
-                domain_node_key = node_by_path.get(node.element_path[:-1]) if node is not None else None
+                domain_node_key = index.node_by_path.get(node.element_path[:-1]) if node is not None else None
             if domain_node_key is None:
                 raise SourceViewError(f"{unit.unit_id}: tail slot {slot_id} has no known parent node")
         else:

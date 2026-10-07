@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from engine.epub.fill import fill_resource
 from engine.epub.ranges import RangeError
-from engine.item.atoms import EXTRACTOR_VERSION, extract_resource
+from engine.item.atoms import _LEGACY_EXTRACTOR_VERSION, EXTRACTOR_VERSION, extract_resource
 from engine.item.inline import parse_projection, validate_projection
 from engine.item.views import validate_source_views
 from engine.schemas.bridge import AtomicDocument, ByteSpan
@@ -35,6 +35,31 @@ def texts(result) -> list[str]:
         )
         for item in result.items
     ]
+
+
+def test_resource_stem_head_title_is_preserved_locally_without_a_model_item() -> None:
+    raw = source("<p>Translate this body.</p>", "<title>chapter</title>")
+    result = extract_resource(raw, "OPS/chapter.xhtml", "source")
+
+    assert all(item.kind != "head_title" for item in result.items)
+    body = next(item for item in result.items if item.kind == "p")
+    rendered = fill_resource(raw, result, {body.item_id: body.source_projection.replace("Translate", "翻译")})
+    assert b"<title>chapter</title>" in rendered
+    assert "翻译" in rendered.decode()
+
+
+def test_prose_head_title_remains_translatable_and_v2_replay_is_unchanged() -> None:
+    raw = source("<p>Body.</p>", "<title>Chapter One</title>")
+    current = extract_resource(raw, "OPS/chapter.xhtml", "source")
+    legacy = extract_resource(
+        source("<p>Body.</p>", "<title>chapter</title>"),
+        "OPS/chapter.xhtml",
+        "source",
+        extractor_version=_LEGACY_EXTRACTOR_VERSION,
+    )
+
+    assert any(item.kind == "head_title" for item in current.items)
+    assert any(item.kind == "head_title" for item in legacy.items)
 
 
 def test_three_nested_containers_keep_paragraphs_whole_and_inline_ranges_inside_their_owner() -> None:

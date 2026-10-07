@@ -308,6 +308,18 @@ def test_v4_source_limit_counts_only_translatable_text() -> None:
     assert current.output_tokens == 4096
 
 
+def test_v5_output_counts_only_the_text_slots_the_model_actually_returns() -> None:
+    markers = "".join(f"⟦=x{index}⟧" for index in range(2000))
+    request = payload("translate", (item(markers + "Text."),))
+    request["prompt_version"] = "epubox-members-1"
+    request["wire_version"] = "epubox-wire-5"
+    legacy = measure_budget(stage="translate", payload=request, limits=limits(source_tokens=20, output_version=4))
+    current = measure_budget(stage="translate", payload=request, limits=limits(source_tokens=20, output_version=5))
+    assert any(reason.startswith("output ") for reason in legacy.failures)
+    assert current.fits and current.output_tokens == 4096
+    assert current.source_tokens == legacy.source_tokens
+
+
 def test_v4_output_still_rejects_huge_marker_inventory() -> None:
     markers = "".join(f"⟦=x{index}⟧" for index in range(2000))
     measured = measure_budget(

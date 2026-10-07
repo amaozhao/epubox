@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+import engine.services.journal as journal_module
 from engine.agents.workflow import run_workflow
 from engine.schemas.contracts import ItemStatus, canonical_hash
 from engine.services.atomic import IdentityMismatch
@@ -15,7 +16,7 @@ from tests.engine.services.journal import _answer
 
 
 @pytest.mark.parametrize("malformed", ("{}", "not json", "extra"))
-def test_restart_uses_successful_retry_after_malformed_translation(tmp_path, malformed) -> None:
+def test_restart_uses_successful_retry_after_malformed_translation(tmp_path, malformed, monkeypatch) -> None:
     case = prepare_case(tmp_path, "<p>Hello world.</p>", ("Hello world.",))
     journal = BodyJournal(case.session.store, case.session)
 
@@ -42,6 +43,7 @@ def test_restart_uses_successful_retry_after_malformed_translation(tmp_path, mal
         )
 
     assert run(journal, failed).status == "needs_attention"
+    failed_request = next(request.request_id for request in journal._requests.values() if request.stage == "translate")
     journal = BodyJournal(case.session.store)
     with pytest.raises(IdentityMismatch, match="no proven saved draft"):
         journal._review_target(case.batch.items[0].item_id, canonical_hash("译文1。"), 0)
@@ -55,11 +57,21 @@ def test_restart_uses_successful_retry_after_malformed_translation(tmp_path, mal
     assert run(journal, succeeded).status == "completed"
     assert calls == ["translate", "review"]
     # A new process must prove the later successful draft despite the older bad response.
+    valid_request = journal.records()[case.batch.items[0].item_id].request_id
+    validations = []
+    validate = journal_module.validate_translation_response
+
+    def counted(raw, request_id, sources):
+        validations.append(request_id)
+        return validate(raw, request_id, sources)
+
+    monkeypatch.setattr(journal_module, "validate_translation_response", counted)
     resumed = BodyJournal(case.session.store)
     resumed.recover_results()
     assert all(
         record.status == ItemStatus.REVIEWED for record in resumed.records(case.batch.manifest.item_ids).values()
     )
+    assert failed_request not in validations and validations.count(valid_request) == 2
     assert not plan_resume(case.session.store.root).reasons
     assert run(resumed, succeeded).status == "completed"
     assert calls == ["translate", "review"]

@@ -240,6 +240,7 @@ def _expected_configs(config: PreparationConfig) -> tuple[tuple[dict[str, JsonVa
     translation.pop("max_input_tokens", None)
     translation.pop("input_budget_version", None)
     translation.pop("output_budget_version", None)
+    translation.pop("minimum_source_tokens", None)
     translation.pop("rpm", None)
     legacy = replace(
         config,
@@ -250,10 +251,14 @@ def _expected_configs(config: PreparationConfig) -> tuple[tuple[dict[str, JsonVa
     )
     previous = dict(current[1])
     previous.pop("output_budget_version", None)
+    previous.pop("minimum_source_tokens", None)
+    previous["planner_version"] = "epubox-member-planner-1"
     return (
         current,
         (current[0], previous),
         (current[0], previous | {"output_budget_version": 2}),
+        (current[0], previous | {"output_budget_version": 3}),
+        (current[0], previous | {"output_budget_version": 4}),
         (_frozen_extraction_config(legacy), _frozen_translation_config(legacy)),
     )
 

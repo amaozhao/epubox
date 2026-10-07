@@ -272,12 +272,11 @@ class RunStore:
 
     def _trusted_preparation_documents(self) -> tuple[PreparationPlan, dict[str, DocumentPlan]]:
         preparation, documents = self._preparation_documents()
-        from engine.item.atoms import _LEGACY_EXTRACTOR_VERSION
-        from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
+        from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS
         from engine.item.structure import EXTRACTOR_VERSION
 
         versions = {document.extractor_version for document in documents.values()}
-        if len(versions) == 1 and versions <= {ATOMIC_EXTRACTOR_VERSION, _LEGACY_EXTRACTOR_VERSION}:
+        if len(versions) == 1 and versions <= _SUPPORTED_EXTRACTOR_VERSIONS:
             from engine.services.terms.storage import canonical_documents
 
             canonical_documents(self, preparation, documents)

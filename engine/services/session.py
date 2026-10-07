@@ -312,7 +312,7 @@ def reopen(work_dir: Path) -> tuple[str, ...]:
     store = RunStore(work_dir)
     with store.lock(blocking=False):
         journal = BodyJournal(store)
-        if journal.session.prepared.plan.translation_config.get("output_budget_version", 2) not in {3, 4}:
+        if journal.session.prepared.plan.translation_config.get("output_budget_version", 2) not in {3, 4, 5}:
             return ()
         records = journal.recover_results()
         units = {

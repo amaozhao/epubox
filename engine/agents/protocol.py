@@ -237,7 +237,8 @@ def review_applicability(member: Any, index: Any, wire: Mapping[str, Any]) -> di
         and member.channel == "metadata"
         and not member.registry
         and isinstance(source, str)
-        and source == member.source_projection == target == PurePosixPath(resource).name
+        and source == member.source_projection == target
+        and target in {PurePosixPath(resource).name, PurePosixPath(resource).stem}
     )
     return {
         "terminology_applicable": expected["terminology"],

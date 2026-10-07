@@ -46,13 +46,13 @@ def measure_budget(
     if not items:
         raise ValueError("budget requires at least one item")
     _validate_items(items)
-    messages = request_messages(stage, payload)
+    messages = request_messages(stage, payload, compact=limits.output_version == 5)
 
     tokenizer, tokenizer_name, fallback = _tokenizer(tokenizer_model)
     source_wire = [{"item_id": _item_id(item), "source": _source(item)} for item in items]
     source_tokens = (
         sum(_projection_parts(_source(item), tokenizer)[0] for item in items)
-        if limits.output_version == 4
+        if limits.output_version in {4, 5}
         else _count(_json(source_wire), tokenizer)
     )
     input_tokens = _count(_json({"messages": list(messages)}), tokenizer)
@@ -68,7 +68,7 @@ def measure_budget(
                 raise ValueError(f"review actual budget requires saved targets: {', '.join(missing)}")
         elif review_targets == "estimated":
             output_items = tuple(_without_target(item) for item in items)
-            if limits.output_version == 4:
+            if limits.output_version in {4, 5}:
                 review_target_input_tokens = sum(
                     markers + math.ceil(text * limits.target_ratio)
                     for item in items
@@ -99,7 +99,9 @@ def measure_budget(
     output_tokenizer = _planner_tokenizer()
     if output_tokenizer is None or output_tokenizer.name != tokenizer_name:
         raise RuntimeError("output tokenizer does not match budget tokenizer")
-    if limits.output_version == 4:
+    if limits.output_version == 5:
+        output_tokens = _v5_output_tokens(stage, output_items, payload, limits, tokenizer)
+    elif limits.output_version == 4:
         output_tokens = _v4_output_tokens(stage, output_items, payload, limits, estimate_config, tokenizer)
     else:
         output_tokens = recommended_output_tokens(
@@ -116,8 +118,8 @@ def measure_budget(
     context_tokens = input_reserve + output_tokens + limits.safety_tokens
     input_limit = min(limits.input_tokens, MAX_MODEL_INPUT_TOKENS)
     failures: list[str] = []
-    if source_tokens > limits.source_tokens:
-        failures.append(f"source budget {source_tokens} exceeds {limits.source_tokens}")
+    if source_tokens > limits.source_ceiling:
+        failures.append(f"source budget {source_tokens} exceeds {limits.source_ceiling}")
     if input_reserve > input_limit:
         failures.append(f"input budget {input_reserve} exceeds {input_limit}")
     if output_tokens > limits.output_tokens:
@@ -146,7 +148,7 @@ def measure_budget(
             wrapper_tokens=WRAPPER_HEADROOM_TOKENS,
             safety_tokens=limits.safety_tokens,
             target_ratio=limits.target_ratio,
-            source_limit=limits.source_tokens,
+            source_limit=limits.source_ceiling,
             input_limit=input_limit,
             output_limit=limits.output_tokens,
             context_limit=limits.context_tokens,
@@ -223,6 +225,47 @@ def _v4_output_tokens(
         text, markers = _projection_parts(_source(item), tokenizer)
         content += markers + math.ceil(text * limits.target_ratio)
     complete = envelope + content
+    reserved = complete + math.ceil(complete * TOKENIZER_MARGIN_PERCENT / 100) + WRAPPER_HEADROOM_TOKENS
+    return max(limits.output_tokens, reserved)
+
+
+def _v5_output_tokens(
+    stage: BudgetStage,
+    items: Sequence[Mapping[str, Any]],
+    payload: Mapping[str, Any],
+    limits: BudgetLimits,
+    tokenizer: Any,
+) -> int:
+    """Reserve only emitted short IDs/text slots; markers are restored locally."""
+    envelope: list[dict[str, Any]] = []
+    text_tokens = 0
+    for number, item in enumerate(items, 1):
+        events = parse_projection(_source(item))
+        slots = [event.value for event in events if event.kind == "text" and event.value.strip()]
+        target = _target(item)
+        text_tokens += (
+            _projection_parts(target, tokenizer)[0]
+            if stage == "review" and target is not None
+            else math.ceil(sum(_count(text, tokenizer) for text in slots) * limits.target_ratio)
+        )
+        value: dict[str, Any] = {
+            "item_id": str(number),
+            "target": {str(index): "" for index in range(1, len(slots) + 1)},
+        }
+        if stage == "review":
+            value.update(
+                base_revision=item.get("base_revision", 0),
+                decision="replace",
+                checks={key: "not_applicable" for key in ("accuracy", "fluency", "terminology", "bindings", "script")},
+                issues=[],
+            )
+        envelope.append(value)
+    if stage == "review":
+        text_tokens += 160  # Shared allowance for concise issues, plus the 50% response margin below.
+    complete = text_tokens + _count(
+        _json({"protocol": payload["protocol"], "request_id": payload.get("request_id", ""), "items": envelope}),
+        tokenizer,
+    )
     reserved = complete + math.ceil(complete * TOKENIZER_MARGIN_PERCENT / 100) + WRAPPER_HEADROOM_TOKENS
     return max(limits.output_tokens, reserved)
 

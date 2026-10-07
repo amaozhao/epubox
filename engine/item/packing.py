@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal, cast
 
+from pydantic import Field
+
 from engine.item.budget import measure_budget
 from engine.item.request import SourceIndex, build_payload
 from engine.schemas.bridge import AtomicItem, ByteSpan, RequestBatch, batch_item_hash
@@ -22,6 +24,8 @@ type BoundaryReason = Literal[
     "completed",
     "blocked",
     "heading",
+    "minimum",
+    "minimum_unavoidable",
     "end",
 ]
 PACKING_VERSION = 1
@@ -40,6 +44,7 @@ class BlockedItem(FrozenModel):
     source_span: ByteSpan
     atomic_tag: str | None
     budget: BudgetResult
+    reason: str = Field(default="", exclude_if=lambda value: not value)
 
 
 class PackingResult(FrozenModel):

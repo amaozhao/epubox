@@ -430,7 +430,12 @@ async def _advance_atomic(
     from engine.services.terms.storage import atomic_documents
 
     if state.is_file(store.root / "prepared.json"):
-        session = ReadySession(store)
+        session = ReadySession(
+            store,
+            progress=(
+                lambda notice: _emit(progress, PreparationProgress("ready", 0, 0, 0, 0, _http_attempts(store), notice))
+            ),
+        )
         prepared = session.prepared
         if prepared.plan.output_policy_hash != output_policy_hash:
             raise IdentityMismatch("resume output policy differs from the committed ready plan")
@@ -584,15 +589,37 @@ async def _advance_atomic(
         PreparationProgress("p4", len(members), len(members) - failed, failed, 0, _http_attempts(store)),
     )
     if not packing.ready:
+        diagnostics = tuple(
+            PreflightDiagnostic(
+                item_id=blocked.item_id,
+                document_id=blocked.document_id,
+                resource_path=blocked.resource_path,
+                source_span=blocked.source_span,
+                atomic_tag=blocked.atomic_tag,
+                status="blocked",
+                source_tokens=blocked.budget.source_tokens,
+                input_tokens=blocked.budget.input_reserve,
+                output_tokens=blocked.budget.output_tokens,
+                context_tokens=blocked.budget.context_tokens,
+                failures=blocked.budget.failures + ((blocked.reason,) if blocked.reason else ()),
+            )
+            for blocked in packing.blocked
+        )
         return PreparationPipelineResult(
             "needs_attention",
             "preflight",
             store.root,
             preparation.run_id,
             glossary.extraction_status,
-            reason=f"body packing blocked {failed} member(s)",
+            reason=f"body packing blocked {failed} member(s): "
+            + "; ".join(
+                f"{blocked.resource_path} {blocked.item_id}: "
+                + ", ".join(blocked.budget.failures + ((blocked.reason,) if blocked.reason else ()))
+                for blocked in packing.blocked
+            ),
+            diagnostics=diagnostics,
         )
-    prepared = write_ready(
+    ready_session = write_ready(
         store,
         inventories,
         report,
@@ -600,6 +627,9 @@ async def _advance_atomic(
         packing,
         output_policy_hash=output_policy_hash,
         derived_sources=derived_sources,
+        progress=lambda notice: _emit(
+            progress, PreparationProgress("p4", len(members), len(members), 0, 0, _http_attempts(store), notice)
+        ),
     )
     _emit(
         progress,
@@ -611,7 +641,8 @@ async def _advance_atomic(
         store.root,
         preparation.run_id,
         term_status,
-        prepared=prepared,
+        prepared=ready_session.prepared,
+        ready_session=ready_session,
     )
 
 

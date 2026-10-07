@@ -26,16 +26,22 @@ class BudgetLimits:
     context_tokens: int
     safety_tokens: int = 256
     target_ratio: float = 1.6
-    output_version: Literal[2, 3, 4] = 2
+    output_version: Literal[2, 3, 4, 5] = 2
+    minimum_source_tokens: int = 0
+    source_tolerance_tokens: int = 0
 
     def __post_init__(self) -> None:
-        if type(self.output_version) is not int or self.output_version not in (2, 3, 4):
+        if type(self.output_version) is not int or self.output_version not in (2, 3, 4, 5):
             raise ValueError("unsupported output budget version")
         integers = (self.source_tokens, self.input_tokens, self.output_tokens, self.context_tokens)
         if any(type(value) is not int or value < 1 for value in integers):
             raise ValueError("budget limits must be positive integers")
         if type(self.safety_tokens) is not int or self.safety_tokens < 0:
             raise ValueError("budget safety must be a non-negative integer")
+        if type(self.minimum_source_tokens) is not int or self.minimum_source_tokens < 0:
+            raise ValueError("minimum source tokens must be a non-negative integer")
+        if type(self.source_tolerance_tokens) is not int or not 0 <= self.source_tolerance_tokens <= 1000:
+            raise ValueError("source tolerance must be between 0 and 1000 tokens")
         if isinstance(self.target_ratio, bool) or not isinstance(self.target_ratio, (int, float)):
             raise TypeError("budget target ratio must be a number")
         if not math.isfinite(self.target_ratio) or self.target_ratio <= 0:
@@ -45,13 +51,21 @@ class BudgetLimits:
         values = asdict(self)
         if self.output_version == 2:
             values.pop("output_version")
+        if not self.minimum_source_tokens:
+            values.pop("minimum_source_tokens")
+        if not self.source_tolerance_tokens:
+            values.pop("source_tolerance_tokens")
         return values
+
+    @property
+    def source_ceiling(self) -> int:
+        return self.source_tokens + self.source_tolerance_tokens
 
 
 class BudgetIdentity(FrozenModel):
     """Policy identity required to validate a saved budget."""
 
-    version: Literal[2, 3, 4]
+    version: Literal[2, 3, 4, 5]
     tokenizer: str = Field(min_length=1)
     tokenizer_version: str = Field(min_length=1)
     tokenizer_model: str = Field(min_length=1)

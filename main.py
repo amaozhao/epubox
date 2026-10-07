@@ -219,6 +219,9 @@ def _progress_printer():
                     f"，本次实际输入={report.get('actual_input_tokens', '-')} tokens，"
                     f"本次实际输出={report.get('actual_output_tokens', '-')} tokens"
                 )
+            source_label = {"body": "正文", "metadata": "元数据", "navigation": "导航", "attribute": "属性"}.get(
+                str(report.get("source_channel", "body")), "文本"
+            )
             typer.echo(
                 f"{phase}: 批次={report.get('request_id', '-')}，结果="
                 f"{result}，修订={'是' if report.get('revised') else '否'}，"
@@ -226,7 +229,7 @@ def _progress_printer():
                 f"初译={report.get('translated_items', 0)}，校对={report.get('reviewed_items', 0)}，"
                 f"待处理单元={report.get('needs_attention_units', 0)}，"
                 f"耗时={float(report.get('elapsed_seconds', 0)):.1f}秒；"
-                f"正文估算={report.get('source_tokens', '-')} tokens，"
+                f"{source_label}估算={report.get('source_tokens', '-')} tokens，"
                 f"输入估算={report.get('estimated_input_tokens', '-')} tokens，"
                 f"输入预留={report.get('reserved_input_tokens', '-')} tokens，"
                 f"输出预留={report.get('reserved_output_tokens', '-')} tokens，"

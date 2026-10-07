@@ -38,6 +38,8 @@ type BoundaryReason = Literal[
     "completed",
     "blocked",
     "heading",
+    "minimum",
+    "minimum_unavoidable",
     "end",
 ]
 
@@ -148,6 +150,8 @@ def _budget_limits_match(budget: BudgetResult, limits: Mapping[str, int | float]
     expected = dict(limits)
     if identity.version != expected.pop("output_version", 2):
         return False
+    expected.pop("minimum_source_tokens", None)
+    expected["source_tokens"] += expected.pop("source_tolerance_tokens", 0)
     configured_input = expected.get("input_tokens")
     if type(configured_input) is not int:
         return False
@@ -285,8 +289,24 @@ class MemberIndex:
         self.documents = MappingProxyType(documents)
         self.members = supplied
         self.members_by_id = MappingProxyType({member.item_id: member for member in supplied})
+        lane_positions: dict[tuple[str, str], int] = {}
+        self._lane_positions: dict[str, int] = {}
+        for member in supplied:
+            lane = (member.document_id, member.channel)
+            self._lane_positions[member.item_id] = lane_positions.get(lane, 0)
+            lane_positions[lane] = self._lane_positions[member.item_id] + 1
         self.items_by_id = self.members_by_id
         self.source_hash = report.source_hash
+        self.source_tokens = MappingProxyType(
+            {piece.piece_id: piece.translate.source_tokens for piece in report.pieces}
+        )
+        body_tokens: dict[str, int] = {}
+        for member in supplied:
+            if member.channel == "body":
+                body_tokens[member.document_id] = (
+                    body_tokens.get(member.document_id, 0) + self.source_tokens[member.item_id]
+                )
+        self.body_tokens = MappingProxyType(body_tokens)
         self.document_order = tuple(inventory.document.document_id for inventory in saved)
         parents = {item.item_id: item for inventory in saved for item in inventory.items}
         self._texts = MappingProxyType(
@@ -311,7 +331,12 @@ class MemberIndex:
             if text := self._texts[member.item_id]:
                 channels[key] = (*prior, (member, text))[-2:]
 
-    def validate_items(self, items: tuple[RequestMember, ...]) -> None:
+    def validate_items(
+        self,
+        items: tuple[RequestMember, ...],
+        *,
+        relaxed_adjacency: bool = False,
+    ) -> None:
         if not items or len({item.item_id for item in items}) != len(items):
             raise ValueError("request candidates must be non-empty and unique")
         if any(self.members_by_id.get(item.item_id) != item for item in items):
@@ -319,16 +344,29 @@ class MemberIndex:
         if len({(item.document_id, item.channel) for item in items}) != 1:
             raise ValueError("request candidates must share one document and channel")
         for left, right in pairwise(items):
-            if not _adjacent(left, right):
+            if not (self.adjacent(left, right) if relaxed_adjacency else _adjacent(left, right)):
                 raise ValueError("request candidates must follow adjacent source reading order")
+
+    def adjacent(self, left: RequestMember, right: RequestMember) -> bool:
+        return (
+            left.document_id == right.document_id
+            and left.channel == right.channel
+            and self._lane_positions.get(right.item_id) == self._lane_positions.get(left.item_id, -2) + 1
+        )
 
     def text(self, item: RequestMember) -> str:
         if self.members_by_id.get(item.item_id) != item:
             raise ValueError("request member is not owned by this index")
         return self._texts[item.item_id]
 
-    def preceding(self, items: tuple[RequestMember, ...], count: int) -> tuple[tuple[RequestMember, str], ...]:
-        self.validate_items(items)
+    def preceding(
+        self,
+        items: tuple[RequestMember, ...],
+        count: int,
+        *,
+        relaxed_adjacency: bool = False,
+    ) -> tuple[tuple[RequestMember, str], ...]:
+        self.validate_items(items, relaxed_adjacency=relaxed_adjacency)
         if type(count) is not int or not 0 <= count <= 2:
             raise ValueError("context_count must be 0, 1, or 2")
         return self._previous[items[0].item_id][-count:] if count else ()
@@ -344,18 +382,32 @@ def build_member_payload(
     targets: Mapping[str, ItemRecord] | None = None,
     revisions: Mapping[str, int] | None = None,
     context_count: int = 2,
+    compact_constraints: bool = False,
+    relaxed_adjacency: bool = False,
 ) -> dict[str, Any]:
     if stage not in {"translate", "review"} or not request_id:
         raise ValueError("member payload requires a supported stage and request ID")
     if glossary.source_hash != index.source_hash:
         raise ValueError("glossary and member index identities differ")
-    index.validate_items(items)
-    contexts = tuple((item, context_suffix(text, 400)) for item, text in index.preceding(items, context_count))
+    index.validate_items(items, relaxed_adjacency=relaxed_adjacency)
+    contexts = tuple(
+        (item, context_suffix(text, 400))
+        for item, text in index.preceding(
+            items,
+            context_count,
+            relaxed_adjacency=relaxed_adjacency,
+        )
+    )
     review = _member_review(stage, items, targets, revisions)
     wire_items: list[dict[str, Any]] = []
     for item in items:
         validate_member_target(item, item.source_projection)
         hints, constraints = marker_fields(item)
+        if compact_constraints and all(
+            entry.movement in {"locked", "fixed"} and not entry.reorder_allowed for entry in item.registry.values()
+        ):
+            # Exact source order already governs every reference; retain the full registry locally.
+            constraints = {ref: value | {"fixed_order": []} for ref, value in constraints.items()}
         terms = select_terms(item, glossary.terms, index, contexts)
         wire: dict[str, Any] = {
             "item_id": item.item_id,
@@ -387,6 +439,47 @@ def build_member_payload(
     if stage == "translate":
         payload["target_language"] = "zh-Hans"
     return payload
+
+
+def fit_member_payload(
+    stage: BudgetStage,
+    items: tuple[RequestMember, ...],
+    glossary: GlossarySnapshot,
+    index: MemberIndex,
+    limits: BudgetLimits,
+    *,
+    request_id: str,
+    targets: Mapping[str, ItemRecord] | None = None,
+    revisions: Mapping[str, int] | None = None,
+    tokenizer_model: str = "gpt-3.5-turbo",
+) -> tuple[dict[str, Any], BudgetResult]:
+    """Keep fitting legacy requests unchanged; compact only an otherwise blocked singleton."""
+    payload: dict[str, Any] = {}
+    budget: BudgetResult | None = None
+    for count, compact in ((2, False), (1, False), (0, False), (0, True)):
+        if compact and len(items) != 1 and not limits.minimum_source_tokens:
+            break
+        if not compact and budget is not None and not payload["context"]:
+            continue
+        payload = build_member_payload(
+            stage,
+            items,
+            glossary,
+            index,
+            request_id=request_id,
+            targets=targets,
+            revisions=revisions,
+            context_count=count,
+            compact_constraints=compact,
+            relaxed_adjacency=bool(limits.minimum_source_tokens),
+        )
+        if limits.output_version == 5:
+            payload["wire_version"] = "epubox-wire-5"
+        budget = measure_budget(stage=stage, payload=payload, limits=limits, tokenizer_model=tokenizer_model)
+        if budget.fits:
+            return payload, budget
+    assert budget is not None
+    return payload, budget
 
 
 def _member_review(
@@ -477,6 +570,7 @@ def pack_members(
     blocked: list[BlockedItem] = []
     skipped: list[str] = []
     batch: MemberBatch | None = None
+    adjacent = index.adjacent if limits.minimum_source_tokens else _adjacent
 
     def close(reason: BoundaryReason, failures: tuple[str, ...] = ()) -> None:
         nonlocal batch
@@ -500,30 +594,26 @@ def pack_members(
             "epochs": {item.unit_id: (plan_epochs or {}).get(item.unit_id, 0) for item in values},
         }
         request_id = "tx-" + canonical_hash(identity)[:32]
-        for count in (2, 1, 0):
-            payload = build_member_payload(
-                stage,
-                values,
-                glossary,
-                index,
-                request_id=request_id,
-                targets={item.item_id: targets[item.item_id] for item in values} if targets is not None else None,
-                revisions={item.unit_id: revisions[item.unit_id] for item in values}
-                if stage == "review" and revisions is not None
-                else None,
-                context_count=count,
-            )
-            budget = measure_budget(stage=stage, payload=payload, limits=limits, tokenizer_model=tokenizer_model)
-            if budget.fits or not payload["context"]:
-                return payload, budget
-        return payload, budget
+        return fit_member_payload(
+            stage,
+            values,
+            glossary,
+            index,
+            limits,
+            request_id=request_id,
+            targets={item.item_id: targets[item.item_id] for item in values} if targets is not None else None,
+            revisions={item.unit_id: revisions[item.unit_id] for item in values}
+            if stage == "review" and revisions is not None
+            else None,
+            tokenizer_model=tokenizer_model,
+        )
 
     for position, item in enumerate(members):
         if item.item_id in completed:
             close("completed")
             skipped.append(item.item_id)
             continue
-        if batch is not None and not _adjacent(batch.items[-1], item):
+        if batch is not None and not adjacent(batch.items[-1], item):
             previous = batch.items[-1]
             close(
                 "resource"
@@ -534,7 +624,7 @@ def pack_members(
             )
         if batch is not None and item.kind == "heading" and position + 1 < len(members):
             following = members[position + 1]
-            if following.item_id not in completed and _adjacent(item, following):
+            if following.item_id not in completed and adjacent(item, following):
                 _, pair_budget = candidate((item, following))
                 if pair_budget.fits:
                     _, combined_budget = candidate((*batch.items, item, following))
@@ -542,6 +632,15 @@ def pack_members(
                         close("heading", combined_budget.failures)
         proposed = (*batch.items, item) if batch is not None else (item,)
         payload, budget = candidate(proposed)
+        if (
+            batch is not None
+            and limits.source_tolerance_tokens
+            and batch.budget.source_tokens >= limits.minimum_source_tokens
+            and budget.source_tokens > limits.source_tokens
+        ):
+            close("source")
+            proposed = (item,)
+            payload, budget = candidate(proposed)
         if not budget.fits and batch is not None:
             reason = cast(BoundaryReason, budget.failures[0].split(" ", 1)[0])
             close(reason, budget.failures)
@@ -562,6 +661,154 @@ def pack_members(
                 )
             )
     close("end")
+    minimum = limits.minimum_source_tokens
+    if minimum:
+        position = 0
+        while position < len(batches):
+            current = batches[position]
+            if current.items[0].channel != "body" or current.budget.source_tokens >= minimum:
+                position += 1
+                continue
+            previous_position = following_position = None
+            for neighbor in range(position - 1, -1, -1):
+                other = batches[neighbor]
+                if other.items[0].document_id != current.items[0].document_id:
+                    break
+                if other.items[0].channel == "body":
+                    if adjacent(other.items[-1], current.items[0]):
+                        previous_position = neighbor
+                    break
+            for neighbor in range(position + 1, len(batches)):
+                other = batches[neighbor]
+                if other.items[0].document_id != current.items[0].document_id:
+                    break
+                if other.items[0].channel == "body":
+                    if adjacent(current.items[-1], other.items[0]):
+                        following_position = neighbor
+                    break
+            if previous_position is not None:
+                left_position, right_position = previous_position, position
+            elif following_position is not None:
+                left_position, right_position = position, following_position
+            else:
+                boundaries[position] = BatchBoundary(
+                    request_id=current.manifest.request_id,
+                    reason="minimum_unavoidable",
+                    failures=(
+                        (
+                            f"body source budget {current.budget.source_tokens} is below minimum {minimum}; "
+                            "the HTML body has no adjacent request batch"
+                        ),
+                    ),
+                )
+                position += 1
+                continue
+            left_batch, right_batch = batches[left_position], batches[right_position]
+            combined_items = (*left_batch.items, *right_batch.items)
+            payload, budget = candidate(combined_items)
+            if budget.fits:
+                merged = _batch(
+                    combined_items, glossary, glossary_hash, payload, budget, revisions, record_versions, plan_epochs
+                )
+                final = boundaries[right_position]
+                batches[left_position] = merged
+                boundaries[left_position] = final.model_copy(update={"request_id": merged.manifest.request_id})
+                del batches[right_position]
+                del boundaries[right_position]
+                position = max(0, left_position - 1)
+                continue
+            prefix = 0
+            total = sum(index.source_tokens[item.item_id] for item in combined_items)
+            splits: list[tuple[int, int]] = []
+            for split, item in enumerate(combined_items[:-1], 1):
+                prefix += index.source_tokens[item.item_id]
+                if prefix >= minimum and total - prefix >= minimum:
+                    splits.append((abs(prefix - (total - prefix)), split))
+            for _, split in sorted(splits):
+                left_items, right_items = combined_items[:split], combined_items[split:]
+                if left_items[-1].kind == "heading":
+                    continue
+                left_payload, left_budget = candidate(left_items)
+                right_payload, right_budget = candidate(right_items)
+                if (
+                    left_budget.fits
+                    and right_budget.fits
+                    and left_budget.source_tokens >= minimum
+                    and right_budget.source_tokens >= minimum
+                ):
+                    left = _batch(
+                        left_items,
+                        glossary,
+                        glossary_hash,
+                        left_payload,
+                        left_budget,
+                        revisions,
+                        record_versions,
+                        plan_epochs,
+                    )
+                    right = _batch(
+                        right_items,
+                        glossary,
+                        glossary_hash,
+                        right_payload,
+                        right_budget,
+                        revisions,
+                        record_versions,
+                        plan_epochs,
+                    )
+                    break
+            else:
+                left = right = None
+            if left is not None and right is not None:
+                final = boundaries[right_position]
+                batches[left_position], batches[right_position] = left, right
+                boundaries[left_position] = BatchBoundary(request_id=left.manifest.request_id, reason="minimum")
+                boundaries[right_position] = final.model_copy(update={"request_id": right.manifest.request_id})
+            else:
+                boundaries[position] = BatchBoundary(
+                    request_id=current.manifest.request_id,
+                    reason="minimum_unavoidable",
+                    failures=(
+                        f"body source budget {current.budget.source_tokens} is below minimum {minimum}; "
+                        + ", ".join(budget.failures or ("no valid whole-member rebalance",)),
+                    ),
+                )
+            position += 1
+        if limits.output_version == 5 and stage == "translate" and not any((record_versions or {}).values()):
+            fitting_batches: list[MemberBatch] = []
+            fitting_boundaries: list[BatchBoundary] = []
+            for value, boundary in zip(batches, boundaries, strict=True):
+                document = value.items[0].document_id
+                if (
+                    value.items[0].channel == "body"
+                    and value.budget.source_tokens < minimum
+                    and index.body_tokens.get(document, 0) >= minimum
+                    and not any(
+                        index.members_by_id[item].channel == "body"
+                        and index.members_by_id[item].document_id == document
+                        for item in completed
+                    )
+                ):
+                    failure = (
+                        f"body chunk has {value.budget.source_tokens} tokens, below required minimum {minimum}; "
+                        + "; ".join(boundary.failures)
+                    )
+                    blocked.extend(
+                        BlockedItem(
+                            item_id=item.item_id,
+                            document_id=item.document_id,
+                            resource_path=index.documents[item.document_id].resource.path,
+                            source_span=item.source_span,
+                            atomic_tag=item.atomic_tag,
+                            budget=value.budget,
+                            reason=failure,
+                        )
+                        for item in value.items
+                    )
+                else:
+                    fitting_batches.append(value)
+                    fitting_boundaries.append(boundary)
+            batches, boundaries = fitting_batches, fitting_boundaries
     return MemberPackingResult(
         stage=stage,
         source_hash=glossary.source_hash,
