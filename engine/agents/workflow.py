@@ -630,7 +630,7 @@ def _target_error(member: RequestMember, target: str, wire: Mapping[str, Any]) -
     except ValueError as error:
         return str(error)
     source_text, target_text = plain_text(member.source_projection), plain_text(target)
-    if degeneration := find_degenerate_translation(source_text, target_text):
+    if degeneration := find_degenerate_translation(source_text, target_text, markup=False):
         return degeneration
     script_text = script_text_without_retained_titles(member.source_projection, target, member.registry)
     for term in wire.get("terms", ()):
@@ -639,7 +639,7 @@ def _target_error(member: RequestMember, target: str, wire: Mapping[str, Any]) -
             if isinstance(spelling, str):
                 flags = re.IGNORECASE if term.get("match_policy") == "casefold" else 0
                 script_text = re.sub(re.escape(spelling), "", script_text, flags=flags)
-    if residual := find_untranslated_english_texts(script_text):
+    if residual := find_untranslated_english_texts(script_text, markup=False):
         return f"untranslated English remains: {residual[0]}"
     for term in wire.get("terms", ()):
         if not isinstance(term, Mapping) or term.get("role") != "target":

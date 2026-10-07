@@ -26,7 +26,9 @@ class Translation(Revision):
         unit = self.units[job.unit_id]
         segment = _segment(record, job.item_id)
         validate_projection(segment.source_projection, target, unit.registry)
-        degeneration = find_degenerate_translation(plain_text(segment.source_projection), plain_text(target))
+        degeneration = find_degenerate_translation(
+            plain_text(segment.source_projection), plain_text(target), markup=False
+        )
         if degeneration:
             raise ProtocolError(degeneration)
         item = record.items[job.item_id].model_copy(

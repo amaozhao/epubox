@@ -4,6 +4,7 @@ import re
 import zlib
 from dataclasses import dataclass
 from enum import Enum
+from html import unescape
 
 from bs4 import BeautifulSoup, Tag
 from bs4.element import Comment, NavigableString
@@ -456,42 +457,52 @@ def _extract_nav_payloads(text: str) -> list[str]:
     return payloads
 
 
+def _prose_nodes(value: str, *, markup: bool) -> tuple[str, ...]:
+    if not markup:
+        return (value,)
+    if "<" not in value:
+        # An HTML text fragment only needs entity decoding, not a document parser.
+        return (unescape(value),)
+    soup = BeautifulSoup(value, get_markup_parser(value))
+    return tuple(
+        node
+        for node in soup.find_all(string=True)
+        if isinstance(node, NavigableString) and not _should_skip_untranslated_scan(node)
+    )
+
+
 def classify_untranslated_english_texts(
-    html: str, *, split_nav_payloads: bool = False
+    html: str, *, split_nav_payloads: bool = False, markup: bool = True
 ) -> list[EnglishResidualFinding]:
     """Classify visible English residuals as review-only or hard failures."""
     if split_nav_payloads and (payloads := _extract_nav_payloads(html or "")):
-        return [finding for payload in payloads for finding in classify_untranslated_english_texts(payload)]
+        return [
+            finding for payload in payloads for finding in classify_untranslated_english_texts(payload, markup=markup)
+        ]
 
-    soup = BeautifulSoup(html or "", get_markup_parser(html or ""))
     findings: list[EnglishResidualFinding] = []
-    for node in soup.find_all(string=True):
-        if not isinstance(node, NavigableString) or _should_skip_untranslated_scan(node):
-            continue
+    for node in _prose_nodes(html or "", markup=markup):
         text = re.sub(r"\s+", " ", str(node)).strip()
         if len(text) < 4 or _looks_like_technical_ascii_noop(text) or _looks_like_bibliographic_reference(text):
             continue
-        analysis = _analyze_untranslated_english_text(text, has_cjk_context=_has_cjk_parent_context(node, text))
+        analysis = _analyze_untranslated_english_text(
+            text, has_cjk_context=isinstance(node, NavigableString) and _has_cjk_parent_context(node, text)
+        )
         if analysis.decision != EnglishResidualDecision.ALLOW:
             findings.append(EnglishResidualFinding(text, analysis.decision, analysis.reason, analysis.words))
     return findings
 
 
-def find_untranslated_english_texts(html: str, *, split_nav_payloads: bool = False) -> list[str]:
+def find_untranslated_english_texts(html: str, *, split_nav_payloads: bool = False, markup: bool = True) -> list[str]:
     return [
         finding.text
-        for finding in classify_untranslated_english_texts(html, split_nav_payloads=split_nav_payloads)
+        for finding in classify_untranslated_english_texts(html, split_nav_payloads=split_nav_payloads, markup=markup)
         if finding.decision == EnglishResidualDecision.FAIL
     ]
 
 
-def _visible_prose_text(value: str) -> str:
-    soup = BeautifulSoup(value, get_markup_parser(value))
-    parts = [
-        str(node)
-        for node in soup.find_all(string=True)
-        if isinstance(node, NavigableString) and not _should_skip_untranslated_scan(node)
-    ]
+def _visible_prose_text(value: str, *, markup: bool = True) -> str:
+    parts = [str(node) for node in _prose_nodes(value, markup=markup)]
     return re.sub(r"\s+", " ", QUALITY_MARKER_PATTERN.sub("", " ".join(parts))).strip()
 
 
@@ -504,9 +515,9 @@ def _max_character_run(text: str) -> int:
     return max((len(match.group(0)) for match in re.finditer(r"([^\W\d_])\1+", text)), default=1)
 
 
-def find_degenerate_translation(original: str, translated: str) -> str | None:
-    original_text = re.sub(r"\s+", "", _visible_prose_text(original))
-    translated_text = re.sub(r"\s+", "", _visible_prose_text(translated))
+def find_degenerate_translation(original: str, translated: str, *, markup: bool = True) -> str | None:
+    original_text = re.sub(r"\s+", "", _visible_prose_text(original, markup=markup))
+    translated_text = re.sub(r"\s+", "", _visible_prose_text(translated, markup=markup))
     if len(translated_text) < DEGENERATE_MIN_CHARS:
         return None
     source_run = _max_character_run(original_text)
