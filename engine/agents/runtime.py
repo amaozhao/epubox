@@ -22,6 +22,7 @@ from openai import APIConnectionError, APIStatusError, AuthenticationError, Rate
 from engine.core.tokens import _get_tokenizer, count_tokens
 from engine.schemas.internal import Attempt, Usage
 
+from . import wire
 from .models import build_primary_model
 from .streaming import StreamingOpenAILike
 
@@ -142,7 +143,7 @@ def _contains_forbidden_source(value: Any) -> bool:
     return False
 
 
-def request_messages(kind: Stage, payload: dict[str, Any]) -> tuple[dict[str, str], ...]:
+def request_messages(kind: Stage, payload: dict[str, Any], *, compact: bool = False) -> tuple[dict[str, str], ...]:
     if kind not in _PROTOCOLS:
         raise ValueError(f"unsupported request kind: {kind}")
     if _contains_forbidden_source(payload):
@@ -161,17 +162,21 @@ def request_messages(kind: Stage, payload: dict[str, Any]) -> tuple[dict[str, st
             if kind == "resolution" and protocol == "epubox-term-resolution-1"
             else _SYSTEM_PROMPTS[kind]
         )
+    if compact:
+        return wire.messages(kind, payload, prompt)
     return (
         {"role": "system", "content": prompt},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))},
     )
 
 
-def model_input_budget(kind: Stage, payload: dict[str, Any], *, algorithm_version: int = 1) -> dict[str, int]:
+def model_input_budget(
+    kind: Stage, payload: dict[str, Any], *, algorithm_version: int = 1, compact: bool = False
+) -> dict[str, int]:
     """Return a reproducible conservative Agnes input budget for pre-splitting."""
     if type(algorithm_version) is not int or algorithm_version not in {1, 2}:
         raise ValueError("unsupported input budget algorithm version")
-    messages = request_messages(kind, payload)
+    messages = request_messages(kind, payload, compact=compact)
     rendered = json.dumps({"messages": messages}, ensure_ascii=False, separators=(",", ":"))
     rendered_bytes = len(rendered.encode("utf-8"))
     result = {
@@ -196,9 +201,9 @@ def model_input_budget(kind: Stage, payload: dict[str, Any], *, algorithm_versio
     }
 
 
-def wire_hash(kind: Stage, payload: dict[str, Any], output_tokens: int | None = None) -> str:
-    wire = {"messages": request_messages(kind, payload), "max_completion_tokens": output_tokens}
-    encoded = json.dumps(wire, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+def wire_hash(kind: Stage, payload: dict[str, Any], output_tokens: int | None = None, *, compact: bool = False) -> str:
+    value = {"messages": request_messages(kind, payload, compact=compact), "max_completion_tokens": output_tokens}
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -335,6 +340,8 @@ class ModelRuntime:
         self._model_max_output_tokens = model_max_output_tokens
         self._provider_output_token_field = provider_output_token_field
         self._output_cap: ContextVar[int | None] = ContextVar("epubox_output_cap", default=None)
+        self._compact: bool = transport is None
+        self._physical_wire: ContextVar[bool] = ContextVar("epubox_physical_wire", default=False)
         self._sleep = sleep
         self._monotonic = monotonic
 
@@ -375,7 +382,7 @@ class ModelRuntime:
                 request_model.max_completion_tokens = None
             else:
                 request_model.max_completion_tokens = self._output_cap.get()
-            messages = request_messages(kind, payload)
+            messages = request_messages(kind, payload, compact=self._physical_wire.get())
             formatted_messages = request_model._format_all_messages(
                 [Message(role=message["role"], content=message["content"]) for message in messages], False
             )
@@ -520,6 +527,17 @@ class ModelRuntime:
         dispatch_guard: DispatchGuard | None = None,
     ) -> dict[str, Any]:
         budget = model_input_budget(kind, payload, algorithm_version=self._input_budget_version)
+        compact = False
+        if (
+            self._compact
+            and kind in {"translate", "review"}
+            and payload.get("prompt_version") == ATOMIC_PROMPT_VERSION
+        ):
+            physical_budget = model_input_budget(
+                kind, payload, algorithm_version=self._input_budget_version, compact=True
+            )
+            if physical_budget["cl100k_tokens"] < budget["cl100k_tokens"]:
+                budget, compact = physical_budget, True
         estimated_input_tokens = budget["estimated_input_tokens"]
         if estimated_input_tokens > MAX_MODEL_INPUT_TOKENS:
             raise InputBudgetError(estimated_input_tokens)
@@ -536,6 +554,8 @@ class ModelRuntime:
                 if isinstance(item, dict) and isinstance(item.get("item_id"), str)
             )
         item_ids = tuple(item_ids)
+        if compact and item_ids != tuple(item["item_id"] for item in payload["items"]):
+            raise ValueError("compact wire item order differs from its request manifest")
         legacy_estimated_tokens = int(context_manifest.get("estimated_tokens", 0))
         if legacy_estimated_tokens < 0:
             raise ValueError("estimated_tokens cannot be negative")
@@ -551,7 +571,8 @@ class ModelRuntime:
             raise RequestError("estimated request tokens exceed TPM capacity", attempts=0)
 
         if self._prepare_request is not None:
-            prepared = self._prepare_request(kind, payload, context_manifest)
+            context = dict(context_manifest) | ({"physical_budget": budget} if compact else {})
+            prepared = self._prepare_request(kind, payload, context)
             if inspect.isawaitable(prepared):
                 await prepared
         if self._replay_response is not None:
@@ -563,6 +584,12 @@ class ModelRuntime:
                     raise TypeError("replayed response must be a dictionary")
                 return replayed
         self._ensure_dispatch_allowed()
+
+        wire_metadata = (
+            {"wire_version": wire.VERSION, "wire_hash": wire_hash(kind, payload, output_tokens_value, compact=True)}
+            if compact
+            else {}
+        )
 
         for attempt_index in range(self._max_transport_retries + 1):
             attempt_id = str(uuid4())
@@ -588,6 +615,7 @@ class ModelRuntime:
                     "attempt_number": attempt_index + 1,
                 },
                 created_at=created_at,
+                metadata={key: value for key, value in wire_metadata.items()},
             )
             async with self._semaphore:
                 self._ensure_dispatch_allowed()
@@ -617,6 +645,7 @@ class ModelRuntime:
                     )
                     raise
                 cap_token = self._output_cap.set(output_tokens_value)
+                wire_token = self._physical_wire.set(compact)
                 try:
                     result = await asyncio.wait_for(
                         self._transport(kind, payload), timeout=self._request_timeout_seconds
@@ -668,6 +697,7 @@ class ModelRuntime:
                     continue
                 finally:
                     self._output_cap.reset(cap_token)
+                    self._physical_wire.reset(wire_token)
 
                 usage_value = result.get("usage") if isinstance(result, Mapping) else None
                 finish_reason = result.get("finish_reason") if isinstance(result, Mapping) else None
@@ -693,7 +723,7 @@ class ModelRuntime:
 
                 if self._shared_service_failures:
                     self._service_failures = 0
-                metadata = _provider_metadata(metadata_value, finish_reason)
+                metadata = _provider_metadata(metadata_value, finish_reason) | wire_metadata
                 raw = result["raw"]
                 response = {
                     "raw": raw,
@@ -716,6 +746,6 @@ class ModelRuntime:
                 )
                 if usage is not None and usage.input_tokens > MAX_MODEL_INPUT_TOKENS:
                     self._actual_input_limit_breached = usage.input_tokens
-                return response
+                return response | {"raw": wire.decode(kind, raw, request_id, item_ids)} if compact else response
 
         raise AssertionError("unreachable")

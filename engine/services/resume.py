@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from engine.agents import wire as physical
 from engine.agents.protocol import review_applicability, validate_translation_response
 from engine.agents.terms import validate_review_response
 from engine.item.members import MemberIndex, pack_members
@@ -34,6 +35,7 @@ from engine.schemas.ready import AtomicPlan, AtomicPreparedInput
 from engine.services import state
 from engine.services.atomic import CorruptRecord, safe_id
 from engine.services.coherence import _read as read_coherence_record
+from engine.services.custody import review_draft
 from engine.services.preflight import PreflightReport
 from engine.services.ready import derived_record, limits_from_config
 from engine.services.store import RunStore
@@ -257,6 +259,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
             if request.request_id != path.stem or request.request_id in requests:
                 raise ValueError("request filename or request ID inventory changed")
             requests[request.request_id] = request
+        _compact_request_proofs(root, ready, members, records, index, requests)
         for record in records.values():
             source_id = plan.derived_sources.get(members[record.item_id].unit_id)
             if source_id is not None:
@@ -266,7 +269,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
             if record.status != ItemStatus.PENDING:
                 _atomic_record_frame(root, ready, record, members, index, requests)
             if record.status == ItemStatus.REVIEWED:
-                _atomic_review_proof(root, record, members, records, index, requests)
+                _atomic_review_proof(root, ready, record, members, records, index, requests)
     except (CorruptRecord, OSError, TypeError, ValueError) as error:
         return ResumePlan("preparation", "needs_attention", ("repair_shared_identity",), (str(error),))
 
@@ -320,6 +323,55 @@ def _atomic_preflight(root: Path, ready: AtomicPreparedInput) -> PreflightReport
     ):
         raise ValueError("preflight wrapper identity changed")
     return PreflightReport.model_validate(value["report"])
+
+
+def _compact_request_proofs(root, ready, members, records, index, requests) -> None:
+    for stage in ("translate", "review"):
+        for request in requests.values():
+            if request.stage != stage or not any(
+                "wire_version" in attempt.metadata or "wire_hash" in attempt.metadata for attempt in request.attempts
+            ):
+                continue
+            targets = None
+            if stage == "review":
+                targets = {}
+                for item_id in request.item_ids:
+                    saved = records[item_id]
+                    _atomic_record_frame(root, ready, saved, members, index, requests)
+                    original = requests.get(saved.request_id or "")
+                    if original is None:
+                        raise ValueError("review member lacks translation request proof")
+                    raw = _atomic_response(root, original)
+                    result = validate_translation_response(
+                        raw["raw"],
+                        original.request_id,
+                        {key: members[key].source_projection for key in original.item_ids},
+                    ).accepted.get(item_id)
+                    if result is None or canonical_hash(result["target"]) != request.target_hashes[item_id]:
+                        raise ValueError("review member target differs from its translation proof")
+                    targets[item_id] = review_draft(
+                        saved, result["target"], request.revisions[members[item_id].unit_id]
+                    )
+            packed = pack_members(
+                stage,
+                tuple(members[key] for key in request.item_ids),
+                ready.glossary,
+                index,
+                limits_from_config(ready.plan.translation_config),
+                targets=targets,
+                revisions=request.revisions if stage == "review" else None,
+                record_versions=request.record_versions,
+                plan_epochs=request.plan_epochs,
+                tokenizer_model=str(ready.plan.translation_config["model"]),
+            )
+            if (
+                len(packed.batches) != 1
+                or packed.blocked
+                or packed.batches[0].manifest != request.model_copy(update={"attempts": ()})
+            ):
+                raise ValueError("compact request differs from its canonical source and targets")
+            batch = packed.batches[0]
+            physical.verify(request, batch.payload, batch.budget.output_tokens)
 
 
 def _atomic_record_frame(
@@ -377,6 +429,7 @@ def _atomic_record_frame(
         or request.model_copy(update={"attempts": ()}) != batch.manifest
     ):
         raise ValueError("saved translation frame changed")
+    physical.verify(request, batch.payload, batch.budget.output_tokens)
     wire_items = cast(list[dict[str, Any]], batch.payload["items"])
     wire = next(value for value in wire_items if value["item_id"] == record.item_id)
     roles = {str(term["term_id"]): term["role"] for term in cast(list[dict[str, Any]], wire["terms"])}
@@ -405,6 +458,7 @@ def _atomic_record_frame(
 
 def _atomic_review_proof(
     root: Path,
+    ready: AtomicPreparedInput,
     record: ItemRecord,
     members: dict[str, RequestMember],
     records: dict[str, ItemRecord],
@@ -476,16 +530,20 @@ def _atomic_response(root: Path, request: RequestManifest) -> dict:
         if not state.exists(path):
             continue
         saved = RunStore._read_model_response_file(path)
+        version, physical_hash = physical.identity(request, attempt.attempt_id)
         if (
             saved.stage != request.stage
             or saved.request_id != request.request_id
             or saved.attempt_id != attempt.attempt_id
-            or saved.wire_hash != request.wire_hash
+            or saved.wire_hash != physical_hash
         ):
             raise ValueError("response identity differs from request")
         if saved.response.finish_reason in {"length", "max_tokens"}:
             continue
-        return saved.response.model_dump(mode="python")
+        response = saved.response.model_dump(mode="python")
+        if version is not None:
+            response["raw"] = physical.decode(request.stage, saved.response.raw, request.request_id, request.item_ids)
+        return response
     raise ValueError("reviewed result lacks succeeded response file")
 
 

@@ -24,6 +24,8 @@ async def run_atomic(
     model: Any = None,
     transport: Any = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
+    reopen_attention: bool = False,
+    ready_session: Any = None,
 ) -> TranslationRunResult:
     from engine.services.journal import BodyJournal
 
@@ -31,10 +33,24 @@ async def run_atomic(
     with store.lock(blocking=False):
         if progress:
             progress({"phase": "recovery", "notice": "翻译：加载已保存的正文记录与请求计划。"})
-        journal = BodyJournal(store)
+        journal = BodyJournal(store, session=ready_session, progress=progress)
         session = journal.session
         ready = session.prepared
         journal.recover_results()
+        if reopen_attention and ready.plan.translation_config.get("output_budget_version", 2) in {3, 4}:
+            records = journal.records()
+            units = {
+                unit_id
+                for unit_id, item_ids in ready.plan.unit_members.items()
+                if any(records[item_id].status == ItemStatus.NEEDS_ATTENTION for item_id in item_ids)
+            }
+            for request in journal._requests.values():
+                if request.stage in {"translate", "review"} and journal._ambiguous(request):
+                    units.update(unit_id for owners in request.item_unit_ids.values() for unit_id in owners)
+            if units:
+                journal.retry_units(tuple(sorted(units)))
+            if progress:
+                progress({"phase": "recovery", "notice": f"恢复：正文断点处理完成，重试 {len(units)} 个单元。"})
         order = {document: index for index, document in enumerate(session.index.document_order)}
         batches = sorted(
             (
@@ -63,7 +79,7 @@ async def run_atomic(
             if progress is None:
                 return
             report: dict[str, Any] = dict(journal.progress_snapshot())
-            report.update(phase=phase, execution_state="running", elapsed_seconds=elapsed, **extra)
+            report.update(phase=phase, execution_state="running", elapsed_seconds=elapsed)
             if batch is not None:
                 report.update(
                     request_id=batch.manifest.request_id,
@@ -74,6 +90,7 @@ async def run_atomic(
                     reserved_input_tokens=batch.budget.input_reserve,
                     reserved_output_tokens=batch.budget.output_tokens,
                 )
+            report.update(extra)
             progress(report)
 
         requests: dict[str, dict[str, Any]] = {}
@@ -97,8 +114,7 @@ async def run_atomic(
         async def execute(batch: MemberBatch):
             started = monotonic()
 
-            def save(record):
-                journal.save(record)
+            def observe(record):
                 if (
                     record.status == ItemStatus.NEEDS_ATTENTION
                     and record.stage == "review"
@@ -123,6 +139,17 @@ async def run_atomic(
                             "elapsed_seconds": monotonic() - started,
                         }
                     )
+
+            def save(record):
+                journal.save(record)
+                observe(record)
+
+            def save_many(records):
+                journal.save_many(records)
+                for record in records:
+                    observe(record)
+
+            save.save_many = save_many  # type: ignore[attr-defined]
 
             return await run_workflow(
                 ready,
@@ -209,19 +236,34 @@ async def run_atomic(
                         result = task.result()
                         errors.extend(result.issues)
                         revised = any(record.checks.get("decision") == "replace" for record in result.results.values())
+                        identifier = current_requests.get(task)
+                        details = requests.get(identifier or "", {})
                         emit(
                             "workflow",
                             batch,
                             monotonic() - started,
-                            batch_status=result.status,
-                            batch_issues=result.issues,
-                            decision="needs_attention"
-                            if result.status == "needs_attention"
-                            else "replace"
-                            if revised
-                            else "no_change",
-                            revised=revised,
-                            reason="; ".join(result.issues) or None,
+                            **{
+                                **{
+                                    key: details[key]
+                                    for key in (
+                                        "source_tokens",
+                                        "estimated_input_tokens",
+                                        "reserved_input_tokens",
+                                        "reserved_output_tokens",
+                                    )
+                                    if key in details
+                                },
+                                "request_id": identifier,
+                                "batch_status": result.status,
+                                "batch_issues": result.issues,
+                                "decision": "needs_attention"
+                                if result.status == "needs_attention"
+                                else "replace"
+                                if revised
+                                else "no_change",
+                                "revised": revised,
+                                "reason": "; ".join(result.issues) or None,
+                            },
                         )
                     except RuntimePaused as error:
                         stopped = str(error)

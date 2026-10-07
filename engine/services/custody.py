@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from engine.schemas.contracts import ItemRecord, RequestManifest, Usage
+from engine.schemas.contracts import ItemRecord, ItemStatus, RequestManifest, Usage, canonical_hash
 from engine.services.atomic import IdentityMismatch
 from engine.services.store import RunStore
 
@@ -61,6 +61,29 @@ def retry_checks(record: ItemRecord, review_epoch: int) -> dict[str, Any]:
         "review_epoch": review_epoch,
         **({"translation_epoch": translation_epoch} if translation_epoch else {}),
     }
+
+
+def review_draft(record: ItemRecord, target: str, review_epoch: int) -> ItemRecord:
+    """Reconstruct the exact persisted draft used to identify a review request."""
+    return record.model_copy(
+        update={
+            "stage": "proofread",
+            "status": ItemStatus.LOCAL_VALID,
+            "target_projection": target,
+            "target_hash": canonical_hash(target),
+            "checks": {
+                "translation_frame": record.checks["translation_frame"],
+                **({"review_epoch": review_epoch} if review_epoch else {}),
+                **(
+                    {"translation_epoch": record.checks["translation_epoch"]}
+                    if "translation_epoch" in record.checks
+                    else {}
+                ),
+            },
+            "failure": None,
+            "next_action": "review",
+        }
+    )
 
 
 def persisted_response(

@@ -77,7 +77,12 @@ def test_one_pipeline_reaches_verified_epub_with_fake_model(tmp_path: Path, monk
     real_run = run_translation
 
     async def fake_model_run(work_dir, **_kwargs):
-        return await real_run(work_dir, transport=transport)
+        return await real_run(
+            work_dir,
+            transport=transport,
+            reopen_attention=bool(_kwargs.get("reopen_attention")),
+            ready_session=_kwargs.get("ready_session"),
+        )
 
     monkeypatch.setattr(cli, "run_translation", fake_model_run)
     config = PreparationConfig(
@@ -202,7 +207,12 @@ def test_same_translate_command_resumes_without_resending_saved_translations(
     real_run = run_translation
 
     async def fake_model_run(work_dir, **_kwargs):
-        return await real_run(work_dir, transport=transport)
+        return await real_run(
+            work_dir,
+            transport=transport,
+            reopen_attention=bool(_kwargs.get("reopen_attention")),
+            ready_session=_kwargs.get("ready_session"),
+        )
 
     monkeypatch.setattr(cli, "run_translation", fake_model_run)
     monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
@@ -214,6 +224,12 @@ def test_same_translate_command_resumes_without_resending_saved_translations(
     assert first.status == "needs_attention" and first_translated
 
     fail_review = False
+    from engine.services import session as session_module
+
+    def duplicate_reopen(*_args, **_kwargs):
+        raise AssertionError("resume must reuse atomic execution")
+
+    monkeypatch.setattr(session_module, "reopen", duplicate_reopen)
     second = cli.translate_book(source, output=output)
 
     assert second.status == "completed"

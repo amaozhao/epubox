@@ -36,11 +36,20 @@ async def run_translation(
     model: Any = None,
     transport: Any = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
+    reopen_attention: bool = False,
+    ready_session: Any = None,
 ) -> TranslationRunResult:
     if state.is_file(Path(work_dir) / "prepared.json"):
         from engine.execution.atomic import run_atomic
 
-        return await run_atomic(work_dir, model=model, transport=transport, progress=progress)
+        return await run_atomic(
+            work_dir,
+            model=model,
+            transport=transport,
+            progress=progress,
+            reopen_attention=reopen_attention,
+            ready_session=ready_session,
+        )
     return await TranslationEngine(RunStore(work_dir), model=model, transport=transport, progress=progress).run()
 
 

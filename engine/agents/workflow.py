@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from engine.agents import wire
 from engine.agents.protocol import ProtocolError, review_applicability, validate_translation_response
 from engine.agents.runtime import ATOMIC_PROMPT_VERSION, ModelRuntime, RequestError
 from engine.agents.terms import validate_review_response
@@ -506,9 +507,40 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
     if not isinstance(request_id, str):
         raise TypeError("saved translation frame has an invalid request ID")
     request_path = session.store.root / "requests" / f"{request_id}.json"
-    request = session.store.read_request(request_id) if state.exists(request_path) else None
+    if state.exists(request_path):
+        stamp = state.stat(request_path).st_mtime_ns
+        request_key = (request_id, stamp)
+        request = session._frame_requests.get(request_key)
+        if request is None:
+            request = session.store.read_request(request_id)
+            session._frame_requests[request_key] = request
+    else:
+        stamp, request = 0, None
     if request is not None and request.record_versions.get(member.unit_id) != _translation_epoch(record):
         raise ValueError("saved result translation epoch differs from its request frame")
+    cache_key = (request_id, frame["batch_hash"], tuple(member_ids), stamp)
+    cached = session._saved_batches.get(cache_key)
+    if cached is None and request is not None:
+        prepared = session._prepared_batches.get(request_id)
+        if (
+            prepared is not None
+            and request.model_copy(update={"attempts": ()}) == prepared.manifest
+            and tuple(member_ids) == prepared.manifest.item_ids
+            and frame["batch_hash"] == canonical_hash(prepared)
+        ):
+            cached = prepared
+            session._saved_batches[cache_key] = prepared
+    if isinstance(cached, MemberBatch):
+        if (
+            record.request_id != cached.manifest.request_id
+            or request is not None
+            and request.model_copy(update={"attempts": ()}) != cached.manifest
+        ):
+            raise ValueError("saved translation frame changed")
+        _validate_record_frame(member, record, cached)
+        if request is not None:
+            wire.verify(request, cached.payload, cached.budget.output_tokens)
+        return cached
     versions: dict[str, int] = {}
     for value, saved_member in zip(member_ids, members, strict=True):
         saved = (
@@ -541,6 +573,9 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
         raise ValueError("saved translation frame changed")
     session.verify_batch(batch)
     _validate_record_frame(member, record, batch)
+    if request is not None:
+        wire.verify(request, batch.payload, batch.budget.output_tokens)
+    session._saved_batches[cache_key] = batch
     return batch
 
 
@@ -678,7 +713,7 @@ async def _save_group(callback: SaveCallback, records: Sequence[ItemRecord]) -> 
     if not records:
         return
     owner = getattr(callback, "__self__", None)
-    save_many = getattr(owner, "save_many", None)
+    save_many = getattr(callback, "save_many", None) or getattr(owner, "save_many", None)
     if callable(save_many):
         save_many(tuple(records))
         return

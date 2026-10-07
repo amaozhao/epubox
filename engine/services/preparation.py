@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from engine.epub.preparation import (
     PreparationConfig,
@@ -41,6 +41,9 @@ from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION, TERM_PLA
 from engine.services.terms.resolution import TermResolutionRunner
 from engine.services.terms.runner import TermRunner
 
+if TYPE_CHECKING:
+    from engine.services.ready import ReadySession
+
 
 @dataclass(frozen=True)
 class PreparationPipelineResult:
@@ -53,6 +56,7 @@ class PreparationPipelineResult:
     prepared: AtomicPreparedInput | None = None
     reason: str | None = None
     diagnostics: tuple[PreflightDiagnostic, ...] = ()
+    ready_session: ReadySession | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -421,12 +425,13 @@ async def _advance_atomic(
 ) -> PreparationPipelineResult:
     from engine.epub.bindings import resolve_derived_navigation
     from engine.item.members import MemberIndex, materialize_members, pack_members
-    from engine.services.ready import limits_for, read_ready, write_ready
+    from engine.services.ready import ReadySession, limits_for, write_ready
     from engine.services.terms.planning import plan_atomic_terms
     from engine.services.terms.storage import atomic_documents
 
     if state.is_file(store.root / "prepared.json"):
-        prepared = read_ready(store)
+        session = ReadySession(store)
+        prepared = session.prepared
         if prepared.plan.output_policy_hash != output_policy_hash:
             raise IdentityMismatch("resume output policy differs from the committed ready plan")
         count = len(prepared.plan.member_hashes)
@@ -438,6 +443,7 @@ async def _advance_atomic(
             preparation.run_id,
             prepared.glossary.extraction_status,
             prepared=prepared,
+            ready_session=session,
         )
 
     report = _ensure_preflight(store, preparation)

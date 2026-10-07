@@ -10,6 +10,7 @@ from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from engine.agents import wire
 from engine.item.context import build_context_index, initial_derived_navigation, plan_unit
 from engine.item.extractor import validate_source_relations
 from engine.item.inline import events_to_projection, parse_projection
@@ -821,10 +822,11 @@ class RunStore:
         path = self._model_response_path(stage, request_id, attempt_id)
         with self.lock():
             manifest = self._model_response_identity(stage, request_id, attempt_id)
+            _, physical_hash = wire.identity(manifest, attempt_id)
             fields = {
                 "request_id": request_id,
                 "attempt_id": attempt_id,
-                "wire_hash": manifest.wire_hash,
+                "wire_hash": physical_hash,
                 "response": response,
                 "response_sha256": hashlib.sha256(encoded).hexdigest(),
                 "response_size": len(encoded),
@@ -849,13 +851,18 @@ class RunStore:
         if not state.exists(path):
             return None
         record = self._read_term_response_file(path) if stage == "terms" else self._read_model_response_file(path)
+        version, physical_hash = wire.identity(manifest, attempt_id)
         if (
             record.request_id != request_id
             or record.attempt_id != attempt_id
-            or record.wire_hash != manifest.wire_hash
+            or record.wire_hash != physical_hash
             or (isinstance(record, _ModelResponseFile) and record.stage != stage)
         ):
             raise IdentityMismatch("model response identity does not match its request attempt")
+        if version is not None:
+            return record.response.model_copy(
+                update={"raw": wire.decode(stage, record.response.raw, request_id, manifest.item_ids)}
+            )
         return record.response
 
     def save_term_response(self, request_id: str, attempt_id: str, envelope: Mapping[str, object]) -> None:
@@ -900,6 +907,17 @@ class RunStore:
             for index, attempt in enumerate(attempts):
                 if attempt.attempt_id != attempt_id:
                     continue
+                if metadata is not None and any(
+                    key in metadata and key not in attempt.metadata for key in ("wire_version", "wire_hash")
+                ):
+                    raise IdentityMismatch("physical wire identity must be fixed before dispatch")
+                if "wire_version" in attempt.metadata:
+                    wire.identity(manifest, attempt_id)
+                    fixed = {key: attempt.metadata[key] for key in ("wire_version", "wire_hash")}
+                    if metadata is not None:
+                        if any(key in metadata and metadata[key] != value for key, value in fixed.items()):
+                            raise IdentityMismatch("physical wire identity cannot change after reservation")
+                        metadata = metadata | fixed
                 updated_attempt = attempt.model_copy(
                     update={
                         "state": state,

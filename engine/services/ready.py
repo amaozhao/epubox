@@ -10,7 +10,15 @@ from typing import TYPE_CHECKING, Literal, cast
 from engine.epub.bindings import resolve_derived_navigation
 from engine.schemas.bridge import AtomicDocument
 from engine.schemas.budget import BudgetLimits
-from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash, canonical_json_bytes, parse_contract
+from engine.schemas.contracts import (
+    ItemRecord,
+    ItemStatus,
+    RequestManifest,
+    canonical_hash,
+    canonical_json_bytes,
+    parse_contract,
+)
+from engine.schemas.members import MemberBatch
 from engine.schemas.ready import AtomicPlan, AtomicPreparedInput
 from engine.services import state
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, safe_id
@@ -135,10 +143,14 @@ def write_ready(
     return read_ready(store)
 
 
-def read_ready(store: RunStore) -> AtomicPreparedInput:
+def _read_ready(store: RunStore):
     ready = _read(store.root / "prepared.json", AtomicPreparedInput, "epubox-prepared-2")
-    _verify(store, ready)
-    return ready
+    index, batches = _verify(store, ready)
+    return ready, index, batches
+
+
+def read_ready(store: RunStore) -> AtomicPreparedInput:
+    return _read_ready(store)[0]
 
 
 def load_index(store: RunStore, prepared: AtomicPreparedInput | None = None) -> MemberIndex:
@@ -162,7 +174,7 @@ def navigation_sources(inventories: Sequence[AtomicDocument]) -> dict[str, str]:
     }
 
 
-def _verify(store: RunStore, ready: AtomicPreparedInput) -> None:
+def _verify(store: RunStore, ready: AtomicPreparedInput):
     from engine.item.members import MemberIndex, pack_members
     from engine.schemas.members import MemberBatch, RequestMember
 
@@ -231,6 +243,7 @@ def _verify(store: RunStore, ready: AtomicPreparedInput) -> None:
         if result.item_id != member.item_id or result.segment_id != member.item_id:
             raise IdentityMismatch("atomic ready result ownership changed")
     _terminal_requests(store)
+    return index, expected.batches
 
 
 def derived_record(item_id: str, source_id: str) -> ItemRecord:
@@ -362,21 +375,31 @@ class ReadySession:
     def __init__(self, store: RunStore):
         self.store = store
         self._signature = self._fingerprint()
-        self.prepared = read_ready(store)
-        self.index = load_index(store, self.prepared)
+        self._checkpoint = self._quick_fingerprint()
+        self._saved_batches: dict[tuple[object, ...], MemberBatch] = {}
+        self._frame_requests: dict[tuple[str, int], RequestManifest] = {}
+        self.prepared, self.index, batches = _read_ready(store)
+        self._prepared_batches = {batch.manifest.request_id: batch for batch in batches}
         if self._signature != self._fingerprint():
             raise IdentityMismatch("ready dependencies changed during workflow verification")
 
     def verify(self) -> AtomicPreparedInput:
+        checkpoint = self._quick_fingerprint()
+        if checkpoint is not None and checkpoint == self._checkpoint:
+            return self.prepared
+        self._saved_batches.clear()
+        self._frame_requests.clear()
         signature = self._fingerprint()
         if signature != self._signature:
-            current = read_ready(self.store)
+            current, index, batches = _read_ready(self.store)
             if current != self.prepared:
                 raise IdentityMismatch("workflow source task changed after it became ready")
-            self.index = load_index(self.store, current)
+            self.index = index
+            self._prepared_batches = {batch.manifest.request_id: batch for batch in batches}
             if signature != self._fingerprint():
                 raise IdentityMismatch("ready dependencies changed during workflow verification")
             self._signature = signature
+        self._checkpoint = checkpoint
         return self.prepared
 
     def verify_batch(self, batch, *, initial: bool = False) -> None:
@@ -469,6 +492,19 @@ class ReadySession:
                 (str(path), status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
                 for path in paths
                 for status in [state.stat(path)]
+            )
+        except OSError as error:
+            raise IdentityMismatch(f"workflow ready dependency is unavailable: {error}") from error
+
+    def _quick_fingerprint(self):
+        if not state.compact(self.store.root):
+            return None
+        paths = (self.store.root / "state.json", state.snapshot(self.store.root))
+        try:
+            return tuple(
+                (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
+                for path in paths
+                for status in [path.stat()]
             )
         except OSError as error:
             raise IdentityMismatch(f"workflow ready dependency is unavailable: {error}") from error

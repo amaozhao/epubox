@@ -53,14 +53,14 @@ def test_session_caches_full_verification_but_not_changed_dependency(tmp_path: P
     store, original = prepared(tmp_path)
     session = ReadySession(store)
     calls = 0
-    original_read = ready_module.read_ready
+    original_read = ready_module._read_ready
 
     def counted(*args):
         nonlocal calls
         calls += 1
         return original_read(*args)
 
-    monkeypatch.setattr(ready_module, "read_ready", counted)
+    monkeypatch.setattr(ready_module, "_read_ready", counted)
     assert session.verify() == original
     assert session.verify() == original
     assert calls == 0
@@ -75,7 +75,7 @@ def test_session_caches_full_verification_but_not_changed_dependency(tmp_path: P
 
 def test_session_refuses_dependencies_changed_during_initial_verification(tmp_path: Path, monkeypatch) -> None:
     store, _ = prepared(tmp_path)
-    original = ready_module.read_ready
+    original = ready_module._read_ready
 
     def changing(*args):
         ready = original(*args)
@@ -83,7 +83,7 @@ def test_session_refuses_dependencies_changed_during_initial_verification(tmp_pa
         path.write_bytes(path.read_bytes() + b" ")
         return ready
 
-    monkeypatch.setattr(ready_module, "read_ready", changing)
+    monkeypatch.setattr(ready_module, "_read_ready", changing)
     with pytest.raises(IdentityMismatch, match="during workflow verification"):
         ReadySession(store)
 

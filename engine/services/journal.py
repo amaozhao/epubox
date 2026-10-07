@@ -10,6 +10,7 @@ from time import monotonic
 from types import SimpleNamespace
 from typing import Any, cast
 
+from engine.agents import wire
 from engine.agents.protocol import ProtocolError, review_applicability, validate_translation_response
 from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS, ModelRuntime, RequestError, RuntimePaused, wire_hash
 from engine.agents.terms import validate_review_response
@@ -36,7 +37,7 @@ from engine.services.custody import number as _number
 from engine.services.custody import optional as _optional
 from engine.services.custody import persisted_response as _persisted_response
 from engine.services.custody import positive as _positive
-from engine.services.custody import retry_checks as _retry_checks
+from engine.services.custody import review_draft
 from engine.services.custody import text as _text
 from engine.services.ready import ReadySession, limits_from_config
 from engine.services.store import ModelResponseStage, RunStore
@@ -47,7 +48,12 @@ _FROZEN_RESULT_FIELDS = tuple(
 
 
 class BodyJournal:
-    def __init__(self, store: RunStore, session: ReadySession | None = None):
+    def __init__(
+        self,
+        store: RunStore,
+        session: ReadySession | None = None,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ):
         self.store = store
         self.session = session or ReadySession(store)
         if self.session.store.root != store.root:
@@ -57,17 +63,38 @@ class BodyJournal:
         self._responses: dict[tuple[str, str], Any] = {}
         self._translations: dict[str, Mapping[str, Any]] = {}
         self._reviews: dict[str, Mapping[str, Any]] = {}
+        self._translation_batches: dict[str, tuple[RequestManifest, MemberBatch]] = {}
+        self._review_batches: dict[str, tuple[RequestManifest, MemberBatch]] = {}
+        self._initial_records: dict[str, ItemRecord] | None = None
+        self._ambiguous_cache: dict[str, tuple[tuple[Any, ...], bool]] = {}
         frozen_limit = _bounded(self.session.prepared.plan.translation_config, "run_http_limit", 0, 0, 2**31 - 1)
         addition = load_budget_overrides(store)["add_run_http"]
         if type(addition) is not int or addition < 0:
             raise CorruptRecord("body run limit addition must be a non-negative integer")
         self._run_limit = frozen_limit + addition if frozen_limit else 0
-        for record in self._records.values():
+        for stage in ("translate", "review"):
+            for request in self._requests.values():
+                if request.stage == stage and any(
+                    "wire_version" in attempt.metadata or "wire_hash" in attempt.metadata
+                    for attempt in request.attempts
+                ):
+                    (self._translation_batch if stage == "translate" else self._review_batch)(request)
+        total = len(self._records)
+        for position, record in enumerate(self._records.values(), 1):
             _validate_saved_record(self.session, record)
             if record.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
                 self._translation_proof(record)
             if record.status == ItemStatus.REVIEWED:
                 self._require_review_proof(record)
+            if progress is not None and (position % 250 == 0 or position == total):
+                progress(
+                    {
+                        "phase": "recovery",
+                        "notice": f"恢复：已校验 {position}/{total} 条正文断点。",
+                        "completed_items": position,
+                        "required_items": total,
+                    }
+                )
         self._initialize_counts()
 
     def records(self, item_ids: Sequence[str] | None = None) -> dict[str, ItemRecord]:
@@ -123,6 +150,10 @@ class BodyJournal:
 
     def recover_results(self) -> dict[str, ItemRecord]:
         for request in tuple(self._requests.values()):
+            if request.stage == "translate" and any(
+                "wire_version" in attempt.metadata for attempt in request.attempts
+            ):
+                self._translation_batch(request)
             if (
                 request.stage != "translate"
                 or (response := _persisted_response(self.store, request, reconcile=True, finish=self._finish)) is None
@@ -194,6 +225,8 @@ class BodyJournal:
                 )
             self.save_many(recovered)
         for request in tuple(self._requests.values()):
+            if request.stage == "review" and any("wire_version" in attempt.metadata for attempt in request.attempts):
+                self._review_batch(request)
             if (
                 request.stage != "review"
                 or (response := _persisted_response(self.store, request, reconcile=True, finish=self._finish)) is None
@@ -302,96 +335,14 @@ class BodyJournal:
         return self.records()
 
     def retry_units(self, unit_ids: Sequence[str], *, retry_unknown: bool = True) -> tuple[str, ...]:
-        selected = tuple(unit_ids)
-        permitted = set(self.validate_retry_units(selected, retry_unknown=retry_unknown))
-        reopened: list[str] = []
-        for unit_id in selected:
-            item_ids = self.session.prepared.plan.unit_members[unit_id]
-            candidates = tuple(self._records[item_id] for item_id in item_ids if item_id in permitted)
-            if not candidates:
-                continue
-            missing = tuple(record for record in candidates if record.target_projection is None)
-            drafts = tuple(record for record in candidates if record.target_projection is not None)
-            if missing:
-                self._unlock_stage("translate", item_ids, retry_unknown=retry_unknown)
-            if drafts:
-                self._unlock_stage("review", item_ids, retry_unknown=retry_unknown)
-            epoch = 1 + max(
-                (_saved_epoch(record, "review_epoch") for record in (self._records[item_id] for item_id in item_ids)),
-                default=0,
-            )
-            for record in candidates:
-                if record.target_projection is None:
-                    translation_epoch = 1 + max(
-                        (_saved_epoch(self._records[item_id], "translation_epoch") for item_id in item_ids), default=0
-                    )
-                    reopened_record = self._initial_pending(record.item_id).model_copy(
-                        update={"checks": {"translation_epoch": translation_epoch}}
-                    )
-                    self.store._base.atomic_write_bytes(
-                        self._result_path(record.item_id), canonical_json_bytes(reopened_record)
-                    )
-                    self._update_result(record, reopened_record)
-                    reopened.append(record.item_id)
-                    continue
-                checks = _retry_checks(record, epoch)
-                reopened_record = record.model_copy(
-                    update={
-                        "stage": "proofread",
-                        "status": ItemStatus.LOCAL_VALID,
-                        "checks": checks,
-                        "failure": None,
-                        "next_action": "review",
-                    }
-                )
-                _validate_saved_record(self.session, reopened_record)
-                self.store._base.atomic_write_bytes(
-                    self._result_path(record.item_id), canonical_json_bytes(reopened_record)
-                )
-                self._update_result(record, reopened_record)
-                reopened.append(record.item_id)
-        return tuple(reopened)
+        from engine.services.retry import retry_units
+
+        return retry_units(self, unit_ids, retry_unknown=retry_unknown)
 
     def validate_retry_units(self, unit_ids: Sequence[str], *, retry_unknown: bool = True) -> tuple[str, ...]:
-        selected = tuple(unit_ids)
-        if not selected or len(selected) != len(set(selected)):
-            raise ValueError("explicit atomic retry requires unique Unit IDs")
-        if not set(selected).issubset(self.session.prepared.plan.unit_members):
-            raise IdentityMismatch("explicit atomic retry names an unknown Unit")
-        authorized_items = {
-            item_id for unit_id in selected for item_id in self.session.prepared.plan.unit_members[unit_id]
-        }
-        for request in self._requests.values():
-            if (
-                request.stage in {"translate", "review"}
-                and self._ambiguous(request)
-                and authorized_items.intersection(request.item_ids)
-                and not set(request.item_ids).issubset(authorized_items)
-            ):
-                raise IdentityMismatch("explicit retry must include every Unit in an ambiguous shared review request")
-        retryable: list[str] = []
-        for unit_id in selected:
-            item_ids = self.session.prepared.plan.unit_members[unit_id]
-            unknown = any(
-                self._ambiguous(request)
-                for request in self._requests.values()
-                if request.stage in {"translate", "review"} and set(item_ids).intersection(request.item_ids)
-            )
-            if unknown and not retry_unknown:
-                raise RuntimePaused("explicit retry must authorize an unknown review outcome")
-            candidates = tuple(
-                self._records[item_id]
-                for item_id in item_ids
-                if self._records[item_id].status == ItemStatus.NEEDS_ATTENTION
-                or unknown
-                and self._records[item_id].status in {ItemStatus.PENDING, ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
-            )
-            for record in candidates:
-                _saved_epoch(record, "translation_epoch")
-                if record.target_projection is not None:
-                    self._translation_proof(record)
-                retryable.append(record.item_id)
-        return tuple(retryable)
+        from engine.services.retry import validate_units
+
+        return validate_units(self, unit_ids, retry_unknown=retry_unknown)
 
     def runtime(
         self,
@@ -489,6 +440,17 @@ class BodyJournal:
         }
 
     def _translation_batch(self, request: RequestManifest):
+        frozen = request.model_copy(update={"attempts": ()})
+        cached = self._translation_batches.get(request.request_id)
+        initial = self.session._prepared_batches.get(request.request_id)
+        if cached is None and initial is not None and frozen == initial.manifest:
+            cached = (frozen, initial)
+            self._translation_batches[request.request_id] = cached
+        if cached is not None:
+            if cached[0] != frozen:
+                raise IdentityMismatch("persisted translation request changed after validation")
+            wire.verify(request, cached[1].payload, cached[1].budget.output_tokens)
+            return cached[1]
         members = tuple(self.session.index.members_by_id[item_id] for item_id in request.item_ids)
         packed = pack_members(
             "translate",
@@ -503,11 +465,20 @@ class BodyJournal:
         if len(packed.batches) != 1 or packed.blocked:
             raise IdentityMismatch("persisted translation request is no longer a canonical fitting batch")
         batch = packed.batches[0]
-        if request.model_copy(update={"attempts": ()}) != batch.manifest:
+        if frozen != batch.manifest:
             raise IdentityMismatch("persisted translation request differs from its frozen source frame")
+        wire.verify(request, batch.payload, batch.budget.output_tokens)
+        self._translation_batches[request.request_id] = (frozen, batch)
         return batch
 
     def _review_batch(self, request: RequestManifest):
+        frozen = request.model_copy(update={"attempts": ()})
+        cached = self._review_batches.get(request.request_id)
+        if cached is not None:
+            if cached[0] != frozen:
+                raise IdentityMismatch("persisted review request changed after validation")
+            wire.verify(request, cached[1].payload, cached[1].budget.output_tokens)
+            return cached[1]
         members = tuple(self.session.index.members_by_id[item_id] for item_id in request.item_ids)
         targets = {
             item_id: self._review_target(
@@ -532,8 +503,10 @@ class BodyJournal:
         if len(packed.batches) != 1 or packed.blocked:
             raise IdentityMismatch("persisted review request is no longer a canonical fitting batch")
         batch = packed.batches[0]
-        if request.model_copy(update={"attempts": ()}) != batch.manifest:
+        if frozen != batch.manifest:
             raise IdentityMismatch("persisted review request differs from its saved target frame")
+        wire.verify(request, batch.payload, batch.budget.output_tokens)
+        self._review_batches[request.request_id] = (frozen, batch)
         return batch
 
     def _review_target(self, item_id: str, target_hash: str, review_epoch: int) -> ItemRecord:
@@ -555,46 +528,8 @@ class BodyJournal:
             ).accepted
             target = accepted.get(item_id, {}).get("target")
             if isinstance(target, str) and canonical_hash(target) == target_hash:
-                return current.model_copy(
-                    update={
-                        "stage": "proofread",
-                        "status": ItemStatus.LOCAL_VALID,
-                        "target_projection": target,
-                        "target_hash": target_hash,
-                        "checks": {
-                            "translation_frame": current.checks["translation_frame"],
-                            **({"review_epoch": review_epoch} if review_epoch else {}),
-                            **(
-                                {"translation_epoch": current.checks["translation_epoch"]}
-                                if "translation_epoch" in current.checks
-                                else {}
-                            ),
-                        },
-                        "failure": None,
-                        "next_action": "review",
-                    }
-                )
+                return review_draft(current, target, review_epoch)
         raise IdentityMismatch("persisted review request has no proven saved draft")
-
-    def _initial_pending(self, item_id: str) -> ItemRecord:
-        for request_id in self.session.prepared.plan.batch_hashes:
-            batch = MemberBatch.model_validate_json(
-                state.read(self.store.root / "batches" / f"{safe_id(request_id)}.json")
-            )
-            if item_id not in batch.manifest.item_ids:
-                continue
-            self.session.verify_batch(batch, initial=True)
-            wire = _wire_items(batch)[item_id]
-            terms = tuple(term for term in wire["terms"] if isinstance(term, Mapping))
-            return ItemRecord(
-                item_id=item_id,
-                segment_id=item_id,
-                selected_term_ids=batch.manifest.term_ids_by_item[item_id],
-                term_applicability={str(term["term_id"]): term["role"] for term in terms},
-                terms_hash=batch.manifest.terms_hashes[item_id],
-                context_hash=batch.manifest.context_hashes[item_id],
-            )
-        raise IdentityMismatch("explicit retry member has no committed initial batch")
 
     def _prepare(self, stage: str, payload: dict[str, Any], context: Mapping[str, Any]) -> None:
         self.session.verify()
@@ -617,6 +552,11 @@ class BodyJournal:
             limits=limits_from_config(self.session.prepared.plan.translation_config),
             tokenizer_model=_text(self.session.prepared.plan.translation_config, "model"),
         )
+        physical = context.get("physical_budget")
+        estimated = physical.get("cl100k_tokens") if isinstance(physical, Mapping) else None
+        reserved = physical.get("estimated_input_tokens") if isinstance(physical, Mapping) else None
+        if type(estimated) is not int or estimated < 0 or type(reserved) is not int or reserved < estimated:
+            estimated, reserved = measured.input_tokens, measured.input_reserve
         self._started[manifest.request_id] = monotonic()
         self._emit(
             {
@@ -625,8 +565,8 @@ class BodyJournal:
                 "request_id": manifest.request_id,
                 "item_ids": manifest.item_ids,
                 "source_tokens": measured.source_tokens,
-                "estimated_input_tokens": measured.input_tokens,
-                "reserved_input_tokens": measured.input_reserve,
+                "estimated_input_tokens": estimated,
+                "reserved_input_tokens": reserved,
                 "reserved_output_tokens": measured.output_tokens,
             }
         )
@@ -671,6 +611,7 @@ class BodyJournal:
         response: dict[str, Any],
     ) -> None:
         self.store.save_model_response(stage, request_id, attempt_id, response)
+        self._ambiguous_cache.pop(request_id, None)
         request = self._requests[request_id]
         attempt = next(value for value in request.attempts if value.attempt_id == attempt_id)
         self._account_usage(request_id, attempt_id, self._usage(request, attempt))
@@ -703,11 +644,16 @@ class BodyJournal:
         if self._run_limit and self._run_attempts >= self._run_limit:
             raise RuntimePaused("frozen body request limit is exhausted")
         self._requests[request_id] = self.store.reserve_attempt(request_id, attempt)
+        self._ambiguous_cache.pop(request_id, None)
         self._run_attempts += 1
         self._body_attempts += 1
 
     def _ambiguous(self, request: RequestManifest) -> bool:
-        return any(
+        cached = self._ambiguous_cache.get(request.request_id)
+        attempts = tuple(request.attempts)
+        if cached is not None and cached[0] == attempts:
+            return cached[1]
+        result = any(
             (
                 attempt.state in {"sent", "unknown"}
                 or attempt.state == "reserved"
@@ -718,6 +664,8 @@ class BodyJournal:
             and self.store.read_model_response(request.stage, request.request_id, attempt.attempt_id) is None
             for attempt in request.attempts
         )
+        self._ambiguous_cache[request.request_id] = (attempts, result)
+        return result
 
     def _finish(
         self,
@@ -749,6 +697,7 @@ class BodyJournal:
             if updated.stage in {"translate", "review"}:
                 self._body_actual_attempts += 1
         self._requests[request_id] = updated
+        self._ambiguous_cache.pop(request_id, None)
         self._account_usage(request_id, attempt_id, self._usage(updated, current))
 
     def _account_usage(self, request_id: str, attempt_id: str, usage: Usage | None) -> None:

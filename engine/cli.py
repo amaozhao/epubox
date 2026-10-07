@@ -686,6 +686,7 @@ async def _advance_source(
         overwrite,
         progress,
         reason=_preparation_reason(prepared),
+        ready_session=prepared.ready_session,
     )
 
 
@@ -703,14 +704,8 @@ async def _advance_work_dir(
         if progress:
             progress({"phase": "recovery", "notice": "恢复：读取已保存的准备状态，保留词表和累计请求。"})
         prepared = await resume_preparation(work_dir, checker, model=model, progress=_preparation_progress(progress))
-        if automatic:
-            from engine.services.session import reopen
-
-            if progress:
-                progress({"phase": "recovery", "notice": "恢复：批量校验正文断点并回放缓存响应。"})
-            reopen(work_dir)
         if progress:
-            progress({"phase": "recovery", "notice": "恢复校验完成，进入翻译调度。"})
+            progress({"phase": "recovery", "notice": "准备状态已恢复，开始核对正文断点。"})
     except StoreLocked:
         raise
     except Exception as error:
@@ -726,6 +721,8 @@ async def _advance_work_dir(
         overwrite,
         progress,
         reason=_preparation_reason(prepared),
+        automatic=automatic,
+        ready_session=prepared.ready_session,
     )
 
 
@@ -740,6 +737,8 @@ async def _finish(
     progress: ProgressCallback | None = None,
     *,
     reason: str | None = None,
+    automatic: bool = False,
+    ready_session: Any = None,
 ) -> RunOutcome:
     if preparation_status == "paused":
         return _record(RunOutcome("paused", work_dir, phase))
@@ -750,7 +749,13 @@ async def _finish(
     if not state.is_file(work_dir / "prepared.json") and not state.is_file(work_dir / "bookplan.json"):
         return _record(RunOutcome("needs_attention", work_dir, phase, reason=reason or "preparation is incomplete"))
     try:
-        translated: TranslationRunResult = await run_translation(work_dir, model=model, progress=progress)
+        translated: TranslationRunResult = await run_translation(
+            work_dir,
+            model=model,
+            progress=progress,
+            reopen_attention=automatic and state.is_file(work_dir / "prepared.json"),
+            ready_session=ready_session,
+        )
     except Exception as error:
         _record_internal_failure(work_dir, "translation", error)
         raise
@@ -759,7 +764,11 @@ async def _finish(
     if atomic:
         from engine.services.ready import read_ready
 
-        count = read_ready(store).plan.required_unit_count
+        count = (
+            ready_session.prepared.plan.required_unit_count
+            if ready_session is not None
+            else read_ready(store).plan.required_unit_count
+        )
     else:
         count = store.read_bookplan().required_unit_count
     if translated.status != "translated":
