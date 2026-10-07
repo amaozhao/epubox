@@ -164,7 +164,7 @@ def _progress_printer():
     def show(report: dict[str, Any]) -> None:
         nonlocal last
         phase = str(report.get("phase", "running"))
-        if "result_item_id" in report or (phase != "waiting" and report.get("event") in {"request", "response"}):
+        if phase == "waiting" or "result_item_id" in report or report.get("event") in {"request", "response"}:
             return
         if isinstance(report.get("notice"), str):
             typer.echo(report["notice"])

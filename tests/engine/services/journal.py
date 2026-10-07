@@ -789,10 +789,16 @@ def test_local_attention_does_not_stop_later_ready_batches(tmp_path) -> None:
     case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p><p>Third.</p>", ("First.", "Second.", "Third."))
     assert len(case.prepared.plan.batch_hashes) >= 3
     calls: list[tuple[str, str]] = []
+    translated: dict[str, int] = {}
+    missing = []
 
     async def transport(kind, payload):
         calls.append((kind, payload["request_id"]))
+        if kind == "translate":
+            for item in payload["items"]:
+                translated[item["item_id"]] = translated.get(item["item_id"], 0) + 1
         if len(calls) == 1:
+            missing.extend(item["item_id"] for item in payload["items"])
             return {"raw": json.dumps({"protocol": "epubox-text-1", "request_id": payload["request_id"], "items": []})}
         return _answer(kind, payload)
 
@@ -803,8 +809,10 @@ def test_local_attention_does_not_stop_later_ready_batches(tmp_path) -> None:
             transport=transport,
         )
     )
-    assert result.status == "needs_attention" and result.reason is not None
+    assert result.status == "translated" and result.reason is None
     assert len({request_id for _, request_id in calls}) >= 3
+    assert missing and all(translated[item] == 2 for item in missing)
+    assert all(count == 1 for item, count in translated.items() if item not in missing)
 
 
 def test_selective_retry_skips_old_shared_translation_response_for_the_new_epoch(tmp_path) -> None:

@@ -88,8 +88,24 @@ def test_messages_compact_defaults_without_mutating_canonical_payload() -> None:
     assert physical["request_id"] == "request-full" and item["item_id"] == "1"
     assert "prompt_version" not in physical and "context" not in physical
     assert "terms" not in item and "context" not in item and "constraints" not in item
-    assert item["hints"] == {"g1": "span", "x1": {"element": "code", "class": "code", "excerpt": "x"}}
-    assert "Missing constraints" in result[0]["content"]
+    assert item["hints"] == {"g1": "span", "x1": {"element": "code", "class": "code"}}
+    assert "missing constraints" in result[0]["content"].lower()
+
+
+def test_v2_wire_hash_stays_frozen_and_v3_hides_code_content():
+    from engine.agents.runtime import wire_hash
+
+    assert (
+        wire_hash("translate", payload(), 1000, compact=True, wire_version="epubox-wire-2")
+        == "9bc535c6436d44a4c19693ccf9955c07f06b36582604c0f42225085edd0127a9"
+    )
+    book = payload()
+    book["items"][0]["hints"]["x1"].update(readonly="DO_NOT_SEND_CODE", excerpt="DO_NOT_SEND_CODE")
+    current = messages("translate", book, "base")
+    old = messages("translate", book, "base", version="epubox-wire-2")
+    assert "DO_NOT_SEND_CODE" not in current[1]["content"]
+    assert "DO_NOT_SEND_CODE" in old[1]["content"]
+    assert book["items"][0]["hints"]["x1"]["readonly"] == "DO_NOT_SEND_CODE"
 
 
 def test_messages_retain_nondefault_constraints_and_term_semantics() -> None:

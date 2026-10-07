@@ -143,7 +143,9 @@ def _contains_forbidden_source(value: Any) -> bool:
     return False
 
 
-def request_messages(kind: Stage, payload: dict[str, Any], *, compact: bool = False) -> tuple[dict[str, str], ...]:
+def request_messages(
+    kind: Stage, payload: dict[str, Any], *, compact: bool = False, wire_version: str = wire.VERSION
+) -> tuple[dict[str, str], ...]:
     if kind not in _PROTOCOLS:
         raise ValueError(f"unsupported request kind: {kind}")
     if _contains_forbidden_source(payload):
@@ -163,7 +165,7 @@ def request_messages(kind: Stage, payload: dict[str, Any], *, compact: bool = Fa
             else _SYSTEM_PROMPTS[kind]
         )
     if compact:
-        return wire.messages(kind, payload, prompt)
+        return wire.messages(kind, payload, prompt, version=wire_version)
     return (
         {"role": "system", "content": prompt},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))},
@@ -201,8 +203,18 @@ def model_input_budget(
     }
 
 
-def wire_hash(kind: Stage, payload: dict[str, Any], output_tokens: int | None = None, *, compact: bool = False) -> str:
-    value = {"messages": request_messages(kind, payload, compact=compact), "max_completion_tokens": output_tokens}
+def wire_hash(
+    kind: Stage,
+    payload: dict[str, Any],
+    output_tokens: int | None = None,
+    *,
+    compact: bool = False,
+    wire_version: str = wire.VERSION,
+) -> str:
+    value = {
+        "messages": request_messages(kind, payload, compact=compact, wire_version=wire_version),
+        "max_completion_tokens": output_tokens,
+    }
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -536,7 +548,12 @@ class ModelRuntime:
             physical_budget = model_input_budget(
                 kind, payload, algorithm_version=self._input_budget_version, compact=True
             )
-            if physical_budget["cl100k_tokens"] < budget["cl100k_tokens"]:
+            protected_code = any(
+                isinstance(hint, Mapping) and hint.get("class") == "code"
+                for item in payload["items"]
+                for hint in item.get("hints", {}).values()
+            )
+            if protected_code or physical_budget["cl100k_tokens"] < budget["cl100k_tokens"]:
                 budget, compact = physical_budget, True
         estimated_input_tokens = budget["estimated_input_tokens"]
         if estimated_input_tokens > MAX_MODEL_INPUT_TOKENS:

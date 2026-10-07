@@ -23,7 +23,7 @@ from tests.engine.epub.preparation import StubChecker
 from tests.engine.execution.atomic import answer
 
 
-@pytest.mark.parametrize("failure", ("checks", "missing", "timeout", "replacement"))
+@pytest.mark.parametrize("failure", ("checks", "missing", "timeout", "replacement", "duplicate", "needs_attention"))
 def test_failed_reviews_retry_twice_after_later_content_without_retranslation(tmp_path, failure):
     case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p>", ("First.", "Second."))
     failed_item = case.batch.items[0].item_id
@@ -53,6 +53,13 @@ def test_failed_reviews_retry_twice_after_later_content_without_retranslation(tm
                 value["items"].remove(item)
             elif failure == "replacement":
                 item.update(decision="replace", target="⟦-g1⟧坏译文")
+            elif failure == "duplicate":
+                item.update(decision="replace", target="⟦+b3⟧错误⟦-b3⟧⟦+b3⟧重复⟦-b3⟧")
+            elif failure == "needs_attention":
+                item.update(
+                    decision="needs_attention",
+                    issues=[{"code": "accuracy_error", "severity": "critical", "message": "ambiguous wording"}],
+                )
             else:
                 item["checks"]["accuracy"] = "fail"
             response["raw"] = json.dumps(value)

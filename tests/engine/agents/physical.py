@@ -271,3 +271,60 @@ def test_custom_transport_cannot_enable_a_different_wire_contract():
 
     with pytest.raises(TypeError, match="compact"):
         ModelRuntime(transport=transport, compact=True)  # type: ignore[call-arg]
+
+
+def test_code_hint_content_is_never_sent_even_for_a_tiny_request():
+    payload = {
+        "protocol": "epubox-text-1",
+        "prompt_version": "epubox-members-1",
+        "request_id": "code",
+        "items": [
+            {
+                "item_id": "u-code",
+                "source": "⟦=x1⟧",
+                "terms": [],
+                "hints": {"x1": {"element": "code", "class": "code", "readonly": "ZX", "excerpt": "ZX"}},
+                "constraints": {
+                    "x1": {
+                        "kind": "x",
+                        "parent": "root",
+                        "movement": "fixed",
+                        "reorder_allowed": False,
+                        "fixed_order": ["x1"],
+                    }
+                },
+            }
+        ],
+    }
+    assert (
+        model_input_budget("translate", payload, compact=True)["cl100k_tokens"]
+        > model_input_budget("translate", payload)["cl100k_tokens"]
+    )
+
+    class Completions:
+        async def create(self, **kwargs):
+            message = kwargs["messages"][1]["content"]
+            assert "ZX" not in message
+            item = json.loads(message)["items"][0]
+            assert item["item_id"] == "1" and item["source"] == "<x1/>"
+            raw = json.dumps(
+                {"protocol": "epubox-text-1", "request_id": "code", "items": [{"item_id": "1", "target": "<x1/>"}]}
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=raw), finish_reason="stop")],
+                usage=None,
+                id="reply",
+                model=MODEL,
+                system_fingerprint=None,
+            )
+
+    runtime = ModelRuntime(
+        model=Model(FakeOpenAIClient(Completions())),
+        model_max_output_tokens=1000,
+        provider_output_token_field="max_tokens",
+        input_budget_version=2,
+    )
+    result = asyncio.run(
+        runtime.invoke("translate", payload, {"request_id": "code", "item_ids": ["u-code"], "output_tokens": 100})
+    )
+    assert result["metadata"]["wire_version"] == "epubox-wire-3"

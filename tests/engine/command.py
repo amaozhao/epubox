@@ -274,7 +274,7 @@ def test_atomic_batch_progress_keeps_estimates_reserves_and_actual_usage_distinc
     assert "结果=通过，修订=否" in capsys.readouterr().out
 
 
-def test_progress_hides_item_and_transport_events_but_keeps_waiting_and_batch_errors(capsys) -> None:
+def test_progress_hides_item_transport_and_waiting_events_but_keeps_batch_errors(capsys) -> None:
     printer = _progress_printer()
     report = {"phase": "review", "request_id": "tx-1", "execution_state": "running"}
     printer(report | {"event": "request"})
@@ -282,7 +282,7 @@ def test_progress_hides_item_and_transport_events_but_keeps_waiting_and_batch_er
     printer(report | {"result_item_id": "item-1", "result_status": "needs_attention", "reason": "timeout"})
     assert capsys.readouterr().out == ""
     printer(report | {"phase": "waiting", "event": "request", "elapsed_seconds": 30})
-    assert "waiting: 批次=tx-1" in capsys.readouterr().out
+    assert capsys.readouterr().out == ""
     printer(report | {"phase": "workflow", "batch_status": "needs_attention", "reason": "timeout"})
     output = capsys.readouterr().out
     assert len(output.splitlines()) == 1 and "原因=timeout" in output

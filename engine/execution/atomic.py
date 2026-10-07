@@ -63,8 +63,8 @@ async def run_atomic(
         if type(configured) is not int or configured < 1:
             raise ValueError("frozen concurrency must be a positive integer")
         pending = iter(batches)
-        review_failures: set[str] = set()
-        review_retry_round = 0
+        retry_failures: set[str] = set()
+        retry_round = 0
         active: dict[asyncio.Task, tuple[MemberBatch, float]] = {}
         stopped: str | None = (
             "output budget v2 requires a new v3 task before further provider requests"
@@ -115,12 +115,13 @@ async def run_atomic(
             started = monotonic()
 
             def observe(record):
-                if (
-                    record.status == ItemStatus.NEEDS_ATTENTION
-                    and record.stage == "review"
+                if record.status == ItemStatus.NEEDS_ATTENTION and (
+                    record.stage == "review"
                     and record.target_projection is not None
+                    or record.stage == "translate"
+                    and _structural_failure(record)
                 ):
-                    review_failures.add(record.item_id)
+                    retry_failures.add(record.item_id)
                 request_id = record.checks.get("review_request_id", record.request_id)
                 details = requests.get(request_id, {}) if isinstance(request_id, str) else {}
                 if progress is not None:
@@ -173,20 +174,19 @@ async def run_atomic(
                         continue
                     active[asyncio.create_task(execute(batch))] = (batch, monotonic())
                 if not active:
-                    if stopped is None and review_retry_round < 2:
+                    if stopped is None and retry_round < 2:
                         records = journal.records()
                         units = set()
-                        for unit_id in {session.index.members_by_id[item].unit_id for item in review_failures}:
+                        for unit_id in {session.index.members_by_id[item].unit_id for item in retry_failures}:
                             failed = [
                                 records[item]
                                 for item in ready.plan.unit_members[unit_id]
                                 if records[item].status == ItemStatus.NEEDS_ATTENTION
                             ]
-                            if failed and all(
-                                record.item_id in review_failures
-                                and record.stage == "review"
-                                and record.target_projection is not None
-                                for record in failed
+                            if (
+                                failed
+                                and len({record.stage for record in failed}) == 1
+                                and all(record.item_id in retry_failures for record in failed)
                             ):
                                 units.add(unit_id)
                         groups = [
@@ -201,7 +201,7 @@ async def run_atomic(
                             units.difference_update(blocked)
                         if units:
                             reopened = set(journal.retry_units(tuple(sorted(units))))
-                            review_retry_round += 1
+                            retry_round += 1
                             pending = iter(
                                 batch for batch in batches if reopened.intersection(batch.manifest.item_ids)
                             )
@@ -209,27 +209,12 @@ async def run_atomic(
                                 progress(
                                     {
                                         "phase": "review",
-                                        "notice": f"校对自动重试：第 {review_retry_round}/2 轮，{len(units)} 个单元；复用已保存初译。",
+                                        "notice": f"正文自动重试：第 {retry_round}/2 轮，{len(units)} 个单元；已有有效初译继续复用。",
                                     }
                                 )
                             continue
                     break
-                done, _ = await asyncio.wait(active, timeout=15, return_when=asyncio.FIRST_COMPLETED)
-                if not done:
-                    for task, (batch, started) in active.items():
-                        identifier = current_requests.get(task)
-                        if progress is not None:
-                            progress(
-                                dict(journal.progress_snapshot())
-                                | requests.get(identifier or "", {})
-                                | {
-                                    "phase": "waiting",
-                                    "execution_state": "running",
-                                    "request_id": identifier,
-                                    "elapsed_seconds": monotonic() - started,
-                                }
-                            )
-                    continue
+                done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
                     batch, started = active.pop(task)
                     try:
@@ -301,3 +286,28 @@ async def run_atomic(
             predicted_http_requests=2 * len(batches),
             reason=reason,
         )
+
+
+def _structural_failure(record) -> bool:
+    message = (record.failure or {}).get("message")
+    return isinstance(message, str) and message.startswith(
+        (
+            "text moved across",
+            "reference moved across",
+            "locked reference order changed",
+            "plain text and metadata units",
+            "marker inventory mismatch",
+            "crossed or unmatched",
+            "unclosed target",
+            "duplicate target",
+            "unknown projection marker",
+            "unclosed projection marker",
+            "literal closing delimiter",
+            "unsupported projection escape",
+            "dangling projection escape",
+            "target must be",
+            "target contains invalid XML",
+            "translation item missing",
+            "duplicate item_id",
+        )
+    )
