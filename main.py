@@ -153,7 +153,7 @@ def _print_result(result: RunOutcome) -> None:
                     "EPUBCheck 仍未完全通过。详情见报告。"
                 )
         return
-    if result.reason:
+    if result.reason and not (result.status == "needs_attention" and result.phase == "translation"):
         typer.echo(result.reason, err=True)
     raise typer.Exit(1)
 

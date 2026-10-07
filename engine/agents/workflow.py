@@ -322,7 +322,8 @@ async def _apply_corrections_step(
         if result is not None and result["decision"] == "replace":
             error = _target_error(member, result["target"], wires[member.item_id])
         if error is not None:
-            issues.append(f"review:{member.item_id}: {error}")
+            if batch_error is None:
+                issues.append(f"review:{member.item_id}: {error}")
             current[member.item_id] = _failed(member, prior, "review", error, None)
         else:
             assert result is not None

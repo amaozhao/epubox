@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
@@ -294,15 +295,31 @@ async def run_atomic(
 def _pending_batches(journal, initial, selected=None) -> tuple[MemberBatch, ...]:
     """Regroup a checkpoint by HTML, channel and next step, preserving completed members."""
     records = journal.records()
-    if selected is None and all(
+    fresh = selected is None and all(
         records[item].status == ItemStatus.PENDING and not _translation_epoch(records[item])
         for batch in initial
         for item in batch.manifest.item_ids
-    ):
+    )
+    navigation_counts = Counter(
+        batch.items[0].document_id for batch in initial if batch.items[0].channel == "navigation"
+    )
+    merge_navigation = {document for document, count in navigation_counts.items() if count > 1}
+    if fresh and not merge_navigation:
         return tuple(initial)
     session = journal.session
+    batches = (
+        [
+            batch
+            for batch in initial
+            if batch.items[0].channel != "navigation" or batch.items[0].document_id not in merge_navigation
+        ]
+        if fresh
+        else []
+    )
     lanes = {}
     for member in session.index.members:
+        if fresh and (member.channel != "navigation" or member.document_id not in merge_navigation):
+            continue
         record = records[member.item_id]
         if (
             selected is not None
@@ -320,7 +337,6 @@ def _pending_batches(journal, initial, selected=None) -> tuple[MemberBatch, ...]
                 break
         else:
             lanes[key].append(([member], {member.unit_id: epoch}))
-    batches = []
     for members, _ in (group for groups in lanes.values() for group in groups):
         versions = {}
         for member in members:

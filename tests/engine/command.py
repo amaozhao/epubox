@@ -676,3 +676,25 @@ def test_direct_api_infers_nondefault_provider_as_explicit(tmp_path):
 
     with pytest.raises(ValueError, match="explicit --provider"):
         cli.translate_book(source, provider="cr_proxy")
+
+
+def test_finished_translation_with_errors_prints_only_summary(tmp_path, capsys):
+    from main import _print_result
+
+    result = cli.RunOutcome(
+        "needs_attention",
+        tmp_path,
+        "translation",
+        accepted_units=1884,
+        required_units=2398,
+        http_attempts=703,
+        report_path=tmp_path / "state.json",
+        reason="translate:unit: long error content",
+    )
+    with pytest.raises(typer.Exit) as raised:
+        _print_result(result)
+    assert getattr(raised.value, "exit_code", None) == 1
+    captured = capsys.readouterr()
+    assert "1884/2398" in captured.out and "state.json" in captured.out
+    assert captured.err == "" and "long error content" not in captured.out
+    assert result.reason == "translate:unit: long error content"

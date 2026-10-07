@@ -176,3 +176,42 @@ def test_repeated_truncation_stays_an_error_and_preserves_restart_retry(tmp_path
 
     resumed = asyncio.run(run_translation(case.session.store.root, transport=healthy, reopen_attention=True))
     assert resumed.status == "translated"
+
+
+@pytest.mark.parametrize("failure", ("protocol", "fluency", "needs_attention"))
+def test_review_errors_retry_review_without_retranslating_valid_drafts(tmp_path, failure):
+    case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p>", ("First.", "Second."))
+    wanted = set(case.batch.manifest.item_ids)
+    calls = []
+    events = []
+
+    async def transport(kind, payload):
+        response = answer(kind, payload)
+        if wanted & {item["item_id"] for item in payload["items"]}:
+            calls.append(kind)
+            if calls == ["translate", "review"]:
+                if failure == "protocol":
+                    response["raw"] = '{"items":[]}'
+                else:
+                    root = json.loads(response["raw"])
+                    if failure == "fluency":
+                        root["items"][0]["checks"]["fluency"] = "not_applicable"
+                    else:
+                        root["items"][0]["decision"] = "needs_attention"
+                        root["items"][0]["checks"]["accuracy"] = "fail"
+                        root["items"][0]["issues"] = [
+                            {"code": "accuracy", "severity": "major", "message": "Incorrect meaning"}
+                        ]
+                    response["raw"] = json.dumps(root)
+        return response
+
+    result = asyncio.run(run_translation(case.session.store.root, transport=transport, progress=events.append))
+    assert result.status == "translated", result.reason
+    assert calls == ["translate", "review", "review"]
+    if failure == "protocol":
+        bad = [
+            event
+            for event in events
+            if event.get("phase") == "workflow" and event.get("batch_status") == "needs_attention"
+        ]
+        assert len(bad) == 1 and str(bad[0]["reason"]).count("response root must contain exactly") == 1
