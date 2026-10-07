@@ -523,9 +523,12 @@ class BodyJournal:
             response = self._response(request)
             if response is None:
                 continue
-            accepted = validate_translation_response(
-                response.raw, request.request_id, self._source_projections(request)
-            ).accepted
+            sources = self._source_projections(request)
+            try:
+                accepted = validate_translation_response(response.raw, request.request_id, sources).accepted
+            except ProtocolError:
+                # A failed historical response cannot prove a draft; a later retry may.
+                continue
             target = accepted.get(item_id, {}).get("target")
             if isinstance(target, str) and canonical_hash(target) == target_hash:
                 return review_draft(current, target, review_epoch)
