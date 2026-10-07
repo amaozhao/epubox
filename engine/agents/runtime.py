@@ -277,11 +277,11 @@ def _redact_api_key(message: str, api_key: Any) -> str:
     return message.replace(api_key, "[REDACTED]") if isinstance(api_key, str) and api_key else message
 
 
-def _without_implicit_retries(client: Any) -> Any:
+def _without_implicit_retries(client: Any, timeout: float) -> Any:
     with_options = getattr(client, "with_options", None)
     if not callable(with_options):
         raise TypeError("provider client cannot disable implicit retries")
-    return with_options(max_retries=0)
+    return with_options(max_retries=0, timeout=timeout)
 
 
 class ModelRuntime:
@@ -402,7 +402,7 @@ class ModelRuntime:
                 response_format={"type": "json_object"}, tools=None, tool_choice=None, run_response=None
             )
             try:
-                client = _without_implicit_retries(request_model.get_async_client())
+                client = _without_implicit_retries(request_model.get_async_client(), self._request_timeout_seconds)
                 if isinstance(request_model, StreamingOpenAILike):
                     stream = await client.chat.completions.create(
                         model=request_model.id,

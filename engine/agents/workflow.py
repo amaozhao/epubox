@@ -72,6 +72,7 @@ async def run_workflow(
             completed=completed,
             tokenizer_model=str(prepared.plan.translation_config["model"]),
             sparse=batch.manifest.sparse,
+            feedback={item: value for item, value in batch.manifest.feedback_by_item.items() if item not in completed},
         )
         if replanned.blocked:
             raise ValueError("saved translation checkpoint cannot replan the remaining ready members")
@@ -242,6 +243,11 @@ async def _proofread_step(
         revisions={item.unit_id: revisions[item.unit_id] for item in members},
         tokenizer_model=str(prepared.plan.translation_config["model"]),
         sparse=sparse,
+        feedback={
+            item.item_id: str(current[item.item_id].checks["retry_feedback"])
+            for item in members
+            if current[item.item_id].checks.get("retry_feedback")
+        },
     )
     issues: list[str] = []
     blocked_records: list[ItemRecord] = []
@@ -572,6 +578,7 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
         plan_epochs=request.plan_epochs if request is not None else {member.unit_id: 0 for member in members},
         tokenizer_model=str(session.prepared.plan.translation_config["model"]),
         sparse=request.sparse if request is not None else False,
+        feedback=request.feedback_by_item if request is not None else None,
     )
     if len(packed.batches) != 1 or packed.blocked:
         raise ValueError("saved translation frame is not a canonical fitting batch")

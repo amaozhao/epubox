@@ -253,13 +253,28 @@ def _expected_configs(config: PreparationConfig) -> tuple[tuple[dict[str, JsonVa
     previous.pop("output_budget_version", None)
     previous.pop("minimum_source_tokens", None)
     previous["planner_version"] = "epubox-member-planner-1"
+    prior_extraction = dict(current[0])
+    prior_extraction["max_output_tokens"] = 4096
+    prior_output = dict(current[1])
+    prior_output["max_output_tokens"] = 4096
+    prior = dict(prior_output)
+    prior["output_budget_version"] = 5
+    previous["max_output_tokens"] = 4096
+    legacy_extraction = _frozen_extraction_config(legacy)
+    legacy_translation = _frozen_translation_config(legacy)
+    legacy_prior_extraction = dict(legacy_extraction) | {"max_output_tokens": 4096}
+    legacy_prior_translation = dict(legacy_translation) | {"max_output_tokens": 4096}
     return (
         current,
-        (current[0], previous),
-        (current[0], previous | {"output_budget_version": 2}),
-        (current[0], previous | {"output_budget_version": 3}),
-        (current[0], previous | {"output_budget_version": 4}),
-        (_frozen_extraction_config(legacy), _frozen_translation_config(legacy)),
+        (current[0], dict(current[1]) | {"output_budget_version": 5}),
+        (prior_extraction, prior_output),
+        (prior_extraction, prior),
+        (prior_extraction, previous),
+        (prior_extraction, previous | {"output_budget_version": 2}),
+        (prior_extraction, previous | {"output_budget_version": 3}),
+        (prior_extraction, previous | {"output_budget_version": 4}),
+        (legacy_extraction, legacy_translation),
+        (legacy_prior_extraction, legacy_prior_translation),
     )
 
 

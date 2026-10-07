@@ -24,6 +24,7 @@ from engine.epub.verification import (
 )
 from engine.schemas.contracts import PreparationPlan, canonical_hash, strict_json_loads
 from engine.services import state
+from engine.services.atomic import safe_id
 from engine.services.ready import ReadySession
 from engine.services.store import RunStore
 
@@ -38,6 +39,7 @@ def publish_atomic(
     checker: object,
     *,
     overwrite: bool = False,
+    session: ReadySession | None = None,
 ) -> dict[str, object]:
     """Render only complete reviewed parents, verify, then atomically publish."""
     if not isinstance(store, RunStore):
@@ -45,13 +47,14 @@ def publish_atomic(
     output_path = Path(output_path)
     with store.lock():
         validate_atomic_output(store, output_path)
-        session, targets = _targets(store)
+        session, targets = _targets(store, session=session)
         recovered = _recover(store, output_path, session.prepared.plan, targets, checker=checker)
         if recovered is not None:
             proof = recovered.get("verification")
             if isinstance(proof, dict) and proof.get("epub_version") == "3.0":
                 return recovered
             overwrite = True
+        result_fingerprint = _result_fingerprint(store, session)
         snapshot = state.snapshot(store.root)
         inventory = inspect_epub(snapshot, session.prepared.plan.source_hash, checker=checker)
         replacements: dict[str, bytes] = {}
@@ -90,8 +93,8 @@ def publish_atomic(
                 expected_language=_LANGUAGE,
                 upgraded=True,
             )
-            current_session, current_targets = _targets(store)
-            if current_session.prepared != session.prepared or current_targets != targets:
+            session.verify()
+            if _result_fingerprint(store, session) != result_fingerprint:
                 raise EpubValidationError("atomic_results_changed", "Reviewed targets changed during publication")
             if file_hash(snapshot) != session.prepared.plan.source_hash:
                 raise EpubValidationError("source_changed", "Source snapshot changed during publication")
@@ -159,10 +162,10 @@ def _recover(store, output_path, plan, targets, *, checker: object | None = None
     return {"path": str(output_path), "sha256": target_hash, "verification": verification, "publish": intent}
 
 
-def _targets(store: RunStore):
+def _targets(store: RunStore, *, session: ReadySession | None = None):
     from engine.services.journal import BodyJournal
 
-    session = ReadySession(store)
+    session = session or ReadySession(store)
     targets = BodyJournal(store, session=session).parent_targets(require_complete=True)
     expected = {item.item_id for inventory in session.index.inventories for item in inventory.items}
     if set(targets) != expected:
@@ -172,6 +175,15 @@ def _targets(store: RunStore):
 
 def _versions(targets: Mapping[str, str]) -> dict[str, str]:
     return {item_id: canonical_hash(target) for item_id, target in sorted(targets.items())}
+
+
+def _result_fingerprint(store: RunStore, session: ReadySession) -> tuple[tuple[str, str], ...]:
+    if state.compact(store.root):
+        return (("state.json", file_hash(store.root / "state.json")),)
+    return tuple(
+        (item_id, file_hash(store.root / "results" / f"{safe_id(item_id)}.json"))
+        for item_id in session.prepared.plan.member_hashes
+    )
 
 
 def _reject_output(output: Path, root: Path, preparation: PreparationPlan) -> None:

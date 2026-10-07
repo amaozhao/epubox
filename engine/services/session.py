@@ -248,7 +248,7 @@ def infer(options: Mapping[str, Any]) -> frozenset[str]:
         "provider": "agnes",
         "context_tokens": 32768,
         "max_input_tokens": 50000,
-        "max_output_tokens": 4096,
+        "max_output_tokens": 8192,
         "limit": None,
         "http_limit": 0,
         "concurrency": 2,
@@ -312,7 +312,7 @@ def reopen(work_dir: Path) -> tuple[str, ...]:
     store = RunStore(work_dir)
     with store.lock(blocking=False):
         journal = BodyJournal(store)
-        if journal.session.prepared.plan.translation_config.get("output_budget_version", 2) not in {3, 4, 5}:
+        if journal.session.prepared.plan.translation_config.get("output_budget_version", 2) not in {3, 4, 5, 6}:
             return ()
         records = journal.recover_results()
         units = {

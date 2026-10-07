@@ -29,7 +29,7 @@ def translate(
     provider: str = typer.Option("agnes", "--provider"),
     context_tokens: int = typer.Option(32768, "--context-tokens", min=1),
     max_input_tokens: int = typer.Option(50000, "--max-input-tokens", min=1),
-    max_output_tokens: int = typer.Option(4096, "--max-output-tokens", min=1),
+    max_output_tokens: int = typer.Option(8192, "--max-output-tokens", min=1),
     limit: int | None = typer.Option(
         None, "--limit", min=1, help="单个源片段可翻译正文的最大 token 数；默认读取环境配置。"
     ),

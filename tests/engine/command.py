@@ -168,10 +168,17 @@ def test_translate_freezes_atomic_versions_and_explicit_chunk_limit(
     assert config.extraction_config["strategy"] == ATOMIC_TERM_PLANNER_VERSION
     assert config.translation_config["prompt_version"] == "epubox-members-1"
     assert config.translation_config["input_budget_version"] == 2
-    assert config.translation_config["output_budget_version"] == 5
+    assert config.translation_config["output_budget_version"] == 6
     assert config.translation_config["max_source_tokens"] == 5000
     assert config.translation_config["max_input_tokens"] == 24000
     assert config.translation_config["rpm"] == cli.settings.AGNES_TEXT_RPM
+    from engine.services.legacy import _expected_configs
+
+    assert any(
+        translation.get("output_budget_version") == 5
+        and translation.get("planner_version") == "epubox-member-planner-2"
+        for _, translation in _expected_configs(config)
+    )
 
 
 def test_implicit_environment_limit_change_reuses_run_but_explicit_change_refuses_it(
@@ -302,22 +309,40 @@ def test_progress_hides_item_transport_and_waiting_events_but_keeps_batch_errors
 def test_finish_routes_atomic_ready_to_atomic_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     case = prepare_case(tmp_path, "<p>First.</p>", ("First.",))
     output = tmp_path / "book-cn.epub"
+    progress = []
 
     async def translated(*_args, **_kwargs):
         return TranslationRunResult("translated", 1, 0, 0, 2, 2)
 
-    def publish(store, target, _checker, *, overwrite):
+    def publish(store, target, _checker, *, overwrite, session):
         assert store.root == case.session.store.root
         assert target == output and not overwrite
+        assert session is case.session
         return {"sha256": "f" * 64}
 
     monkeypatch.setattr(cli, "run_translation", translated)
     monkeypatch.setattr(atomic_publish, "publish_atomic", publish)
-    result = asyncio.run(cli._finish("ready", "ready", case.session.store.root, output, object(), object(), False))
+    result = asyncio.run(
+        cli._finish(
+            "ready",
+            "ready",
+            case.session.store.root,
+            output,
+            object(),
+            object(),
+            False,
+            progress.append,
+            ready_session=case.session,
+        )
+    )
 
     assert result.status == "completed"
     assert result.required_units == case.prepared.plan.required_unit_count
     assert result.output_sha256 == "f" * 64
+    assert [event.get("notice") for event in progress if event.get("phase") == "publication"] == [
+        "出版：正在组装并校验 EPUB 3.0。",
+        "出版：EPUB 3.0 已组装并校验完成。",
+    ]
 
 
 def test_atomic_resume_uses_frozen_body_model_and_nondefault_output_cap(
@@ -536,7 +561,7 @@ def test_v3_cli_pipeline_reserves_full_output_and_completed_resume_sends_nothing
     result = cli.translate_book(source, auto_extract=False, progress=events.append)
     assert result.status == "completed"
     requests = [event for event in events if event.get("event") == "request"]
-    assert requests and all(event["reserved_output_tokens"] == 4096 for event in requests)
+    assert requests and all(event["reserved_output_tokens"] == 8192 for event in requests)
     before = len(calls)
     repeated = cli.translate_book(source, auto_extract=False)
     assert repeated.status == "completed"

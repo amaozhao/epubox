@@ -79,13 +79,13 @@ def context(request_id: str = "r1", **values) -> dict:
 
 
 class FakeOpenAIClient:
-    def __init__(self, completions, *, max_retries: int = 2, options: list[int] | None = None):
+    def __init__(self, completions, *, max_retries: int = 2, options=None):
         self.chat = SimpleNamespace(completions=completions)
         self.max_retries = max_retries
         self.options = [] if options is None else options
 
-    def with_options(self, *, max_retries: int):
-        self.options.append(max_retries)
+    def with_options(self, *, max_retries: int, timeout: float):
+        self.options.append((max_retries, timeout))
         return FakeOpenAIClient(self.chat.completions, max_retries=max_retries, options=self.options)
 
 
@@ -816,7 +816,7 @@ async def test_default_provider_uses_per_request_model_copies_and_preserves_resp
     assert results[0]["finish_reason"] == "stop"
     assert results[0]["metadata"]["model"] == "fake-model"
     assert client.max_retries == 2
-    assert client.options == [0, 0]
+    assert client.options == [(0, 120.0), (0, 120.0)]
 
 
 @pytest.mark.asyncio
@@ -872,7 +872,7 @@ async def test_agnes_provider_sends_max_tokens_and_clears_max_completion_tokens(
     assert model.max_tokens == 65_536
     assert model.max_completion_tokens == 999
     assert client.max_retries == 2
-    assert client.options == [0]
+    assert client.options == [(0, 120.0)]
 
 
 @pytest.mark.asyncio
@@ -940,7 +940,7 @@ async def test_provider_error_redacts_only_the_exact_configured_api_key(tmp_path
     assert "[REDACTED]" in error
     assert "sk-example remains" in error
     assert client.max_retries == 2
-    assert client.options == [0]
+    assert client.options == [(0, 120.0)]
 
 
 @pytest.mark.asyncio

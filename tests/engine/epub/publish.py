@@ -187,6 +187,47 @@ def test_atomic_publish_rejects_snapshot_alias_and_keeps_existing_product_on_fai
         BodyJournal.parent_targets = original
 
 
+def test_atomic_publish_reuses_one_verified_target_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    case = _case(tmp_path, "<p>Hello world.</p>", ("Hello world.",))
+    targets = {
+        item.item_id: item.source_projection for inventory in case.index.inventories for item in inventory.items
+    }
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+    original = publish_module._targets
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(publish_module, "_targets", counted)
+    publish_atomic(case.session.store, tmp_path / "single-snapshot-cn.epub", StubChecker(), session=case.session)
+
+    assert calls == 1
+
+
+def test_atomic_publish_detects_result_mutation_without_rebuilding_proofs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _case(tmp_path, "<p>Hello world.</p>", ("Hello world.",))
+    targets = {
+        item.item_id: item.source_projection for inventory in case.index.inventories for item in inventory.items
+    }
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+    verify = publish_module.verify_staged_epub
+
+    def mutate(*args, **kwargs):
+        result = verify(*args, **kwargs)
+        path = next((case.session.store.root / "results").glob("*.json"))
+        path.write_bytes(path.read_bytes() + b" ")
+        return result
+
+    monkeypatch.setattr(publish_module, "verify_staged_epub", mutate)
+    with pytest.raises(EpubValidationError, match="changed during publication"):
+        publish_atomic(case.session.store, tmp_path / "mutated-cn.epub", StubChecker(), session=case.session)
+
+
 def test_atomic_publish_rejects_hardlink_to_snapshot(tmp_path: Path) -> None:
     case = _case(tmp_path, "<p>Hello world.</p>", ("Hello world.",))
     output = tmp_path / "alias.epub"

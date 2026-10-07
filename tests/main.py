@@ -23,6 +23,7 @@ def test_translate_cli_uses_one_pipeline_and_defaults_to_auto_terms(tmp_path: Pa
     assert len(called) == 1
     assert called[0][1]["auto_extract"] is True
     assert called[0][1]["work_root"] is None
+    assert called[0][1]["max_output_tokens"] == 8192
     assert "输出：" in result.output
 
 
@@ -53,7 +54,8 @@ def test_resume_cli_reports_unfinished_run_as_nonzero(tmp_path: Path, monkeypatc
     result = CliRunner().invoke(main.app, ["resume", str(work_dir), "--output", str(tmp_path / "out.epub")])
 
     assert result.exit_code == 1
-    assert "one item needs repair" in result.output
+    assert "needs_attention" in result.output
+    assert "one item needs repair" not in result.output
 
 
 def test_resume_cli_forwards_explicit_retry_and_budget_targets(tmp_path: Path, monkeypatch) -> None:

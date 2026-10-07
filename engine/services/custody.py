@@ -60,6 +60,11 @@ def retry_checks(record: ItemRecord, review_epoch: int) -> dict[str, Any]:
         "translation_frame": record.checks["translation_frame"],
         "review_epoch": review_epoch,
         **({"translation_epoch": translation_epoch} if translation_epoch else {}),
+        **(
+            {"retry_feedback": str(record.failure["message"])[:1200]}
+            if record.failure and record.failure.get("message")
+            else {}
+        ),
     }
 
 
@@ -84,6 +89,21 @@ def review_draft(record: ItemRecord, target: str, review_epoch: int) -> ItemReco
             "next_action": "review",
         }
     )
+
+
+def review_feedback(records: Mapping[str, ItemRecord], feedback: Mapping[str, str]) -> dict[str, ItemRecord]:
+    """Restore the diagnostic snapshot used to identify a historical review draft."""
+    return {
+        item_id: record.model_copy(
+            update={
+                "checks": {
+                    **{key: value for key, value in record.checks.items() if key != "retry_feedback"},
+                    **({"retry_feedback": feedback[item_id]} if item_id in feedback else {}),
+                }
+            }
+        )
+        for item_id, record in records.items()
+    }
 
 
 def persisted_response(

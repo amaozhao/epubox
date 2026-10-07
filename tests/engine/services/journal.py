@@ -377,9 +377,10 @@ def test_dispatched_attempt_without_response_is_local_error_without_duplicate_tr
     with pytest.raises(RequestError, match="unknown provider outcome"):
         asyncio.run(resumed.runtime(transport=forbidden).invoke("translate", case.batch.payload, manifest))
     after = resumed.progress_snapshot()
-    assert calls == 1
-    assert before["http_attempts"] == after["http_attempts"] == 1
-    assert before["body_http_attempts"] == after["body_http_attempts"] == 1
+    expected_calls = 1 if outcome == "sent" else 3
+    assert calls == expected_calls
+    assert before["http_attempts"] == after["http_attempts"] == expected_calls
+    assert before["body_http_attempts"] == after["body_http_attempts"] == expected_calls
 
 
 def test_explicit_retry_reopens_all_pending_members_of_a_shared_unknown_translation(tmp_path) -> None:
@@ -398,13 +399,13 @@ def test_explicit_retry_reopens_all_pending_members_of_a_shared_unknown_translat
 
     runtime._sleep = no_sleep
     manifest = case.batch.manifest.model_dump(mode="python") | {"output_tokens": case.batch.budget.output_tokens}
-    with pytest.raises(RequestError, match="unknown provider outcome"):
+    with pytest.raises(RequestError, match="provider outcome unknown"):
         asyncio.run(runtime.invoke("translate", case.batch.payload, manifest))
 
     units = tuple(dict.fromkeys(item.unit_id for item in case.batch.items))
     assert set(journal.validate_retry_units(units)) == set(case.batch.manifest.item_ids)
     assert set(journal.retry_units(units)) == set(case.batch.manifest.item_ids)
-    assert journal.progress_snapshot()["body_http_attempts"] == 1
+    assert journal.progress_snapshot()["body_http_attempts"] == 3
 
     async def valid(kind, payload):
         calls.append(kind)
@@ -426,7 +427,7 @@ def test_explicit_retry_reopens_all_pending_members_of_a_shared_unknown_translat
             records=journal.records(case.batch.manifest.item_ids),
         )
     )
-    assert attention.status == "needs_attention" and calls == ["translate", "translate", "review"]
+    assert attention.status == "needs_attention" and calls == ["translate"] * 4 + ["review"]
     assert all(
         record.checks.get("translation_epoch") == 1
         for record in journal.records(case.batch.manifest.item_ids).values()
@@ -451,13 +452,16 @@ def test_explicit_retry_reopens_all_pending_members_of_a_shared_unknown_translat
             records=restarted.records(case.batch.manifest.item_ids),
         )
     )
-    assert completed.status == "completed" and calls == ["translate", "translate", "review", "review"]
+    assert completed.status == "completed" and calls == ["translate"] * 4 + ["review", "review"]
     translation_requests = [request for request in journal._requests.values() if request.stage == "translate"]
     assert len(translation_requests) == 2
     assert sorted(attempt.state for request in translation_requests for attempt in request.attempts) == [
         "failed",
+        "failed",
+        "failed",
         "succeeded",
     ]
+    assert all("provider outcome unknown" in (attempt.error or "") for attempt in translation_requests[0].attempts)
 
 
 def test_authorized_body_quota_addition_survives_restart_without_resetting_attempts(tmp_path) -> None:

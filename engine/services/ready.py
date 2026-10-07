@@ -47,7 +47,7 @@ def limits_from_config(config) -> BudgetLimits:
         context_tokens=context,
         safety_tokens=_int(config, "safety_margin", 256, zero=True),
         target_ratio=float(ratio),
-        output_version=cast(Literal[2, 3, 4, 5], _int(config, "output_budget_version", 2)),
+        output_version=cast(Literal[2, 3, 4, 5, 6], _int(config, "output_budget_version", 2)),
         minimum_source_tokens=(
             _int(config, "minimum_source_tokens", 500)
             if config.get("planner_version") == "epubox-member-planner-2"
@@ -502,6 +502,7 @@ class ReadySession:
             revisions=batch.manifest.revisions if batch.manifest.stage == "review" else None,
             tokenizer_model=_model(prepared.preparation),
             sparse=batch.manifest.sparse,
+            feedback=batch.manifest.feedback_by_item,
         )
         if expected_payload != batch.payload:
             raise IdentityMismatch("workflow payload differs from its frozen source, terms or context")

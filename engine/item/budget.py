@@ -46,13 +46,17 @@ def measure_budget(
     if not items:
         raise ValueError("budget requires at least one item")
     _validate_items(items)
-    messages = request_messages(stage, payload, compact=limits.output_version == 5, wire_version="epubox-wire-5")
+    messages = (
+        request_messages(stage, payload, compact=True, wire_version="epubox-wire-5")
+        if limits.output_version == 5
+        else request_messages(stage, payload, compact=limits.output_version == 6)
+    )
 
     tokenizer, tokenizer_name, fallback = _tokenizer(tokenizer_model)
     source_wire = [{"item_id": _item_id(item), "source": _source(item)} for item in items]
     source_tokens = (
         sum(_projection_parts(_source(item), tokenizer)[0] for item in items)
-        if limits.output_version in {4, 5}
+        if limits.output_version in {4, 5, 6}
         else _count(_json(source_wire), tokenizer)
     )
     input_tokens = _count(_json({"messages": list(messages)}), tokenizer)
@@ -68,7 +72,7 @@ def measure_budget(
                 raise ValueError(f"review actual budget requires saved targets: {', '.join(missing)}")
         elif review_targets == "estimated":
             output_items = tuple(_without_target(item) for item in items)
-            if limits.output_version in {4, 5}:
+            if limits.output_version in {4, 5, 6}:
                 review_target_input_tokens = sum(
                     markers + math.ceil(text * limits.target_ratio)
                     for item in items
@@ -99,8 +103,15 @@ def measure_budget(
     output_tokenizer = _planner_tokenizer()
     if output_tokenizer is None or output_tokenizer.name != tokenizer_name:
         raise RuntimeError("output tokenizer does not match budget tokenizer")
-    if limits.output_version == 5:
-        output_tokens = _v5_output_tokens(stage, output_items, payload, limits, tokenizer)
+    if limits.output_version in {5, 6}:
+        output_tokens = _slotted_output_tokens(
+            stage,
+            output_items,
+            payload,
+            limits,
+            tokenizer,
+            formatted=limits.output_version == 6,
+        )
     elif limits.output_version == 4:
         output_tokens = _v4_output_tokens(stage, output_items, payload, limits, estimate_config, tokenizer)
     else:
@@ -229,12 +240,14 @@ def _v4_output_tokens(
     return max(limits.output_tokens, reserved)
 
 
-def _v5_output_tokens(
+def _slotted_output_tokens(
     stage: BudgetStage,
     items: Sequence[Mapping[str, Any]],
     payload: Mapping[str, Any],
     limits: BudgetLimits,
     tokenizer: Any,
+    *,
+    formatted: bool,
 ) -> int:
     """Reserve only emitted short IDs/text slots; markers are restored locally."""
     envelope: list[dict[str, Any]] = []
@@ -262,10 +275,9 @@ def _v5_output_tokens(
         envelope.append(value)
     if stage == "review":
         text_tokens += 160  # Shared allowance for concise issues, plus the 50% response margin below.
-    complete = text_tokens + _count(
-        _json({"protocol": payload["protocol"], "request_id": payload.get("request_id", ""), "items": envelope}),
-        tokenizer,
-    )
+    response = {"protocol": payload["protocol"], "request_id": payload.get("request_id", ""), "items": envelope}
+    encoded = json.dumps(response, ensure_ascii=False, sort_keys=True, indent=2) if formatted else _json(response)
+    complete = text_tokens + _count(encoded, tokenizer)
     reserved = complete + math.ceil(complete * TOKENIZER_MARGIN_PERCENT / 100) + WRAPPER_HEADROOM_TOKENS
     return max(limits.output_tokens, reserved)
 

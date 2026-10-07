@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
+from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 from zipfile import ZipFile
 
 import pytest
@@ -112,7 +114,11 @@ def test_plain_command_translates_titles_and_derives_navigation_without_translat
 
 
 def test_plain_command_rebuilds_only_unsent_blocked_local_budget_plan(tmp_path, monkeypatch):
-    body = "<table>" + "<tr><td><p>A</p></td><td><p>B</p></td></tr>" * 25 + "</table>"
+    body = (
+        "<ul>"
+        + "".join(f'<li>Entry {number}, <a href="#p{number}">{number}</a></li>' for number in range(125))
+        + "</ul>"
+    )
     source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": body})
     config = PreparationConfig(
         run_id="old",
@@ -127,10 +133,19 @@ def test_plain_command_rebuilds_only_unsent_blocked_local_budget_plan(tmp_path, 
         translation_config={
             "provider": "agnes",
             "model": cli.settings.AGNES_MODEL,
+            "target_language": "zh-Hans",
             "max_source_tokens": 2000,
+            "minimum_source_tokens": 500,
+            "max_input_tokens": 50000,
             "max_output_tokens": 4096,
             "context_tokens": 32768,
-            "output_budget_version": 3,
+            "prompt_version": "epubox-members-1",
+            "planner_version": "epubox-member-planner-2",
+            "input_budget_version": 2,
+            "output_budget_version": 6,
+            "run_http_limit": 0,
+            "concurrency": 2,
+            "rpm": cli.settings.AGNES_TEXT_RPM,
         },
     )
     root = source.with_suffix("")
@@ -141,8 +156,44 @@ def test_plain_command_rebuilds_only_unsent_blocked_local_budget_plan(tmp_path, 
         cli.settings.AGNES_MODEL,
     )
     assert not old.passed
+    upgraded = replace(
+        config,
+        extraction_config=dict(prepared.preparation.extraction_config),
+        translation_config=dict(prepared.preparation.translation_config)
+        | {"max_output_tokens": 8192, "output_budget_version": 6},
+    )
+    assert cli._replan_local(prepared.work_dir, upgraded)
+    state.write(prepared.work_dir / "glossary" / "plan.json", b"{}")
+    assert not cli._replan_local(prepared.work_dir, upgraded)
+    state.unlink(prepared.work_dir / "glossary" / "plan.json")
     cli._write_source_hint(prepared.work_dir, source, prepared.preparation.source_hash, "old")
     remember(source, prepared.work_dir)
+    before = {
+        path.relative_to(prepared.work_dir): path.read_bytes()
+        for path in prepared.work_dir.rglob("*")
+        if path.is_file()
+    }
+    capped = replace(
+        upgraded,
+        translation_config=dict(upgraded.translation_config) | {"max_output_tokens": 4096},
+    )
+    assert not cli._replan_local(prepared.work_dir, capped)
+    glossary = tmp_path / "terms.json"
+    glossary.write_text('{"A":"甲"}')
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: pytest.fail("conflict built a model"))
+    conflicts: tuple[tuple[dict[str, Any], frozenset[str]], ...] = (
+        ({"provider": "proxy"}, frozenset({"provider"})),
+        ({"concurrency": 3}, frozenset({"concurrency"})),
+        ({"glossary": glossary}, frozenset({"glossary"})),
+    )
+    for options, explicit in conflicts:
+        with pytest.raises(ValueError, match="different frozen configuration|conflicts"):
+            cli.translate_book(source, explicit_options=explicit, **options)
+        assert {
+            path.relative_to(prepared.work_dir): path.read_bytes()
+            for path in prepared.work_dir.rglob("*")
+            if path.is_file()
+        } == before
     monkeypatch.setattr(cli, "build_run_model", lambda *args, **kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
     monkeypatch.setattr(cli, "checker_for_source", lambda *args: StubChecker())
     reached = []
@@ -153,7 +204,9 @@ def test_plain_command_rebuilds_only_unsent_blocked_local_budget_plan(tmp_path, 
         report = prepare_preflight(
             RunStore(work_root), limits_from_config(new.preparation.translation_config), cli.settings.AGNES_MODEL
         )
-        assert report.passed and updated.translation_config["output_budget_version"] == 4
+        assert report.passed and updated.translation_config["output_budget_version"] == 6
+        assert updated.translation_config["max_output_tokens"] == 8192
+        assert updated.extraction_config["max_output_tokens"] == 4096
         reached.append(True)
         return cli._record(cli.RunOutcome("paused", work_root, "preflight"))
 

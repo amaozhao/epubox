@@ -261,6 +261,7 @@ class RequestManifest(FrozenModel):
     input_hashes: dict[str, str]
     wire_hash: str = Field(min_length=1)
     sparse: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
+    feedback_by_item: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
     record_versions: dict[str, int] = Field(default_factory=dict)
     item_unit_ids: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     unit_document_ids: dict[str, str] = Field(default_factory=dict)
@@ -290,6 +291,12 @@ class RequestManifest(FrozenModel):
 
     @model_validator(mode="after")
     def validate_owner(self) -> RequestManifest:
+        if self.feedback_by_item and (
+            self.stage not in {"translate", "review"}
+            or not set(self.feedback_by_item).issubset(self.item_ids)
+            or any(not value.strip() or len(value) > 1200 for value in self.feedback_by_item.values())
+        ):
+            raise ValueError("repair feedback must name request members and contain bounded messages")
         if self.sparse and self.stage not in {"translate", "review"}:
             raise ValueError("only body workflow requests may regroup checkpoint members")
         if not self.item_ids or len(self.item_ids) != len(set(self.item_ids)):

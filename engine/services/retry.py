@@ -78,7 +78,16 @@ def retry_units(journal: BodyJournal, unit_ids: Sequence[str], *, retry_unknown:
                 for record in candidates:
                     reopened = (
                         _initial(journal, record.item_id).model_copy(
-                            update={"checks": {"translation_epoch": translation_epoch}}
+                            update={
+                                "checks": {
+                                    "translation_epoch": translation_epoch,
+                                    **(
+                                        {"retry_feedback": str(record.failure["message"])[:1200]}
+                                        if record.failure and record.failure.get("message")
+                                        else {}
+                                    ),
+                                }
+                            }
                         )
                         if record.target_projection is None
                         else record.model_copy(

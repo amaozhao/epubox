@@ -393,6 +393,7 @@ def build_member_payload(
     compact_constraints: bool = False,
     relaxed_adjacency: bool = False,
     sparse: bool = False,
+    feedback: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if stage not in {"translate", "review"} or not request_id:
         raise ValueError("member payload requires a supported stage and request ID")
@@ -426,6 +427,8 @@ def build_member_payload(
             "hints": hints,
             "constraints": constraints,
         }
+        if feedback and item.item_id in feedback:
+            wire["repair"] = feedback[item.item_id]
         if stage == "review":
             record = review[item.item_id]
             target = cast(str, record.target_projection)
@@ -463,6 +466,7 @@ def fit_member_payload(
     revisions: Mapping[str, int] | None = None,
     tokenizer_model: str = "gpt-3.5-turbo",
     sparse: bool = False,
+    feedback: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], BudgetResult]:
     """Keep fitting legacy requests unchanged; compact only an otherwise blocked singleton."""
     payload: dict[str, Any] = {}
@@ -486,13 +490,19 @@ def fit_member_payload(
             compact_constraints=compact,
             relaxed_adjacency=bool(limits.minimum_source_tokens),
             sparse=sparse,
+            feedback=feedback,
         )
-        if limits.output_version == 5:
+        if limits.output_version in {5, 6}:
             payload["wire_version"] = "epubox-wire-5"
         budget = measure_budget(stage=stage, payload=payload, limits=limits, tokenizer_model=tokenizer_model)
         if budget.fits:
             return payload, budget
     assert budget is not None
+    if limits.output_version == 6:
+        # Slot replies restore every marker locally; keep full constraints in the member registry.
+        for item in payload["items"]:
+            item["constraints"] = {}
+        budget = measure_budget(stage=stage, payload=payload, limits=limits, tokenizer_model=tokenizer_model)
     return payload, budget
 
 
@@ -551,6 +561,7 @@ def pack_members(
     completed: Collection[str] = (),
     tokenizer_model: str = "gpt-3.5-turbo",
     sparse: bool = False,
+    feedback: Mapping[str, str] | None = None,
 ) -> MemberPackingResult:
     members = tuple(items)
     if stage not in {"translate", "review"}:
@@ -559,6 +570,11 @@ def pack_members(
         raise ValueError("translation planning cannot include review targets")
     if len({item.item_id for item in members}) != len(members):
         raise ValueError("member planning cannot repeat an item")
+    if feedback and (
+        not set(feedback).issubset(item.item_id for item in members)
+        or any(not isinstance(value, str) or not value.strip() or len(value) > 1200 for value in feedback.values())
+    ):
+        raise ValueError("repair feedback must contain bounded messages for requested members")
     if not set(completed).issubset(index.items_by_id):
         raise ValueError("completed checkpoint references an unknown member")
     if glossary.source_hash != index.source_hash:
@@ -614,6 +630,11 @@ def pack_members(
         }
         if sparse:
             identity["sparse"] = True
+        selected_feedback = {
+            item.item_id: feedback[item.item_id] for item in values if feedback and item.item_id in feedback
+        }
+        if selected_feedback:
+            identity["feedback"] = selected_feedback
         request_id = "tx-" + canonical_hash(identity)[:32]
         return fit_member_payload(
             stage,
@@ -628,6 +649,7 @@ def pack_members(
             else None,
             tokenizer_model=tokenizer_model,
             sparse=sparse,
+            feedback=selected_feedback,
         )
 
     for position, item in enumerate(members):
@@ -810,7 +832,7 @@ def pack_members(
                 )
             position += 1
         if (
-            limits.output_version == 5
+            limits.output_version in {5, 6}
             and stage == "translate"
             and not sparse
             and not any((record_versions or {}).values())
@@ -823,6 +845,15 @@ def pack_members(
                     value.items[0].channel == "body"
                     and value.budget.source_tokens < minimum
                     and index.body_tokens.get(document, 0) >= minimum
+                    and not (
+                        limits.output_version == 6
+                        and boundary.reason == "minimum_unavoidable"
+                        and any(
+                            budget in failure
+                            for failure in boundary.failures
+                            for budget in ("output budget", "input budget", "context budget")
+                        )
+                    )
                     and not any(
                         index.members_by_id[item].channel == "body"
                         and index.members_by_id[item].document_id == document
@@ -911,6 +942,9 @@ def _batch(
         },
         wire_hash=budget.wire_hash,
         sparse=sparse,
+        feedback_by_item={
+            item.item_id: wire[item.item_id]["repair"] for item in items if "repair" in wire[item.item_id]
+        },
         record_versions={item.unit_id: (versions or {}).get(item.unit_id, 0) for item in items},
         item_unit_ids={item.item_id: (item.unit_id,) for item in items},
         unit_document_ids={item.unit_id: item.document_id for item in items},

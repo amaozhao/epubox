@@ -35,7 +35,7 @@ from engine.schemas.ready import AtomicPlan, AtomicPreparedInput
 from engine.services import state
 from engine.services.atomic import CorruptRecord, safe_id
 from engine.services.coherence import _read as read_coherence_record
-from engine.services.custody import review_draft
+from engine.services.custody import review_draft, review_feedback
 from engine.services.preflight import PreflightReport
 from engine.services.ready import derived_record, limits_from_config
 from engine.services.store import RunStore
@@ -352,6 +352,7 @@ def _compact_request_proofs(root, ready, members, records, index, requests) -> N
                     targets[item_id] = review_draft(
                         saved, result["target"], request.revisions[members[item_id].unit_id]
                     )
+                targets = review_feedback(targets, request.feedback_by_item)
             packed = pack_members(
                 stage,
                 tuple(members[key] for key in request.item_ids),
@@ -362,6 +363,7 @@ def _compact_request_proofs(root, ready, members, records, index, requests) -> N
                 revisions=request.revisions if stage == "review" else None,
                 record_versions=request.record_versions,
                 plan_epochs=request.plan_epochs,
+                feedback=request.feedback_by_item,
                 tokenizer_model=str(ready.plan.translation_config["model"]),
                 sparse=request.sparse,
             )
@@ -416,6 +418,7 @@ def _atomic_record_frame(
         limits_from_config(ready.plan.translation_config),
         record_versions=request.record_versions,
         plan_epochs=request.plan_epochs,
+        feedback=request.feedback_by_item,
         tokenizer_model=str(ready.plan.translation_config["model"]),
         sparse=request.sparse,
     )

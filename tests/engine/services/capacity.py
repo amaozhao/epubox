@@ -106,7 +106,7 @@ def test_historical_wire_response_replays_before_new_physical_capacity_check(tmp
         response["raw"], case.batch.manifest.request_id, {case.batch.items[0].item_id: "First."}
     ).accepted
 
-    assert wire.VERSION == "epubox-wire-6"
+    assert wire.VERSION != "epubox-wire-5" and "epubox-wire-5" in wire.VERSIONS
     assert oversized + case.batch.budget.output_tokens + frozen.safety_tokens > frozen.context_limit
     assert accepted[case.batch.items[0].item_id]["target"] == "第一。"
     request = resumed.store.read_request(case.batch.manifest.request_id)

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -39,8 +40,16 @@ async def run_atomic(
         session = journal.session
         ready = session.prepared
         journal.recover_results()
-        if reopen_attention and ready.plan.translation_config.get("output_budget_version", 2) in {3, 4, 5}:
+        recovery_partitions: tuple[tuple[str, ...], ...] = ()
+        if reopen_attention and ready.plan.translation_config.get("output_budget_version", 2) in {3, 4, 5, 6}:
             records = journal.records()
+            attention = {
+                item_id
+                for item_ids in ready.plan.unit_members.values()
+                for item_id in item_ids
+                if records[item_id].status == ItemStatus.NEEDS_ATTENTION
+            }
+            recovery_partitions = _retry_partitions(journal, attention)
             units = {
                 unit_id
                 for unit_id, item_ids in ready.plan.unit_members.items()
@@ -50,7 +59,8 @@ async def run_atomic(
                 if request.stage in {"translate", "review"} and journal._ambiguous(request):
                     units.update(unit_id for owners in request.item_unit_ids.values() for unit_id in owners)
             if units:
-                journal.retry_units(tuple(sorted(units)))
+                reopened = set(journal.retry_units(tuple(sorted(units))))
+                recovery_partitions = _selected_partitions(recovery_partitions, reopened)
             if progress:
                 progress({"phase": "recovery", "notice": f"恢复：正文断点处理完成，重试 {len(units)} 个单元。"})
         order = {document: index for index, document in enumerate(session.index.document_order)}
@@ -61,7 +71,7 @@ async def run_atomic(
         configured = ready.plan.translation_config.get("concurrency", 2)
         if type(configured) is not int or configured < 1:
             raise ValueError("frozen concurrency must be a positive integer")
-        pending = iter(_pending_batches(journal, batches))
+        pending = iter(_pending_batches(journal, batches, partitions=recovery_partitions))
         retry_failures: set[str] = set()
         retry_round = 0
         active: dict[asyncio.Task, tuple[MemberBatch, float]] = {}
@@ -192,15 +202,19 @@ async def run_atomic(
                             for request in journal._requests.values()
                             if request.stage in {"translate", "review"} and journal._ambiguous(request)
                         ]
-                        while units:
-                            blocked = set().union(*(group for group in groups if group & units and not group <= units))
-                            if not blocked:
-                                break
-                            units.difference_update(blocked)
+                        units.difference_update(set().union(*groups) if groups else set())
                         if units:
+                            partitions = _retry_partitions(journal, retry_failures)
                             reopened = set(journal.retry_units(tuple(sorted(units))))
                             retry_round += 1
-                            pending = iter(_pending_batches(journal, batches, reopened))
+                            pending = iter(
+                                _pending_batches(
+                                    journal,
+                                    batches,
+                                    reopened,
+                                    partitions=_selected_partitions(partitions, reopened),
+                                )
+                            )
                             if progress:
                                 progress(
                                     {
@@ -292,9 +306,24 @@ async def run_atomic(
         )
 
 
-def _pending_batches(journal, initial, selected=None) -> tuple[MemberBatch, ...]:
+def _pending_batches(
+    journal,
+    initial,
+    selected=None,
+    *,
+    partitions: Sequence[Collection[str]] = (),
+) -> tuple[MemberBatch, ...]:
     """Regroup a checkpoint by HTML, channel and next step, preserving completed members."""
     records = journal.records()
+    if not partitions:
+        retry_items = {
+            item_id
+            for item_id, record in records.items()
+            if record.status in {ItemStatus.PENDING, ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
+            and isinstance(record.checks.get("retry_feedback"), str)
+        }
+        if retry_items:
+            partitions = _retry_partitions(journal, retry_items)
     fresh = selected is None and all(
         records[item].status == ItemStatus.PENDING and not _translation_epoch(records[item])
         for batch in initial
@@ -307,6 +336,12 @@ def _pending_batches(journal, initial, selected=None) -> tuple[MemberBatch, ...]
     if fresh and not merge_navigation:
         return tuple(initial)
     session = journal.session
+    partition_by_item: dict[str, int] = {}
+    for position, partition in enumerate(partitions):
+        for item_id in partition:
+            if item_id in partition_by_item:
+                raise ValueError("retry partitions cannot overlap")
+            partition_by_item[item_id] = position
     batches = (
         [
             batch
@@ -328,7 +363,12 @@ def _pending_batches(journal, initial, selected=None) -> tuple[MemberBatch, ...]
             or member.unit_id in session.prepared.plan.derived_sources
         ):
             continue
-        key = (member.document_id, member.channel, record.target_projection is not None)
+        key = (
+            partition_by_item.get(member.item_id, -1),
+            member.document_id,
+            member.channel,
+            record.target_projection is not None,
+        )
         epoch = _review_epoch(record) if record.target_projection is not None else _translation_epoch(record)
         for members, epochs in lanes.setdefault(key, []):
             if epochs.get(member.unit_id, epoch) == epoch:
@@ -350,6 +390,11 @@ def _pending_batches(journal, initial, selected=None) -> tuple[MemberBatch, ...]
             session.index,
             limits_for(session.prepared.preparation),
             record_versions=versions,
+            feedback={
+                member.item_id: feedback
+                for member in members
+                if isinstance((feedback := records[member.item_id].checks.get("retry_feedback")), str)
+            },
             tokenizer_model=str(session.prepared.plan.translation_config["model"]),
             sparse=True,
         )
@@ -360,10 +405,13 @@ def _pending_batches(journal, initial, selected=None) -> tuple[MemberBatch, ...]
 
 
 def _structural_failure(record) -> bool:
-    message = (record.failure or {}).get("message")
-    if isinstance(message, str) and message.endswith("translation response was truncated"):
+    message = _retry_message(record)
+    if not isinstance(message, str):
+        return False
+    if message.endswith(("translation response was truncated", "review response was truncated")):
         return True
-    return isinstance(message, str) and message.startswith(
+    detail = _failure_detail(message)
+    return detail.startswith(
         (
             "text moved across",
             "reference moved across",
@@ -382,6 +430,90 @@ def _structural_failure(record) -> bool:
             "target decoding failed:",
             "target contains invalid XML",
             "translation item missing",
+            "review item missing",
+            "duplicate item_id",
+            "response root must",
+        )
+    )
+
+
+def _retry_partitions(journal, selected: Collection[str]) -> tuple[tuple[str, ...], ...]:
+    """Keep failed request ownership while shrinking retries that cannot succeed unchanged."""
+    wanted = set(selected)
+    records = journal.records(tuple(wanted))
+    truncated: dict[str, list[str]] = {}
+    for item_id, record in records.items():
+        message = _retry_message(record)
+        if not isinstance(message, str) or not message.endswith("response was truncated"):
+            continue
+        match = re.match(r"^(?:translate|review):(tx-[^:]+):", message)
+        if match and match.group(1) in journal._requests:
+            truncated.setdefault(match.group(1), []).append(item_id)
+
+    partitions: list[tuple[str, ...]] = []
+    claimed: set[str] = set()
+    for request_id in truncated:
+        request = journal._requests[request_id]
+        members = tuple(item_id for item_id in request.item_ids if item_id in wanted)
+        if not members:
+            continue
+        middle = max(1, len(members) // 2)
+        partitions.append(members[:middle])
+        if members[middle:]:
+            partitions.append(members[middle:])
+        claimed.update(members)
+    for item_id in _session_order(journal, wanted - claimed):
+        if _isolation_failure(records[item_id]):
+            partitions.append((item_id,))
+    return tuple(partitions)
+
+
+def _retry_message(record) -> str | None:
+    message = (record.failure or {}).get("message")
+    if isinstance(message, str):
+        return message
+    feedback = record.checks.get("retry_feedback")
+    return feedback if isinstance(feedback, str) else None
+
+
+def _failure_detail(message: str) -> str:
+    return re.sub(r"^(?:translate|review):tx-[^:]+:\s*", "", message)
+
+
+def _isolation_failure(record) -> bool:
+    message = _retry_message(record)
+    if not isinstance(message, str):
+        return False
+    return _failure_detail(message).startswith(
+        (
+            "text moved across",
+            "reference moved across",
+            "locked reference order changed",
+            "plain text and metadata units",
+            "marker inventory mismatch",
+            "crossed or unmatched",
+            "unclosed target",
+            "duplicate target",
+            "unknown projection marker",
+            "unclosed projection marker",
+            "literal closing delimiter",
+            "unsupported projection escape",
+            "dangling projection escape",
+            "target must be",
+            "target decoding failed:",
+            "target contains invalid XML",
             "duplicate item_id",
         )
     )
+
+
+def _selected_partitions(
+    partitions: Sequence[Collection[str]], selected: Collection[str]
+) -> tuple[tuple[str, ...], ...]:
+    wanted = set(selected)
+    return tuple(values for partition in partitions if (values := tuple(item for item in partition if item in wanted)))
+
+
+def _session_order(journal, selected: Collection[str]) -> tuple[str, ...]:
+    wanted = set(selected)
+    return tuple(member.item_id for member in journal.session.index.members if member.item_id in wanted)

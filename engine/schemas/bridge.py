@@ -339,6 +339,8 @@ def validate_batch_identity(batch: Any, *, allow_pieces: bool = False) -> Any:
         ):
             raise ValueError("payload item differs from its whole source atom")
         terms = wire_item.get("terms", [])
+        if wire_item.get("repair") != batch.manifest.feedback_by_item.get(item.item_id):
+            raise ValueError("payload repair feedback differs from its frozen manifest")
         if not isinstance(terms, list):
             raise ValueError("payload terms must identify every selected rule")  # noqa: TRY004 - Pydantic wraps ValueError.
         selected: list[str] = []

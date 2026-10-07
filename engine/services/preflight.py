@@ -296,7 +296,7 @@ def _piece(
     wire = [{"item_id": piece_id, "source": source}]
     translate_payload = base | {"protocol": "epubox-text-1", "items": wire}
     review_payload = base | {"protocol": "epubox-review-2", "items": wire}
-    if limits.output_version == 5:
+    if limits.output_version in {5, 6}:
         translate_payload["prompt_version"] = "epubox-members-1"
         review_payload["prompt_version"] = "epubox-members-1"
     return PreflightPiece(

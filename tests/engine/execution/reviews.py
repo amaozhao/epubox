@@ -71,9 +71,10 @@ def test_failed_reviews_retry_twice_after_later_content_without_retranslation(tm
 
     result = asyncio.run(run_translation(case.session.store.root, transport=transport))
     assert result.status == "translated"
-    assert reviewed[failed_item] == 3 and len(set(request_ids)) == 3
+    assert reviewed[failed_item] == 3
+    assert len(set(request_ids)) == (1 if failure == "timeout" else 3)
     assert all(count == 1 for count in translated.values())
-    assert reviewed[case.batch.items[1].item_id] == (3 if failure in {"timeout", "truncated"} else 1)
+    assert reviewed[case.batch.items[1].item_id] == (3 if failure == "timeout" else 2 if failure == "truncated" else 1)
     saved = BodyJournal(case.session.store)
     assert saved.records()[failed_item].status == ItemStatus.REVIEWED
     before = sum(translated.values()) + sum(reviewed.values())

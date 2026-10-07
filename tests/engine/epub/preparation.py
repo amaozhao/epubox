@@ -293,11 +293,11 @@ def test_atomic_p1_uses_raw_resources_and_freezes_member_budget(tmp_path: Path) 
         "max_source_tokens": settings.EPUB_CHUNK_MAX_TOKENS,
         "context_tokens": 32768,
         "max_input_tokens": 32768,
-        "max_output_tokens": 4096,
+        "max_output_tokens": 8192,
         "prompt_version": "epubox-members-1",
         "planner_version": "epubox-member-planner-2",
         "input_budget_version": 2,
-        "output_budget_version": 5,
+        "output_budget_version": 6,
         "minimum_source_tokens": settings.EPUB_CHUNK_MIN_TOKENS,
     }
     assert not any(

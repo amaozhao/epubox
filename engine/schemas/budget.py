@@ -26,12 +26,12 @@ class BudgetLimits:
     context_tokens: int
     safety_tokens: int = 256
     target_ratio: float = 1.6
-    output_version: Literal[2, 3, 4, 5] = 2
+    output_version: Literal[2, 3, 4, 5, 6] = 2
     minimum_source_tokens: int = 0
     source_tolerance_tokens: int = 0
 
     def __post_init__(self) -> None:
-        if type(self.output_version) is not int or self.output_version not in (2, 3, 4, 5):
+        if type(self.output_version) is not int or self.output_version not in (2, 3, 4, 5, 6):
             raise ValueError("unsupported output budget version")
         integers = (self.source_tokens, self.input_tokens, self.output_tokens, self.context_tokens)
         if any(type(value) is not int or value < 1 for value in integers):
@@ -65,7 +65,7 @@ class BudgetLimits:
 class BudgetIdentity(FrozenModel):
     """Policy identity required to validate a saved budget."""
 
-    version: Literal[2, 3, 4, 5]
+    version: Literal[2, 3, 4, 5, 6]
     tokenizer: str = Field(min_length=1)
     tokenizer_version: str = Field(min_length=1)
     tokenizer_model: str = Field(min_length=1)

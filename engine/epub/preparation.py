@@ -363,13 +363,15 @@ def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue
         if provider not in {"agnes", "cr_proxy"}:
             raise ValueError(f"unsupported translation provider: {provider!r}")
         default_model = settings.AGNES_MODEL if provider == "agnes" else settings.CR_PROXY_MODEL
+        context_default = translation.get("context_tokens", 32_768)
+        default_output = min(8_192, context_default // 2) if type(context_default) is int else 8_192
         defaults: dict[str, JsonValue] = {
             "provider": provider,
             "model": translation.get("model", default_model),
             "target_language": translation.get("target_language", "zh-Hans"),
             "max_source_tokens": settings.EPUB_CHUNK_MAX_TOKENS,
-            "context_tokens": 32_768,
-            "max_output_tokens": 4_096,
+            "context_tokens": context_default,
+            "max_output_tokens": max(1, default_output),
             "prompt_version": "epubox-members-1",
             "planner_version": "epubox-member-planner-2",
             "input_budget_version": 2,
@@ -378,7 +380,7 @@ def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue
         for name, value in defaults.items():
             translation.setdefault(name, value)
         if translation["planner_version"] == "epubox-member-planner-2":
-            translation.setdefault("output_budget_version", 5)
+            translation.setdefault("output_budget_version", 6)
             translation.setdefault("minimum_source_tokens", settings.EPUB_CHUNK_MIN_TOKENS)
         if translation["target_language"] != "zh-Hans":
             raise ValueError(f"unsupported target language: {translation['target_language']!r}")

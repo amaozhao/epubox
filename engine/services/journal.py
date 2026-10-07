@@ -37,7 +37,7 @@ from engine.services.custody import number as _number
 from engine.services.custody import optional as _optional
 from engine.services.custody import persisted_response as _persisted_response
 from engine.services.custody import positive as _positive
-from engine.services.custody import review_draft
+from engine.services.custody import review_draft, review_feedback
 from engine.services.custody import text as _text
 from engine.services.ready import ReadySession, limits_from_config
 from engine.services.store import ModelResponseStage, RunStore
@@ -460,6 +460,7 @@ class BodyJournal:
             limits_from_config(self.session.prepared.plan.translation_config),
             record_versions=request.record_versions,
             plan_epochs=request.plan_epochs,
+            feedback=request.feedback_by_item,
             tokenizer_model=_text(self.session.prepared.plan.translation_config, "model"),
             sparse=request.sparse,
         )
@@ -489,6 +490,7 @@ class BodyJournal:
             )
             for item_id in request.item_ids
         }
+        targets = review_feedback(targets, request.feedback_by_item)
         packed = pack_members(
             "review",
             members,
@@ -499,6 +501,7 @@ class BodyJournal:
             revisions=request.revisions,
             record_versions=request.record_versions,
             plan_epochs=request.plan_epochs,
+            feedback=request.feedback_by_item,
             tokenizer_model=_text(self.session.prepared.plan.translation_config, "model"),
             sparse=request.sparse,
         )
@@ -673,7 +676,8 @@ class BodyJournal:
                 )
             ):
                 raise IdentityMismatch("physical request exceeds frozen input or context capacity")
-        if self._ambiguous(self._requests[request_id]):
+        attempt_number = attempt.reservation.get("attempt_number")
+        if self._ambiguous(self._requests[request_id]) and attempt_number not in {2, 3}:
             raise RequestError("body request has an unknown provider outcome without a persisted response")
         if self._run_limit and self._run_attempts >= self._run_limit:
             raise RuntimePaused("frozen body request limit is exhausted")
@@ -687,7 +691,10 @@ class BodyJournal:
         attempts = tuple(request.attempts)
         if cached is not None and cached[0] == attempts:
             return cached[1]
-        result = any(
+        result = not any(
+            self.store.read_model_response(request.stage, request.request_id, attempt.attempt_id) is not None
+            for attempt in request.attempts
+        ) and any(
             (
                 attempt.state in {"sent", "unknown"}
                 or attempt.state == "reserved"
@@ -896,11 +903,12 @@ class BodyJournal:
                     continue
                 if not retry_unknown:
                     raise RuntimePaused(f"explicit retry must authorize an unknown {stage} outcome")
+                authorization = f"explicit retry authorized after unknown {stage} outcome"
                 self._finish(
                     request.request_id,
                     attempt.attempt_id,
                     state="failed",
-                    error=f"explicit retry authorized after unknown {stage} outcome",
+                    error=f"{attempt.error}; {authorization}" if attempt.error else authorization,
                     finished_at=attempt.finished_at or datetime.now(UTC).isoformat(),
                 )
                 unlocked = True

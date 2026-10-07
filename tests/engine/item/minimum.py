@@ -146,3 +146,20 @@ def test_no_small_split_body_request_is_emitted_when_provider_limits_prevent_mer
     planned = pack_members("translate", members, glossary(), index, capacity)
     assert not planned.ready
     assert not any(batch.items[0].channel == "body" and batch.budget.source_tokens < 500 for batch in planned.batches)
+
+
+def test_dense_index_hard_output_capacity_does_not_block_the_entire_document():
+    inventory, report = prepared("<p>Agentic <em>AI</em> model</p>" * 321, cap=2000)
+    members = materialize_members((inventory,), report)
+    index = MemberIndex((inventory,), report, members)
+    capacity = replace(limits(), output_version=6, output_tokens=4096, minimum_source_tokens=500)
+    planned = pack_members("translate", members, glossary(), index, capacity)
+    assert planned.ready and len(planned.batches) > 1
+    assert all(batch.budget.fits for batch in planned.batches)
+    assert [item.item_id for batch in planned.batches for item in batch.items] == [item.item_id for item in members]
+    assert any(batch.budget.source_tokens < 500 for batch in planned.batches)
+    assert all(
+        boundary.reason == "minimum_unavoidable" and "output budget" in boundary.failures[0]
+        for batch, boundary in zip(planned.batches, planned.boundaries, strict=True)
+        if batch.budget.source_tokens < 500
+    )

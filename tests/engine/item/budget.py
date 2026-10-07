@@ -320,6 +320,27 @@ def test_v5_output_counts_only_the_text_slots_the_model_actually_returns() -> No
     assert current.source_tokens == legacy.source_tokens
 
 
+def test_v6_reserves_formatted_json_for_many_small_slots_without_changing_v5() -> None:
+    items = []
+    for number in range(107):
+        source = "AI " + "word " * (3 if number < 7 else 2) + "⟦=x1⟧platform"
+        if number < 59:
+            source += "⟦=x2⟧42"
+        items.append({"item_id": f"item-{number}", "source": source})
+    request = payload("translate", items)
+    request["prompt_version"] = "epubox-members-1"
+    request["wire_version"] = "epubox-wire-5"
+
+    frozen = measure_budget(stage="translate", payload=request, limits=limits(output_version=5))
+    current = measure_budget(stage="translate", payload=request, limits=limits(output_version=6))
+
+    assert frozen.source_tokens == current.source_tokens == 601
+    assert sum(source["source"].count("⟦=") + 1 for source in items) == 273
+    assert frozen.fits and frozen.output_tokens == 4096
+    assert current.output_tokens > 4096
+    assert any(reason.startswith("output budget") for reason in current.failures)
+
+
 def test_v4_output_still_rejects_huge_marker_inventory() -> None:
     markers = "".join(f"⟦=x{index}⟧" for index in range(2000))
     measured = measure_budget(

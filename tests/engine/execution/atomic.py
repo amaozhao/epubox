@@ -10,6 +10,7 @@ from engine.item.inline import events_to_projection, parse_projection
 from engine.orchestrator import run_translation
 from engine.schemas.internal import Event
 from engine.services.journal import BodyJournal
+from engine.services.session import reopen
 from main import _progress_printer
 from tests.engine.agents.workflow import prepare_case, review_item
 
@@ -132,8 +133,10 @@ def test_truncated_translation_is_retried_without_accepting_incomplete_json(tmp_
 
     result = asyncio.run(run_translation(case.session.store.root, transport=transport, progress=events.append))
     assert result.status == "translated", result.reason
-    assert [kind for kind, _ in calls] == ["translate", "translate", "review"]
-    assert calls[0][1] != calls[1][1]
+    assert calls[0][0] == "translate"
+    assert [kind for kind, _ in calls].count("translate") == 3
+    assert [kind for kind, _ in calls].count("review") == 2
+    assert len({request_id for _, request_id in calls}) == len(calls)
     failures = [
         event
         for event in events
@@ -162,8 +165,8 @@ def test_repeated_truncation_stays_an_error_and_preserves_restart_retry(tmp_path
 
     result = asyncio.run(run_translation(case.session.store.root, transport=broken))
     assert result.status == "needs_attention"
-    assert len(calls) == 3 and len(set(calls)) == 3
-    assert result.reason and result.reason.count("translation response was truncated") == 1
+    assert len(calls) == 5 and len(set(calls)) == 5
+    assert result.reason and result.reason.count("translation response was truncated") == 2
     journal = BodyJournal(case.session.store)
     assert all(
         record.status == ItemStatus.NEEDS_ATTENTION and record.target_projection is None
@@ -171,11 +174,45 @@ def test_repeated_truncation_stays_an_error_and_preserves_restart_retry(tmp_path
     )
     assert result.accepted_units == case.prepared.plan.required_unit_count - len(wanted)
 
+    resumed_calls = []
+
     async def healthy(kind, payload):
+        if kind == "translate" and wanted & {item["item_id"] for item in payload["items"]}:
+            resumed_calls.append(tuple(item["item_id"] for item in payload["items"]))
         return answer(kind, payload)
 
-    resumed = asyncio.run(run_translation(case.session.store.root, transport=healthy, reopen_attention=True))
+    assert set(reopen(case.session.store.root)) == wanted
+    resumed = asyncio.run(run_translation(case.session.store.root, transport=healthy))
     assert resumed.status == "translated"
+    assert sorted(map(len, resumed_calls)) == [1, 1]
+
+
+@pytest.mark.parametrize("stage", ("translate", "review"))
+def test_truncated_large_batch_is_bisected_until_complete(tmp_path, stage):
+    values = tuple(f"Part {number}." for number in range(8))
+    case = prepare_case(
+        tmp_path,
+        "".join(f"<p>{value}</p>" for value in values),
+        values,
+        output_budget_version=5,
+    )
+    wanted = set(case.batch.manifest.item_ids)
+    calls = []
+
+    async def transport(kind, payload):
+        if kind == stage and wanted & {item["item_id"] for item in payload["items"]}:
+            calls.append(tuple(item["item_id"] for item in payload["items"]))
+            if len(payload["items"]) > 2:
+                return {"raw": "{", "finish_reason": "length"}
+        return answer(kind, payload)
+
+    result = asyncio.run(run_translation(case.session.store.root, transport=transport))
+
+    assert result.status == "translated", result.reason
+    assert len(calls[0]) == 8
+    assert sorted(map(len, calls[1:3])) == [4, 4]
+    assert len(calls) == 7 and all(len(group) == 2 for group in calls[3:])
+    assert len({item for group in calls[3:] for item in group}) == 8
 
 
 @pytest.mark.parametrize("failure", ("protocol", "fluency", "needs_attention"))

@@ -104,7 +104,7 @@ def translate_book(
     provider: str = "agnes",
     context_tokens: int = 32768,
     max_input_tokens: int = MAX_MODEL_INPUT_TOKENS,
-    max_output_tokens: int = 4096,
+    max_output_tokens: int = 8192,
     limit: int | None = None,
     http_limit: int = 0,
     concurrency: int = 2,
@@ -135,7 +135,7 @@ def translate_book(
         "max_source_tokens": chunk_limit,
         "max_output_tokens": max_output_tokens,
         "input_budget_version": 2,
-        "output_budget_version": 5,
+        "output_budget_version": 6,
         "run_http_limit": http_limit,
         "concurrency": concurrency,
     }
@@ -266,13 +266,17 @@ def _advance_adjacent(source, output, config, epubcheck, overwrite, progress, ex
 
     if active is not None and state.exists(root / "preparation.json"):
         if _replan_local(root, config):
-            validate_options(root, config, explicit)
+            validate_options(root, config, explicit - {"max_output_tokens"})
             previous = RunStore(root).read_preparation()
             config = replace(
                 config,
                 auto_extract=bool(previous.extraction_config.get("auto_extract", True)),
                 extraction_config=dict(previous.extraction_config),
-                translation_config=dict(previous.translation_config) | {"output_budget_version": 4},
+                translation_config=dict(previous.translation_config)
+                | {
+                    "max_output_tokens": config.translation_config["max_output_tokens"],
+                    "output_budget_version": 6,
+                },
             )
             state.reset_records(root)
             if progress:
@@ -376,6 +380,15 @@ def _replan_local(root: Path, config: PreparationConfig) -> bool:
         state.exists(root / "prepared.json")
         or state.exists(root / "bookplan.json")
         or list(state.glob(root / "requests", "*.json"))
+        or any(
+            state.exists(root / path)
+            for path in (
+                "glossary/plan.json",
+                "glossary/candidates.json",
+                "glossary/freeze.json",
+                "glossary.json",
+            )
+        )
     ):
         return False
     path = root / "checks" / "preflight.json"
@@ -385,7 +398,12 @@ def _replan_local(root: Path, config: PreparationConfig) -> bool:
     saved = RunStore(root).read_preparation()
     if saved.user_terms:
         return False
-    if saved.translation_config == _frozen_translation_config(config):
+    expected = _frozen_translation_config(config)
+    actual = saved.translation_config
+    if actual == expected:
+        return False
+    migrated = dict(actual) | {"max_output_tokens": 8192, "output_budget_version": 6}
+    if actual.get("max_output_tokens") != 4096 or expected.get("max_output_tokens") != 8192 or migrated != expected:
         return False
     report = value.get("report") if isinstance(value, dict) else None
     return isinstance(report, dict) and report.get("check") is None
@@ -794,12 +812,16 @@ async def _finish(
             )
         )
     try:
+        if progress is not None:
+            progress({"phase": "publication", "notice": "出版：正在组装并校验 EPUB 3.0。"})
         if atomic:
             from engine.epub.publish import publish_atomic
 
-            published = publish_atomic(store, output, checker, overwrite=overwrite)
+            published = publish_atomic(store, output, checker, overwrite=overwrite, session=ready_session)
         else:
             published = publish_book(store, output, checker, overwrite=overwrite)
+        if progress is not None:
+            progress({"phase": "publication", "notice": "出版：EPUB 3.0 已组装并校验完成。"})
     except Exception as error:
         _record_internal_failure(work_dir, "publication", error)
         raise
