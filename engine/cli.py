@@ -700,11 +700,17 @@ async def _advance_work_dir(
     automatic: bool = False,
 ) -> RunOutcome:
     try:
+        if progress:
+            progress({"phase": "recovery", "notice": "恢复：读取已保存的准备状态，保留词表和累计请求。"})
         prepared = await resume_preparation(work_dir, checker, model=model, progress=_preparation_progress(progress))
         if automatic:
             from engine.services.session import reopen
 
+            if progress:
+                progress({"phase": "recovery", "notice": "恢复：批量校验正文断点并回放缓存响应。"})
             reopen(work_dir)
+        if progress:
+            progress({"phase": "recovery", "notice": "恢复校验完成，进入翻译调度。"})
     except StoreLocked:
         raise
     except Exception as error:

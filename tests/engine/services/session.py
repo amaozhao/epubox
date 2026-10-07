@@ -189,3 +189,40 @@ def test_mixed_snapshot_find_rejects_source_record_without_original_alias(tmp_pa
         path.relative_to(result.work_dir): path.read_bytes() for path in result.work_dir.rglob("*") if path.is_file()
     }
     assert after == before
+
+
+def test_automatic_reopen_reads_all_records_once_not_once_per_unit(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from engine.schemas.contracts import ItemStatus
+    from engine.services import journal as journal_module
+    from engine.services.session import reopen
+
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / "prepared.json").write_text("{}")
+    calls = []
+    records = {f"item-{n}": SimpleNamespace(status=ItemStatus.PENDING) for n in range(200)}
+
+    class Journal:
+        def __init__(self, store):
+            self.session = SimpleNamespace(
+                prepared=SimpleNamespace(
+                    plan=SimpleNamespace(
+                        translation_config={"output_budget_version": 4},
+                        unit_members={f"unit-{n}": (f"item-{n}",) for n in range(200)},
+                    )
+                )
+            )
+            self._requests = {}
+
+        def recover_results(self):
+            return self.records()
+
+        def records(self, identifiers=None):
+            calls.append(identifiers)
+            return records if identifiers is None else {key: records[key] for key in identifiers}
+
+    monkeypatch.setattr(journal_module, "BodyJournal", Journal)
+    assert reopen(root) == ()
+    assert calls == [None]

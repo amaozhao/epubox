@@ -120,3 +120,13 @@ DOM 修复相关测试 22 passed；当时全量测试 **666 passed（128.05 秒�
 最终独立审查进一步统一了只读恢复规划的派生记录检查，使用ready中同一规范构造器；真实状态只读plan_resume返回translation/ready、1889项待翻译，无文件变化或HTTP请求。迁移入口拒绝无关目录内容、旧目录兄弟文件和内部符号链接，失败保留旧数据。缓存响应的翻译/校对兄弟结果也按每个响应一次原子提交，提交失败磁盘、内存及进度均不变。
 
 全部收尾后的唯一最终完整验证：**777 passed（160.57 秒）**，仅两个已有 BeautifulSoup 文件名提示；Ruff、173个Python文件格式、Pyright、单词命名/≤1000行及diff检查通过。独立代码审查 **APPROVE（0 issues）**、全范围架构审查 **CLEAR**。本次没有实际翻译用户全书。
+
+## ready 后恢复耗时修复
+
+用户实际进程在ready后超过15分钟占用约98%CPU，状态仍HTTP127、正文请求0。本地reopen逐个单元调用journal.records，导致2274次整书依赖指纹扫描。回归测试200个单元在修复前读取200次，修复后复用recover_results返回的完整已校验记录，只读取一次。
+
+另一次只读cProfile测得BodyJournal初始化162.75秒（带剖析开销），pack_members占108.9秒，canonical_hash调用277408次。每次pack调用现在仅计算一次冻结词表/限制和每个member/target的固定哈希；每个候选的载荷、上下文、预算、请求身份及校验仍重新构建。v2/v3/v4、标题合批/拆分及review的完整结果哈希回归保持不变。
+
+确认旧CPU进程的PID及命令、持久正文请求0后，以SIGINT安全停止；第一次asyncio取消因同步循环没有让出而排队，第二次中断退出。无SIGKILL、删除状态或重新请求。修复后真实自动reopen测得40.71秒，原state.json的mtime/大小不变，HTTP127、正文请求0，未重试任何项。新增恢复读取、批量校验和调度阶段提示，未虚构进度百分比。
+
+最终全量 pytest **782 passed（162.39 秒）**，仅两个已有 BeautifulSoup 文件名提示；Ruff、173个Python文件格式、Pyright（0 errors/0 warnings）、变更文件约束及diff检查通过。独立代码审查 **APPROVE（0 issues）**、架构审查 **CLEAR**。修复只减少重复本地工作，未跳过来源、词表、载荷、预算或持久响应校验。

@@ -468,6 +468,10 @@ def pack_members(
     for item in members:
         index.validate_items((item,))
     _validate_order(members, index.document_order)
+    glossary_hash = canonical_hash(glossary)
+    member_hashes = {item.item_id: canonical_hash(item) for item in members}
+    target_hashes = {item.item_id: canonical_hash((targets or {}).get(item.item_id)) for item in members}
+    limit_values = limits.to_dict()
     batches: list[MemberBatch] = []
     boundaries: list[BatchBoundary] = []
     blocked: list[BlockedItem] = []
@@ -486,11 +490,11 @@ def pack_members(
             "version": PACKING_VERSION,
             "stage": stage,
             "source": glossary.source_hash,
-            "freeze": canonical_hash(glossary),
-            "members": [canonical_hash(item) for item in values],
-            "limits": limits.to_dict(),
+            "freeze": glossary_hash,
+            "members": [member_hashes[item.item_id] for item in values],
+            "limits": limit_values,
             "model": tokenizer_model,
-            "targets": {item.item_id: canonical_hash((targets or {}).get(item.item_id)) for item in values},
+            "targets": {item.item_id: target_hashes[item.item_id] for item in values},
             "revisions": {item.unit_id: (revisions or {}).get(item.unit_id, 0) for item in values},
             "versions": {item.unit_id: (record_versions or {}).get(item.unit_id, 0) for item in values},
             "epochs": {item.unit_id: (plan_epochs or {}).get(item.unit_id, 0) for item in values},
@@ -544,7 +548,7 @@ def pack_members(
             proposed = (item,)
             payload, budget = candidate(proposed)
         if budget.fits:
-            batch = _batch(proposed, glossary, payload, budget, revisions, record_versions, plan_epochs)
+            batch = _batch(proposed, glossary, glossary_hash, payload, budget, revisions, record_versions, plan_epochs)
         else:
             close("blocked", budget.failures)
             blocked.append(
@@ -598,6 +602,7 @@ def _validate_order(items: tuple[RequestMember, ...], document_order: tuple[str,
 def _batch(
     items: tuple[RequestMember, ...],
     glossary: GlossarySnapshot,
+    glossary_hash: str,
     payload: dict[str, Any],
     budget: BudgetResult,
     revisions: Mapping[str, int] | None,
@@ -625,7 +630,7 @@ def _batch(
         target_hashes={item.item_id: canonical_hash(wire[item.item_id]["target"]) for item in items}
         if budget.stage == "review"
         else {},
-        glossary_file_sha256=canonical_hash(glossary),
+        glossary_file_sha256=glossary_hash,
         freeze_id=glossary.freeze_id,
         term_ids_by_item={
             item.item_id: tuple(term["term_id"] for term in wire[item.item_id]["terms"]) for item in items

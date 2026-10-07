@@ -28,6 +28,8 @@ async def run_atomic(
 
     store = RunStore(work_dir)
     with store.lock(blocking=False):
+        if progress:
+            progress({"phase": "recovery", "notice": "翻译：加载已保存的正文记录与请求计划。"})
         journal = BodyJournal(store)
         session = journal.session
         ready = session.prepared

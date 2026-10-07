@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Literal
+
 import pytest
 
+import engine.item.members as members_module
 from engine.item.atoms import extract_resource
 from engine.item.budget import measure_budget
 from engine.item.inline import projection_identities
@@ -164,6 +168,66 @@ def test_member_payload_and_packing_use_piece_identity_and_shared_context() -> N
     assert all(batch.payload["prompt_version"] == "epubox-members-1" for batch in packed.batches)
 
 
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    (
+        (2, "c939c319a9d78c09bb3f2fbc23918db1009893716569db583f05747848bf0773"),
+        (3, "51c54c9af2a35aada35c9824029f402a4da18701705c639edfc24118a21579cb"),
+        (4, "22f7f2d3f396d4335619e5f8f727704365f36f5a235fb3fdbcfbf3f48524aaff"),
+    ),
+)
+def test_packing_preserves_budget_version_identities(version: Literal[2, 3, 4], expected: str) -> None:
+    inventory, report = prepared("<h2>Previous</h2><h2>Current</h2><h2>Following</h2>")
+    members = materialize_members((inventory,), report)
+    index = MemberIndex((inventory,), report, members)
+    configured = replace(limits(), output_version=version)
+
+    assert canonical_hash(pack_members("translate", members, glossary(), index, configured)) == expected
+
+
+def test_packing_hashes_stable_identity_components_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    inventory, report = prepared("<h2>Previous</h2><h2>Current</h2><h2>Following</h2>")
+    members = materialize_members((inventory,), report)
+    index = MemberIndex((inventory,), report, members)
+    frozen = glossary()
+    targets = {member.item_id: record(member.item_id, member.source_projection) for member in members}
+    tracked = {id(frozen): "glossary"}
+    tracked.update((id(member), f"member:{member.item_id}") for member in members)
+    tracked.update((id(target), f"target:{item_id}") for item_id, target in targets.items())
+    calls = dict.fromkeys(tracked.values(), 0)
+    limit_calls = 0
+    real_hash = members_module.canonical_hash
+    real_limits = BudgetLimits.to_dict
+
+    def hash_spy(value: object) -> str:
+        if name := tracked.get(id(value)):
+            calls[name] += 1
+        return real_hash(value)
+
+    def limits_spy(value: BudgetLimits) -> dict[str, int | float]:
+        nonlocal limit_calls
+        limit_calls += 1
+        return real_limits(value)
+
+    monkeypatch.setattr(members_module, "canonical_hash", hash_spy)
+    monkeypatch.setattr(BudgetLimits, "to_dict", limits_spy)
+
+    packed = pack_members(
+        "review",
+        members,
+        frozen,
+        index,
+        limits(),
+        targets=targets,
+        revisions={member.unit_id: 4 for member in members},
+    )
+
+    assert packed.ready
+    assert canonical_hash(packed) == "42952b6c0a1c2e44d6665ca99aaadc10ee206dffe31e67aacd75dc60b1de9678"
+    assert set(calls.values()) == {1}
+    assert limit_calls == 1
+
+
 def test_review_payload_binds_each_piece_target_and_parent_revision() -> None:
     paragraph = "word " * 850
     inventory, report = prepared(paragraph + ". " + paragraph + ". " + paragraph + ".", cap=2000)
@@ -207,6 +271,7 @@ def test_heading_priority_and_saved_versions_affect_member_request_identity() ->
         [heading.item_id, following.item_id],
     ]
     assert packed.boundaries[0].reason == "heading"
+    assert canonical_hash(packed) == "8576aecb36f110cad6a1a2ad9bf09e12f3b05bd10eb90814a1bdbe4d1d90cd02"
 
     baseline = pack_members("translate", members, frozen, index, limits()).batches[0].manifest.request_id
     versioned = (

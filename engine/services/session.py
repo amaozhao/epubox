@@ -314,11 +314,11 @@ def reopen(work_dir: Path) -> tuple[str, ...]:
         journal = BodyJournal(store)
         if journal.session.prepared.plan.translation_config.get("output_budget_version", 2) not in {3, 4}:
             return ()
-        journal.recover_results()
+        records = journal.recover_results()
         units = {
             unit_id
             for unit_id, item_ids in journal.session.prepared.plan.unit_members.items()
-            if any(journal.records((item_id,))[item_id].status == ItemStatus.NEEDS_ATTENTION for item_id in item_ids)
+            if any(records[item_id].status == ItemStatus.NEEDS_ATTENTION for item_id in item_ids)
         }
         for request in journal._requests.values():
             if request.stage in {"translate", "review"} and journal._ambiguous(request):
