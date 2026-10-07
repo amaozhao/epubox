@@ -17,7 +17,7 @@ from engine.services.resume import plan_resume
 app = typer.Typer()
 
 
-@app.command("translate", help="完整翻译一本 EPUB，并保存可恢复的 JSON 进度。")
+@app.command("translate", help="完整翻译一本 EPUB，未完成时自动续跑，最多 5 轮（含首次）。")
 def translate(
     ctx: typer.Context,
     epub_path: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False, readable=True),
@@ -41,49 +41,56 @@ def translate(
 ) -> None:
     if language.lower().replace("_", "-") not in {"chinese", "zh", "zh-cn", "zh-hans", "simplified chinese"}:
         raise typer.BadParameter("目前仅支持译为简体中文（zh-Hans）")
-    try:
-        explicit = frozenset(
-            name
-            for name in (
-                "glossary",
-                "auto_extract",
-                "provider",
-                "context_tokens",
-                "max_input_tokens",
-                "max_output_tokens",
-                "limit",
-                "http_limit",
-                "concurrency",
-                "repair_terms",
+    explicit = frozenset(
+        name
+        for name in (
+            "glossary",
+            "auto_extract",
+            "provider",
+            "context_tokens",
+            "max_input_tokens",
+            "max_output_tokens",
+            "limit",
+            "http_limit",
+            "concurrency",
+            "repair_terms",
+        )
+        if getattr(ctx.get_parameter_source(name), "name", None) == "COMMANDLINE"
+    )
+    for attempt in range(1, 6):
+        try:
+            result = translate_book(
+                epub_path,
+                output=output,
+                work_root=work_root,
+                glossary=glossary,
+                auto_extract=auto_extract,
+                provider=provider,
+                context_tokens=context_tokens,
+                max_input_tokens=max_input_tokens,
+                max_output_tokens=max_output_tokens,
+                limit=limit,
+                http_limit=http_limit,
+                concurrency=concurrency,
+                epubcheck=epubcheck,
+                overwrite=overwrite,
+                repair_terms=repair_terms,
+                progress=_progress_printer(),
+                explicit_options=explicit,
             )
-            if getattr(ctx.get_parameter_source(name), "name", None) == "COMMANDLINE"
-        )
-        result = translate_book(
-            epub_path,
-            output=output,
-            work_root=work_root,
-            glossary=glossary,
-            auto_extract=auto_extract,
-            provider=provider,
-            context_tokens=context_tokens,
-            max_input_tokens=max_input_tokens,
-            max_output_tokens=max_output_tokens,
-            limit=limit,
-            http_limit=http_limit,
-            concurrency=concurrency,
-            epubcheck=epubcheck,
-            overwrite=overwrite,
-            repair_terms=repair_terms,
-            progress=_progress_printer(),
-            explicit_options=explicit,
-        )
-    except StoreLocked as error:
-        typer.echo("同一本书已有翻译进程在运行；请等它退出后，用相同命令继续。", err=True)
-        raise typer.Exit(1) from error
-    except Exception as error:
-        typer.echo(f"翻译未完成：{error}", err=True)
-        raise typer.Exit(1) from error
-    _print_result(result)
+        except StoreLocked as error:
+            typer.echo("同一本书已有翻译进程在运行；请等它退出后，用相同命令继续。", err=True)
+            raise typer.Exit(1) from error
+        except Exception as error:
+            if attempt == 5:
+                typer.echo(f"翻译未完成：{error}", err=True)
+                raise typer.Exit(1) from error
+        else:
+            explicit = frozenset()  # Later rounds resume the configuration validated by the first result.
+            if result.status == "completed" or attempt == 5:
+                _print_result(result)
+                return
+        typer.echo(f"自动续跑：第 {attempt + 1}/5 轮，复用已保存的进度。")
 
 
 @app.command("resume", help="从工作目录中的 JSON 继续同一轮翻译。")

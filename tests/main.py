@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import main
@@ -31,7 +32,10 @@ def test_translate_cli_explains_active_same_book_run(tmp_path: Path, monkeypatch
     source = tmp_path / "source.epub"
     source.write_bytes(b"fixture")
 
+    calls = []
+
     def locked(*_args, **_kwargs):
+        calls.append(True)
         raise StoreLocked("run store is locked")
 
     monkeypatch.setattr(main, "translate_book", locked)
@@ -39,6 +43,132 @@ def test_translate_cli_explains_active_same_book_run(tmp_path: Path, monkeypatch
 
     assert result.exit_code == 1
     assert "已有翻译进程在运行" in result.output
+    assert len(calls) == 1 and "自动续跑" not in result.output
+
+
+@pytest.mark.parametrize("status", ("needs_attention", "paused", "failed", "exception"))
+def test_translate_cli_limits_unsuccessful_runs_to_five(tmp_path: Path, monkeypatch, status) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def unsuccessful(path, **options):
+        calls.append((path, options))
+        if status == "exception":
+            raise RuntimeError("request timed out")
+        return RunOutcome(status, tmp_path / "work", "translation")
+
+    monkeypatch.setattr(main, "translate_book", unsuccessful)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1 and len(calls) == 5
+    assert result.output.count("自动续跑：") == 4
+    assert "第 6/5" not in result.output
+    if status == "exception":
+        assert result.output.count("request timed out") == 1
+    else:
+        assert result.output.count("状态：") == 1
+
+
+def test_translate_cli_retries_errors_then_resumes_validated_options_and_stops_on_success(tmp_path, monkeypatch):
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def recover(path, **options):
+        calls.append((path, options))
+        if len(calls) == 1:
+            raise RuntimeError("temporary failure")
+        status = "needs_attention" if len(calls) == 2 else "completed"
+        return RunOutcome(status, tmp_path / "work", "publication", output_path=tmp_path / "out.epub")
+
+    monkeypatch.setattr(main, "translate_book", recover)
+    result = CliRunner().invoke(main.app, ["translate", str(source), "--concurrency", "3"])
+
+    assert result.exit_code == 0 and len(calls) == 3
+    assert [options["explicit_options"] for _, options in calls] == [
+        frozenset({"concurrency"}),
+        frozenset({"concurrency"}),
+        frozenset(),
+    ]
+    assert all(path == source and options["concurrency"] == 3 for path, options in calls)
+    assert result.output.count("状态：") == 1 and "输出：" in result.output
+
+
+def test_translate_cli_does_not_restart_after_keyboard_interrupt(tmp_path, monkeypatch):
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def interrupted(*_args, **_kwargs):
+        calls.append(True)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main, "translate_book", interrupted)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+    assert result.exit_code != 0 and len(calls) == 1
+    assert "自动续跑" not in result.output
+
+
+def test_translate_cli_resumes_real_checkpoint_and_publishes_without_retranslation(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from zipfile import ZipFile
+
+    from engine import cli
+    from engine.services.journal import BodyJournal
+    from tests.engine.epub.factory import make_epub
+    from tests.engine.epub.preparation import StubChecker
+    from tests.engine.execution.atomic import answer
+
+    source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
+    original_runtime = BodyJournal.runtime
+    runs: list[RunOutcome] = []
+    round_number = 0
+    translated = []
+
+    async def transport(stage, payload):
+        response = answer(stage, payload)
+        if stage == "translate":
+            translated.extend(item["item_id"] for item in payload["items"])
+        elif stage == "review" and round_number == 1:
+            data = json.loads(response["raw"])
+            for item in data["items"]:
+                item["checks"]["accuracy"] = "not_applicable"
+            response["raw"] = json.dumps(data)
+        return response
+
+    def run(path, **options):
+        nonlocal round_number
+        round_number += 1
+        result = cli.translate_book(path, **options)
+        runs.append(result)
+        return result
+
+    monkeypatch.setattr(main, "translate_book", run)
+    monkeypatch.setattr(cli, "build_run_model", lambda *args, **kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *args: StubChecker())
+    monkeypatch.setattr(cli.settings, "AGNES_TEXT_RPM", 1000)
+    monkeypatch.setattr(
+        BodyJournal,
+        "runtime",
+        lambda self, model=None, **kwargs: original_runtime(
+            self,
+            model=model,
+            transport=transport,
+            progress=kwargs.get("progress"),
+        ),
+    )
+    result = CliRunner().invoke(main.app, ["translate", str(source), "--no-auto-extract"])
+
+    assert result.exit_code == 0, result.output
+    assert [run.status for run in runs] == ["needs_attention", "completed"]
+    assert len(translated) == len(set(translated))
+    assert runs[0].work_dir == runs[1].work_dir == source.with_suffix("")
+    assert (source.with_suffix("") / "state.json").is_file()
+    with ZipFile(source.with_name("book-cn.epub")) as archive:
+        assert archive.testzip() is None
+        assert "译文" in archive.read("OEBPS/chapter.xhtml").decode()
 
 
 def test_resume_cli_reports_unfinished_run_as_nonzero(tmp_path: Path, monkeypatch) -> None:
