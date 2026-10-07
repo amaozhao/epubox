@@ -136,6 +136,9 @@ def _collect_items(
         if counts[item_id] > 1:
             errors[item_id] = "duplicate item_id"
             continue
+        if "decode_error" in item:
+            errors[item_id] = str(item["decode_error"])
+            continue
         accepted[item_id] = item
     return accepted, errors, tuple(dict.fromkeys(unknown)), counts
 

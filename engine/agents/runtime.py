@@ -551,7 +551,7 @@ class ModelRuntime:
             protected_structure = any(item.get("hints") or item.get("constraints") for item in payload["items"])
             if (
                 protected_structure
-                or payload.get("wire_version") == wire.VERSION
+                or payload.get("wire_version") in wire.SLOT_VERSIONS
                 or physical_budget["cl100k_tokens"] < budget["cl100k_tokens"]
             ):
                 budget, compact = physical_budget, True

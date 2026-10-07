@@ -46,7 +46,7 @@ def measure_budget(
     if not items:
         raise ValueError("budget requires at least one item")
     _validate_items(items)
-    messages = request_messages(stage, payload, compact=limits.output_version == 5)
+    messages = request_messages(stage, payload, compact=limits.output_version == 5, wire_version="epubox-wire-5")
 
     tokenizer, tokenizer_name, fallback = _tokenizer(tokenizer_model)
     source_wire = [{"item_id": _item_id(item), "source": _source(item)} for item in items]

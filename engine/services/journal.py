@@ -559,13 +559,6 @@ class BodyJournal:
             raise IdentityMismatch("body request wire differs from its frozen manifest")
         if not set(manifest.item_ids).issubset(self.session.index.members_by_id):
             raise IdentityMismatch("body request references a member outside the ready plan")
-        path = self.store._path("requests", manifest.request_id)
-        if state.exists(path):
-            existing = self._requests.get(manifest.request_id) or self.store.read_request(manifest.request_id)
-            if existing.model_copy(update={"attempts": ()}) != manifest:
-                raise StaleWrite("body request identity changed during resume")
-        else:
-            self._requests[manifest.request_id] = self.store.write_request(manifest)
         measured = measure_budget(
             stage=cast(Any, stage),
             payload=payload,
@@ -577,6 +570,13 @@ class BodyJournal:
         reserved = physical.get("estimated_input_tokens") if isinstance(physical, Mapping) else None
         if type(estimated) is not int or estimated < 0 or type(reserved) is not int or reserved < estimated:
             estimated, reserved = measured.input_tokens, measured.input_reserve
+        path = self.store._path("requests", manifest.request_id)
+        if state.exists(path):
+            existing = self._requests.get(manifest.request_id) or self.store.read_request(manifest.request_id)
+            if existing.model_copy(update={"attempts": ()}) != manifest:
+                raise StaleWrite("body request identity changed during resume")
+        else:
+            self._requests[manifest.request_id] = self.store.write_request(manifest)
         self._started[manifest.request_id] = monotonic()
         self._emit(
             {
@@ -660,6 +660,19 @@ class BodyJournal:
 
     def _reserve(self, request_id: str, attempt) -> None:
         self.session.verify()
+        request = self._requests[request_id]
+        if "wire_version" in attempt.metadata:
+            batch = self._translation_batch(request) if request.stage == "translate" else self._review_batch(request)
+            reserved = attempt.reservation["estimated_input_tokens"]
+            if (
+                type(reserved) is not int
+                or reserved > batch.budget.identity.input_limit
+                or (
+                    reserved + batch.budget.output_tokens + batch.budget.identity.safety_tokens
+                    > batch.budget.identity.context_limit
+                )
+            ):
+                raise IdentityMismatch("physical request exceeds frozen input or context capacity")
         if self._ambiguous(self._requests[request_id]):
             raise RequestError("body request has an unknown provider outcome without a persisted response")
         if self._run_limit and self._run_attempts >= self._run_limit:

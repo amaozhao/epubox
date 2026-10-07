@@ -359,6 +359,7 @@ def _structural_failure(record) -> bool:
             "unsupported projection escape",
             "dangling projection escape",
             "target must be",
+            "target decoding failed:",
             "target contains invalid XML",
             "translation item missing",
             "duplicate item_id",

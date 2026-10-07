@@ -12,6 +12,59 @@ from engine.agents.wire import VERSION, decode, decode_projection, digest, encod
 from engine.item.inline import ProjectionError, normalize_empty_closes, parse_projection, validate_projection
 
 
+def test_translation_lists_only_nonempty_slots_and_restores_code_indentation():
+    source = (
+        "⟦+b1⟧public record ReviewResult(⟦-b1⟧⟦=x1⟧"
+        "⟦+b2⟧\u00a0\u00a0String status⟦-b2⟧⟦=x2⟧"
+        "⟦+b3⟧) {}⟦-b3⟧⟦=x3⟧⟦+b4⟧⟦-b4⟧"
+    )
+    request = payload()
+    request["items"][0]["source"] = source
+    physical = json.loads(messages("translate", request, "base")[1]["content"])
+    assert physical["items"][0]["slot_ids"] == ["1", "2", "3"]
+    raw = json.dumps(
+        {
+            "protocol": "epubox-text-1",
+            "request_id": request["request_id"],
+            "items": [
+                {"item_id": "1", "target": {"1": "public record ReviewResult(", "2": "String status", "3": ") {}"}}
+            ],
+        }
+    )
+    restored = json.loads(
+        decode(
+            "translate", raw, request["request_id"], ("u-long-one",), version=VERSION, sources={"u-long-one": source}
+        )
+    )
+    assert restored["items"][0]["target"] == source
+
+
+def test_extra_empty_slot_reports_exact_decode_failure_without_accepting_it():
+    from engine.agents.protocol import validate_translation_response
+    from engine.execution.atomic import _structural_failure
+
+    source = "⟦+b1⟧Text⟦-b1⟧⟦=x1⟧⟦+b2⟧⟦-b2⟧"
+    raw = json.dumps(
+        {"protocol": "epubox-text-1", "request_id": "r", "items": [{"item_id": "1", "target": {"1": "正文", "2": ""}}]}
+    )
+    canonical = decode("translate", raw, "r", ("u",), version=VERSION, sources={"u": source})
+    result = validate_translation_response(canonical, "r", {"u": source})
+    assert not result.accepted
+    assert "unexpected=['2']" in result.errors["u"]
+    assert _structural_failure(SimpleNamespace(failure={"message": result.errors["u"]}))
+
+
+@pytest.mark.parametrize(
+    "stage, expected",
+    [
+        ("translate", "1b88fe84071abb2fa7d25b8a3a217fd9d8ebe5ee6f69919c4b3cf8d548a76f43"),
+        ("review", "496f1f9b83f6f0f084f7abb9f0e9641095213713a8a34f71f657cf768cf13294"),
+    ],
+)
+def test_v5_physical_requests_keep_the_frozen_hash_after_slot_fix(stage, expected):
+    assert digest(messages(stage, payload(stage), "base", version="epubox-wire-5"), 4096) == expected
+
+
 def payload(kind: str = "translate") -> dict:
     item = {
         "item_id": "u-long-one",

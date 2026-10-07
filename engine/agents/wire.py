@@ -10,9 +10,9 @@ from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from typing import Any
 
-VERSION = "epubox-wire-5"
-VERSIONS = ("epubox-wire-2", "epubox-wire-3", "epubox-wire-4", VERSION)
-SLOT_VERSIONS = ("epubox-wire-4", VERSION)
+VERSION = "epubox-wire-6"
+VERSIONS = ("epubox-wire-2", "epubox-wire-3", "epubox-wire-4", "epubox-wire-5", VERSION)
+SLOT_VERSIONS = ("epubox-wire-4", "epubox-wire-5", VERSION)
 
 _PROTOCOLS = {"translate": "epubox-text-1", "review": "epubox-review-2"}
 _REF = re.compile(r"[gbx][A-Za-z0-9_.:-]+\Z")
@@ -49,6 +49,12 @@ _PROMPTS_V5 = {
     "For replace, use the same complete envelope and include target with ALL slot_ids. "
     "Return only final JSON; close every object and array; do not repeat keys or append commentary. "
     "Use at most two concise issues per item; do not copy applicability or input fields into the response.",
+}
+_PROMPTS_V6 = {
+    kind: prompt + " Use slot_ids as the exact target keys. Empty b/g ranges and trailing br/x markers have no "
+    "text slot: never invent a key or return an empty string for them. Preserve programming syntax and identifiers; "
+    "they are not prose to translate. Leading/trailing whitespace and empty lines are restored locally."
+    for kind, prompt in _PROMPTS_V5.items()
 }
 
 
@@ -160,11 +166,11 @@ def messages(
         _compact_item(item)
         if version in SLOT_VERSIONS and isinstance(source, str):
             item["source"] = _encode_slotted_source(source)
-            if version == VERSION and kind == "review":
+            if version == VERSION or version == "epubox-wire-5" and kind == "review":
                 layout = _slot_layout(source)
                 item["slot_ids"] = [str(number) for number in range(1, layout.count("text") + 1)]
                 target = payload["items"][index - 1].get("target")
-                if isinstance(target, str) and layout == _slot_layout(target):
+                if kind == "review" and isinstance(target, str) and layout == _slot_layout(target):
                     item["target"] = _encode_slotted_source(target)
     if not physical.get("context"):
         physical.pop("context", None)
@@ -179,6 +185,8 @@ def messages(
                 else _PROMPTS_V4[kind]
                 if version == "epubox-wire-4"
                 else _PROMPTS_V5[kind]
+                if version == "epubox-wire-5"
+                else _PROMPTS_V6[kind]
             ),
         },
         {
@@ -230,11 +238,14 @@ def decode(
                 if version in SLOT_VERSIONS:
                     if canonical_id is None or sources is None:
                         raise ValueError("target has no matching source")
-                    item["target"] = _decode_slots(sources[canonical_id], item["target"])
+                    item["target"] = _decode_slots(
+                        sources[canonical_id], item["target"], preserve_whitespace=version == VERSION
+                    )
                 else:
                     item["target"] = decode_projection(item["target"])
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError) as error:
                 item["target"] = None
+                item["decode_error"] = f"target decoding failed: {error}"
     return json.dumps(root, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -353,14 +364,17 @@ def _encode_slotted_source(projection: str) -> str:
     return "".join(parts)
 
 
-def _decode_slots(source: str, target: Any) -> str:
+def _decode_slots(source: str, target: Any, *, preserve_whitespace: bool = False) -> str:
     from engine.item.inline import events_to_projection, parse_projection
 
     events = parse_projection(source)
     source_slots = [event.value for event in events if event.kind == "text" and event.value.strip()]
     expected = {str(index) for index in range(1, len(source_slots) + 1)}
     if not isinstance(target, dict) or set(target) != expected:
-        raise ValueError("target slots do not match source")
+        actual = set(target) if isinstance(target, dict) else set()
+        raise ValueError(
+            f"target slots do not match source: missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
+        )
     if any(not isinstance(value, str) or not value.strip() for value in target.values()):
         raise ValueError("target slots require nonempty strings")
     for index, source_text in enumerate(source_slots, 1):
@@ -372,7 +386,12 @@ def _decode_slots(source: str, target: Any) -> str:
     for event in events:
         if event.kind == "text" and event.value.strip():
             slot += 1
-            rebuilt.append(("text", target[str(slot)], event.virtual))
+            value = target[str(slot)]
+            if preserve_whitespace:
+                leading = event.value[: len(event.value) - len(event.value.lstrip())]
+                trailing = event.value[len(event.value.rstrip()) :]
+                value = leading + value.strip() + trailing
+            rebuilt.append(("text", value, event.virtual))
         else:
             rebuilt.append(event)
     return events_to_projection(rebuilt)
