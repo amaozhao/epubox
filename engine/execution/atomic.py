@@ -262,13 +262,15 @@ async def run_atomic(
         complete = accepted == ready.plan.required_unit_count
         status = "paused" if stopped is not None else "translated" if complete else "needs_attention"
         failures = (
-            f"{record.stage}:{record.item_id}: {record.failure['message']}"
+            str(record.failure["message"])
+            if str(record.failure["message"]).startswith(f"{record.stage}:tx-")
+            else f"{record.stage}:{record.item_id}: {record.failure['message']}"
             for record in journal.records().values()
             if record.status == ItemStatus.NEEDS_ATTENTION
             and record.failure is not None
             and isinstance(record.failure.get("message"), str)
         )
-        reason = stopped or ("; ".join(failures) if not complete else None) or None
+        reason = stopped or ("; ".join(dict.fromkeys(failures)) if not complete else None) or None
         if progress is not None:
             progress(
                 snapshot
@@ -343,6 +345,8 @@ def _pending_batches(journal, initial, selected=None) -> tuple[MemberBatch, ...]
 
 def _structural_failure(record) -> bool:
     message = (record.failure or {}).get("message")
+    if isinstance(message, str) and message.endswith("translation response was truncated"):
+        return True
     return isinstance(message, str) and message.startswith(
         (
             "text moved across",

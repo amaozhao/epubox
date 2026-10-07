@@ -4,6 +4,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from engine.item.inline import events_to_projection, parse_projection
 from engine.orchestrator import run_translation
 from engine.schemas.internal import Event
@@ -108,3 +110,69 @@ def test_real_provider_pauses_legacy_output_budget_without_dispatch(tmp_path, mo
     assert result.status == "paused"
     assert "output budget v2" in (result.reason or "")
     assert result.http_attempts == 0
+
+
+@pytest.mark.parametrize("finish", ("length", "max_tokens"))
+def test_truncated_translation_is_retried_without_accepting_incomplete_json(tmp_path, finish):
+    case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p>", ("First.", "Second."))
+    wanted = set(case.batch.manifest.item_ids)
+    calls = []
+    events = []
+
+    async def transport(kind, payload):
+        if wanted & {item["item_id"] for item in payload["items"]}:
+            calls.append((kind, payload["request_id"]))
+            if len(calls) == 1:
+                return {
+                    "raw": '{"protocol":"epubox-text-1","items":[{"target":{"1"' + " \n" * 4000,
+                    "finish_reason": finish,
+                    "usage": {"input_tokens": 100, "output_tokens": 10000},
+                }
+        return answer(kind, payload)
+
+    result = asyncio.run(run_translation(case.session.store.root, transport=transport, progress=events.append))
+    assert result.status == "translated", result.reason
+    assert [kind for kind, _ in calls] == ["translate", "translate", "review"]
+    assert calls[0][1] != calls[1][1]
+    failures = [
+        event
+        for event in events
+        if event.get("phase") == "workflow" and event.get("batch_status") == "needs_attention"
+    ]
+    assert len(failures) == 1 and str(failures[0]["reason"]).count("translation response was truncated") == 1
+    journal = BodyJournal(case.session.store)
+    assert len(journal.parent_targets()) == case.prepared.plan.required_unit_count
+    before = len(calls)
+    assert asyncio.run(run_translation(case.session.store.root, transport=transport)).status == "translated"
+    assert len(calls) == before
+
+
+def test_repeated_truncation_stays_an_error_and_preserves_restart_retry(tmp_path):
+    from engine.schemas.contracts import ItemStatus
+
+    case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p>", ("First.", "Second."))
+    wanted = set(case.batch.manifest.item_ids)
+    calls = []
+
+    async def broken(kind, payload):
+        if kind == "translate" and wanted & {item["item_id"] for item in payload["items"]}:
+            calls.append(payload["request_id"])
+            return {"raw": '{"items":[' + " \n" * 4000, "finish_reason": "length"}
+        return answer(kind, payload)
+
+    result = asyncio.run(run_translation(case.session.store.root, transport=broken))
+    assert result.status == "needs_attention"
+    assert len(calls) == 3 and len(set(calls)) == 3
+    assert result.reason and result.reason.count("translation response was truncated") == 1
+    journal = BodyJournal(case.session.store)
+    assert all(
+        record.status == ItemStatus.NEEDS_ATTENTION and record.target_projection is None
+        for record in journal.records(tuple(wanted)).values()
+    )
+    assert result.accepted_units == case.prepared.plan.required_unit_count - len(wanted)
+
+    async def healthy(kind, payload):
+        return answer(kind, payload)
+
+    resumed = asyncio.run(run_translation(case.session.store.root, transport=healthy, reopen_attention=True))
+    assert resumed.status == "translated"

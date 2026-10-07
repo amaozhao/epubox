@@ -180,7 +180,8 @@ async def _translate_step(
         else:
             error = parsed.errors.get(member.item_id, "translation item missing")
         if error is not None:
-            issues.append(f"translate:{member.item_id}: {error}")
+            if batch_error is None:
+                issues.append(f"translate:{member.item_id}: {error}")
             current[member.item_id] = _failed(member, current.get(member.item_id), "translate", error, batch)
             changed.append(current[member.item_id])
             continue
