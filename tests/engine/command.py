@@ -274,6 +274,20 @@ def test_atomic_batch_progress_keeps_estimates_reserves_and_actual_usage_distinc
     assert "结果=通过，修订=否" in capsys.readouterr().out
 
 
+def test_progress_hides_item_and_transport_events_but_keeps_waiting_and_batch_errors(capsys) -> None:
+    printer = _progress_printer()
+    report = {"phase": "review", "request_id": "tx-1", "execution_state": "running"}
+    printer(report | {"event": "request"})
+    printer(report | {"event": "response"})
+    printer(report | {"result_item_id": "item-1", "result_status": "needs_attention", "reason": "timeout"})
+    assert capsys.readouterr().out == ""
+    printer(report | {"phase": "waiting", "event": "request", "elapsed_seconds": 30})
+    assert "waiting: 批次=tx-1" in capsys.readouterr().out
+    printer(report | {"phase": "workflow", "batch_status": "needs_attention", "reason": "timeout"})
+    output = capsys.readouterr().out
+    assert len(output.splitlines()) == 1 and "原因=timeout" in output
+
+
 def test_finish_routes_atomic_ready_to_atomic_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     case = prepare_case(tmp_path, "<p>First.</p>", ("First.",))
     output = tmp_path / "book-cn.epub"

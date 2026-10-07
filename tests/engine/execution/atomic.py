@@ -8,6 +8,7 @@ from engine.item.inline import events_to_projection, parse_projection
 from engine.orchestrator import run_translation
 from engine.schemas.internal import Event
 from engine.services.journal import BodyJournal
+from main import _progress_printer
 from tests.engine.agents.workflow import prepare_case, review_item
 
 
@@ -33,7 +34,7 @@ def answer(kind, payload):
     }
 
 
-def test_shared_execution_entry_persists_every_batch_and_resume_sends_nothing(tmp_path) -> None:
+def test_shared_execution_entry_persists_every_batch_and_resume_sends_nothing(tmp_path, capsys) -> None:
     case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p>", ("First.", "Second."))
     calls = []
     events = []
@@ -55,6 +56,14 @@ def test_shared_execution_entry_persists_every_batch_and_resume_sends_nothing(tm
     assert result.http_attempts == len(calls)
     assert any(event.get("request_id") for event in events)
     assert any(event.get("reserved_output_tokens") for event in events)
+    printer = _progress_printer()
+    for event in events:
+        printer(event)
+    summaries = [line for line in capsys.readouterr().out.splitlines() if "批次=" in line]
+    assert len(summaries) == len(case.prepared.plan.batch_hashes)
+    assert all(line.startswith("workflow:") and "结果=通过" in line for line in summaries)
+    total = len(case.session.index.members)
+    assert f"初译={total}，校对={total}" in summaries[-1]
     before = len(calls)
     resumed = asyncio.run(
         run_translation(

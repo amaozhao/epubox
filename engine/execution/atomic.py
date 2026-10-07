@@ -159,12 +159,19 @@ async def run_atomic(
                     try:
                         result = task.result()
                         errors.extend(result.issues)
+                        revised = any(record.checks.get("decision") == "replace" for record in result.results.values())
                         emit(
-                            "translation",
-                            None,
+                            "workflow",
+                            batch,
                             monotonic() - started,
                             batch_status=result.status,
                             batch_issues=result.issues,
+                            decision="needs_attention"
+                            if result.status == "needs_attention"
+                            else "replace"
+                            if revised
+                            else "no_change",
+                            revised=revised,
                             reason="; ".join(result.issues) or None,
                         )
                     except RuntimePaused as error:
