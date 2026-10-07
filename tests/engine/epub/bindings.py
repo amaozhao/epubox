@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from engine.epub.bindings import resolve_derived_navigation
+from engine.item.atoms import extract_resource
 from engine.item.extractor import extract_document
 
 
@@ -84,3 +85,29 @@ def test_protected_title_and_multi_text_navigation_are_not_reused() -> None:
     resolved = resolve_derived_navigation((protected, simple, navigation))
 
     assert _derived(resolved[2]) == []
+
+
+def test_atomic_epub_navigation_anchor_binds_to_matching_heading() -> None:
+    chapter = extract_resource(
+        _xhtml('<h1 id="intro">Introduction</h1><p>Body text.</p>').encode(),
+        "OPS/chapter.xhtml",
+        "source-sha",
+    ).document
+    navigation = extract_resource(
+        (
+            b'<html xmlns="http://www.w3.org/1999/xhtml" '
+            b'xmlns:epub="http://www.idpf.org/2007/ops"><head/><body>'
+            b'<nav epub:type="toc"><ol><li><a class="entry" href="chapter.xhtml#intro">'
+            b"Introduction</a></li></ol></nav></body></html>"
+        ),
+        "OPS/nav.xhtml",
+        "source-sha",
+    ).document
+
+    resolved = resolve_derived_navigation((chapter, navigation))
+
+    binding = _derived(resolved[1])[0]
+    label = next(unit for unit in resolved[1].units if unit.kind == "navigation")
+    assert binding["unit_id"] == label.unit_id
+    assert binding["source_unit_id"] == next(unit.unit_id for unit in chapter.units if unit.kind == "heading")
+    assert label.region["navigation_anchor"] is True

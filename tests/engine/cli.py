@@ -1,5 +1,6 @@
 import hashlib
 import json
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,6 +10,8 @@ import pytest
 from engine import cli
 from engine.epub.preparation import prepare_book
 from engine.schemas.contracts import ItemStatus
+from engine.services import legacy as legacy_module
+from engine.services import state
 from engine.services.atomic import AtomicStore, StoreLocked
 from engine.services.coherence import load_budget_overrides
 from tests.engine.epub.factory import make_epub
@@ -105,8 +108,7 @@ def test_default_paths_are_beside_source_independent_of_cwd(tmp_path: Path, monk
     monkeypatch.setattr(cli, "_advance_source", advance)
     result = cli.translate_book(source)
 
-    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-    assert result.work_dir.parent == source.parent / source.stem / source_hash
+    assert result.work_dir == source.with_suffix("")
     assert outputs == [source.with_name("novel-cn.epub")]
 
 
@@ -190,7 +192,7 @@ def test_repeating_translate_command_reuses_the_same_prepared_run(
     second = cli.translate_book(source)
 
     assert first.work_dir == second.work_dir
-    assert seen_run_ids == [first.work_dir.name]
+    assert seen_run_ids == [state.header(first.work_dir)["run_id"]]
     assert resumed == [first.work_dir]
 
 
@@ -211,10 +213,7 @@ def test_default_work_roots_separate_same_named_books_in_different_directories(
     monkeypatch.setattr(cli, "_advance_source", advance)
     results = [cli.translate_book(source) for source in sources]
 
-    source_hash = hashlib.sha256(sources[0].read_bytes()).hexdigest()
-    assert [result.work_dir.parent for result in results] == [
-        source.parent / source.stem / source_hash for source in sources
-    ]
+    assert [result.work_dir for result in results] == [source.with_suffix("") for source in sources]
 
 
 def test_default_work_root_migrates_legacy_progress_without_record_changes(
@@ -263,16 +262,23 @@ def test_default_work_root_migrates_legacy_progress_without_record_changes(
     migrated = cli.translate_book(source)
 
     source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-    expected = source.parent / source.stem / source_hash / legacy.work_dir.name
-    after = {
-        path.relative_to(migrated.work_dir): path.read_bytes()
-        for path in migrated.work_dir.rglob("*")
-        if path.is_file()
-    }
+    expected = source.with_suffix("")
+    moved_legacy = expected / source_hash / legacy.work_dir.name
     assert migrated.work_dir == expected
     assert resumed_paths == [expected]
+    assert not moved_legacy.exists()
     assert not legacy.work_dir.exists()
-    assert after == before
+    for relative, payload in before.items():
+        if relative not in {Path("source.epub"), Path(".store.lock")}:
+            assert state.read(expected / relative) == payload
+    assert state.snapshot(expected).read_bytes() == source.read_bytes()
+    with zipfile.ZipFile(source) as archive:
+        assert all(
+            (expected / "source" / name).read_bytes() == archive.read(name)
+            for name in archive.namelist()
+            if not name.endswith("/")
+        )
+    assert {path.name for path in expected.iterdir()} == {"source", "state.json"}
     assert model_calls == 0
 
 
@@ -321,7 +327,7 @@ def test_default_work_root_does_not_move_a_locked_checkpoint(tmp_path, monkeypat
         AtomicStore(legacy if locked_directory == "source" else run).lock(blocking=False),
         pytest.raises(StoreLocked),
     ):
-        cli._default_work_root(source, digest)
+        legacy_module._default_work_root(source, digest)
     assert checkpoint.read_text() == '{"accepted":1}'
     assert not (source.parent / source.stem / digest).exists()
 
@@ -335,7 +341,7 @@ def test_default_work_root_never_merges_competing_checkpoints(tmp_path, monkeypa
         root.mkdir(parents=True)
         (root / "checkpoint.json").write_text(str(index))
     with pytest.raises(cli.IdentityMismatch, match="multiple checkpoint locations"):
-        cli._default_work_root(source, digest)
+        legacy_module._default_work_root(source, digest)
     assert [(root / "checkpoint.json").read_text() for root in roots] == ["0", "1"]
 
 
@@ -348,7 +354,7 @@ def test_default_work_root_refuses_dangling_legacy_checkpoint_link(tmp_path, mon
     missing = tmp_path / "offline-disk" / digest
     legacy.symlink_to(missing, target_is_directory=True)
     with pytest.raises(cli.IdentityMismatch, match="symbolic link"):
-        cli._default_work_root(source, digest)
+        legacy_module._default_work_root(source, digest)
     assert legacy.is_symlink() and legacy.readlink() == missing
     assert not (source.parent / source.stem / digest).exists()
 
@@ -362,7 +368,7 @@ def test_default_work_root_refuses_dangling_destination_link(tmp_path: Path) -> 
     destination.symlink_to(tmp_path / "offline" / digest, target_is_directory=True)
 
     with pytest.raises(cli.IdentityMismatch, match="symbolic link"):
-        cli._default_work_root(source, digest)
+        legacy_module._default_work_root(source, digest)
     assert destination.is_symlink()
 
 
@@ -735,15 +741,15 @@ def test_only_known_empty_term_freeze_can_be_superseded(tmp_path: Path, monkeypa
             diagnostics=({"reason": "candidate 0: evidence must contain 1 to 64 citations"},),
         ),
     )
-    monkeypatch.setattr(cli, "load_user_terms", lambda *_args, **_kwargs: ((), "terms-hash"))
+    monkeypatch.setattr(legacy_module, "load_user_terms", lambda *_args, **_kwargs: ((), "terms-hash"))
     desired_extraction = old_extraction | {"prompt_version": "epubox-v25-3"}
     desired_translation = old_translation
 
-    assert cli._superseded_empty_term_run(
+    assert legacy_module._superseded_empty_term_run(
         cast(Any, store), preparation, desired_extraction, desired_translation, cli.PreparationConfig()
     )
     unit.accepted_revision = 0
-    assert not cli._superseded_empty_term_run(
+    assert not legacy_module._superseded_empty_term_run(
         cast(Any, store), preparation, desired_extraction, desired_translation, cli.PreparationConfig()
     )
 
@@ -774,22 +780,24 @@ def test_empty_term_repair_requires_opt_in_and_then_resumes_from_marker(
         _trusted_preparation_documents=lambda: None,
     )
     config = cli.PreparationConfig()
-    monkeypatch.setattr(cli, "RunStore", lambda _path: store)
-    monkeypatch.setattr(cli, "load_user_terms", lambda *_args, **_kwargs: ((), "terms-hash"))
-    monkeypatch.setattr(cli, "_frozen_extraction_config", lambda _config: {"prompt_version": "epubox-v25-3"})
-    monkeypatch.setattr(cli, "_frozen_translation_config", lambda _config: {"prompt_version": "epubox-v25-2"})
-    monkeypatch.setattr(cli, "_superseded_empty_term_run", lambda *_args: True)
+    monkeypatch.setattr(legacy_module, "RunStore", lambda _path: store)
+    monkeypatch.setattr(legacy_module, "load_user_terms", lambda *_args, **_kwargs: ((), "terms-hash"))
+    monkeypatch.setattr(legacy_module, "_frozen_extraction_config", lambda _config: {"prompt_version": "epubox-v25-3"})
+    monkeypatch.setattr(
+        legacy_module, "_frozen_translation_config", lambda _config: {"prompt_version": "epubox-v25-2"}
+    )
+    monkeypatch.setattr(legacy_module, "_superseded_empty_term_run", lambda *_args: True)
 
     with pytest.raises(ValueError, match="--repair-terms"):
-        cli._existing_run_id(source_root, source_hash, config)
+        legacy_module._existing_run_id(source_root, source_hash, config)
     assert not (source_root / "term-repair.json").exists()
 
-    replacement = cli._existing_run_id(source_root, source_hash, config, repair_terms=True)
-    marker = cli.strict_json_loads((source_root / "term-repair.json").read_bytes())
+    replacement = legacy_module._existing_run_id(source_root, source_hash, config, repair_terms=True)
+    marker = legacy_module.strict_json_loads((source_root / "term-repair.json").read_bytes())
     assert isinstance(marker, dict)
     assert marker["old_run_id"] == "old-run"
     assert marker["replacement_run_id"] == replacement
-    assert cli._existing_run_id(source_root, source_hash, config) == replacement
+    assert legacy_module._existing_run_id(source_root, source_hash, config) == replacement
 
 
 def test_valid_v25_2_bookplan_resumes_with_v25_3_term_prompt_without_new_run(
@@ -821,12 +829,12 @@ def test_valid_v25_2_bookplan_resumes_with_v25_3_term_prompt_without_new_run(
         read_glossary=lambda: SimpleNamespace(terms=("useful-term",), extraction_status="closed"),
         _trusted_preparation_documents=lambda: None,
     )
-    monkeypatch.setattr(cli, "RunStore", lambda _path: store)
-    monkeypatch.setattr(cli, "_frozen_extraction_config", lambda _config: expected_extraction)
-    monkeypatch.setattr(cli, "_frozen_translation_config", lambda _config: translation)
-    monkeypatch.setattr(cli, "load_user_terms", lambda *_args, **_kwargs: (("useful-term",), "terms-hash"))
+    monkeypatch.setattr(legacy_module, "RunStore", lambda _path: store)
+    monkeypatch.setattr(legacy_module, "_frozen_extraction_config", lambda _config: expected_extraction)
+    monkeypatch.setattr(legacy_module, "_frozen_translation_config", lambda _config: translation)
+    monkeypatch.setattr(legacy_module, "load_user_terms", lambda *_args, **_kwargs: (("useful-term",), "terms-hash"))
 
-    assert cli._existing_run_id(source_root, source_hash, cli.PreparationConfig()) == "old-run"
+    assert legacy_module._existing_run_id(source_root, source_hash, cli.PreparationConfig()) == "old-run"
 
 
 def test_existing_run_without_resolution_protocol_resumes_as_v1() -> None:
@@ -834,7 +842,7 @@ def test_existing_run_without_resolution_protocol_resumes_as_v1() -> None:
     expected = actual | {"resolution_protocol_version": "epubox-term-resolution-2"}
     translation = {"prompt_version": "epubox-v25-2", "model": "same"}
 
-    assert cli._legacy_resolution_protocol_run(actual, expected, translation, translation)
+    assert legacy_module._legacy_resolution_protocol_run(actual, expected, translation, translation)
 
 
 def test_existing_v1_resolution_run_is_selected_by_the_same_translate_command(
@@ -863,9 +871,9 @@ def test_existing_v1_resolution_run_is_selected_by_the_same_translate_command(
         read_preparation=lambda: preparation,
         _trusted_preparation_documents=lambda: None,
     )
-    monkeypatch.setattr(cli, "RunStore", lambda _path: store)
-    monkeypatch.setattr(cli, "_frozen_extraction_config", lambda _config: expected_extraction)
-    monkeypatch.setattr(cli, "_frozen_translation_config", lambda _config: translation)
-    monkeypatch.setattr(cli, "load_user_terms", lambda *_args, **_kwargs: ((), "terms-hash"))
+    monkeypatch.setattr(legacy_module, "RunStore", lambda _path: store)
+    monkeypatch.setattr(legacy_module, "_frozen_extraction_config", lambda _config: expected_extraction)
+    monkeypatch.setattr(legacy_module, "_frozen_translation_config", lambda _config: translation)
+    monkeypatch.setattr(legacy_module, "load_user_terms", lambda *_args, **_kwargs: ((), "terms-hash"))
 
-    assert cli._existing_run_id(source_root, source_hash, cli.PreparationConfig()) == "v1-run"
+    assert legacy_module._existing_run_id(source_root, source_hash, cli.PreparationConfig()) == "v1-run"

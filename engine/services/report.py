@@ -14,6 +14,7 @@ from engine.schemas.contracts import (
     canonical_json_bytes,
     strict_json_loads,
 )
+from engine.services import state
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.store import RunStore
 
@@ -32,25 +33,25 @@ def write_report(
     """Snapshot facts without treating report.json as a resume authority."""
     preparation = store.read_preparation()
     glossary_path = store.root / "glossary.json"
-    glossary = store.read_glossary() if glossary_path.exists() else None
+    glossary = store.read_glossary() if state.exists(glossary_path) else None
     plan_path = store.root / "glossary" / "plan.json"
-    term_plan = store.read_term_plan() if plan_path.exists() else None
+    term_plan = store.read_term_plan() if state.exists(plan_path) else None
     pool_path = store.root / "glossary" / "candidates.json"
-    pool = store.read_candidate_pool() if pool_path.exists() else None
+    pool = store.read_candidate_pool() if state.exists(pool_path) else None
     book_path = store.root / "bookplan.json"
-    book = store.read_bookplan() if book_path.exists() else None
+    book = store.read_bookplan() if state.exists(book_path) else None
     records = {unit_id: store.read_unit(unit_id) for unit_id in book.unit_ids} if book is not None else {}
     atomic = None
     atomic_required = None
     atomic_records = {}
-    if (store.root / "prepared.json").is_file():
+    if state.is_file(store.root / "prepared.json"):
         from engine.services.journal import BodyJournal
 
         journal = BodyJournal(store)
         atomic = journal.progress_snapshot()
         atomic_required = journal.session.prepared.plan.required_unit_count
         atomic_records = journal.records()
-    requests = tuple(store.read_request(path.stem) for path in sorted((store.root / "requests").glob("*.json")))
+    requests = tuple(store.read_request(path.stem) for path in sorted(state.glob(store.root / "requests", "*.json")))
     attempts = tuple(attempt for request in requests for attempt in request.attempts)
     actual = tuple(attempt for attempt in attempts if attempt.state != "reserved")
     usage_by_attempt: dict[tuple[str, str], Usage] = {}
@@ -110,7 +111,9 @@ def write_report(
     if book is not None:
         for document_id in book.document_hashes:
             path = store._path("checks", document_id)
-            checks[document_id] = read_coherence_record(path).get("status", "unknown") if path.exists() else "missing"
+            checks[document_id] = (
+                read_coherence_record(path).get("status", "unknown") if state.exists(path) else "missing"
+            )
     report: dict[str, JsonValue] = {
         "format": "epubox-report-2",
         "status": status,
@@ -167,13 +170,13 @@ def write_report(
             "known_cost_attempts": len(known_costs),
         },
         "json_paths": {
-            "documents": str(store.root / "documents"),
-            "units": str(store.root / "units"),
-            "results": str(store.root / "results"),
-            "prepared": str(store.root / "prepared.json"),
-            "requests": str(store.root / "requests"),
-            "glossary": str(store.root / "glossary.json"),
-            "report": str(store.root / "report.json"),
+            "documents": str(state.artifact(store.root / "documents")),
+            "units": str(state.artifact(store.root / "units")),
+            "results": str(state.artifact(store.root / "results")),
+            "prepared": str(state.artifact(store.root / "prepared.json")),
+            "requests": str(state.artifact(store.root / "requests")),
+            "glossary": str(state.artifact(store.root / "glossary.json")),
+            "report": str(state.artifact(store.root / "report.json")),
         },
         "terminology": {
             "planned_windows": len(term_plan.items) if term_plan is not None else 0,
@@ -210,17 +213,17 @@ def write_report(
         "coherence_by_document": checks,
     }
     path = store.root / "report.json"
-    if path.is_file():
+    if state.is_file(path):
         try:
-            previous = strict_json_loads(path.read_bytes())
+            previous = strict_json_loads(state.read(path))
         except ValueError:
             previous = None
         diagnostic = previous.get("source_validation") if isinstance(previous, dict) else None
         if isinstance(diagnostic, dict) and diagnostic.get("source_hash") == preparation.source_hash:
             report["source_validation"] = diagnostic
     publish_path = store.root / "publish.json"
-    if publish_path.is_file():
-        publication = strict_json_loads(publish_path.read_bytes())
+    if state.is_file(publish_path):
+        publication = strict_json_loads(state.read(publish_path))
         if isinstance(publication, dict) and publication.get("target_hash") == output_sha256:
             report["publication_verification"] = publication.get("verification")
     store._base.atomic_write_bytes(path, canonical_json_bytes(report))

@@ -52,6 +52,7 @@ from engine.schemas.contracts import (
     validate_cut_plan_coverage,
     validate_term_scopes,
 )
+from engine.services import state
 from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite, safe_id
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -167,19 +168,19 @@ class RunStore:
 
     @staticmethod
     def _file_hash(path: Path) -> str:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashlib.sha256(state.read(path)).hexdigest()
 
     @staticmethod
     def _read_contract(path: Path, model: type[ModelT], expected_format: str) -> ModelT:
         try:
-            return parse_contract(path.read_bytes(), model, expected_format)
+            return parse_contract(state.read(path), model, expected_format)
         except UnsupportedFormatError:
             raise
         except Exception as error:
             raise CorruptRecord(f"invalid {path}: {error}") from error
 
     def _write_immutable(self, path: Path, value: BaseModel, model: type[ModelT], expected_format: str) -> str:
-        if path.exists():
+        if state.exists(path):
             existing = self._read_contract(path, model, expected_format)
             if existing == value:
                 return self._file_hash(path)
@@ -214,11 +215,11 @@ class RunStore:
             path = self.root / "preparation.json"
             if plan.source_path != "source.epub":
                 raise IdentityMismatch("preparation source_path must name the immutable source snapshot")
-            source_path = self.root / plan.source_path
-            if not source_path.is_file() or self._file_hash(source_path) != plan.source_hash:
+            source_path = state.snapshot(self.root)
+            if not state.is_file(source_path) or self._file_hash(source_path) != plan.source_hash:
                 raise IdentityMismatch("source snapshot is missing or does not match preparation source_hash")
 
-            disk_ids = {entry.stem for entry in (self.root / "documents").glob("*.json")}
+            disk_ids = {entry.stem for entry in state.glob(self.root / "documents", "*.json")}
             if disk_ids != set(plan.document_hashes):
                 raise IdentityMismatch("preparation document inventory differs from durable DocumentPlans")
 
@@ -240,7 +241,7 @@ class RunStore:
             if user_copy.terms != plan.user_terms or canonical_hash(user_copy.terms) != plan.user_terms_hash:
                 raise IdentityMismatch("preparation user terms differ from glossary/user.json")
             validate_term_scopes(plan.user_terms, set(plan.document_hashes), set(plan.unit_documents))
-            if path.exists():
+            if state.exists(path):
                 return self._write_immutable(path, plan, PreparationPlan, PREPARATION_FORMAT)
             return self._atomic_write(path, plan)
 
@@ -269,11 +270,12 @@ class RunStore:
 
     def _trusted_preparation_documents(self) -> tuple[PreparationPlan, dict[str, DocumentPlan]]:
         preparation, documents = self._preparation_documents()
+        from engine.item.atoms import _LEGACY_EXTRACTOR_VERSION
         from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
         from engine.item.structure import EXTRACTOR_VERSION
 
         versions = {document.extractor_version for document in documents.values()}
-        if versions == {ATOMIC_EXTRACTOR_VERSION}:
+        if len(versions) == 1 and versions <= {ATOMIC_EXTRACTOR_VERSION, _LEGACY_EXTRACTOR_VERSION}:
             from engine.services.terms.storage import canonical_documents
 
             canonical_documents(self, preparation, documents)
@@ -281,7 +283,7 @@ class RunStore:
         if versions != {EXTRACTOR_VERSION}:
             raise IdentityMismatch("preparation uses an obsolete extractor version; start a new run")
         try:
-            with zipfile.ZipFile(self.root / preparation.source_path) as archive:
+            with zipfile.ZipFile(state.snapshot(self.root)) as archive:
                 for document in documents.values():
                     validate_source_views(document)
                     validate_source_relations(document)
@@ -300,10 +302,10 @@ class RunStore:
         preparation = self.read_preparation()
         if (
             preparation.source_path != "source.epub"
-            or self._file_hash(self.root / preparation.source_path) != preparation.source_hash
+            or self._file_hash(state.snapshot(self.root)) != preparation.source_hash
         ):
             raise IdentityMismatch("preparation source snapshot identity changed")
-        disk_ids = {entry.stem for entry in (self.root / "documents").glob("*.json")}
+        disk_ids = {entry.stem for entry in state.glob(self.root / "documents", "*.json")}
         if disk_ids != set(preparation.document_hashes):
             raise IdentityMismatch("document inventory differs from preparation")
         documents = {
@@ -320,7 +322,7 @@ class RunStore:
     ) -> TermExtractionRecord:
         path = self._path("glossary/extraction", record.item_id)
         with self.lock():
-            if (self.root / "glossary" / "freeze.json").exists():
+            if state.exists(self.root / "glossary" / "freeze.json"):
                 raise StaleWrite("extraction records are sealed after freeze")
             item = next((item for item in self.read_term_plan().items if item.item_id == record.item_id), None)
             if item is None:
@@ -328,7 +330,7 @@ class RunStore:
             identity = (record.document_id, record.view_ids, record.extraction_input_hash)
             if identity != (item.document_id, item.view_ids, item.extraction_input_hash):
                 raise IdentityMismatch(f"extraction record identity mismatch: {record.item_id}")
-            if not path.exists():
+            if not state.exists(path):
                 if record.record_version != 0 or expected_record_version not in {None, 0}:
                     raise StaleWrite("new extraction records must start at record_version 0")
             else:
@@ -360,7 +362,7 @@ class RunStore:
         path = self.root / "glossary" / "candidates.json"
         stored = self._with_candidate_hash(pool)
         with self.lock():
-            if (self.root / "glossary" / "freeze.json").exists():
+            if state.exists(self.root / "glossary" / "freeze.json"):
                 raise StaleWrite("candidate pool is sealed after freeze")
             plan = self.read_term_plan()
             if (
@@ -369,7 +371,7 @@ class RunStore:
                 or stored.term_plan_hash != plan.plan_hash
             ):
                 raise IdentityMismatch("candidate pool does not belong to the term plan")
-            if not path.exists():
+            if not state.exists(path):
                 if stored.record_version != 0 or expected_record_version not in {None, 0}:
                     raise StaleWrite("new candidate pools must start at record_version 0")
             else:
@@ -460,8 +462,11 @@ class RunStore:
         return preparation, document, unit, freeze, glossary
 
     def _shared_fingerprint(self) -> tuple[tuple[int, int], ...]:
+        if state.compact(self.root):
+            paths = (state.snapshot(self.root), state.artifact(self.root / "preparation.json"))
+            return tuple((status.st_mtime_ns, status.st_size) for path in paths for status in (state.stat(path),))
         paths = (
-            self.root / "source.epub",
+            state.snapshot(self.root),
             self.root / "preparation.json",
             self.root / "documents",
             self.root / "glossary.json",
@@ -470,7 +475,7 @@ class RunStore:
             self.root / "glossary" / "candidates.json",
             self.root / "glossary" / "extraction",
         )
-        return tuple((status.st_mtime_ns, status.st_size) for path in paths for status in (path.stat(),))
+        return tuple((status.st_mtime_ns, status.st_size) for path in paths for status in (state.stat(path),))
 
     def _validate_unit_record(self, record: UnitRecord) -> None:
         preparation, document, unit, _, glossary = self._unit_source(record.unit_id)
@@ -532,8 +537,8 @@ class RunStore:
         with self.lock():
             self._validate_unit_record(record)
             stored = self._with_unit_hash(record)
-            if not path.exists():
-                if (self.root / "bookplan.json").exists():
+            if not state.exists(path):
+                if state.exists(self.root / "bookplan.json"):
                     raise StaleWrite("cannot create a missing UnitRecord after BookPlan ready")
                 if stored.record_version != 0 or expected_record_version not in {None, 0}:
                     raise StaleWrite("new UnitRecords must start at record_version 0")
@@ -572,7 +577,7 @@ class RunStore:
         """Commit translation-ready state only after every P4 dependency is trusted."""
         path = self.root / "bookplan.json"
         with self.lock():
-            if path.exists():
+            if state.exists(path):
                 return self._write_immutable(path, plan, BookPlan, BOOK_FORMAT)
             preparation, documents = self._trusted_preparation_documents()
             preparation_hash = self._file_hash(self.root / "preparation.json")
@@ -620,7 +625,7 @@ class RunStore:
             context_index = build_context_index(documents, reading_edges, context_chars)
             if plan.unit_ids != expected_units or plan.required_unit_count != len(expected_units):
                 raise IdentityMismatch("BookPlan Unit inventory differs from DocumentPlans")
-            disk_units = {entry.stem for entry in (self.root / "units").glob("*.json")}
+            disk_units = {entry.stem for entry in state.glob(self.root / "units", "*.json")}
             if disk_units != set(expected_units):
                 raise IdentityMismatch("ready BookPlan requires exactly one UnitRecord per Unit")
             for unit_id in expected_units:
@@ -678,7 +683,7 @@ class RunStore:
 
             requests = tuple(
                 self.read_request(request_path.stem)
-                for request_path in sorted((self.root / "requests").glob("*.json"))
+                for request_path in sorted(state.glob(self.root / "requests", "*.json"))
             )
             term_requests = tuple(request for request in requests if request.stage in {"terms", "resolution"})
             succeeded_owners = {
@@ -718,7 +723,7 @@ class RunStore:
         ):
             raise CorruptRecord("BookPlan dependency hash mismatch")
         source_units = {unit.unit_id for document in documents.values() for unit in document.units}
-        disk_units = {entry.stem for entry in (self.root / "units").glob("*.json")}
+        disk_units = {entry.stem for entry in state.glob(self.root / "units", "*.json")}
         ordered_documents = (
             *preparation.reading_order,
             *(
@@ -739,7 +744,7 @@ class RunStore:
     def write_request(self, manifest: RequestManifest) -> RequestManifest:
         path = self._path("requests", manifest.request_id)
         with self.lock():
-            if manifest.stage in {"terms", "resolution"} and (self.root / "glossary" / "freeze.json").exists():
+            if manifest.stage in {"terms", "resolution"} and state.exists(self.root / "glossary" / "freeze.json"):
                 raise StaleWrite("term preparation requests are sealed after freeze")
             if manifest.stage == "terms":
                 plan_items = {item.item_id: item for item in self.read_term_plan().items}
@@ -791,14 +796,14 @@ class RunStore:
     @staticmethod
     def _read_term_response_file(path: Path) -> _TermResponseFile:
         try:
-            return _TermResponseFile.model_validate_json(path.read_bytes())
+            return _TermResponseFile.model_validate_json(state.read(path))
         except Exception as error:
             raise CorruptRecord(f"invalid {path}: {error}") from error
 
     @staticmethod
     def _read_model_response_file(path: Path) -> _ModelResponseFile:
         try:
-            return _ModelResponseFile.model_validate_json(path.read_bytes())
+            return _ModelResponseFile.model_validate_json(state.read(path))
         except Exception as error:
             raise CorruptRecord(f"invalid {path}: {error}") from error
 
@@ -826,7 +831,7 @@ class RunStore:
             }
             record: _TermResponseFile | _ModelResponseFile
             record = _TermResponseFile(**fields) if stage == "terms" else _ModelResponseFile(stage=stage, **fields)
-            if path.exists():
+            if state.exists(path):
                 existing = (
                     self._read_term_response_file(path) if stage == "terms" else self._read_model_response_file(path)
                 )
@@ -841,7 +846,7 @@ class RunStore:
     ) -> ModelResponseEnvelope | None:
         manifest = self._model_response_identity(stage, request_id, attempt_id)
         path = self._model_response_path(stage, request_id, attempt_id)
-        if not path.exists():
+        if not state.exists(path):
             return None
         record = self._read_term_response_file(path) if stage == "terms" else self._read_model_response_file(path)
         if (

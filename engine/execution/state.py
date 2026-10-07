@@ -29,6 +29,7 @@ from engine.schemas.contracts import (
     UnitRecord,
     Usage,
 )
+from engine.services import state
 from engine.services.atomic import IdentityMismatch
 from engine.services.coherence import (
     load_budget_overrides,
@@ -182,7 +183,7 @@ class State:
     def _rebuild_journal(self) -> None:
         self._request_cache = {
             path.stem: self.store.read_request(path.stem)
-            for path in sorted((self.store.root / "requests").glob("*.json"))
+            for path in sorted(state.glob(self.store.root / "requests", "*.json"))
         }
         self._spent_total = sum(len(request.attempts) for request in self._request_cache.values())
         self._actual_attempt_ids = {

@@ -12,6 +12,7 @@ import tiktoken
 
 from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS, request_messages
 from engine.agents.runtime import wire_hash as request_wire_hash
+from engine.item.inline import parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS, PlannerConfig, _planner_tokenizer, recommended_output_tokens
 from engine.schemas.budget import (
     BUDGET_VERSION,
@@ -49,7 +50,11 @@ def measure_budget(
 
     tokenizer, tokenizer_name, fallback = _tokenizer(tokenizer_model)
     source_wire = [{"item_id": _item_id(item), "source": _source(item)} for item in items]
-    source_tokens = _count(_json(source_wire), tokenizer)
+    source_tokens = (
+        sum(_projection_parts(_source(item), tokenizer)[0] for item in items)
+        if limits.output_version == 4
+        else _count(_json(source_wire), tokenizer)
+    )
     input_tokens = _count(_json({"messages": list(messages)}), tokenizer)
     review_target_input_tokens = 0
 
@@ -63,9 +68,16 @@ def measure_budget(
                 raise ValueError(f"review actual budget requires saved targets: {', '.join(missing)}")
         elif review_targets == "estimated":
             output_items = tuple(_without_target(item) for item in items)
-            review_target_input_tokens = math.ceil(
-                sum(_count(_source(item), tokenizer) for item in items) * limits.target_ratio
-            )
+            if limits.output_version == 4:
+                review_target_input_tokens = sum(
+                    markers + math.ceil(text * limits.target_ratio)
+                    for item in items
+                    for text, markers in (_projection_parts(_source(item), tokenizer),)
+                )
+            else:
+                review_target_input_tokens = math.ceil(
+                    sum(_count(_source(item), tokenizer) for item in items) * limits.target_ratio
+                )
         else:
             raise ValueError(f"unsupported review target basis: {review_targets}")
 
@@ -87,12 +99,15 @@ def measure_budget(
     output_tokenizer = _planner_tokenizer()
     if output_tokenizer is None or output_tokenizer.name != tokenizer_name:
         raise RuntimeError("output tokenizer does not match budget tokenizer")
-    output_tokens = recommended_output_tokens(
-        output_items,
-        estimate_config,
-        stage="translation" if stage == "translate" else "review",
-        request_id=str(payload.get("request_id", "r00000000000000000000000000000000")),
-    )
+    if limits.output_version == 4:
+        output_tokens = _v4_output_tokens(stage, output_items, payload, limits, estimate_config, tokenizer)
+    else:
+        output_tokens = recommended_output_tokens(
+            output_items,
+            estimate_config,
+            stage="translation" if stage == "translate" else "review",
+            request_id=str(payload.get("request_id", "r00000000000000000000000000000000")),
+        )
     if limits.output_version == 3:
         estimated_output = (
             output_tokens + math.ceil(output_tokens * TOKENIZER_MARGIN_PERCENT / 100) + WRAPPER_HEADROOM_TOKENS
@@ -163,6 +178,53 @@ def _count(value: str, tokenizer: Any) -> int:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _projection_parts(projection: str, tokenizer: Any) -> tuple[int, int]:
+    text = 0
+    markers = 0
+    for event in parse_projection(projection):
+        if event.kind == "text":
+            text += _count(event.value, tokenizer)
+        else:
+            markers += _count(f"⟦{event.value}⟧", tokenizer)
+    return text, markers
+
+
+def _v4_output_tokens(
+    stage: BudgetStage,
+    items: Sequence[Mapping[str, Any]],
+    payload: Mapping[str, Any],
+    limits: BudgetLimits,
+    config: PlannerConfig,
+    tokenizer: Any,
+) -> int:
+    empty = tuple(
+        {
+            "item_id": _item_id(item),
+            "source": "",
+            "target": "",
+            "base_revision": item.get("base_revision", 0),
+        }
+        for item in items
+    )
+    envelope = recommended_output_tokens(
+        empty,
+        config,
+        stage="translation" if stage == "translate" else "review",
+        request_id=str(payload.get("request_id", "r00000000000000000000000000000000")),
+    )
+    content = 0
+    for item in items:
+        target = _target(item)
+        if stage == "review" and target is not None:
+            content += _count(target, tokenizer)
+            continue
+        text, markers = _projection_parts(_source(item), tokenizer)
+        content += markers + math.ceil(text * limits.target_ratio)
+    complete = envelope + content
+    reserved = complete + math.ceil(complete * TOKENIZER_MARGIN_PERCENT / 100) + WRAPPER_HEADROOM_TOKENS
+    return max(limits.output_tokens, reserved)
 
 
 def _item_id(item: Mapping[str, Any]) -> str:

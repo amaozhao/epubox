@@ -6,6 +6,7 @@ import hashlib
 import pytest
 from pydantic import ValidationError
 
+from engine.epub.fill import fill_resource
 from engine.epub.ranges import RangeError
 from engine.item.atoms import EXTRACTOR_VERSION, extract_resource
 from engine.item.inline import parse_projection, validate_projection
@@ -70,6 +71,73 @@ def test_entire_tables_and_nested_lists_have_one_outer_owner() -> None:
     assert raw[result.items[0].source_span.byte_start : result.items[0].source_span.byte_end].endswith(b"</table>")
     assert raw[result.items[1].source_span.byte_start : result.items[1].source_span.byte_end].endswith(b"</ul>")
     validate_source_views(result.document)
+
+
+def test_epub_navigation_extracts_anchor_labels_without_owning_list_markup() -> None:
+    raw = source(
+        '<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc" id="toc" class="nav">'
+        '<h2>Contents</h2><ol class="outer"><li><a href="one.xhtml#top" class="entry">'
+        '<img src="icon.png" class="icon"/>Chapter one</a>'
+        '<ol><li><a href="two.xhtml"><span>Chapter two</span></a></li></ol></li></ol></nav>'
+        "<ol><li>Ordinary body list</li></ol>",
+        "<style>.entry { color: red; }</style>",
+    )
+
+    result = extract_resource(raw, "OPS/nav.xhtml", "book-source")
+
+    navigation = [item for item in result.items if item.channel == "navigation"]
+    assert texts(result) == ["Chapter one", "Chapter two", "Ordinary body list"]
+    assert len(navigation) == 2
+    assert all(item.kind == "navigation" and item.atomic_tag is None for item in navigation)
+    assert [raw[item.source_span.byte_start : item.source_span.byte_end] for item in navigation] == [
+        b'<img src="icon.png" class="icon"/>Chapter one',
+        b"<span>Chapter two</span>",
+    ]
+    assert result.items[-1].atomic_tag == "ol"
+    assert b'<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc" id="toc" class="nav">' in raw
+    validate_source_views(result.document)
+
+    targets = {item.item_id: item.source_projection for item in result.items}
+    targets[navigation[0].item_id] = navigation[0].source_projection.replace("Chapter one", "第一章")
+    targets[navigation[1].item_id] = navigation[1].source_projection.replace("Chapter two", "第二章")
+    filled = fill_resource(raw, result, targets)
+    assert b'<a href="one.xhtml#top" class="entry"><img src="icon.png" class="icon"/>' in filled
+    assert b'<a href="two.xhtml"><span>' in filled
+    assert b"<style>.entry { color: red; }</style>" in filled
+    assert "第一章" in filled.decode() and "第二章" in filled.decode()
+
+
+def test_atomic_one_replay_keeps_historical_navigation_inventory() -> None:
+    raw = source(
+        '<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc">'
+        '<ol><li><a href="one.xhtml">Chapter one</a></li></ol></nav>'
+    )
+
+    current = extract_resource(raw, "OPS/nav.xhtml", "book-source")
+    legacy = extract_resource(
+        raw,
+        "OPS/nav.xhtml",
+        "book-source",
+        extractor_version="epubox-atomic-1",
+    )
+
+    assert [item.kind for item in current.items] == ["navigation"]
+    assert [item.atomic_tag for item in legacy.items] == ["ol"]
+    assert legacy.document.extractor_version == "epubox-atomic-1"
+
+
+@pytest.mark.parametrize("navigation_type", ["page-list", "landmarks"])
+def test_other_epub_navigation_types_extract_anchor_labels(navigation_type: str) -> None:
+    raw = source(
+        f'<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="{navigation_type}">'
+        '<ol><li><a href="one.xhtml">Label</a></li></ol></nav>'
+        "<nav><ol><li>Ordinary navigation content</li></ol></nav>"
+    )
+
+    result = extract_resource(raw, "OPS/nav.xhtml", "book-source")
+
+    assert [item.kind for item in result.items] == ["navigation", "ol"]
+    assert texts(result) == ["Label", "Ordinary navigation content"]
 
 
 def test_standalone_emphasis_and_parent_text_and_tails_follow_byte_reading_order() -> None:

@@ -5,11 +5,12 @@ from __future__ import annotations
 import zipfile
 from typing import TYPE_CHECKING
 
+from engine.item.atoms import _LEGACY_EXTRACTOR_VERSION, extract_resource
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
-from engine.item.atoms import extract_resource
 from engine.schemas.bridge import AtomicDocument
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import DocumentPlan, JsonValue, PreparationPlan, TermExtractionPlan, parse_contract
+from engine.services import state
 from engine.services.atomic import IdentityMismatch
 from engine.services.preflight import require_preflight
 from engine.services.terms.planning import plan_atomic_terms, plan_term_extraction
@@ -26,11 +27,12 @@ def write_plan(store: RunStore, plan: TermExtractionPlan) -> str:
         raise IdentityMismatch("term plan does not belong to the committed preparation")
 
     trusted, documents = store._preparation_documents()
-    atomic = {document.extractor_version for document in documents.values()} == {ATOMIC_EXTRACTOR_VERSION}
+    versions = {document.extractor_version for document in documents.values()}
+    atomic = len(versions) == 1 and versions <= {ATOMIC_EXTRACTOR_VERSION, _LEGACY_EXTRACTOR_VERSION}
     if atomic:
         inventories = (
             canonical_documents(store, trusted, documents)
-            if (store.root / "glossary" / "plan.json").is_file()
+            if state.is_file(store.root / "glossary" / "plan.json")
             else atomic_documents(store, trusted, documents)
         )
         expected = _atomic_plan(store, trusted, inventories, preparation_hash)
@@ -59,12 +61,12 @@ def atomic_documents(
     if report.check is None:
         raise IdentityMismatch("atomic documents require a passing preflight receipt")
     inventory_ids = set(report.check.map_hashes)
-    disk_ids = {path.stem for path in (store.root / "inventories").glob("*.json")}
+    disk_ids = {path.stem for path in state.glob(store.root / "inventories", "*.json")}
     if inventory_ids != disk_ids:
         raise IdentityMismatch("atomic inventory differs from the preflight receipt")
     by_id = {
         document_id: parse_contract(
-            store._path("inventories", document_id).read_bytes(),
+            state.read(store._path("inventories", document_id)),
             AtomicDocument,
             "epubox-atoms-1",
         )
@@ -88,13 +90,14 @@ def canonical_documents(
 ) -> tuple[AtomicDocument, ...]:
     """Re-extract committed atomic documents from source bytes without a paid-work receipt."""
     try:
-        with zipfile.ZipFile(store.root / preparation.source_path) as archive:
+        with zipfile.ZipFile(state.snapshot(store.root)) as archive:
             by_id = {
                 document_id: extract_resource(
                     archive.read(document.resource.path),
                     document.resource.path,
                     preparation.source_hash,
                     document.resource.media_type,
+                    extractor_version=document.extractor_version,
                 )
                 for document_id, document in documents.items()
             }

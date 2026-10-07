@@ -14,7 +14,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from engine.core.markup import parse_xml_bytes, qname_local_name
 from engine.epub.diagnostics import compare, references, same_messages
@@ -26,6 +26,7 @@ from engine.epub.validation import (
     inspect_epub,
     validate_internal_references,
 )
+from engine.services import state
 
 _XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
@@ -50,7 +51,13 @@ class PackageVerification:
         return value
 
 
-def stage_epub(source_snapshot: Path, staged_path: Path, replacements: Mapping[str, bytes]) -> str:
+def stage_epub(
+    source_snapshot: Path,
+    staged_path: Path,
+    replacements: Mapping[str, bytes],
+    *,
+    source_directory: Path | None = None,
+) -> str:
     """Create a candidate EPUB while preserving every untouched ZIP member."""
     staged_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(source_snapshot) as source:
@@ -59,14 +66,22 @@ def stage_epub(source_snapshot: Path, staged_path: Path, replacements: Mapping[s
         if unknown:
             raise EpubValidationError("unknown_replacement", f"Replacement is not in source EPUB: {min(unknown)}")
         with zipfile.ZipFile(staged_path, "w") as target:
-            mimetype = replacements.get("mimetype", source.read("mimetype"))
+            mimetype = (
+                replacements["mimetype"]
+                if "mimetype" in replacements
+                else _source_member(source, source.getinfo("mimetype"), source_directory)
+            )
             if mimetype != b"application/epub+zip":
                 raise EpubValidationError("invalid_mimetype", "mimetype cannot be changed")
             target.writestr("mimetype", mimetype, compress_type=zipfile.ZIP_STORED)
             for info in source.infolist():
                 if info.filename == "mimetype":
                     continue
-                data = replacements.get(info.filename, source.read(info.filename))
+                data = (
+                    replacements[info.filename]
+                    if info.filename in replacements
+                    else _source_member(source, info, source_directory)
+                )
                 copied = zipfile.ZipInfo(info.filename, info.date_time)
                 copied.comment = info.comment
                 copied.extra = info.extra
@@ -76,6 +91,31 @@ def stage_epub(source_snapshot: Path, staged_path: Path, replacements: Mapping[s
                 copied.flag_bits = info.flag_bits & ~0x1
                 target.writestr(copied, data, compress_type=info.compress_type)
     return file_hash(staged_path)
+
+
+def _source_member(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    directory: Path | None,
+) -> bytes:
+    if directory is None:
+        return archive.read(info.filename)
+    relative = PurePosixPath(info.filename)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise EpubValidationError("unsafe_path", f"Unsafe package path: {info.filename!r}")
+    root = directory.resolve(strict=True)
+    path = directory.joinpath(*relative.parts)
+    parents = (path, *path.parents[: len(path.parts) - len(directory.parts)])
+    linked = any(parent.is_symlink() for parent in parents)
+    if info.is_dir():
+        if not path.is_dir() or linked:
+            raise EpubValidationError(
+                "source_directory_changed", f"Extracted source directory is missing: {info.filename}"
+            )
+        return b""
+    if linked or not path.is_file() or not path.resolve(strict=True).is_relative_to(root):
+        raise EpubValidationError("source_directory_changed", f"Extracted source resource is unsafe: {info.filename}")
+    return path.read_bytes()
 
 
 def verify_staged_epub(
@@ -261,9 +301,9 @@ def recover_publication(
     plan_fingerprint: str,
     version_vector: Mapping[str, int | str],
 ) -> dict[str, object] | None:
-    if not publish_path.is_file():
+    if not state.is_file(publish_path):
         return None
-    data = json.loads(publish_path.read_text(encoding="utf-8"))
+    data = json.loads(state.text(publish_path))
     if data.get("format") != "epubox-publish-1":
         raise EpubValidationError("invalid_publish_intent", "Unknown publish intent format")
     if data.get("plan_fingerprint") != plan_fingerprint or data.get("version_vector") != dict(
@@ -370,6 +410,9 @@ def _target_lock(target: Path) -> Iterator[None]:
 
 
 def _atomic_json(path: Path, value: Mapping[str, object]) -> None:
+    if state.artifact(path) != path:
+        state.write(path, json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temporary = Path(name)

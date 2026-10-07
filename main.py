@@ -10,6 +10,7 @@ from typing import Any, cast
 import typer
 
 from engine.cli import RunOutcome, resume_book, translate_book
+from engine.services import state
 from engine.services.atomic import StoreLocked
 from engine.services.resume import plan_resume
 
@@ -29,7 +30,9 @@ def translate(
     context_tokens: int = typer.Option(32768, "--context-tokens", min=1),
     max_input_tokens: int = typer.Option(50000, "--max-input-tokens", min=1),
     max_output_tokens: int = typer.Option(4096, "--max-output-tokens", min=1),
-    limit: int | None = typer.Option(None, "--limit", min=1, help="单个源片段的最大 token 数；默认读取环境配置。"),
+    limit: int | None = typer.Option(
+        None, "--limit", min=1, help="单个源片段可翻译正文的最大 token 数；默认读取环境配置。"
+    ),
     http_limit: int = typer.Option(0, "--http-limit", min=0),
     concurrency: int = typer.Option(2, "--concurrency", min=1),
     epubcheck: str | None = typer.Option(None, "--epubcheck-command"),
@@ -141,7 +144,7 @@ def _print_result(result: RunOutcome) -> None:
     if result.status == "completed":
         typer.echo(f"输出：{result.output_path}")
         if result.report_path:
-            report = json.loads(result.report_path.read_text())
+            report = json.loads(state.read(result.work_dir / "report.json"))
             verification = report.get("publication_verification") or {}
             baseline = verification.get("baseline")
             if isinstance(baseline, dict) and baseline.get("inherited_errors"):

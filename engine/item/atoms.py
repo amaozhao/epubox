@@ -29,9 +29,12 @@ from engine.schemas.contracts import Unit
 from engine.schemas.internal import DocumentPlan as StructuralDocument
 from engine.schemas.internal import RegistryEntry, ResourceRecord, SlotRange
 
-EXTRACTOR_VERSION = "epubox-atomic-1"
+EXTRACTOR_VERSION = "epubox-atomic-2"
 ADAPTER_VERSION = "epubox-bytes-1"
 DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
+EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
+_LEGACY_EXTRACTOR_VERSION = "epubox-atomic-1"
+_NAVIGATION_TYPES = frozenset({"toc", "page-list", "landmarks"})
 
 
 def _name(node: etree._Element) -> str:
@@ -49,9 +52,16 @@ class _AtomicExtractor(_Extractor):
     adapter_version = ADAPTER_VERSION
 
     def __init__(
-        self, parsed: ParsedResource, path: str, source_hash: str, media_type: str, config: Mapping[str, Any]
+        self,
+        parsed: ParsedResource,
+        path: str,
+        source_hash: str,
+        media_type: str,
+        config: Mapping[str, Any],
+        extractor_version: str,
     ):
         self.parsed = parsed
+        self.extractor_version = extractor_version
         if parsed.tree is None:
             raise RangeError("genuine HTML has no proven source mapping")
         super().__init__(parsed.text, path, source_hash, media_type, config, None, tree=parsed.tree)
@@ -160,6 +170,9 @@ class _AtomicExtractor(_Extractor):
         if self._is_hard(node) or not translated and not self._has_translate_yes(node):
             self._mark_subtree(node, "protected")
             return
+        if self.extractor_version == EXTRACTOR_VERSION and self._navigation_type(node):
+            self._extract_navigation(node)
+            return
         if self._is_atom(node):
             self._mark_subtree(node, "protected", preserve_attributes=_name(node) == "img")
             return
@@ -183,6 +196,34 @@ class _AtomicExtractor(_Extractor):
             if before is not None:
                 self._walk(before, translated)
             after = before
+
+    @staticmethod
+    def _navigation_type(node: etree._Element) -> bool:
+        return (
+            _namespace(node) == XHTML_NAMESPACE
+            and _name(node) == "nav"
+            and bool(set((node.get(f"{{{EPUB_NAMESPACE}}}type") or "").split()) & _NAVIGATION_TYPES)
+        )
+
+    def _extract_navigation(self, node: etree._Element) -> None:
+        for anchor in node.iterdescendants(f"{{{XHTML_NAMESPACE}}}a"):
+            if any(self._navigation_type(parent) for parent in anchor.iterancestors() if parent is not node):
+                continue
+            previous = len(self.units)
+            self._make_whole_content_unit(anchor, self._translate_state_chain(anchor), "navigation")
+            if len(self.units) != previous + 1:
+                continue
+            unit = self.units[-1]
+            registry = {
+                ref: entry.model_copy(update={"movement": "locked", "reorder_allowed": False})
+                if entry.kind == "g"
+                else entry
+                for ref, entry in unit.registry.items()
+            }
+            self.units[-1] = unit.model_copy(
+                update={"registry": registry, "region": unit.region | {"navigation_anchor": True}}
+            )
+        self._mark_subtree(node, "protected")
 
     def _make_region_unit(self, parent, after_node, before_node, translated, kind, **kwargs) -> bool:
         members = self._region_members(parent, after_node, before_node)
@@ -383,6 +424,8 @@ def extract_resource(
     source_hash: str,
     media_type: str = "application/xhtml+xml",
     config: Mapping[str, Any] | None = None,
+    *,
+    extractor_version: str = EXTRACTOR_VERSION,
 ) -> AtomicDocument:
     """Prepare raw-byte atom inventory; T15 owns production pipeline integration."""
     parsed = parse_resource(data, media_type)
@@ -390,7 +433,9 @@ def extract_resource(
         prefix = "genuine HTML: " if parsed.kind == "html" else ""
         raise RangeError(prefix + "; ".join(parsed.diagnostics))
     index = index_resource(parsed)
-    draft = _AtomicExtractor(parsed, resource_path, source_hash, media_type, config or {})
+    if extractor_version not in {EXTRACTOR_VERSION, _LEGACY_EXTRACTOR_VERSION}:
+        raise ValueError(f"unsupported atomic extractor version: {extractor_version}")
+    draft = _AtomicExtractor(parsed, resource_path, source_hash, media_type, config or {}, extractor_version)
     document = _to_document_plan(draft.extract())
     lexical = {(slot.path, slot.field, slot.attribute_name, slot.special_index): slot for slot in index.slots}
     spans = {unit.unit_id: _span(unit, document, index, lexical) for unit in document.units}

@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from engine.schemas.contracts import DocumentPlan, JsonValue, UnitRecord, canonical_hash, strict_json_loads
+from engine.services import state
 from engine.services.atomic import CorruptRecord
 from engine.services.store import RunStore
 
@@ -20,7 +21,7 @@ def prepare_document_check(
 ) -> dict[str, Any]:
     """Create or refresh one document snapshot without consuming a request."""
     path = store._path("checks", document.document_id)
-    if path.exists():
+    if state.exists(path):
         check = _read(path)
     else:
         windows = _windows(document, records)
@@ -128,7 +129,7 @@ def save_document_check(store: RunStore, check: Mapping[str, Any]) -> dict[str, 
 
 def load_budget_overrides(store: RunStore) -> dict[str, Any]:
     path = store._path("checks", "run-limits")
-    if not path.exists():
+    if not state.exists(path):
         return {
             "format": LIMITS_FORMAT,
             "add_run_http": 0,
@@ -137,7 +138,7 @@ def load_budget_overrides(store: RunStore) -> dict[str, Any]:
             "authorizations": {},
             "record_hash": None,
         }
-    value = strict_json_loads(path.read_bytes())
+    value = strict_json_loads(state.read(path))
     if not isinstance(value, dict) or value.get("format") != LIMITS_FORMAT:
         raise CorruptRecord("invalid run limit override")
     expected = canonical_hash({key: item for key, item in value.items() if key != "record_hash"})
@@ -213,7 +214,7 @@ def add_http_budget(
 
 def retry_document_check(store: RunStore, document_id: str) -> dict[str, Any]:
     path = store._path("checks", document_id)
-    if not path.exists():
+    if not state.exists(path):
         raise FileNotFoundError(path)
     check = _read(path)
     if check.get("status") != "needs_attention":
@@ -228,7 +229,7 @@ def retry_document_check(store: RunStore, document_id: str) -> dict[str, Any]:
 
 
 def _read(path) -> dict[str, Any]:
-    value = strict_json_loads(path.read_bytes())
+    value = strict_json_loads(state.read(path))
     if not isinstance(value, dict) or value.get("format") != CHECK_FORMAT:
         raise CorruptRecord("invalid v2.5 coherence record")
     expected = canonical_hash({key: item for key, item in value.items() if key != "record_hash"})

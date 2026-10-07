@@ -26,6 +26,7 @@ from engine.schemas.contracts import (
     TermExtractionRecord,
     Usage,
 )
+from engine.services import state
 from engine.services.atomic import StoreError
 from engine.services.coherence import load_budget_overrides
 from engine.services.store import RunStore
@@ -106,8 +107,8 @@ class TermRunner:
         )
 
     def _requests(self) -> tuple[RequestManifest, ...]:
-        for path in sorted((self.store.root / "requests").glob("*.json")):
-            modified = path.stat().st_mtime_ns
+        for path in sorted(state.glob(self.store.root / "requests", "*.json")):
+            modified = state.stat(path).st_mtime_ns
             if self._request_mtimes.get(path.stem) != modified:
                 self._cache_request(self.store.read_request(path.stem))
                 self._request_mtimes[path.stem] = modified
@@ -121,9 +122,9 @@ class TermRunner:
         self._actual_by_item: dict[str, int] = {}
         self._logical_terms_by_item: dict[str, int] = {}
         self._request_mtimes: dict[str, int] = {}
-        for path in sorted((self.store.root / "requests").glob("*.json")):
+        for path in sorted(state.glob(self.store.root / "requests", "*.json")):
             self._cache_request(self.store.read_request(path.stem))
-            self._request_mtimes[path.stem] = path.stat().st_mtime_ns
+            self._request_mtimes[path.stem] = state.stat(path).st_mtime_ns
 
     def _cache_request(self, request: RequestManifest) -> None:
         previous = self._request_cache.get(request.request_id)
@@ -134,8 +135,8 @@ class TermRunner:
         self._request_cache[request.request_id] = request
         self._index_request(request, 1)
         path = self.store._path("requests", request.request_id)
-        if path.exists():
-            self._request_mtimes[request.request_id] = path.stat().st_mtime_ns
+        if state.exists(path):
+            self._request_mtimes[request.request_id] = state.stat(path).st_mtime_ns
 
     def _index_request(self, request: RequestManifest, direction: int) -> None:
         reserved = len(request.attempts)
@@ -197,7 +198,7 @@ class TermRunner:
         self._cache_request(self.store.finish_attempt(request_id, attempt_id, **fields))
 
     def _record(self, item: ExtractionItem) -> TermExtractionRecord:
-        if self.store._path("glossary/extraction", item.item_id).exists():
+        if state.exists(self.store._path("glossary/extraction", item.item_id)):
             return self.store.read_extraction(item.item_id)
         return self.store.save_extraction(
             TermExtractionRecord(
@@ -472,16 +473,16 @@ class TermRunner:
         limits = limits_for(self.preparation)
         paths = [
             self.store.root / "preparation.json",
-            self.store.root / "source.epub",
+            state.snapshot(self.store.root),
             self.store.root / "checks" / "preflight.json",
         ]
-        paths.extend(sorted((self.store.root / "inventories").glob("*.json")))
-        paths.extend(sorted((self.store.root / "documents").glob("*.json")))
+        paths.extend(sorted(state.glob(self.store.root / "inventories", "*.json")))
+        paths.extend(sorted(state.glob(self.store.root / "documents", "*.json")))
         try:
             fingerprint = tuple(
                 (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
                 for path in paths
-                for stat in [path.stat()]
+                for stat in [state.stat(path)]
             )
             if getattr(self, "_preflight_fingerprint", None) == fingerprint:
                 return

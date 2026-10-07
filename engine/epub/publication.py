@@ -34,6 +34,7 @@ from engine.schemas.contracts import (
     canonical_hash,
     strict_json_loads,
 )
+from engine.services import state
 from engine.services.store import RunStore
 
 _TRANSLATABLE_ATTRIBUTES = {"alt", "title", "aria-label", "aria-description"}
@@ -175,7 +176,7 @@ def publish_book(
     plan = store.read_bookplan()
     if plan.format != BOOK_FORMAT:
         raise TypeError(f"publication requires {BOOK_FORMAT}")
-    snapshot = store.root / "source.epub"
+    snapshot = state.snapshot(store.root)
     inventory = inspect_epub(snapshot, plan.source_hash, checker=checker)
     replacements: dict[str, bytes] = {}
     accepted_by_resource: dict[str, dict[str, str]] = {}
@@ -224,8 +225,13 @@ def publish_book(
             source_to_target=sidecar,
             changeset=changesets.get(path, {}),
         )
-    staged_path = store.root / "staging" / f"candidate-{uuid.uuid4().hex}.epub"
-    stage_epub(snapshot, staged_path, replacements)
+    staged_path = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
+    stage_epub(
+        snapshot,
+        staged_path,
+        replacements,
+        source_directory=store.root / "source" if state.compact(store.root) else None,
+    )
     verification = verify_staged_epub(
         snapshot,
         staged_path,
@@ -258,17 +264,20 @@ def publish_book(
                         "unit_changed_during_publication",
                         f"Unit changed while publication was being verified: {unit_id}",
                     )
-    intent = publish_verified(
-        staged_path,
-        output_path,
-        store.root / "publish.json",
-        run_id=plan.run_id,
-        plan_fingerprint=canonical_hash(plan),
-        version_vector=version_vector,
-        verification=verification,
-        forbidden_paths=(Path(store.read_preparation().source_path), snapshot),
-        overwrite=overwrite,
-    )
+    try:
+        intent = publish_verified(
+            staged_path,
+            output_path,
+            store.root / "publish.json",
+            run_id=plan.run_id,
+            plan_fingerprint=canonical_hash(plan),
+            version_vector=version_vector,
+            verification=verification,
+            forbidden_paths=(store.root / store.read_preparation().source_path, snapshot),
+            overwrite=overwrite,
+        )
+    finally:
+        staged_path.unlink(missing_ok=True)
     return {
         "path": str(output_path),
         "sha256": verification.output_hash,
@@ -395,10 +404,10 @@ def _validate_document_coherence(
     records: Mapping[str, UnitRecord],
 ) -> None:
     path = store.root / "checks" / f"{document.document_id}.json"
-    if not path.is_file():
+    if not state.is_file(path):
         raise EpubValidationError("missing_coherence_check", f"Missing coherence check: {document.document_id}")
     try:
-        check = strict_json_loads(path.read_bytes())
+        check = strict_json_loads(state.read(path))
     except (OSError, TypeError, ValueError) as error:
         raise EpubValidationError(
             "invalid_coherence_check", f"Invalid coherence check: {document.document_id}"

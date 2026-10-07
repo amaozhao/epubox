@@ -17,7 +17,8 @@ from engine.item.members import MemberIndex, pack_members, validate_member_targe
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash
 from engine.schemas.members import MemberBatch, RequestMember
 from engine.schemas.ready import AtomicPreparedInput
-from engine.services.ready import ReadySession, limits_for
+from engine.services import state
+from engine.services.ready import ReadySession, derived_record, limits_for
 
 type SaveCallback = Callable[[ItemRecord], None | Awaitable[None]]
 
@@ -159,6 +160,7 @@ async def _translate_step(
         issues.append(f"translate:{batch.manifest.request_id}: {error}")
 
     wires = _wire_items(batch)
+    changed: list[ItemRecord] = []
     for member in batch.items:
         error = None
         target = None
@@ -172,7 +174,7 @@ async def _translate_step(
         if error is not None:
             issues.append(f"translate:{member.item_id}: {error}")
             current[member.item_id] = _failed(member, current.get(member.item_id), "translate", error, batch)
-            await _save(save, current[member.item_id])
+            changed.append(current[member.item_id])
             continue
         assert target is not None
         current[member.item_id] = ItemRecord(
@@ -201,7 +203,8 @@ async def _translate_step(
             request_id=batch.manifest.request_id,
             next_action="review",
         )
-        await _save(save, current[member.item_id])
+        changed.append(current[member.item_id])
+    await _save_group(save, changed)
     return current, issues
 
 
@@ -230,13 +233,15 @@ async def _proofread_step(
         tokenizer_model=str(prepared.plan.translation_config["model"]),
     )
     issues: list[str] = []
+    blocked_records: list[ItemRecord] = []
     for blocked in result.blocked:
         item_id, budget = blocked.item_id, blocked.budget
         issue = f"review:{item_id}: {'; '.join(budget.failures)}"
         issues.append(issue)
         member = index.members_by_id[item_id]
         current[item_id] = _failed(member, current[item_id], "review", issue, None)
-        await _save(save, current[item_id])
+        blocked_records.append(current[item_id])
+    await _save_group(save, blocked_records)
     for review_batch in result.batches:
         session.verify_batch(review_batch)
         _guard_review(prepared, review_batch, index, runtime)
@@ -282,6 +287,7 @@ async def _apply_corrections_step(
     """Apply one complete valid replacement, or retain the saved candidate as failed."""
     current = dict(records)
     issues: list[str] = []
+    changed: list[ItemRecord] = []
     wires = _wire_items(batch)
     for member in batch.items:
         prior = current[member.item_id]
@@ -335,7 +341,8 @@ async def _apply_corrections_step(
                     "next_action": None,
                 }
             )
-        await _save(save, current[member.item_id])
+        changed.append(current[member.item_id])
+    await _save_group(save, changed)
     return current, issues
 
 
@@ -492,7 +499,7 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
     if not isinstance(request_id, str):
         raise TypeError("saved translation frame has an invalid request ID")
     request_path = session.store.root / "requests" / f"{request_id}.json"
-    request = session.store.read_request(request_id) if request_path.exists() else None
+    request = session.store.read_request(request_id) if state.exists(request_path) else None
     if request is not None and request.record_versions.get(member.unit_id) != _translation_epoch(record):
         raise ValueError("saved result translation epoch differs from its request frame")
     versions: dict[str, int] = {}
@@ -500,7 +507,7 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
         saved = (
             record
             if value == record.item_id
-            else ItemRecord.model_validate_json((session.store.root / "results" / f"{value}.json").read_bytes())
+            else ItemRecord.model_validate_json(state.read(session.store.root / "results" / f"{value}.json"))
         )
         versions[saved_member.unit_id] = max(versions.get(saved_member.unit_id, 0), _translation_epoch(saved))
     packed = pack_members(
@@ -660,11 +667,29 @@ async def _save(callback: SaveCallback, record: ItemRecord) -> None:
         await result
 
 
+async def _save_group(callback: SaveCallback, records: Sequence[ItemRecord]) -> None:
+    if not records:
+        return
+    owner = getattr(callback, "__self__", None)
+    save_many = getattr(owner, "save_many", None)
+    if callable(save_many):
+        save_many(tuple(records))
+        return
+    for record in records:
+        await _save(callback, record)
+
+
 def _validate_saved_record(session: ReadySession, record: ItemRecord) -> None:
     """Validate the canonical source frame carried by one durable body result."""
     member = session.index.members_by_id.get(record.item_id)
     if member is None or record.segment_id != record.item_id:
         raise ValueError("saved result is not owned by the ready member inventory")
+    source_id = session.prepared.plan.derived_sources.get(member.unit_id)
+    if source_id is not None:
+        expected = derived_record(member.item_id, source_id)
+        if record != expected:
+            raise ValueError("saved derived result differs from its canonical dependency record")
+        return
     if record.status != ItemStatus.PENDING:
         _saved_batch(session, member, record)
 

@@ -1,18 +1,14 @@
 """Locate an existing book session and reopen unfinished atomic work."""
 
-import os
+import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from engine.epub.preparation import (
-    PreparationConfig,
-    _frozen_extraction_config,
-    _frozen_translation_config,
-    _sha256_file,
-)
+from engine.epub.preparation import PreparationConfig, _frozen_extraction_config, _frozen_translation_config
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.schemas.contracts import ItemStatus, canonical_json_bytes, strict_json_loads
+from engine.services import state
 from engine.services.atomic import AtomicStore, IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.terms.inputs import load_atomic_terms, load_user_terms
@@ -21,12 +17,12 @@ _SOURCE_FIELDS = {"format", "run_id", "source_hash", "original_path", "st_dev", 
 _ALIAS_FIELDS = {"original_path", "source_hash", "st_dev", "st_ino"}
 
 
-def fingerprint(path: Path) -> tuple[str, os.stat_result]:
+def fingerprint(path: Path) -> tuple[str, Any]:
     """Hash one stable file identity without trusting a stale caller digest."""
     path = path.resolve(strict=True)
-    before = path.stat()
-    digest = _sha256_file(path)
-    after = path.stat()
+    before = state.stat(path)
+    digest = hashlib.sha256(state.read(path)).hexdigest()
+    after = state.stat(path)
     fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
     if any(getattr(before, field) != getattr(after, field) for field in fields):
         raise IdentityMismatch("source changed while its session identity was read")
@@ -36,7 +32,7 @@ def fingerprint(path: Path) -> tuple[str, os.stat_result]:
 def source_record(path: Path, expected: Mapping[str, Any]) -> dict[str, Any]:
     if path.is_symlink():
         raise IdentityMismatch("original source record must not be a symbolic link")
-    value = strict_json_loads(path.read_bytes())
+    value = strict_json_loads(state.read(path))
     if not isinstance(value, dict):
         raise IdentityMismatch("original source record has an invalid schema")
     keys = set(value)
@@ -88,9 +84,30 @@ def remember(source: Path, work_dir: Path) -> None:
     if work_dir.is_symlink():
         raise IdentityMismatch("book session must not be a symbolic link")
     work_dir = work_dir.resolve(strict=True)
+    if state.compact(root):
+        current_hash, current_stat = fingerprint(source)
+        identity = state.header(root)
+        original = identity.get("source")
+        if (
+            work_dir != root
+            or not isinstance(original, dict)
+            or original.get("path") != str(source.resolve(strict=True))
+            or original.get("hash") != current_hash
+            or original.get("st_dev") != current_stat.st_dev
+            or original.get("st_ino") != current_stat.st_ino
+        ):
+            raise IdentityMismatch("book session identity differs from the compact checkpoint")
+        if state.exists(root / "preparation.json"):
+            preparation = RunStore(root).read_preparation()
+            if (preparation.source_hash, preparation.run_id) != (
+                original.get("hash"),
+                identity.get("run_id"),
+            ):
+                raise IdentityMismatch("book session preparation differs from the compact checkpoint")
+        return
     if not work_dir.is_relative_to(root) or work_dir.is_symlink():
         raise IdentityMismatch("book session must remain inside the source book directory")
-    if not work_dir.is_dir():
+    if not state.is_dir(work_dir):
         raise IdentityMismatch("book session directory is missing")
     preparation_path = work_dir / "preparation.json"
     if preparation_path.is_symlink():
@@ -98,12 +115,12 @@ def remember(source: Path, work_dir: Path) -> None:
     preparation = RunStore(work_dir).read_preparation()
     if work_dir.name != preparation.run_id or work_dir.parent.name != preparation.source_hash:
         raise IdentityMismatch("book session identity differs from its directory")
-    snapshot = work_dir / preparation.source_path
+    snapshot = state.snapshot(work_dir)
     if snapshot.is_symlink() or fingerprint(snapshot)[0] != preparation.source_hash:
         raise IdentityMismatch("book session source snapshot changed")
     original_hash, original_stat = fingerprint(source)
     hint_path = work_dir / "source.json"
-    if hint_path.exists() or hint_path.is_symlink():
+    if state.exists(hint_path) or hint_path.is_symlink():
         hint = source_record(
             hint_path,
             {"format": "epubox-source-1", "run_id": preparation.run_id, "source_hash": preparation.source_hash},
@@ -144,15 +161,35 @@ def remember(source: Path, work_dir: Path) -> None:
 
 def find(source: Path, source_hash: str | None = None) -> Path | None:
     root = source.with_name(source.stem)
+    if state.compact(root):
+        current_hash, current_stat = fingerprint(source)
+        if source_hash is not None and source_hash != current_hash:
+            raise IdentityMismatch("original source changed while locating its active session")
+        identity = state.header(root)
+        original = identity.get("source")
+        if (
+            not isinstance(original, dict)
+            or original.get("path") != str(source.resolve(strict=True))
+            or original.get("hash") != current_hash
+            or original.get("st_dev") != current_stat.st_dev
+            or original.get("st_ino") != current_stat.st_ino
+            or not isinstance(identity.get("run_id"), str)
+        ):
+            raise IdentityMismatch("compact book session does not match the original source")
+        if state.exists(root / "preparation.json"):
+            preparation = RunStore(root).read_preparation()
+            if (preparation.source_hash, preparation.run_id) != (current_hash, identity["run_id"]):
+                raise IdentityMismatch("compact preparation identity changed")
+        return root
     path = root / "active.json"
     if path.is_symlink():
         raise IdentityMismatch("book session index must not be a symbolic link")
-    if not path.exists():
+    if not state.exists(path):
         return None
     current_hash, current_stat = fingerprint(source)
     if source_hash is not None and source_hash != current_hash:
         raise IdentityMismatch("original source changed while locating its active session")
-    value = strict_json_loads(path.read_bytes())
+    value = strict_json_loads(state.read(path))
     if (
         not isinstance(value, dict)
         or set(value) != {"format", "original_hash", "snapshot_hash", "work_dir"}
@@ -170,10 +207,10 @@ def find(source: Path, source_hash: str | None = None) -> Path | None:
     preparation_path = work_dir / "preparation.json"
     if preparation_path.is_symlink():
         raise IdentityMismatch("book session preparation must not be a symbolic link")
-    if not work_dir.is_dir() or not preparation_path.is_file():
+    if not state.is_dir(work_dir) or not state.is_file(preparation_path):
         raise IdentityMismatch("book session checkpoint is missing")
     preparation = RunStore(work_dir).read_preparation()
-    snapshot = work_dir / preparation.source_path
+    snapshot = state.snapshot(work_dir)
     if snapshot.is_symlink():
         raise IdentityMismatch("book session source snapshot must not be a symbolic link")
     if (
@@ -185,7 +222,7 @@ def find(source: Path, source_hash: str | None = None) -> Path | None:
         raise IdentityMismatch("book session snapshot or run identity changed")
     if value["original_hash"] != value["snapshot_hash"]:
         hint_path = work_dir / "source.json"
-        if hint_path.is_symlink() or not hint_path.is_file():
+        if hint_path.is_symlink() or not state.is_file(hint_path):
             raise IdentityMismatch("mixed-source book session is missing its protected source record")
         hint = source_record(
             hint_path,
@@ -268,14 +305,14 @@ def validate_options(work_dir: Path, config: PreparationConfig, explicit: frozen
 
 
 def reopen(work_dir: Path) -> tuple[str, ...]:
-    if not (work_dir / "prepared.json").is_file():
+    if not state.is_file(work_dir / "prepared.json"):
         return ()
     from engine.services.journal import BodyJournal
 
     store = RunStore(work_dir)
     with store.lock(blocking=False):
         journal = BodyJournal(store)
-        if journal.session.prepared.plan.translation_config.get("output_budget_version", 2) != 3:
+        if journal.session.prepared.plan.translation_config.get("output_budget_version", 2) not in {3, 4}:
             return ()
         journal.recover_results()
         units = {

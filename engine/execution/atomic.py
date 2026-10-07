@@ -12,6 +12,7 @@ from engine.agents.runtime import RuntimePaused
 from engine.agents.workflow import run_workflow
 from engine.execution.state import TranslationRunResult
 from engine.schemas.members import MemberBatch
+from engine.services import state
 from engine.services.atomic import StoreError
 from engine.services.store import RunStore
 
@@ -34,7 +35,7 @@ async def run_atomic(
         order = {document: index for index, document in enumerate(session.index.document_order)}
         batches = sorted(
             (
-                MemberBatch.model_validate_json((store.root / "batches" / f"{identifier}.json").read_bytes())
+                MemberBatch.model_validate_json(state.read(store.root / "batches" / f"{identifier}.json"))
                 for identifier in ready.plan.batch_hashes
             ),
             key=lambda batch: (order[batch.items[0].document_id], batch.items[0].ordinal, batch.items[0].piece_index),

@@ -215,3 +215,7 @@
 2026-10-07 新增 `engine/services/session.py`、`tests/engine/services/session.py`，负责原书任务定位、身份验证和无参数续传；单词命名且≤1000行。
 
 2026-10-07 新增 `engine/epub/diagnostics.py`、`tests/engine/epub/diagnostics.py`，负责源书及成品规范诊断的稳定位置比较；单词命名且≤1000行。
+
+2026-10-07 单 JSON 及预检修复新增 `engine/services/state.py`、`engine/services/legacy.py`、`tests/engine/compact.py`、`tests/engine/services/compact.py`、`tests/engine/services/state.py`；分别负责统一持久化、历史任务发现及紧凑目录回归。源码、测试及维护文档均为单词命名且≤1000行。
+
+`tests/engine/services/replay.py` 验证缓存响应分批回放、提交失败回滚和零重复HTTP；文件为单词命名且≤1000行。

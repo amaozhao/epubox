@@ -13,9 +13,11 @@ from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, T
 from engine.core.config import settings
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.epub.validation import EpubCheckResult, EpubValidationError
+from engine.epub.verification import stage_epub, verify_staged_epub
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.extractor import extract_document
+from engine.services import state
 from engine.services.atomic import IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION, TERM_PLANNER_VERSION, plan_term_extraction
@@ -29,6 +31,58 @@ class StubChecker:
     def check(self, path: Path) -> EpubCheckResult:
         self.paths.append(path)
         return EpubCheckResult(("stub-epubcheck",), 0)
+
+
+def test_compact_preparation_extracts_source_and_keeps_records_in_one_json(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub")
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    root = tmp_path / "book"
+    state.initialize(root, source, source_hash, "compact")
+
+    prepared = prepare_book(
+        source,
+        root,
+        PreparationConfig(run_id="compact", expected_source_hash=source_hash),
+        StubChecker(),
+    )
+
+    assert prepared.work_dir == root
+    assert prepared.source_snapshot == source.resolve()
+    assert (root / "source" / "mimetype").read_bytes() == b"application/epub+zip"
+    assert state.is_file(root / "preparation.json")
+    assert not (root / "preparation.json").exists()
+    assert hashlib.sha256(state.read(root / "preparation.json")).hexdigest() == prepared.preparation_hash
+    assert not (root / source_hash).exists()
+    assert {path.name for path in root.iterdir()} == {"source", "state.json"}
+
+
+def test_compact_preparation_preserves_explicit_empty_directory_for_publication(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub")
+    with zipfile.ZipFile(source, "a") as archive:
+        archive.writestr("OEBPS/empty/", b"")
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    root = tmp_path / "book"
+    state.initialize(root, source, source_hash, "compact-empty")
+    prepared = prepare_book(
+        source,
+        root,
+        PreparationConfig(run_id="compact-empty", expected_source_hash=source_hash),
+        StubChecker(),
+    )
+    staged = tmp_path / "staged.epub"
+
+    stage_epub(source, staged, {}, source_directory=root / "source")
+    verified = verify_staged_epub(
+        source,
+        staged,
+        prepared.inventory,
+        {},
+        accepted_targets={},
+        checker=StubChecker(),
+    )
+
+    assert (root / "source" / "OEBPS" / "empty").is_dir()
+    assert verified.output_hash
 
 
 def test_snapshot_rejects_source_that_changes_during_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

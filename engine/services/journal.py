@@ -26,6 +26,7 @@ from engine.schemas.contracts import (
     canonical_json_bytes,
 )
 from engine.schemas.members import MemberBatch
+from engine.services import state
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, safe_id
 from engine.services.coherence import load_budget_overrides
 from engine.services.custody import bounded as _bounded
@@ -40,10 +41,12 @@ from engine.services.custody import text as _text
 from engine.services.ready import ReadySession, limits_from_config
 from engine.services.store import ModelResponseStage, RunStore
 
+_FROZEN_RESULT_FIELDS = tuple(
+    "item_id segment_id selected_term_ids term_applicability terms_hash context_hash".split()  # noqa: SIM905
+)
+
 
 class BodyJournal:
-    """Persist the existing three-step workflow without another execution engine."""
-
     def __init__(self, store: RunStore, session: ReadySession | None = None):
         self.store = store
         self.session = session or ReadySession(store)
@@ -78,47 +81,47 @@ class BodyJournal:
         return {item_id: self._records[item_id] for item_id in requested}
 
     def save(self, record: ItemRecord) -> None:
-        """Atomically advance one member result; exact repeats are harmless."""
+        self.save_many((record,))
+
+    def save_many(self, records: Sequence[ItemRecord]) -> None:
         self.session.verify()
-        if record.item_id != record.segment_id or record.item_id not in self.session.index.members_by_id:
-            raise IdentityMismatch("body result does not belong to the ready member inventory")
-        _validate_saved_record(self.session, record)
-        path = self._result_path(record.item_id)
-        with self.store.lock():
-            current = self._records[record.item_id]
-            if current == record:
-                return
-            immutable = (
-                ("item_id", "segment_id")
-                if current.status == ItemStatus.PENDING
-                else (
-                    "item_id",
-                    "segment_id",
-                    "selected_term_ids",
-                    "term_applicability",
-                    "terms_hash",
-                    "context_hash",
+        records = tuple(records)
+        if len({record.item_id for record in records}) != len(records):
+            raise IdentityMismatch("body result group contains duplicate members")
+        changes: list[tuple[ItemRecord, ItemRecord, Path]] = []
+        with self.store.lock(), state.batch(self.store.root):
+            for record in records:
+                if record.item_id != record.segment_id or record.item_id not in self.session.index.members_by_id:
+                    raise IdentityMismatch("body result does not belong to the ready member inventory")
+                _validate_saved_record(self.session, record)
+                path = self._result_path(record.item_id)
+                current = self._records[record.item_id]
+                if current == record:
+                    continue
+                immutable = (
+                    ("item_id", "segment_id") if current.status == ItemStatus.PENDING else _FROZEN_RESULT_FIELDS
                 )
-            )
-            if any(getattr(current, name) != getattr(record, name) for name in immutable):
-                raise IdentityMismatch("body result changed its frozen source, terms, or context identity")
-            if current.status == ItemStatus.REVIEWED or current.status == ItemStatus.NEEDS_ATTENTION:
-                raise StaleWrite("terminal body result cannot be replaced implicitly")
-            if (
-                current.target_projection is not None
-                and record.status != ItemStatus.REVIEWED
-                and record.target_projection != current.target_projection
-            ):
-                raise StaleWrite("body draft can change only through a reviewed replacement")
-            if record.status == ItemStatus.REVIEWED:
-                self._require_review_proof(record)
-            elif record.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
-                self._translation_proof(record)
-            self.store._base.atomic_write_bytes(path, canonical_json_bytes(record))
+                if any(getattr(current, name) != getattr(record, name) for name in immutable):
+                    raise IdentityMismatch("body result changed its frozen source, terms, or context identity")
+                if current.status == ItemStatus.REVIEWED or current.status == ItemStatus.NEEDS_ATTENTION:
+                    raise StaleWrite("terminal body result cannot be replaced implicitly")
+                if (
+                    current.target_projection is not None
+                    and record.status != ItemStatus.REVIEWED
+                    and record.target_projection != current.target_projection
+                ):
+                    raise StaleWrite("body draft can change only through a reviewed replacement")
+                if record.status == ItemStatus.REVIEWED:
+                    self._require_review_proof(record)
+                elif record.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
+                    self._translation_proof(record)
+                changes.append((current, record, path))
+            for _, record, path in changes:
+                self.store._base.atomic_write_bytes(path, canonical_json_bytes(record))
+        for current, record, _ in changes:
             self._update_result(current, record)
 
     def recover_results(self) -> dict[str, ItemRecord]:
-        """Materialize every locally valid sibling from already persisted batch responses."""
         for request in tuple(self._requests.values()):
             if (
                 request.stage != "translate"
@@ -142,12 +145,12 @@ class BodyJournal:
                     raise ProtocolError("translation response contains unknown item IDs")
             except (KeyError, ProtocolError, TypeError, ValueError) as error:
                 parsed, batch_error = None, str(error)
+            recovered: list[ItemRecord] = []
             for member in batch.items:
-                if self._records[member.item_id].status != ItemStatus.PENDING:
-                    continue
+                prior = self._records[member.item_id]
                 if (
-                    _saved_epoch(self._records[member.item_id], "translation_epoch")
-                    != request.record_versions[member.unit_id]
+                    prior.status != ItemStatus.PENDING
+                    or _saved_epoch(prior, "translation_epoch") != request.record_versions[member.unit_id]
                 ):
                     continue
                 accepted = parsed.accepted.get(member.item_id) if parsed is not None else None
@@ -161,12 +164,11 @@ class BodyJournal:
                 if accepted is not None:
                     error = _target_error(member, accepted["target"], wires[member.item_id])
                 if error is not None:
-                    self.save(_failed(member, self._records[member.item_id], "translate", error, batch))
+                    recovered.append(_failed(member, prior, "translate", error, batch))
                     continue
                 assert accepted is not None
                 terms = tuple(term for term in wires[member.item_id]["terms"] if isinstance(term, Mapping))
-                target = accepted["target"]
-                self.save(
+                recovered.append(
                     ItemRecord(
                         item_id=member.item_id,
                         segment_id=member.item_id,
@@ -176,8 +178,8 @@ class BodyJournal:
                         context_hash=batch.manifest.context_hashes[member.item_id],
                         stage="proofread",
                         status=ItemStatus.LOCAL_VALID,
-                        target_projection=target,
-                        target_hash=canonical_hash(target),
+                        target_projection=accepted["target"],
+                        target_hash=canonical_hash(accepted["target"]),
                         checks={
                             "translation_frame": _frame(batch),
                             **(
@@ -190,6 +192,7 @@ class BodyJournal:
                         next_action="review",
                     )
                 )
+            self.save_many(recovered)
         for request in tuple(self._requests.values()):
             if (
                 request.stage != "review"
@@ -214,11 +217,13 @@ class BodyJournal:
             except (KeyError, ProtocolError, TypeError, ValueError) as error:
                 parsed, batch_error = None, str(error)
             wires = _wire_items(batch)
+            recovered = []
             for member in batch.items:
                 prior = self._records[member.item_id]
-                if prior.status not in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
-                    continue
-                if _saved_epoch(prior, "review_epoch") != request.revisions[member.unit_id]:
+                if (
+                    prior.status not in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
+                    or _saved_epoch(prior, "review_epoch") != request.revisions[member.unit_id]
+                ):
                     continue
                 decision = parsed.accepted.get(member.item_id) if parsed is not None else None
                 error = (
@@ -231,7 +236,7 @@ class BodyJournal:
                 if decision is not None and decision["decision"] == "replace":
                     error = _target_error(member, decision["target"], wires[member.item_id])
                 if error is not None:
-                    self.save(
+                    recovered.append(
                         prior.model_copy(
                             update={
                                 "stage": "review",
@@ -245,7 +250,7 @@ class BodyJournal:
                     continue
                 assert decision is not None
                 if decision["decision"] == "needs_attention":
-                    self.save(
+                    recovered.append(
                         prior.model_copy(
                             update={
                                 "stage": "review",
@@ -263,7 +268,7 @@ class BodyJournal:
                     )
                     continue
                 target = decision["target"] if decision["decision"] == "replace" else prior.target_projection
-                self.save(
+                recovered.append(
                     prior.model_copy(
                         update={
                             "stage": "reviewed",
@@ -292,6 +297,7 @@ class BodyJournal:
                         }
                     )
                 )
+            self.save_many(recovered)
         return self.records()
 
     def retry_units(self, unit_ids: Sequence[str], *, retry_unknown: bool = True) -> tuple[str, ...]:
@@ -394,7 +400,6 @@ class BodyJournal:
         *,
         progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> ModelRuntime:
-        """Build the sole v2 body runtime from the frozen ready configuration."""
         config = self.session.prepared.plan.translation_config
         model_id = _text(config, "model")
         if model is not None and getattr(model, "id", None) != model_id:
@@ -462,7 +467,6 @@ class BodyJournal:
         return targets
 
     def parent_versions(self, require_complete: bool = True) -> dict[str, int]:
-        """Expose the single completed atomic workflow generation per merged parent."""
         return {parent_id: 1 for parent_id in self.parent_targets(require_complete=require_complete)}
 
     def progress_snapshot(self) -> dict[str, Any]:
@@ -573,7 +577,7 @@ class BodyJournal:
     def _initial_pending(self, item_id: str) -> ItemRecord:
         for request_id in self.session.prepared.plan.batch_hashes:
             batch = MemberBatch.model_validate_json(
-                (self.store.root / "batches" / f"{safe_id(request_id)}.json").read_bytes()
+                state.read(self.store.root / "batches" / f"{safe_id(request_id)}.json")
             )
             if item_id not in batch.manifest.item_ids:
                 continue
@@ -599,7 +603,7 @@ class BodyJournal:
         if not set(manifest.item_ids).issubset(self.session.index.members_by_id):
             raise IdentityMismatch("body request references a member outside the ready plan")
         path = self.store._path("requests", manifest.request_id)
-        if path.exists():
+        if state.exists(path):
             existing = self._requests.get(manifest.request_id) or self.store.read_request(manifest.request_id)
             if existing.model_copy(update={"attempts": ()}) != manifest:
                 raise StaleWrite("body request identity changed during resume")
@@ -758,7 +762,7 @@ class BodyJournal:
         for item_id in self.session.prepared.plan.member_hashes:
             path = self._result_path(item_id)
             try:
-                record = ItemRecord.model_validate_json(path.read_bytes())
+                record = ItemRecord.model_validate_json(state.read(path))
             except Exception as error:
                 raise CorruptRecord(f"invalid body result {path}: {error}") from error
             if record.item_id != item_id or record.segment_id != item_id:
@@ -768,7 +772,7 @@ class BodyJournal:
 
     def _load_requests(self) -> dict[str, RequestManifest]:
         result: dict[str, RequestManifest] = {}
-        for path in sorted((self.store.root / "requests").glob("*.json")):
+        for path in sorted(state.glob(self.store.root / "requests", "*.json")):
             request = self.store.read_request(path.stem)
             if request.request_id != path.stem or request.request_id in result:
                 raise IdentityMismatch("request filename or request ID inventory changed")

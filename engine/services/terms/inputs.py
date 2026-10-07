@@ -14,6 +14,7 @@ from engine.schemas.contracts import (
     strict_json_loads,
     validate_term_scopes,
 )
+from engine.services import state
 
 _TERM_FIELDS = {"source", "target", "aliases", "scope", "mode", "match_policy", "note"}
 
@@ -48,7 +49,7 @@ def _load_terms(
         return terms, canonical_hash(terms)
 
     source_path = Path(path)
-    raw = strict_json_loads(source_path.read_bytes())
+    raw = strict_json_loads(state.read(source_path))
     entries = _entries(raw)
     normalized: dict[str, UserTerm] = {}
     for index, entry in enumerate(entries):

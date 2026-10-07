@@ -371,6 +371,13 @@ def _unit_allows_markers(unit: Any, refs: Mapping[str, Any], inventory: set[str]
     if isinstance(unit, str):
         return True
     kind = str(_field(unit, "unit_type", "kind", default="")).lower()
+    region = _field(unit, "region", default={})
+    if kind == "navigation" and isinstance(region, Mapping) and region.get("navigation_anchor") is True:
+        return (
+            bool(inventory)
+            and set(refs) == inventory
+            and all(_field(refs[ref], "movement") in {"locked", "fixed"} for ref in inventory)
+        )
     if not any(word in kind for word in ("attribute", "metadata", "navigation", "plain", "opf")):
         return True
     return bool(inventory) and all(

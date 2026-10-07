@@ -31,10 +31,11 @@ from engine.schemas.contracts import (
 )
 from engine.schemas.members import MemberBatch, RequestMember
 from engine.schemas.ready import AtomicPlan, AtomicPreparedInput
+from engine.services import state
 from engine.services.atomic import CorruptRecord, safe_id
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.preflight import PreflightReport
-from engine.services.ready import limits_from_config
+from engine.services.ready import derived_record, limits_from_config
 from engine.services.store import RunStore
 
 type ResumePhase = Literal["preparation", "terms", "freeze", "translation", "coherence", "publication"]
@@ -53,33 +54,33 @@ class ResumePlan:
 def plan_resume(work_dir: Path | str) -> ResumePlan:
     """Inspect saved JSON without creating directories, lock files, or model requests."""
     root = Path(work_dir)
-    if not root.is_dir():
+    if not state.is_dir(root):
         raise FileNotFoundError(root)
     preparation_path = root / "preparation.json"
     old_book_path = root / "bookplan.json"
-    if not preparation_path.exists():
-        if old_book_path.exists():
-            raw = strict_json_loads(old_book_path.read_bytes())
+    if not state.exists(preparation_path):
+        if state.exists(old_book_path):
+            raw = strict_json_loads(state.read(old_book_path))
             if isinstance(raw, dict) and raw.get("format") != BOOK_FORMAT:
                 return ResumePlan("preparation", "unsupported_format", ("start_new_run",), ("old BookPlan format",))
         return ResumePlan(
             "preparation", "incomplete", ("resume_source_parse",), ("parsed_ready has not been committed",)
         )
     try:
-        preparation = parse_contract(preparation_path.read_bytes(), PreparationPlan, PREPARATION_FORMAT)
+        preparation = parse_contract(state.read(preparation_path), PreparationPlan, PREPARATION_FORMAT)
     except UnsupportedFormatError:
         return ResumePlan("preparation", "unsupported_format", ("start_new_run",), ("old preparation format",))
     _ = preparation
     term_path = root / "glossary" / "plan.json"
     preflight_path = root / "checks" / "preflight.json"
-    if preflight_path.exists() and not term_path.exists():
+    if state.exists(preflight_path) and not state.exists(term_path):
         try:
-            value = strict_json_loads(preflight_path.read_bytes())
+            value = strict_json_loads(state.read(preflight_path))
             if (
                 not isinstance(value, dict)
                 or set(value) != {"format", "preparation_hash", "translation_hash", "report"}
                 or value.get("format") != "epubox-preflight-record-1"
-                or value.get("preparation_hash") != hashlib.sha256(preparation_path.read_bytes()).hexdigest()
+                or value.get("preparation_hash") != hashlib.sha256(state.read(preparation_path)).hexdigest()
                 or value.get("translation_hash") != canonical_hash(preparation.translation_config)
             ):
                 raise ValueError("preflight wrapper identity changed")
@@ -94,10 +95,10 @@ def plan_resume(work_dir: Path | str) -> ResumePlan:
                 ("adjust_source_or_limits",),
                 (f"atomic preflight blocked {len(blocked)} item(s)",),
             )
-    if not term_path.exists():
+    if not state.exists(term_path):
         return ResumePlan("terms", "incomplete", ("plan_term_windows",), ("parsed_ready source has no term plan",))
-    plan = parse_contract(term_path.read_bytes(), TermExtractionPlan, TERM_PLAN_FORMAT)
-    if not (root / "glossary" / "freeze.json").exists():
+    plan = parse_contract(state.read(term_path), TermExtractionPlan, TERM_PLAN_FORMAT)
+    if not state.exists(root / "glossary" / "freeze.json"):
         pending_terms = tuple(
             item.item_id
             for item in plan.items
@@ -107,16 +108,16 @@ def plan_resume(work_dir: Path | str) -> ResumePlan:
             return ResumePlan("terms", "ready", ("extract_pending_windows",), (), pending_term_item_ids=pending_terms)
         pool = root / "glossary" / "candidates.json"
         return ResumePlan(
-            "terms" if not pool.exists() else "freeze",
+            "terms" if not state.exists(pool) else "freeze",
             "ready",
-            ("collect_candidates",) if not pool.exists() else ("resolve_or_freeze_candidates",),
+            ("collect_candidates",) if not state.exists(pool) else ("resolve_or_freeze_candidates",),
             (),
         )
-    if not (root / "glossary.json").exists():
+    if not state.exists(root / "glossary.json"):
         return ResumePlan("freeze", "ready", ("replay_frozen_glossary",), ())
-    if (root / "prepared.json").exists():
+    if state.exists(root / "prepared.json"):
         try:
-            marker = strict_json_loads((root / "prepared.json").read_bytes())
+            marker = strict_json_loads(state.read(root / "prepared.json"))
         except (OSError, TypeError, ValueError) as error:
             return ResumePlan("preparation", "needs_attention", ("repair_shared_identity",), (str(error),))
         if not isinstance(marker, dict) or marker.get("format") != "epubox-prepared-2":
@@ -127,10 +128,10 @@ def plan_resume(work_dir: Path | str) -> ResumePlan:
                 ("unsupported prepared marker format",),
             )
         return _atomic_resume(root)
-    if not old_book_path.exists():
+    if not state.exists(old_book_path):
         return ResumePlan("freeze", "ready", ("initialize_units_and_bookplan",), ())
     try:
-        book = parse_contract(old_book_path.read_bytes(), BookPlan, BOOK_FORMAT)
+        book = parse_contract(state.read(old_book_path), BookPlan, BOOK_FORMAT)
     except UnsupportedFormatError:
         return ResumePlan("translation", "unsupported_format", ("start_new_run",), ("old BookPlan format",))
     try:
@@ -141,7 +142,7 @@ def plan_resume(work_dir: Path | str) -> ResumePlan:
     if preparation.source_path != "source.epub" or preparation.source_hash != book.source_hash:
         return ResumePlan("preparation", "needs_attention", ("repair_shared_identity",), ("source identity mismatch",))
     shared_paths = {
-        root / preparation.source_path: book.source_hash,
+        state.snapshot(root): book.source_hash,
         preparation_path: book.preparation_hash,
         root / "glossary.json": book.glossary_file_sha256,
         root / "glossary" / "freeze.json": book.freeze_file_sha256,
@@ -158,10 +159,10 @@ def plan_resume(work_dir: Path | str) -> ResumePlan:
     review: list[str] = []
     for unit_id in book.unit_ids:
         path = root / "units" / f"{unit_id}.json"
-        if not path.exists():
+        if not state.exists(path):
             attention.append(unit_id)
             continue
-        record = parse_contract(path.read_bytes(), UnitRecord, UNIT_FORMAT)
+        record = parse_contract(state.read(path), UnitRecord, UNIT_FORMAT)
         records[unit_id] = record
         if record.accepted_revision == record.revision:
             continue
@@ -194,12 +195,12 @@ def plan_resume(work_dir: Path | str) -> ResumePlan:
 def _atomic_resume(root: Path) -> ResumePlan:
     """Inspect prepared-2 and result files without constructing a writable store."""
     try:
-        ready = AtomicPreparedInput.model_validate_json((root / "prepared.json").read_bytes())
+        ready = AtomicPreparedInput.model_validate_json(state.read(root / "prepared.json"))
         plan = ready.plan
-        if AtomicPlan.model_validate_json((root / "plans" / "book.json").read_bytes()) != plan:
+        if AtomicPlan.model_validate_json(state.read(root / "plans" / "book.json")) != plan:
             raise ValueError("plans/book.json")
         shared = {
-            root / "source.epub": plan.source_hash,
+            state.snapshot(root): plan.source_hash,
             root / "preparation.json": plan.preparation_hash,
             root / "glossary.json": plan.glossary_file_sha256,
             root / "glossary" / "freeze.json": plan.freeze_file_sha256,
@@ -218,7 +219,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
             return ResumePlan("preparation", "needs_attention", ("repair_shared_identity",), tuple(damaged))
         members: dict[str, RequestMember] = {}
         for identifier, digest in plan.member_hashes.items():
-            member = RequestMember.model_validate_json((root / "members" / f"{safe_id(identifier)}.json").read_bytes())
+            member = RequestMember.model_validate_json(state.read(root / "members" / f"{safe_id(identifier)}.json"))
             if member.item_id != identifier or canonical_hash(member) != digest:
                 raise ValueError(f"members/{identifier}.json")
             members[identifier] = member
@@ -227,7 +228,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
             *(identifier for identifier in plan.inventory_hashes if identifier not in ready.preparation.reading_order),
         )
         inventories = tuple(
-            AtomicDocument.model_validate_json((root / "inventories" / f"{safe_id(identifier)}.json").read_bytes())
+            AtomicDocument.model_validate_json(state.read(root / "inventories" / f"{safe_id(identifier)}.json"))
             for identifier in ordered_documents
         )
         report = _atomic_preflight(root, ready)
@@ -236,14 +237,14 @@ def _atomic_resume(root: Path) -> ResumePlan:
         )
         index = MemberIndex(inventories, report, ordered_members)
         for identifier, digest in plan.batch_hashes.items():
-            batch = MemberBatch.model_validate_json((root / "batches" / f"{safe_id(identifier)}.json").read_bytes())
+            batch = MemberBatch.model_validate_json(state.read(root / "batches" / f"{safe_id(identifier)}.json"))
             if batch.manifest.request_id != identifier or canonical_hash(batch) != digest:
                 raise ValueError(f"batches/{identifier}.json")
         expected = set(plan.member_hashes)
-        if {path.stem for path in (root / "results").glob("*.json")} != expected:
+        if {path.stem for path in state.glob(root / "results", "*.json")} != expected:
             raise ValueError("results inventory")
         records = {
-            identifier: ItemRecord.model_validate_json((root / "results" / f"{safe_id(identifier)}.json").read_bytes())
+            identifier: ItemRecord.model_validate_json(state.read(root / "results" / f"{safe_id(identifier)}.json"))
             for identifier in expected
         }
         if any(
@@ -251,12 +252,17 @@ def _atomic_resume(root: Path) -> ResumePlan:
         ):
             raise ValueError("result ownership")
         requests: dict[str, RequestManifest] = {}
-        for path in (root / "requests").glob("*.json"):
-            request = parse_contract(path.read_bytes(), RequestManifest, REQUEST_FORMAT)
+        for path in state.glob(root / "requests", "*.json"):
+            request = parse_contract(state.read(path), RequestManifest, REQUEST_FORMAT)
             if request.request_id != path.stem or request.request_id in requests:
                 raise ValueError("request filename or request ID inventory changed")
             requests[request.request_id] = request
         for record in records.values():
+            source_id = plan.derived_sources.get(members[record.item_id].unit_id)
+            if source_id is not None:
+                if record != derived_record(record.item_id, source_id):
+                    raise ValueError("saved derived result differs from its canonical dependency record")
+                continue
             if record.status != ItemStatus.PENDING:
                 _atomic_record_frame(root, ready, record, members, index, requests)
             if record.status == ItemStatus.REVIEWED:
@@ -304,7 +310,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
 
 
 def _atomic_preflight(root: Path, ready: AtomicPreparedInput) -> PreflightReport:
-    value = strict_json_loads((root / "checks" / "preflight.json").read_bytes())
+    value = strict_json_loads(state.read(root / "checks" / "preflight.json"))
     if (
         not isinstance(value, dict)
         or set(value) != {"format", "preparation_hash", "translation_hash", "report"}
@@ -464,7 +470,7 @@ def _atomic_review_proof(
 def _atomic_response(root: Path, request: RequestManifest) -> dict:
     for attempt in reversed(request.attempts):
         path = root / "responses" / request.stage / safe_id(request.request_id) / f"{safe_id(attempt.attempt_id)}.json"
-        if not path.exists():
+        if not state.exists(path):
             continue
         saved = RunStore._read_model_response_file(path)
         if (
@@ -481,9 +487,9 @@ def _atomic_response(root: Path, request: RequestManifest) -> dict:
 
 
 def _term_terminal(path: Path) -> bool:
-    if not path.exists():
+    if not state.exists(path):
         return False
-    raw = strict_json_loads(path.read_bytes())
+    raw = strict_json_loads(state.read(path))
     return isinstance(raw, dict) and raw.get("status") in {
         "succeeded",
         "succeeded_with_rejections",
@@ -495,7 +501,7 @@ def _term_terminal(path: Path) -> bool:
 def _coherence_valid(root: Path, book: BookPlan, records: dict[str, UnitRecord]) -> bool:
     for document_id in book.document_hashes:
         path = root / "checks" / f"{document_id}.json"
-        if not path.exists():
+        if not state.exists(path):
             return False
         try:
             check = read_coherence_record(path)
@@ -524,7 +530,7 @@ def _coherence_valid(root: Path, book: BookPlan, records: dict[str, UnitRecord])
 
 
 def _matches_hash(path: Path, expected: str) -> bool:
-    return path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == expected
+    return state.is_file(path) and hashlib.sha256(state.read(path)).hexdigest() == expected
 
 
 __all__ = ["ResumePlan", "plan_resume"]

@@ -12,6 +12,7 @@ from engine.schemas.bridge import AtomicDocument
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash, canonical_json_bytes, parse_contract
 from engine.schemas.ready import AtomicPlan, AtomicPreparedInput
+from engine.services import state
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, safe_id
 from engine.services.preflight import require_preflight
 
@@ -38,7 +39,7 @@ def limits_from_config(config) -> BudgetLimits:
         context_tokens=context,
         safety_tokens=_int(config, "safety_margin", 256, zero=True),
         target_ratio=float(ratio),
-        output_version=cast(Literal[2, 3], _int(config, "output_budget_version", 2)),
+        output_version=cast(Literal[2, 3, 4], _int(config, "output_budget_version", 2)),
     )
 
 
@@ -232,6 +233,18 @@ def _verify(store: RunStore, ready: AtomicPreparedInput) -> None:
     _terminal_requests(store)
 
 
+def derived_record(item_id: str, source_id: str) -> ItemRecord:
+    return ItemRecord(
+        item_id=item_id,
+        segment_id=item_id,
+        terms_hash=canonical_hash([]),
+        context_hash=canonical_hash([]),
+        stage="derived",
+        status=ItemStatus.BLOCKED_DEPENDENCY,
+        checks={"source_unit_id": source_id},
+    )
+
+
 def _initial_results(store, ready, members, batches) -> None:
     wires = {entry["item_id"]: (batch, entry) for batch in batches for entry in batch.payload["items"]}
     for member in members:
@@ -248,16 +261,8 @@ def _initial_results(store, ready, members, batches) -> None:
                 context_hash=batch.manifest.context_hashes[member.item_id],
             )
         else:
-            record = ItemRecord(
-                item_id=member.item_id,
-                segment_id=member.item_id,
-                terms_hash=canonical_hash([]),
-                context_hash=canonical_hash([]),
-                stage="derived",
-                status=ItemStatus.BLOCKED_DEPENDENCY,
-                checks={"source_unit_id": ready.plan.derived_sources[member.unit_id]},
-            )
-        if not path.exists():
+            record = derived_record(member.item_id, ready.plan.derived_sources[member.unit_id])
+        if not state.exists(path):
             store._atomic_write(path, record)
         elif _read(path, ItemRecord, None) != record:
             raise StaleWrite("initial atomic result already contains different state")
@@ -274,7 +279,7 @@ def _inventories(store, preparation) -> tuple[AtomicDocument, ...]:
 
 
 def _terminal_requests(store) -> None:
-    requests = tuple(store.read_request(path.stem) for path in (store.root / "requests").glob("*.json"))
+    requests = tuple(store.read_request(path.stem) for path in state.glob(store.root / "requests", "*.json"))
     succeeded = {
         (request.stage, request.owner_kind, request.owner_id, canonical_hash(request.input_hashes))
         for request in requests
@@ -300,20 +305,20 @@ def _terminal_requests(store) -> None:
 
 
 def _exact_files(directory: Path, expected: set[str]) -> None:
-    if {path.stem for path in directory.glob("*.json")} != expected:
+    if {path.stem for path in state.glob(directory, "*.json")} != expected:
         raise IdentityMismatch(f"atomic ready {directory.name} inventory changed")
 
 
 def _read(path, model, format):
     try:
-        raw = path.read_bytes()
+        raw = state.read(path)
         return parse_contract(raw, model, format) if format else model.model_validate_json(raw)
     except Exception as error:
         raise CorruptRecord(f"invalid ready dependency {path}: {error}") from error
 
 
 def _immutable(path, value, model, format) -> None:
-    if path.exists():
+    if state.exists(path):
         if _read(path, model, format) != value:
             raise StaleWrite(f"immutable atomic ready dependency changed: {path.name}")
         return
@@ -323,7 +328,7 @@ def _immutable(path, value, model, format) -> None:
 
 
 def _sha(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(state.read(path)).hexdigest()
 
 
 def _model(preparation) -> str:
@@ -442,25 +447,28 @@ class ReadySession:
     def _fingerprint(self):
         root = self.store.root
         paths = [
-            root / value
-            for value in (
-                "source.epub",
-                "preparation.json",
-                "prepared.json",
-                "glossary.json",
-                "plans/book.json",
-                "checks/preflight.json",
-            )
+            state.snapshot(root),
+            *(
+                root / value
+                for value in (
+                    "preparation.json",
+                    "prepared.json",
+                    "glossary.json",
+                    "plans/book.json",
+                    "checks/preflight.json",
+                )
+            ),
         ]
         for directory in ("documents", "inventories", "members", "batches", "glossary"):
             base = root / directory
-            paths.append(base)
-            paths.extend(sorted(base.rglob("*.json")))
+            if not state.compact(root):
+                paths.append(base)
+            paths.extend(sorted({*state.glob(base, "*.json"), *state.glob(base, "**/*.json")}))
         try:
             return tuple(
                 (str(path), status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
                 for path in paths
-                for status in [path.stat()]
+                for status in [state.stat(path)]
             )
         except OSError as error:
             raise IdentityMismatch(f"workflow ready dependency is unavailable: {error}") from error

@@ -294,3 +294,74 @@ def test_new_output_policy_preserves_legacy_frozen_limits() -> None:
     assert legacy.identity.version == 2
     assert legacy.output_tokens < 4096
     assert legacy.wire_hash != current.wire_hash
+
+
+def test_v4_source_limit_counts_only_translatable_text() -> None:
+    markers = "".join(f"⟦=x{index}⟧" for index in range(200))
+    request = payload("translate", (item(markers + "Translate this."),))
+    legacy = measure_budget(stage="translate", payload=request, limits=limits(source_tokens=20, output_version=3))
+    current = measure_budget(stage="translate", payload=request, limits=limits(source_tokens=20, output_version=4))
+
+    assert any(reason.startswith("source ") for reason in legacy.failures)
+    assert not any(reason.startswith("source ") for reason in current.failures)
+    assert current.source_tokens < 20
+    assert current.output_tokens == 4096
+
+
+def test_v4_output_still_rejects_huge_marker_inventory() -> None:
+    markers = "".join(f"⟦=x{index}⟧" for index in range(2000))
+    measured = measure_budget(
+        stage="translate",
+        payload=payload("translate", (item(markers + "Text."),)),
+        limits=limits(source_tokens=20, output_version=4),
+    )
+
+    assert measured.source_tokens < 20
+    assert any(reason.startswith("output ") for reason in measured.failures)
+
+
+def test_v4_output_still_rejects_huge_natural_text() -> None:
+    measured = measure_budget(
+        stage="translate",
+        payload=payload("translate", (item("word " * 3000),)),
+        limits=limits(source_tokens=10_000, context_tokens=100_000, output_version=4),
+    )
+
+    assert not any(reason.startswith("source ") for reason in measured.failures)
+    assert any(reason.startswith("output ") for reason in measured.failures)
+
+
+def test_v4_estimated_review_target_reserves_markers_once() -> None:
+    plain = measure_budget(
+        stage="review",
+        payload=payload("review", (item("Translate this."),)),
+        limits=limits(output_version=4),
+        review_targets="estimated",
+    )
+    marked = measure_budget(
+        stage="review",
+        payload=payload("review", (item("⟦=x1⟧Translate this."),)),
+        limits=limits(output_version=4),
+        review_targets="estimated",
+    )
+
+    assert marked.source_tokens == plain.source_tokens
+    assert marked.review_target_input_tokens > plain.review_target_input_tokens
+
+
+def test_v4_actual_review_output_uses_the_saved_target() -> None:
+    short = measure_budget(
+        stage="review",
+        payload=payload("review", (item("Source.", target="译文。"),)),
+        limits=limits(output_version=4),
+    )
+    long = measure_budget(
+        stage="review",
+        payload=payload("review", (item("Source.", target="译文 " * 3000),)),
+        limits=limits(context_tokens=100_000, output_version=4),
+    )
+
+    assert short.review_target_input_tokens == long.review_target_input_tokens == 0
+    assert short.output_tokens == 4096
+    assert long.output_tokens > short.output_tokens
+    assert any(reason.startswith("output ") for reason in long.failures)

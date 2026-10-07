@@ -23,6 +23,7 @@ from engine.schemas.contracts import (
     canonical_hash,
     strict_json_loads,
 )
+from engine.services import state
 from engine.services.coherence import (
     load_budget_overrides,
 )
@@ -36,7 +37,7 @@ async def run_translation(
     transport: Any = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> TranslationRunResult:
-    if (Path(work_dir) / "prepared.json").is_file():
+    if state.is_file(Path(work_dir) / "prepared.json"):
         from engine.execution.atomic import run_atomic
 
         return await run_atomic(work_dir, model=model, transport=transport, progress=progress)
@@ -110,7 +111,7 @@ def import_repair_file(store: RunStore, path: Path | str) -> UnitRecord:
 
 def validate_repair_file(store: RunStore, path: Path | str) -> UnitRecord:
     """Validate a repair and return the proposed record without writing it."""
-    value = strict_json_loads(Path(path).read_bytes())
+    value = strict_json_loads(state.read(Path(path)))
     if not isinstance(value, dict):
         raise TypeError("repair file must contain one JSON object")
     unit_id = value.get("unit_id")

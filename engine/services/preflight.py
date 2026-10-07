@@ -13,7 +13,8 @@ from pydantic import Field
 from engine.epub.fill import fill_resource
 from engine.epub.parsing import parse_resource
 from engine.epub.ranges import index_resource
-from engine.item.atoms import _safe_boundaries, extract_resource
+from engine.item.atoms import _LEGACY_EXTRACTOR_VERSION, _safe_boundaries, extract_resource
+from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.budget import measure_budget
 from engine.item.inline import events_to_projection, parse_projection
 from engine.schemas.bridge import AtomicDocument, AtomicItem, ByteSpan, PreflightCheck
@@ -29,6 +30,7 @@ from engine.schemas.contracts import (
     parse_contract,
 )
 from engine.schemas.internal import Event
+from engine.services import state
 from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite
 
 if TYPE_CHECKING:
@@ -200,7 +202,7 @@ def prepare_preflight(
     preparation, _preparation_hash = _preparation(base.root)
     documents = _prepared_documents(base.root, preparation)
     try:
-        with zipfile.ZipFile(base.root / preparation.source_path) as archive:
+        with zipfile.ZipFile(state.snapshot(base.root)) as archive:
             raw = {document.resource.path: archive.read(document.resource.path) for document in documents}
     except (OSError, KeyError, zipfile.BadZipFile) as error:
         raise CorruptRecord(f"cannot read prepared resources: {error}") from error
@@ -210,6 +212,7 @@ def prepare_preflight(
             document.resource.path,
             preparation.source_hash,
             document.resource.media_type,
+            extractor_version=_extractor_version(document),
         )
         for document in documents
     )
@@ -235,7 +238,7 @@ def require_preflight(store: AtomicStore | RunStore, limits: BudgetLimits, model
         _read(base.path("inventories", document_id), AtomicDocument, "epubox-atoms-1")
         for document_id in sorted(record.report.check.map_hashes)
     )
-    raw = _snapshot_resources(base.root / preparation.source_path, inventories)
+    raw = _snapshot_resources(state.snapshot(base.root), inventories)
     _verify_snapshot(base.root, preparation, inventories, raw)
     actual = preflight_atomic_resources(inventories, raw, limits, model)
     if actual != record.report or actual.check is None:
@@ -441,7 +444,7 @@ def _projection_fragments(events: Sequence[Event], cuts: tuple[tuple[int, int], 
 def _preparation(root: Path) -> tuple[PreparationPlan, str]:
     path = root / "preparation.json"
     try:
-        raw = path.read_bytes()
+        raw = state.read(path)
         return parse_contract(raw, PreparationPlan, PREPARATION_FORMAT), hashlib.sha256(raw).hexdigest()
     except Exception as error:
         raise CorruptRecord(f"invalid {path}: {error}") from error
@@ -453,8 +456,8 @@ def _verify_snapshot(
     inventories: Sequence[AtomicDocument],
     raw: Mapping[str, bytes],
 ) -> None:
-    snapshot = root / preparation.source_path
-    if not snapshot.is_file() or hashlib.sha256(snapshot.read_bytes()).hexdigest() != preparation.source_hash:
+    snapshot = state.snapshot(root)
+    if not state.is_file(snapshot) or hashlib.sha256(state.read(snapshot)).hexdigest() != preparation.source_hash:
         raise IdentityMismatch("preflight source snapshot differs from preparation")
     expected_documents = {document.resource.path: document for document in _prepared_documents(root, preparation)}
     expected_paths = set(expected_documents)
@@ -476,6 +479,7 @@ def _verify_snapshot(
             path,
             preparation.source_hash,
             document.resource.media_type,
+            extractor_version=_extractor_version(document),
         )
         if inventory != canonical:
             raise IdentityMismatch("preflight inventory differs from canonical extraction")
@@ -486,10 +490,18 @@ def _prepared_documents(root: Path, preparation: PreparationPlan) -> tuple[Docum
     base = AtomicStore(root)
     for document_id, expected_hash in preparation.document_hashes.items():
         path = base.path("documents", document_id)
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+        if not state.is_file(path) or hashlib.sha256(state.read(path)).hexdigest() != expected_hash:
             raise IdentityMismatch("prepared document file changed")
         result.append(_read(path, DocumentPlan, DOCUMENT_FORMAT))
     return tuple(result)
+
+
+def _extractor_version(document: DocumentPlan) -> str:
+    return (
+        document.extractor_version
+        if document.extractor_version in {ATOMIC_EXTRACTOR_VERSION, _LEGACY_EXTRACTOR_VERSION}
+        else ATOMIC_EXTRACTOR_VERSION
+    )
 
 
 def _snapshot_resources(path: Path, inventories: Sequence[AtomicDocument]) -> dict[str, bytes]:
@@ -504,7 +516,7 @@ def _snapshot_resources(path: Path, inventories: Sequence[AtomicDocument]) -> di
 
 
 def _write_immutable(path: Path, value, model, expected_format: str) -> None:
-    if path.exists():
+    if state.exists(path):
         if _read(path, model, expected_format) != value:
             raise StaleWrite(f"immutable {path.name} already exists")
         return
@@ -513,7 +525,7 @@ def _write_immutable(path: Path, value, model, expected_format: str) -> None:
 
 def _read(path: Path, model, expected_format: str):
     try:
-        return parse_contract(path.read_bytes(), model, expected_format)
+        return parse_contract(state.read(path), model, expected_format)
     except Exception as error:
         raise CorruptRecord(f"invalid {path}: {error}") from error
 

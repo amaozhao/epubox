@@ -31,6 +31,7 @@ from engine.schemas.contracts import (
     strict_json_loads,
 )
 from engine.schemas.ready import AtomicPreparedInput
+from engine.services import state
 from engine.services.atomic import IdentityMismatch
 from engine.services.preflight import PreflightDiagnostic, prepare_preflight
 from engine.services.store import RunStore
@@ -82,9 +83,9 @@ async def prepare_translation(
 ) -> PreparationPipelineResult:
     """Create P1 if needed, then advance the durable run through P4."""
     store, preparation, preparation_hash = _p1(source, work_root, config, checker)
-    if progress is not None and (store.root / "report.json").is_file():
+    if progress is not None and state.is_file(store.root / "report.json"):
         try:
-            report = strict_json_loads((store.root / "report.json").read_bytes())
+            report = strict_json_loads(state.read(store.root / "report.json"))
         except ValueError:
             report = None
         diagnostic = report.get("source_validation") if isinstance(report, dict) else None
@@ -101,7 +102,7 @@ async def prepare_translation(
                         0,
                         notice=(
                             f"原书 EPUBCheck：{len(errors)} 个 ERROR、{len(fatals)} 个 FATAL、{len(warnings)} 个 WARNING；"
-                            f"已记录为原书问题，继续翻译。详情：{store.root / 'report.json'}"
+                            f"已记录为原书问题，继续翻译。详情：{state.artifact(store.root / 'report.json')}"
                         ),
                     )
                 )
@@ -189,7 +190,7 @@ async def _advance_legacy(
     progress: ProgressCallback | None,
 ) -> PreparationPipelineResult:
     bookplan_path = store.root / "bookplan.json"
-    if bookplan_path.exists():
+    if state.exists(bookplan_path):
         ready = store.read_bookplan()
         glossary = store.read_glossary()
         has_gaps = glossary.extraction_status == "closed_with_gaps" or any(
@@ -211,7 +212,7 @@ async def _advance_legacy(
     _ensure_preflight(store, preparation)
     documents = _documents(store, preparation)
     plan_path = store.root / "glossary" / "plan.json"
-    if plan_path.exists():
+    if state.exists(plan_path):
         term_plan = store.read_term_plan()
         store.write_term_plan(term_plan)
     else:
@@ -236,7 +237,7 @@ async def _advance_legacy(
     _emit(progress, _term_progress(store, term_plan))
     freeze_path = store.root / "glossary" / "freeze.json"
     term_status = "frozen"
-    if not freeze_path.exists():
+    if not state.exists(freeze_path):
         term_result = await _with_progress(
             TermRunner(store, model=model, transport=term_transport).run(),
             progress,
@@ -247,7 +248,7 @@ async def _advance_legacy(
             return PreparationPipelineResult("paused", "terms", store.root, preparation.run_id, term_result.status)
         records = {item.item_id: store.read_extraction(item.item_id) for item in term_plan.items}
         pool_path = store.root / "glossary" / "candidates.json"
-        if pool_path.exists():
+        if state.exists(pool_path):
             pool = store.read_candidate_pool()
         else:
             pool = store.save_candidate_pool(
@@ -314,7 +315,7 @@ async def _advance_legacy(
     for document in documents:
         for unit in document.units:
             path = store._path("units", unit.unit_id)
-            if path.exists():
+            if state.exists(path):
                 record = store.read_unit(unit.unit_id)
             else:
                 try:
@@ -424,7 +425,7 @@ async def _advance_atomic(
     from engine.services.terms.planning import plan_atomic_terms
     from engine.services.terms.storage import atomic_documents
 
-    if (store.root / "prepared.json").is_file():
+    if state.is_file(store.root / "prepared.json"):
         prepared = read_ready(store)
         if prepared.plan.output_policy_hash != output_policy_hash:
             raise IdentityMismatch("resume output policy differs from the committed ready plan")
@@ -466,7 +467,7 @@ async def _advance_atomic(
     inventories = atomic_documents(store)
     documents = tuple(inventory.document for inventory in inventories)
     plan_path = store.root / "glossary" / "plan.json"
-    if plan_path.is_file():
+    if state.is_file(plan_path):
         term_plan = store.read_term_plan()
         store.write_term_plan(term_plan)
     else:
@@ -490,7 +491,7 @@ async def _advance_atomic(
     _emit(progress, _term_progress(store, term_plan))
     freeze_path = store.root / "glossary" / "freeze.json"
     term_status = "frozen"
-    if not freeze_path.is_file():
+    if not state.is_file(freeze_path):
         term_result = await _with_progress(
             TermRunner(store, model=model, transport=term_transport).run(),
             progress,
@@ -503,7 +504,7 @@ async def _advance_atomic(
         pool_path = store.root / "glossary" / "candidates.json"
         pool = (
             store.read_candidate_pool()
-            if pool_path.is_file()
+            if state.is_file(pool_path)
             else store.save_candidate_pool(
                 prepare_candidate_pool(
                     term_plan,
@@ -615,9 +616,9 @@ def _p1(
     source = source.resolve(strict=True)
     source_hash = _sha256(source)
     if config.run_id:
-        root = work_root / source_hash / config.run_id
+        root = work_root if state.compact(work_root) else work_root / source_hash / config.run_id
         preparation_path = root / "preparation.json"
-        if preparation_path.exists():
+        if state.exists(preparation_path):
             store = RunStore(root)
             preparation = store.read_preparation()
             documents = _documents(store, preparation)
@@ -686,7 +687,7 @@ def _documents(store: RunStore, preparation: PreparationPlan) -> tuple[DocumentP
 def _initialize_extraction_records(store: RunStore, plan: TermExtractionPlan) -> None:
     for item in plan.items:
         path = store._path("glossary/extraction", item.item_id)
-        if path.exists():
+        if state.exists(path):
             store.read_extraction(item.item_id)
             continue
         store.save_extraction(
@@ -742,7 +743,7 @@ def _term_progress(store: RunStore, plan: TermExtractionPlan) -> PreparationProg
     records = [
         store.read_extraction(item.item_id)
         for item in plan.items
-        if store._path("glossary/extraction", item.item_id).exists()
+        if state.exists(store._path("glossary/extraction", item.item_id))
     ]
     succeeded = sum(record.status in {"succeeded", "succeeded_with_rejections"} for record in records)
     failed = sum(record.status in {"failed_exhausted", "unplannable"} for record in records)
@@ -773,7 +774,7 @@ def _resolution_progress(store: RunStore) -> PreparationProgress:
 def _http_attempts(store: RunStore) -> int:
     return sum(
         attempt.state != "reserved"
-        for path in (store.root / "requests").glob("*.json")
+        for path in state.glob(store.root / "requests", "*.json")
         for attempt in store.read_request(path.stem).attempts
     )
 
@@ -804,11 +805,7 @@ def _bool(config: dict[str, Any], name: str, default: bool) -> bool:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return hashlib.sha256(state.read(path)).hexdigest()
 
 
 __all__ = [

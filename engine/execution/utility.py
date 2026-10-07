@@ -29,6 +29,7 @@ from engine.schemas.contracts import (
     UnitRecord,
     canonical_hash,
 )
+from engine.services import state
 from engine.services.store import RunStore
 
 
@@ -108,7 +109,7 @@ def _unit_limit(record: UnitRecord) -> int:
 def _journal_spent_for_unit(store: RunStore, unit_id: str) -> int:
     return sum(
         len(request.attempts)
-        for path in (store.root / "requests").glob("*.json")
+        for path in state.glob(store.root / "requests", "*.json")
         for request in (store.read_request(path.stem),)
         if any(unit_id in request.item_unit_ids.get(item_id, ()) for item_id in request.item_ids)
     )

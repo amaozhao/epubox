@@ -16,6 +16,7 @@ from engine.execution.repair import run_translation
 from engine.item.atoms import ADAPTER_VERSION, EXTRACTOR_VERSION
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash, canonical_json_bytes
 from engine.schemas.members import MemberBatch
+from engine.services import state
 from engine.services.atomic import IdentityMismatch, StaleWrite
 from engine.services.coherence import add_http_budget
 from engine.services.custody import retry_checks
@@ -83,6 +84,17 @@ def _tree(root: Path) -> tuple[tuple[str, str], ...]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     )
+
+
+def _compact_case(tmp_path: Path, text: str = "<p>First.</p><p>Second.</p>") -> ReadyCase:
+    case = prepare_case(tmp_path / "legacy", text, ("First.", "Second."))
+    source = case.session.store.root / "source.epub"
+    root = tmp_path / "book"
+    preparation = case.prepared.preparation
+    state.initialize(root, source, preparation.source_hash, preparation.run_id)
+    state.import_records(root, case.session.store.root)
+    session = ReadySession(RunStore(root))
+    return ReadyCase(session.prepared, case.batch, session.index, session)
 
 
 @pytest.mark.parametrize("invalid", (True, -1, "1"))
@@ -822,3 +834,130 @@ def test_selective_retry_skips_old_shared_translation_response_for_the_new_epoch
     records = restarted.records(case.batch.manifest.item_ids)
     assert records[first.item_id].status == ItemStatus.PENDING
     assert all(records[item.item_id].status == ItemStatus.NEEDS_ATTENTION for item in case.batch.items[1:])
+
+
+def test_compact_response_siblings_commit_once_per_stage(tmp_path, monkeypatch) -> None:
+    case = _compact_case(tmp_path)
+    journal = BodyJournal(case.session.store, case.session)
+    commits: list[int] = []
+    previous = {path.name: state.read(path) for path in state.glob(case.session.store.root / "results", "*.json")}
+    original = state._commit
+
+    def counted(root, value):
+        current = {
+            Path(key).name: record["data"].encode()
+            for key, record in value["records"].items()
+            if key.startswith("results/")
+        }
+        changed = sum(previous.get(key) != data for key, data in current.items())
+        if changed:
+            commits.append(changed)
+        previous.clear()
+        previous.update(current)
+        return original(root, value)
+
+    monkeypatch.setattr(state, "_commit", counted)
+
+    async def transport(kind, payload):
+        return _answer(kind, payload)
+
+    result = asyncio.run(
+        run_workflow(
+            case.prepared,
+            case.batch,
+            case.index,
+            journal.runtime(transport=transport),
+            session=journal.session,
+            save=journal.save,
+            records=journal.records(case.batch.manifest.item_ids),
+        )
+    )
+
+    assert result.status == "completed"
+    assert commits == [2, 2]
+
+
+def test_compact_group_rejects_one_malformed_sibling_without_partial_state(tmp_path) -> None:
+    case = _compact_case(tmp_path)
+    journal = BodyJournal(case.session.store, case.session)
+    saved: list[ItemRecord] = []
+
+    async def transport(kind, payload):
+        return _answer(kind, payload)
+
+    asyncio.run(
+        run_workflow(
+            case.prepared,
+            case.batch,
+            case.index,
+            journal.runtime(transport=transport),
+            session=journal.session,
+            save=saved.append,
+            records=journal.records(case.batch.manifest.item_ids),
+        )
+    )
+    drafts = [record for record in saved if record.status == ItemStatus.LOCAL_VALID]
+    malformed = drafts[1].model_copy(update={"terms_hash": "changed"})
+    before_state = (case.session.store.root / "state.json").read_bytes()
+    before_records = journal.records()
+    before_progress = journal.progress_snapshot()
+
+    with pytest.raises((IdentityMismatch, ValueError), match="identity changed|frozen source|saved result"):
+        journal.save_many((drafts[0], malformed))
+
+    assert (case.session.store.root / "state.json").read_bytes() == before_state
+    assert journal.records() == before_records
+    assert journal.progress_snapshot() == before_progress
+
+
+def test_compact_saved_multi_item_response_replays_without_translate_http(tmp_path, monkeypatch) -> None:
+    case = _compact_case(tmp_path)
+    journal = BodyJournal(case.session.store, case.session)
+    first_calls: list[str] = []
+    original = journal.save_many
+
+    def interrupted(records):
+        raise RuntimeError("crash before grouped result commit")
+
+    monkeypatch.setattr(journal, "save_many", interrupted)
+
+    async def first(kind, payload):
+        first_calls.append(kind)
+        return _answer(kind, payload)
+
+    with pytest.raises(RuntimeError, match="grouped result"):
+        asyncio.run(
+            run_workflow(
+                case.prepared,
+                case.batch,
+                case.index,
+                journal.runtime(transport=first),
+                session=journal.session,
+                save=journal.save,
+                records=journal.records(case.batch.manifest.item_ids),
+            )
+        )
+    monkeypatch.setattr(journal, "save_many", original)
+    second_calls: list[str] = []
+    resumed = BodyJournal(case.session.store)
+
+    async def second(kind, payload):
+        second_calls.append(kind)
+        assert kind == "review"
+        return _answer(kind, payload)
+
+    result = asyncio.run(
+        run_workflow(
+            resumed.session.prepared,
+            case.batch,
+            resumed.session.index,
+            resumed.runtime(transport=second),
+            session=resumed.session,
+            save=resumed.save,
+            records=resumed.records(case.batch.manifest.item_ids),
+        )
+    )
+
+    assert result.status == "completed"
+    assert first_calls == ["translate"]
+    assert second_calls == ["review"]

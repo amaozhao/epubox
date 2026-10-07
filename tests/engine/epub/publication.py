@@ -82,6 +82,22 @@ def test_package_verification_rejects_a_new_broken_reference(tmp_path: Path) -> 
         )
 
 
+def test_package_staging_reads_compact_extracted_resources_but_verification_rejects_changes(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Safe</p>"})
+    inventory = inspect_epub(source, "source-hash", checker=StubChecker())
+    extracted = tmp_path / "source"
+    with zipfile.ZipFile(source) as archive:
+        archive.extractall(extracted)
+    chapter = extracted / "OEBPS" / "chapter.xhtml"
+    chapter.write_text("<p>Changed outside verified results</p>", encoding="utf-8")
+    staged = tmp_path / "staged.epub"
+
+    stage_epub(source, staged, {}, source_directory=extracted)
+
+    with pytest.raises(EpubValidationError, match="Unexpected resource change"):
+        verify_staged_epub(source, staged, inventory, {}, accepted_targets={}, checker=StubChecker())
+
+
 def _prepared(
     tmp_path: Path,
     chapter: str = "<h1>Reliable systems</h1><p>Keep <em>source data</em> safe.</p>",

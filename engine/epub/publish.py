@@ -22,6 +22,7 @@ from engine.epub.verification import (
     verify_staged_epub,
 )
 from engine.schemas.contracts import PreparationPlan, canonical_hash, strict_json_loads
+from engine.services import state
 from engine.services.ready import ReadySession
 from engine.services.store import RunStore
 
@@ -47,7 +48,7 @@ def publish_atomic(
         recovered = _recover(store, output_path, session.prepared.plan, targets, checker=checker)
         if recovered is not None:
             return recovered
-        snapshot = store.root / "source.epub"
+        snapshot = state.snapshot(store.root)
         inventory = inspect_epub(snapshot, session.prepared.plan.source_hash, checker=checker)
         replacements: dict[str, bytes] = {}
         accepted: dict[str, dict[str, str]] = {}
@@ -65,7 +66,12 @@ def publish_atomic(
                 accepted[path] = owned
         staged = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
         try:
-            stage_epub(snapshot, staged, replacements)
+            stage_epub(
+                snapshot,
+                staged,
+                replacements,
+                source_directory=store.root / "source" if state.compact(store.root) else None,
+            )
             verification = verify_staged_epub(
                 snapshot,
                 staged,
@@ -137,7 +143,7 @@ def _recover(store, output_path, plan, targets, *, checker: object | None = None
         or not isinstance(epubcheck, dict)
     ):
         raise EpubValidationError("invalid_publish_intent", "Atomic publication evidence is incomplete")
-    snapshot = store.root / "source.epub"
+    snapshot = state.snapshot(store.root)
     if "baseline" in verification and file_hash(snapshot) != plan.source_hash:
         raise EpubValidationError("source_changed", "Source snapshot changed after publication")
     verify_baseline(snapshot, output_path, verification, checker)
@@ -172,7 +178,7 @@ def _reject_output(output: Path, root: Path, preparation: PreparationPlan) -> No
             current_inode = _inode(original) if original.exists() else None
             if output_inode in {stored_inode, current_inode}:
                 raise EpubValidationError("unsafe_output_path", "Output aliases the recorded original EPUB inode")
-    snapshot = root / "source.epub"
+    snapshot = state.snapshot(root)
     if output.exists() and output.is_file() and file_hash(output) == file_hash(snapshot):
         raise EpubValidationError("unsafe_output_path", "Output is the source EPUB or an identical source copy")
 
@@ -180,7 +186,7 @@ def _reject_output(output: Path, root: Path, preparation: PreparationPlan) -> No
 def _source_hint(root: Path, preparation: PreparationPlan) -> tuple[Path, tuple[int, int]]:
     path = root / "source.json"
     try:
-        value = strict_json_loads(path.read_bytes())
+        value = strict_json_loads(state.read(path))
     except Exception as error:
         raise EpubValidationError(
             "invalid_source_hint", f"Original source record is missing or invalid: {error}"
@@ -208,7 +214,7 @@ def _source_hint(root: Path, preparation: PreparationPlan) -> tuple[Path, tuple[
 
 
 def _source_aliases(root: Path) -> tuple[tuple[Path, tuple[int, int]], ...]:
-    value = strict_json_loads((root / "source.json").read_bytes())
+    value = strict_json_loads(state.read(root / "source.json"))
     if not isinstance(value, dict):
         raise EpubValidationError("invalid_source_hint", "Original source record must be an object")
     aliases = value.get("aliases", [])

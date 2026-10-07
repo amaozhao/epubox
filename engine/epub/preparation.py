@@ -9,7 +9,7 @@ import shutil
 import uuid
 import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
@@ -22,6 +22,7 @@ from engine.item.atoms import extract_resource
 from engine.item.extractor import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
 from engine.item.structure import select_primary_title
 from engine.schemas.contracts import JsonValue, PreparationPlan, canonical_json_bytes
+from engine.services import state
 from engine.services.atomic import AtomicStore, IdentityMismatch
 from engine.services.store import RunStore
 from engine.services.terms.inputs import load_atomic_terms, load_user_terms
@@ -62,34 +63,55 @@ def prepare_book(
 
     source = source.resolve(strict=True)
     work_root.mkdir(parents=True, exist_ok=True)
-    temporary_snapshot, source_hash = _stable_snapshot(source, work_root)
+    compact = state.compact(work_root)
+    temporary_snapshot: Path | None = None
+    if compact:
+        source_hash = _stable_hash(source)
+    else:
+        temporary_snapshot, source_hash = _stable_snapshot(source, work_root)
     if config.expected_source_hash is not None and source_hash != config.expected_source_hash:
-        temporary_snapshot.unlink(missing_ok=True)
+        if temporary_snapshot is not None:
+            temporary_snapshot.unlink(missing_ok=True)
         raise IdentityMismatch("source EPUB identity changed before the immutable snapshot was created")
     run_id = config.run_id or uuid.uuid4().hex
     if run_id in {".", ".."} or not _SAFE_RUN_ID.fullmatch(run_id):
-        temporary_snapshot.unlink(missing_ok=True)
+        if temporary_snapshot is not None:
+            temporary_snapshot.unlink(missing_ok=True)
         raise ValueError(f"unsafe run id: {run_id!r}")
+    if compact:
+        header = state.header(work_root)
+        recorded = header.get("source")
+        if (
+            header.get("run_id") != run_id
+            or not isinstance(recorded, dict)
+            or recorded.get("path") != str(source)
+            or recorded.get("hash") != source_hash
+        ):
+            raise IdentityMismatch("compact state belongs to a different source or run")
 
-    work_dir = work_root / source_hash / run_id
-    snapshot = work_dir / "source.epub"
-    try:
-        work_dir.mkdir(parents=True, exist_ok=True)
-        if snapshot.exists():
-            if not snapshot.is_file() or _sha256_file(snapshot) != source_hash:
-                raise OSError("Existing preparation snapshot does not match the source")
-            temporary_snapshot.unlink()
-        else:
-            os.replace(temporary_snapshot, snapshot)
-            AtomicStore.sync_directory(work_dir)
-            snapshot.chmod(0o444)
-    except BaseException:
-        temporary_snapshot.unlink(missing_ok=True)
-        raise
+    work_dir = work_root if compact else work_root / source_hash / run_id
+    snapshot = source if compact else work_dir / "source.epub"
+    if not compact:
+        assert temporary_snapshot is not None
+        try:
+            work_dir.mkdir(parents=True, exist_ok=True)
+            if snapshot.exists():
+                if not snapshot.is_file() or _sha256_file(snapshot) != source_hash:
+                    raise OSError("Existing preparation snapshot does not match the source")
+                temporary_snapshot.unlink()
+            else:
+                os.replace(temporary_snapshot, snapshot)
+                AtomicStore.sync_directory(work_dir)
+                snapshot.chmod(0o444)
+        except BaseException:
+            temporary_snapshot.unlink(missing_ok=True)
+            raise
 
     store = RunStore(work_dir)
     with store.lock(blocking=False):
         inventory = inspect_epub(snapshot, source_hash, checker=checker, limits=config.zip_limits)
+        if compact:
+            _extract_source(snapshot, work_dir / "source", inventory)
         if inventory.epubcheck is not None and (not inventory.epubcheck.passed or inventory.epubcheck.warnings):
             store._base.atomic_write_bytes(
                 work_dir / "report.json",
@@ -138,6 +160,9 @@ def prepare_book(
                         f"Extractor version mismatch: {document.extractor_version} != {config.extractor_version}"
                     )
                 documents.append(document)
+
+        if compact and _sha256_file(snapshot) != source_hash:
+            raise IdentityMismatch("source EPUB changed while it was being prepared")
 
         if not atomic:
             documents = list(resolve_derived_navigation(documents))
@@ -195,6 +220,59 @@ def _stable_snapshot(source: Path, work_root: Path) -> tuple[Path, str]:
         raise
     temporary.unlink(missing_ok=True)
     raise OSError("Source EPUB kept changing while creating immutable snapshot")
+
+
+def _stable_hash(source: Path) -> str:
+    for _ in range(3):
+        before = source.stat()
+        digest = _sha256_file(source)
+        after = source.stat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) == (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            return digest
+    raise OSError("Source EPUB kept changing while its identity was checked")
+
+
+def _extract_source(source: Path, directory: Path, inventory: PackageInventory) -> None:
+    if directory.is_symlink():
+        raise IdentityMismatch("extracted source directory cannot be a symbolic link")
+    directory.mkdir(parents=True, exist_ok=True)
+    expected = {name for name in inventory.entries if not name.endswith("/")}
+    explicit_directories = {name.removesuffix("/") for name in inventory.entries if name.endswith("/")}
+    allowed_directories = set(explicit_directories)
+    for name in inventory.entries:
+        relative = PurePosixPath(name.removesuffix("/"))
+        allowed_directories.update(parent.as_posix() for parent in relative.parents if parent.as_posix() != ".")
+    paths = tuple(directory.rglob("*"))
+    if any(path.is_symlink() for path in paths):
+        raise IdentityMismatch("extracted source cannot contain symbolic links")
+    existing = {path.relative_to(directory).as_posix() for path in paths if path.is_file()}
+    if existing - expected:
+        raise IdentityMismatch("extracted source contains files absent from the original EPUB")
+    existing_directories = {path.relative_to(directory).as_posix() for path in paths if path.is_dir()}
+    if existing_directories - allowed_directories:
+        raise IdentityMismatch("extracted source contains directories absent from the original EPUB")
+    for name in sorted(explicit_directories, key=lambda value: (value.count("/"), value)):
+        target = directory.joinpath(*name.split("/"))
+        if target.exists() and not target.is_dir():
+            raise IdentityMismatch(f"extracted source directory collides with a file: {name}")
+        target.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(source) as archive:
+        for name in sorted(expected):
+            target = directory.joinpath(*name.split("/"))
+            parents = (target, *target.parents[: len(target.parts) - len(directory.parts)])
+            if any(parent.is_symlink() for parent in parents):
+                raise IdentityMismatch(f"extracted source path is a symbolic link: {name}")
+            data = archive.read(name)
+            if target.exists():
+                if not target.is_file() or target.read_bytes() != data:
+                    raise IdentityMismatch(f"extracted source differs from the original EPUB: {name}")
+                continue
+            AtomicStore.atomic_write_bytes(target, data)
 
 
 def _sha256_file(path: Path) -> str:

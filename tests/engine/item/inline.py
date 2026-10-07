@@ -166,6 +166,24 @@ def test_projection_locks_css_sensitive_and_hard_atom_order_and_plain_units():
     with pytest.raises(ProjectionError, match="XML-invalid"):
         validate_projection(attribute, "坏\u0001字")
 
+    navigation_registry = {"g1": ref("g1", "g", movement="locked")}
+    navigation = make_unit(
+        "⟦+g1⟧Chapter⟦-g1⟧",
+        registry=navigation_registry,
+        kind="navigation",
+        region={"navigation_anchor": True},
+    )
+    validate_projection(navigation, "⟦+g1⟧章节⟦-g1⟧")
+    with pytest.raises(ProjectionError, match="control markers"):
+        validate_projection(
+            make_unit(
+                "⟦+g1⟧Chapter⟦-g1⟧",
+                registry={"g1": ref("g1", "g")},
+                kind="navigation",
+                region={"navigation_anchor": True},
+            )
+        )
+
     boundary_registry = {
         "b1": ref("b1", "b", movement="fixed"),
         "x1": ref("x1", "x", movement="fixed", boundary_type="br"),

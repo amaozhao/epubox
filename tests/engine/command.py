@@ -160,7 +160,7 @@ def test_translate_freezes_atomic_versions_and_explicit_chunk_limit(
     assert config.extraction_config["strategy"] == ATOMIC_TERM_PLANNER_VERSION
     assert config.translation_config["prompt_version"] == "epubox-members-1"
     assert config.translation_config["input_budget_version"] == 2
-    assert config.translation_config["output_budget_version"] == 3
+    assert config.translation_config["output_budget_version"] == 4
     assert config.translation_config["max_source_tokens"] == 5000
     assert config.translation_config["max_input_tokens"] == 24000
     assert config.translation_config["rpm"] == cli.settings.AGNES_TEXT_RPM
@@ -551,7 +551,8 @@ def test_plain_translate_reopens_failed_review_and_skips_completed_translation(t
     )
     first = cli.translate_book(source, auto_extract=False)
     assert first.status == "needs_attention"
-    assert (source.with_suffix("") / "active.json").is_file()
+    assert (source.with_suffix("") / "state.json").is_file()
+    assert not (source.with_suffix("") / "active.json").exists()
     before = calls.count("translate")
     fail = False
     second = cli.translate_book(source)
@@ -564,7 +565,7 @@ def test_plain_translate_reopens_failed_review_and_skips_completed_translation(t
 
 
 def test_plain_translate_reuses_all_omitted_frozen_options(tmp_path, monkeypatch):
-    source, prepared = active_case(tmp_path)
+    source, _ = active_case(tmp_path)
     calls = []
 
     def resume(work_dir, **kwargs):
@@ -574,12 +575,12 @@ def test_plain_translate_reuses_all_omitted_frozen_options(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "resume_book", resume)
     result = cli.translate_book(source)
 
-    assert result.work_dir == prepared.work_dir
-    assert calls[0][0] == prepared.work_dir and calls[0][1]["_automatic"] is True
+    assert result.work_dir == source.with_suffix("")
+    assert calls[0][0] == source.with_suffix("") and calls[0][1]["_automatic"] is True
 
 
 def test_matching_explicit_option_resumes_without_automatic_retry(tmp_path, monkeypatch):
-    source, prepared = active_case(tmp_path)
+    source, _ = active_case(tmp_path)
     calls = []
 
     def resume(work_dir, **kwargs):
@@ -589,7 +590,7 @@ def test_matching_explicit_option_resumes_without_automatic_retry(tmp_path, monk
     monkeypatch.setattr(cli, "resume_book", resume)
     result = cli.translate_book(source, provider="cr_proxy", explicit_options=frozenset({"provider"}))
 
-    assert result.work_dir == prepared.work_dir
+    assert result.work_dir == source.with_suffix("")
     assert calls == [False]
 
 
