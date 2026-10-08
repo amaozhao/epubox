@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 
 from engine.core.markup import parse_xml_bytes, qname_local_name
 from engine.epub.diagnostics import compare, references, same_messages
+from engine.epub.replace import replacement_fingerprint
 from engine.epub.validation import (
     EpubCheckResult,
     EpubValidationError,
@@ -230,7 +231,7 @@ def publish_verified(
         "format": "epubox-publish-1",
         "state": "intended",
         "run_id": run_id,
-        "plan_fingerprint": plan_fingerprint,
+        "plan_fingerprint": _publication_fingerprint(plan_fingerprint),
         "version_vector": dict(sorted(version_vector.items())),
         "target_path": str(target_path.absolute()),
         "target_hash": verification.output_hash,
@@ -360,9 +361,9 @@ def recover_publication(
     data = json.loads(state.text(publish_path))
     if data.get("format") != "epubox-publish-1":
         raise EpubValidationError("invalid_publish_intent", "Unknown publish intent format")
-    if data.get("plan_fingerprint") != plan_fingerprint or data.get("version_vector") != dict(
-        sorted(version_vector.items())
-    ):
+    if data.get("plan_fingerprint") != _publication_fingerprint(plan_fingerprint) or data.get(
+        "version_vector"
+    ) != dict(sorted(version_vector.items())):
         return None
     target = Path(str(data.get("target_path", "")))
     target_hash = data.get("target_hash")
@@ -373,6 +374,11 @@ def recover_publication(
         data["completed_at"] = utc_now()
         _atomic_json(publish_path, data)
     return data
+
+
+def _publication_fingerprint(plan_fingerprint: str) -> str:
+    value = f"{plan_fingerprint}:{replacement_fingerprint()}"
+    return hashlib.sha256(value.encode("ascii")).hexdigest()
 
 
 def _validate_metadata(

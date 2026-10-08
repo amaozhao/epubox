@@ -92,22 +92,28 @@ def _validate_json(value: Any, depth: int = 0) -> None:
         raise ValueError("non-finite JSON numbers are forbidden")
 
 
-def canonical_json_bytes(value: Any, *, max_bytes: int = MAX_JSON_BYTES) -> bytes:
+def canonical_json_bytes(value: Any, *, max_bytes: int | None = MAX_JSON_BYTES) -> bytes:
     value = _json_value(value)
     _validate_json(value)
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-    if len(encoded) > max_bytes:
+    if max_bytes is not None and len(encoded) > max_bytes:
         raise ValueError(f"JSON exceeds {max_bytes} bytes")
     return encoded
 
 
 def canonical_hash(value: Any) -> str:
-    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+    value = _json_value(value)
+    _validate_json(value)
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    for part in encoder.iterencode(value):
+        digest.update(part.encode("utf-8"))
+    return digest.hexdigest()
 
 
-def strict_json_loads(data: str | bytes, *, max_bytes: int = MAX_JSON_BYTES) -> JsonValue:
+def strict_json_loads(data: str | bytes, *, max_bytes: int | None = MAX_JSON_BYTES) -> JsonValue:
     raw = data if isinstance(data, bytes) else data.encode()
-    if len(raw) > max_bytes:
+    if max_bytes is not None and len(raw) > max_bytes:
         raise ValueError(f"JSON exceeds {max_bytes} bytes")
     value = json.loads(raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant)
     _validate_json(value)
@@ -115,9 +121,13 @@ def strict_json_loads(data: str | bytes, *, max_bytes: int = MAX_JSON_BYTES) -> 
 
 
 def parse_contract[ModelT: BaseModel](
-    data: str | bytes | dict[str, Any], model: type[ModelT], expected_format: str
+    data: str | bytes | dict[str, Any],
+    model: type[ModelT],
+    expected_format: str,
+    *,
+    max_bytes: int | None = MAX_JSON_BYTES,
 ) -> ModelT:
-    value = strict_json_loads(data) if isinstance(data, (str, bytes)) else data
+    value = strict_json_loads(data, max_bytes=max_bytes) if isinstance(data, (str, bytes)) else data
     if not isinstance(value, dict):
         raise TypeError("contract root must be a JSON object")
     actual = value.get("format")

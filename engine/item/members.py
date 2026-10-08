@@ -24,7 +24,7 @@ from engine.schemas.contracts import (
     canonical_hash,
 )
 from engine.schemas.members import MemberBatch, RequestMember, member_input_hash
-from engine.services.preflight import PREFLIGHT_VERSION, PreflightReport
+from engine.services.preflight import PREFLIGHT_VERSION, PreflightReport, validate_list_pieces
 
 PACKING_VERSION = 2
 type BoundaryReason = Literal[
@@ -118,7 +118,7 @@ def materialize_members(inventories: Sequence[AtomicDocument], report: Preflight
             ):
                 raise ValueError("preflight piece ownership or model identity differs from its parent")
             count = len(pieces)
-            if parent.atomic_tag is not None and (count != 1 or pieces[0].piece_id != parent.item_id):
+            if parent.atomic_tag not in {None, "ul", "ol"} and (count != 1 or pieces[0].piece_id != parent.item_id):
                 raise ValueError("hard atomic items cannot be split")
             for index, piece in enumerate(pieces):
                 registry = parent.registry if count == 1 else _local_registry(parent, piece.source_projection)
@@ -195,7 +195,9 @@ def _validate_coverage(parent: AtomicItem, pieces: Sequence[Any]) -> None:
         if isinstance(boundaries, list)
         else set()
     )
-    if any(piece.source_span.byte_end not in safe_offsets for piece in pieces[:-1]):
+    if parent.atomic_tag in {"ul", "ol"}:
+        validate_list_pieces(parent, pieces)
+    elif any(piece.source_span.byte_end not in safe_offsets for piece in pieces[:-1]):
         raise ValueError("split member seams must use frozen safe source boundaries")
     for piece in pieces:
         expected = (

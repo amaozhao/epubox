@@ -9,6 +9,7 @@ import pytest
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.item.atoms import extract_resource
 from engine.item.extractor import extract_document
+from engine.schemas.base import MAX_JSON_BYTES
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import PreparationPlan, canonical_hash, canonical_json_bytes
 from engine.services import preflight as preflight_module
@@ -206,3 +207,18 @@ def test_prepare_covers_every_xhtml_navigation_and_metadata_resource(tmp_path: P
         store.read_document(document_id).resource.path for document_id in store.read_preparation().document_hashes
     }
     assert require_preflight(store, limits(5000), "gpt-3.5-turbo") == report
+
+
+def test_trusted_whole_book_preflight_can_be_saved_and_read_above_32_mib(tmp_path):
+    raw = source("<p>Short paragraph.</p>")
+    report = preflight_atomic_resources((inventory(raw, "book"),), {"OEBPS/chapter.xhtml": raw}, limits(5000), "model")
+    diagnostic = report.diagnostics[0].model_copy(update={"failures": ("x" * MAX_JSON_BYTES,)})
+    report = report.model_copy(update={"diagnostics": (diagnostic,)})
+    record = preflight_module._PreflightRecord(preparation_hash="0" * 64, translation_hash="1" * 64, report=report)
+    path = tmp_path / "checks" / "preflight.json"
+    with pytest.raises(ValueError, match="JSON exceeds"):
+        canonical_json_bytes(record)
+    preflight_module._write_immutable(path, record, preflight_module._PreflightRecord, record.format)
+    assert path.stat().st_size > MAX_JSON_BYTES
+    assert preflight_module._read(path, preflight_module._PreflightRecord, record.format) == record
+    preflight_module._write_immutable(path, record, preflight_module._PreflightRecord, record.format)

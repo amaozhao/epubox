@@ -77,7 +77,7 @@ def plan_resume(work_dir: Path | str) -> ResumePlan:
     preflight_path = root / "checks" / "preflight.json"
     if state.exists(preflight_path) and not state.exists(term_path):
         try:
-            value = strict_json_loads(state.read(preflight_path))
+            value = strict_json_loads(state.read(preflight_path), max_bytes=None)
             if (
                 not isinstance(value, dict)
                 or set(value) != {"format", "preparation_hash", "translation_hash", "report"}
@@ -313,7 +313,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
 
 
 def _atomic_preflight(root: Path, ready: AtomicPreparedInput) -> PreflightReport:
-    value = strict_json_loads(state.read(root / "checks" / "preflight.json"))
+    value = strict_json_loads(state.read(root / "checks" / "preflight.json"), max_bytes=None)
     if (
         not isinstance(value, dict)
         or set(value) != {"format", "preparation_hash", "translation_hash", "report"}

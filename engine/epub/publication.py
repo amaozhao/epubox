@@ -8,6 +8,7 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name, serialize_xml
 from engine.epub.assembly import assemble_document, derive_navigation_projection
+from engine.epub.replace import replace_resources
 from engine.epub.upgrade import upgrade_package
 from engine.epub.validation import (
     EpubValidationError,
@@ -227,6 +228,9 @@ def publish_book(
             changeset=changesets.get(path, {}),
         )
     replacements = upgrade_package(snapshot, inventory, replacements)
+    media_types = {item.path: item.media_type for item in inventory.manifest}
+    media_types[inventory.opf_path] = "application/oebps-package+xml"
+    replacements = replace_resources(replacements, media_types=media_types, source=snapshot)
     for path in replacements:
         accepted_by_resource.setdefault(path, {})
     staged_path = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"

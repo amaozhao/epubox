@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import zipfile
 from collections.abc import Mapping, Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -17,6 +18,7 @@ from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS, _safe_boundaries, e
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.budget import measure_budget
 from engine.item.inline import events_to_projection, parse_projection
+from engine.schemas.base import MAX_JSON_BYTES
 from engine.schemas.bridge import AtomicDocument, AtomicItem, ByteSpan, PreflightCheck
 from engine.schemas.budget import BUDGET_VERSION, BudgetLimits, BudgetResult
 from engine.schemas.contracts import (
@@ -262,6 +264,8 @@ def _preflight_item(
         selected = ()
         if item.atomic_tag is None:
             selected = _split_virtual(inventory, raw, item, limits, model)
+        elif item.atomic_tag in {"ul", "ol"}:
+            selected = _split_list(inventory, raw, item, limits, model)
         if selected and all(piece.translate.fits and piece.review.fits for piece in selected):
             status = "split"
         else:
@@ -338,6 +342,105 @@ def _split_virtual(
         return ()
     fragments = _projection_fragments(events, tuple(point for point, _byte in cut_points))
     byte_cuts = (item.source_span.byte_start, *(byte for _point, byte in cut_points), item.source_span.byte_end)
+    if len(fragments) + 1 != len(byte_cuts):
+        return ()
+    return _pack_fragments(inventory, item, fragments, byte_cuts, limits, model)
+
+
+def _split_list(
+    inventory: AtomicDocument,
+    raw: bytes,
+    item: AtomicItem,
+    limits: BudgetLimits,
+    model: str,
+) -> tuple[PreflightPiece, ...]:
+    parsed = parse_resource(raw, inventory.document.resource.media_type)
+    index = index_resource(parsed)
+    parent_path = inventory.document.nodes[item.node_key].element_path
+    children = sorted(
+        (
+            (node.element_path, node.node_key)
+            for node in inventory.document.nodes.values()
+            if node.element_path[:-1] == parent_path
+        ),
+        key=lambda value: value[0],
+    )
+    if len(children) < 2 or any(index.nodes[path].qname.rsplit("}", 1)[-1] != "li" for path, _key in children):
+        return ()
+    refs = {
+        entry.source_node_key: ref
+        for ref, entry in item.registry.items()
+        if entry.parent_ref == item.node_key and entry.hints.get("element") == "li"
+    }
+    if set(refs) != {key for _path, key in children}:
+        return ()
+    direct_refs = set(refs.values())
+    events = parse_projection(item.source_projection)
+    closes: dict[str, int] = {}
+    groups: list[str] = []
+    for position, event in enumerate(events, 1):
+        if event.kind != "marker" or event.value[:1] not in {"+", "-"} or event.value[1:2] != "g":
+            continue
+        edge, ref = event.value[0], event.value[1:]
+        if edge == "+":
+            if ref in direct_refs and groups:
+                return ()
+            groups.append(ref)
+        elif not groups or groups.pop() != ref:
+            return ()
+        elif not groups and ref in direct_refs:
+            closes[ref] = position
+    ordered_refs = tuple(refs[key] for _path, key in children)
+    if groups or set(closes) != set(ordered_refs):
+        return ()
+    positions = (0, *(closes[ref] for ref in ordered_refs[:-1]), len(events))
+    if tuple(sorted(positions)) != positions or len(set(positions)) != len(positions):
+        return ()
+    fragments = tuple(events_to_projection(events[start:end]) for start, end in pairwise(positions))
+    byte_cuts = (
+        item.source_span.byte_start,
+        *(index.nodes[path].full.end for path, _key in children[:-1]),
+        item.source_span.byte_end,
+    )
+    return _pack_fragments(inventory, item, fragments, byte_cuts, limits, model)
+
+
+def validate_list_pieces(parent: AtomicItem, pieces: Sequence[PreflightPiece]) -> None:
+    """Require every split list piece to contain complete direct li groups."""
+    direct = {
+        ref
+        for ref, entry in parent.registry.items()
+        if entry.parent_ref == parent.node_key and entry.hints.get("element") == "li"
+    }
+    seen: set[str] = set()
+    for piece in pieces:
+        groups: list[str] = []
+        for event in parse_projection(piece.source_projection):
+            if event.kind != "marker" or event.value[1:2] != "g" or event.value[:1] not in {"+", "-"}:
+                continue
+            edge, ref = event.value[0], event.value[1:]
+            if edge == "+":
+                groups.append(ref)
+                if ref in direct:
+                    if len(groups) != 1 or ref in seen:
+                        raise ValueError("split list pieces must start at complete direct li boundaries")
+                    seen.add(ref)
+            elif not groups or groups.pop() != ref:
+                raise ValueError("split list pieces must preserve marker nesting")
+        if groups:
+            raise ValueError("split list pieces must end at complete direct li boundaries")
+    if not direct or seen != direct:
+        raise ValueError("split list pieces must exactly cover every direct li")
+
+
+def _pack_fragments(
+    inventory: AtomicDocument,
+    item: AtomicItem,
+    fragments: Sequence[str],
+    byte_cuts: Sequence[int],
+    limits: BudgetLimits,
+    model: str,
+) -> tuple[PreflightPiece, ...]:
     if len(fragments) + 1 != len(byte_cuts):
         return ()
     result: list[PreflightPiece] = []
@@ -523,12 +626,15 @@ def _write_immutable(path: Path, value, model, expected_format: str) -> None:
         if _read(path, model, expected_format) != value:
             raise StaleWrite(f"immutable {path.name} already exists")
         return
-    AtomicStore.atomic_write_bytes(path, canonical_json_bytes(value))
+    # Whole-book reports are trusted local artifacts, not bounded provider responses.
+    maximum = None if model is _PreflightRecord else MAX_JSON_BYTES
+    AtomicStore.atomic_write_bytes(path, canonical_json_bytes(value, max_bytes=maximum))
 
 
 def _read(path: Path, model, expected_format: str):
     try:
-        return parse_contract(state.read(path), model, expected_format)
+        maximum = None if model is _PreflightRecord else MAX_JSON_BYTES
+        return parse_contract(state.read(path), model, expected_format, max_bytes=maximum)
     except Exception as error:
         raise CorruptRecord(f"invalid {path}: {error}") from error
 

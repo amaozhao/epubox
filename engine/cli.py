@@ -393,7 +393,7 @@ def _replan_local(root: Path, config: PreparationConfig) -> bool:
     path = root / "checks" / "preflight.json"
     if not state.exists(path):
         return False
-    value = strict_json_loads(state.read(path))
+    value = strict_json_loads(state.read(path), max_bytes=None)
     saved = RunStore(root).read_preparation()
     if saved.user_terms:
         return False

@@ -111,7 +111,8 @@ def test_atomic_publish_uses_reviewed_results_preserves_resources_and_recovers(t
     async def transport(kind, payload):
         if kind == "translate":
             items = [
-                {"item_id": item["item_id"], "target": _translated(str(item["source"]))} for item in payload["items"]
+                {"item_id": item["item_id"], "target": _translated(str(item["source"])) + "您好"}
+                for item in payload["items"]
             ]
             protocol = "epubox-text-1"
         else:
@@ -143,7 +144,8 @@ def test_atomic_publish_uses_reviewed_results_preserves_resources_and_recovers(t
     assert isinstance(published["publish"], dict) and published["publish"]["state"] == "completed"
     with zipfile.ZipFile(case.session.store.root / "source.epub") as source, zipfile.ZipFile(output) as target:
         assert source.read("META-INF/container.xml") == target.read("META-INF/container.xml")
-        assert "译文" in target.read("OEBPS/chapter.xhtml").decode()
+        chapter = target.read("OEBPS/chapter.xhtml").decode()
+        assert "译文" in chapter and "你好" in chapter and "您好" not in chapter
     assert recover_atomic(case.session.store, output) == published
 
 

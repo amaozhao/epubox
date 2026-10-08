@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+import engine.epub.replace as replace_module
 from engine.epub.assembly import assemble_document, derive_navigation_projection
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.epub.publication import publish_book, recover_publication, validate_assembled_document
@@ -343,6 +344,7 @@ def test_publish_book_uses_only_v25_bookplan_documents_and_current_accepted_reco
     monkeypatch.setattr(store, "read_bookplan", lambda: plan)
     monkeypatch.setattr(store, "read_unit", lambda unit_id: records[unit_id])
     monkeypatch.setattr(store, "read_request", lambda request_id: manifests[request_id])
+    monkeypatch.setattr(replace_module, "TEXT_REPLACEMENTS", {"可靠": "稳定"})
     output = tmp_path / "translated.epub"
 
     result = publish_book(store, output, StubChecker())
@@ -353,7 +355,7 @@ def test_publish_book_uses_only_v25_bookplan_documents_and_current_accepted_reco
     with zipfile.ZipFile(output) as archive:
         chapter = archive.read("OEBPS/chapter.xhtml").decode()
         opf = archive.read("OEBPS/content.opf").decode()
-    assert "可靠系统" in chapter
+    assert "稳定系统" in chapter and "可靠系统" not in chapter
     assert "zh-Hans" in opf
     recovered = recover_publication(
         store.root / "publish.json",
@@ -361,6 +363,15 @@ def test_publish_book_uses_only_v25_bookplan_documents_and_current_accepted_reco
         version_vector={unit_id: 1 for unit_id in plan.unit_ids},
     )
     assert recovered is not None and recovered["state"] == "completed"
+    monkeypatch.setattr(replace_module, "TEXT_REPLACEMENTS", {"系统": "体系"})
+    assert (
+        recover_publication(
+            store.root / "publish.json",
+            plan_fingerprint=canonical_hash(plan),
+            version_vector={unit_id: 1 for unit_id in plan.unit_ids},
+        )
+        is None
+    )
 
 
 def test_identity_publish_needs_no_translation_records_but_still_verifies_the_package(

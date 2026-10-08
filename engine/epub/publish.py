@@ -12,6 +12,7 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 from engine.epub.fill import fill_resource
 from engine.epub.parsing import OPF_NAMESPACE, XHTML_NAMESPACE, parse_resource
 from engine.epub.ranges import RawSpan, SlotSpan, index_resource
+from engine.epub.replace import replace_resources
 from engine.epub.upgrade import upgrade_package
 from engine.epub.validation import EpubValidationError, inspect_epub
 from engine.epub.verification import (
@@ -72,6 +73,9 @@ def publish_atomic(
                 replacements[path] = rendered
                 accepted[path] = owned
         replacements = upgrade_package(snapshot, inventory, replacements)
+        media_types = {item.path: item.media_type for item in inventory.manifest}
+        media_types[inventory.opf_path] = "application/oebps-package+xml"
+        replacements = replace_resources(replacements, media_types=media_types, source=snapshot)
         for path in replacements:
             accepted.setdefault(path, {})
         staged = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
