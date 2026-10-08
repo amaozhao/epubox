@@ -18,6 +18,7 @@ from engine.services.store import RunStore
 from engine.services.terms.freeze import freeze_terminology
 from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION, plan_atomic_terms
 from engine.services.terms.runner import TermRunner
+from engine.services.terms.storage import write_plan
 from tests.engine.epub.factory import make_epub
 
 
@@ -111,6 +112,29 @@ def test_atomic_plan_executes_and_freezes_against_its_committed_documents(tmp_pa
     assert result.status == "closed"
     assert all(record.status == "succeeded" for record in records.values())
     assert store._trusted_frozen_glossary(preparation) == (frozen.freeze_intent, frozen.glossary)
+
+
+def test_verified_inventories_avoid_revalidating_a_fresh_term_plan(tmp_path: Path, monkeypatch) -> None:
+    store, inventory, plan = atomic_plan(tmp_path)
+    preparation = store.read_preparation()
+    forged = plan_atomic_terms(
+        (inventory,),
+        (),
+        source_hash=preparation.source_hash,
+        preparation_hash=plan.preparation_hash,
+        max_primary_chars=1,
+        extraction_identity=preparation.extraction_config,
+    ).plan
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("verified inventories must be reused")
+
+    monkeypatch.setattr("engine.services.terms.storage.atomic_documents", forbidden)
+    monkeypatch.setattr("engine.services.terms.storage.canonical_documents", forbidden)
+
+    with pytest.raises(IdentityMismatch, match="deterministic atomic coverage"):
+        write_plan(store, forged, verified_inventories=(inventory,))
+    assert write_plan(store, plan, verified_inventories=(inventory,))
 
 
 def test_atomic_plan_is_rejected_without_its_preflight_receipt(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import engine.services.atomic as base_store_module
+import engine.services.store as store_module
 from engine.item import structure
 from engine.item.structure import EXTRACTOR_VERSION
 from engine.item.views import SOURCE_VIEW_RULE_VERSION, SourceViewError
@@ -26,10 +27,12 @@ from engine.schemas.contracts import (
     UnsupportedFormatError,
     UserTerm,
     canonical_hash,
+    canonical_json_bytes,
     glossary_rules_hash,
     source_view_hash_payload,
     term_plan_hash,
 )
+from engine.services import state
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, StoreLocked
 from engine.services.store import RunStore
 from engine.services.terms.planning import plan_term_extraction
@@ -233,6 +236,72 @@ def test_extraction_and_candidate_pool_use_record_version_cas(tmp_path: Path) ->
     assert store.save_candidate_pool(closed, expected_record_version=0).record_version == 1
     with pytest.raises(StaleWrite, match="expected 0, found 1"):
         store.save_candidate_pool(closed.model_copy(update={"record_version": 2}), expected_record_version=0)
+
+
+def test_term_plan_read_cache_tracks_only_the_plan_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, preparation = _prepare(tmp_path)
+    plan = _write_term_plan(store, preparation)
+    store = RunStore(tmp_path)
+    calls = 0
+    parse = store_module.parse_contract
+
+    def count_parse(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(store_module, "parse_contract", count_parse)
+    assert store.read_term_plan() == plan
+    assert store.read_term_plan() == plan
+    assert calls == 1
+
+    state.write(tmp_path / "unrelated.json", b"{}")
+    assert store.read_term_plan() == plan
+    assert calls == 1
+
+    invalid = plan.model_dump(mode="json") | {"plan_hash": "invalid"}
+    state.write(tmp_path / "glossary" / "plan.json", canonical_json_bytes(invalid))
+    with pytest.raises(CorruptRecord, match="term plan hash"):
+        store.read_term_plan()
+    assert calls == 2
+
+
+def test_term_plan_validation_cache_tracks_its_dependencies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store, preparation = _prepare(tmp_path)
+    plan = _write_term_plan(store, preparation)
+    from engine.services.terms import storage
+
+    writes = 0
+    write_plan = storage.write_plan
+
+    def count_write(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        return write_plan(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "write_plan", count_write)
+    store.write_term_plan(plan)
+    state.write(tmp_path / "unrelated.json", b"{}")
+    store.write_term_plan(plan)
+    assert writes == 0
+
+    forged = plan.model_copy(update={"items": ()})
+    with pytest.raises(IdentityMismatch, match="deterministic"):
+        store.write_term_plan(forged)
+    nested = plan.items[0].model_copy(update={"context_refs": ("ghost",)})
+    with pytest.raises(IdentityMismatch, match="deterministic"):
+        store.write_term_plan(plan.model_copy(update={"items": (nested, *plan.items[1:])}))
+    assert writes == 2
+
+    with pytest.raises(IdentityMismatch, match="verified inventories differ"):
+        store.write_term_plan(plan, verified_inventories=())
+    assert writes == 3
+
+    changed = preparation.model_copy(update={"run_id": "changed"})
+    state.write(tmp_path / "preparation.json", canonical_json_bytes(changed))
+    with pytest.raises(IdentityMismatch, match="committed preparation"):
+        store.write_term_plan(plan)
+    assert writes == 4
 
 
 def test_term_plan_and_requests_cannot_reference_uncommitted_inputs(tmp_path: Path) -> None:

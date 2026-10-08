@@ -427,7 +427,6 @@ async def _advance_atomic(
     from engine.item.members import MemberIndex, materialize_members, pack_members
     from engine.services.ready import ReadySession, limits_for, write_ready
     from engine.services.terms.planning import plan_atomic_terms
-    from engine.services.terms.storage import atomic_documents
 
     if state.is_file(store.root / "prepared.json"):
         session = ReadySession(
@@ -451,7 +450,23 @@ async def _advance_atomic(
             ready_session=session,
         )
 
-    report = _ensure_preflight(store, preparation)
+    from engine.services.preflight import load_preflight
+
+    _emit(
+        progress,
+        PreparationProgress("preflight", 0, 0, 0, 0, _http_attempts(store), "准备：核对已保存的预检结果和原文身份。"),
+    )
+    receipt_path = store.root / "checks" / "preflight.json"
+    receipt = strict_json_loads(state.read(receipt_path), max_bytes=None) if state.is_file(receipt_path) else None
+    saved_report = receipt.get("report") if isinstance(receipt, dict) else None
+    capacity = limits_for(preparation)
+    tokenizer = str(preparation.translation_config.get("model", preparation.extraction_config.get("model", "")))
+    if isinstance(saved_report, dict) and saved_report.get("check") is not None:
+        report, inventories = load_preflight(store, capacity, tokenizer)
+    else:
+        report = _ensure_preflight(store, preparation)
+        inventories = () if report.check is None else load_preflight(store, capacity, tokenizer)[1]
+    del receipt, saved_report
     if report.check is None:
         failed = sum(diagnostic.status == "blocked" for diagnostic in report.diagnostics)
         _emit(
@@ -475,12 +490,15 @@ async def _advance_atomic(
             diagnostics=tuple(diagnostic for diagnostic in report.diagnostics if diagnostic.status == "blocked"),
         )
 
-    inventories = atomic_documents(store)
     documents = tuple(inventory.document for inventory in inventories)
+    _emit(
+        progress,
+        PreparationProgress("terms", 0, 0, 0, 0, _http_attempts(store), "准备：预检通过，核对已保存的术语计划。"),
+    )
     plan_path = store.root / "glossary" / "plan.json"
     if state.is_file(plan_path):
         term_plan = store.read_term_plan()
-        store.write_term_plan(term_plan)
+        store.write_term_plan(term_plan, verified_inventories=inventories)
     else:
         extraction = preparation.extraction_config
         term_plan = plan_atomic_terms(
@@ -496,8 +514,20 @@ async def _advance_atomic(
             item_http_limit=_integer(extraction, "item_http_limit", 6),
             resolution_group_limit=_integer(extraction, "resolution_group_limit", 20),
         ).plan
-        store.write_term_plan(term_plan)
+        store.write_term_plan(term_plan, verified_inventories=inventories)
 
+    _emit(
+        progress,
+        PreparationProgress(
+            "terms",
+            len(term_plan.items),
+            0,
+            0,
+            len(term_plan.items),
+            _http_attempts(store),
+            f"准备：批量恢复 {len(term_plan.items)} 条术语断点。",
+        ),
+    )
     _initialize_extraction_records(store, term_plan)
     _emit(progress, _term_progress(store, term_plan))
     freeze_path = store.root / "glossary" / "freeze.json"
@@ -722,19 +752,26 @@ def _documents(store: RunStore, preparation: PreparationPlan) -> tuple[DocumentP
 
 
 def _initialize_extraction_records(store: RunStore, plan: TermExtractionPlan) -> None:
-    for item in plan.items:
-        path = store._path("glossary/extraction", item.item_id)
-        if state.exists(path):
-            store.read_extraction(item.item_id)
-            continue
-        store.save_extraction(
-            TermExtractionRecord(
-                item_id=item.item_id,
-                document_id=item.document_id,
-                view_ids=item.view_ids,
-                extraction_input_hash=item.extraction_input_hash,
+    with state.batch(store.root):
+        for item in plan.items:
+            path = store._path("glossary/extraction", item.item_id)
+            if state.exists(path):
+                record = store.read_extraction(item.item_id)
+                if (record.document_id, record.view_ids, record.extraction_input_hash) != (
+                    item.document_id,
+                    item.view_ids,
+                    item.extraction_input_hash,
+                ):
+                    raise IdentityMismatch(f"extraction record identity mismatch: {item.item_id}")
+                continue
+            store.save_extraction(
+                TermExtractionRecord(
+                    item_id=item.item_id,
+                    document_id=item.document_id,
+                    view_ids=item.view_ids,
+                    extraction_input_hash=item.extraction_input_hash,
+                )
             )
-        )
 
 
 def _stored_decisions(groups) -> tuple[ResolutionDecision, ...]:

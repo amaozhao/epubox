@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal, TypeVar
 
@@ -16,6 +16,7 @@ from engine.item.extractor import validate_source_relations
 from engine.item.inline import events_to_projection, parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS, _atomize, _range_stacks, _segment_events, source_token_count
 from engine.item.views import validate_source_views
+from engine.schemas.bridge import AtomicDocument
 from engine.schemas.contracts import (
     BOOK_FORMAT,
     CANDIDATES_FORMAT,
@@ -49,6 +50,7 @@ from engine.schemas.contracts import (
     canonical_hash,
     canonical_json_bytes,
     parse_contract,
+    term_plan_hash,
     unit_record_hash,
     validate_cut_plan_coverage,
     validate_term_scopes,
@@ -157,6 +159,8 @@ class RunStore:
             ]
             | None
         ) = None
+        self._term_plan_cache: tuple[tuple[int, int], TermExtractionPlan] | None = None
+        self._term_plan_validation_cache: tuple[str, object, tuple[int, ...] | None, str] | None = None
 
     def lock(self, *, blocking: bool = True):
         return self._base.lock(blocking=blocking)
@@ -250,11 +254,25 @@ class RunStore:
     def read_preparation(self) -> PreparationPlan:
         return self._read_contract(self.root / "preparation.json", PreparationPlan, PREPARATION_FORMAT)
 
-    def write_term_plan(self, plan: TermExtractionPlan) -> str:
-        from engine.services.terms.storage import write_plan
+    def write_term_plan(
+        self, plan: TermExtractionPlan, *, verified_inventories: Sequence[AtomicDocument] | None = None
+    ) -> str:
+        from engine.services.terms.storage import plan_dependencies, write_plan
 
         with self.lock():
-            return write_plan(self, plan)
+            dependencies = plan_dependencies(self)
+            proof = None if verified_inventories is None else tuple(id(item) for item in verified_inventories)
+            cached = self._term_plan_validation_cache
+            if (
+                cached is not None
+                and cached[:2] == (plan.plan_hash, dependencies)
+                and plan.plan_hash == term_plan_hash(plan)
+                and (verified_inventories is None or cached[2] == proof)
+            ):
+                return cached[3]
+            digest = write_plan(self, plan, verified_inventories=verified_inventories)
+            self._term_plan_validation_cache = (plan.plan_hash, plan_dependencies(self), proof, digest)
+            return digest
 
     @staticmethod
     def _config_int(config: dict[str, JsonValue], name: str, default: int) -> int:
@@ -316,7 +334,16 @@ class RunStore:
         return preparation, documents
 
     def read_term_plan(self) -> TermExtractionPlan:
-        return self._read_contract(self.root / "glossary" / "plan.json", TermExtractionPlan, TERM_PLAN_FORMAT)
+        path = self.root / "glossary" / "plan.json"
+        status = state.stat(path)
+        key = (status.st_mtime_ns, status.st_size)
+        if self._term_plan_cache is not None and self._term_plan_cache[0] == key:
+            return self._term_plan_cache[1]
+        plan = self._read_contract(path, TermExtractionPlan, TERM_PLAN_FORMAT)
+        status = state.stat(path)
+        if key == (status.st_mtime_ns, status.st_size):
+            self._term_plan_cache = (key, plan)
+        return plan
 
     def save_extraction(
         self, record: TermExtractionRecord, *, expected_record_version: int | None = None

@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+from weakref import WeakKeyDictionary
 
 from pydantic import Field
 
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 
 PREFLIGHT_FORMAT = "epubox-preflight-1"
 PREFLIGHT_VERSION = 1
+_proofs: WeakKeyDictionary[object, tuple[tuple[str, int, int, int, int, int], ...]] = WeakKeyDictionary()
 
 
 class PreflightPiece(FrozenModel):
@@ -177,7 +179,7 @@ def write_preflight(
         translation_hash=canonical_hash(preparation.translation_config),
         report=report,
     )
-    with base.lock():
+    with base.lock(), state.batch(base.root):
         for inventory in inventories:
             _write_immutable(
                 base.path("inventories", inventory.document.document_id),
@@ -219,6 +221,150 @@ def prepare_preflight(
         for document in documents
     )
     return write_preflight(base, inventories, raw, limits, model)
+
+
+def preflight_fingerprint(
+    store: AtomicStore | RunStore,
+) -> tuple[tuple[str, int, int, int, int, int], ...]:
+    """Fingerprint only the source and immutable records covered by preflight."""
+    base = _store(store)
+    paths = [
+        state.snapshot(base.root),
+        base.root / "preparation.json",
+        base.root / "checks" / "preflight.json",
+        *sorted(state.glob(base.root / "documents", "*.json")),
+        *sorted(state.glob(base.root / "inventories", "*.json")),
+    ]
+    return tuple(
+        (str(path), status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
+        for path in paths
+        for status in (state.stat(path),)
+    )
+
+
+def preflight_verified(store: AtomicStore | RunStore) -> bool:
+    """Return whether this store object still has an unchanged full proof."""
+    try:
+        return _proofs.get(store) == preflight_fingerprint(store)
+    except OSError:
+        return False
+
+
+def read_preflight(store: AtomicStore | RunStore, limits: BudgetLimits, model: str) -> PreflightReport:
+    """Read a saved receipt and check its frozen preparation identity."""
+    base = _store(store)
+    _preparation, report = _saved_preflight(base, limits, model)
+    return report
+
+
+def load_preflight(
+    store: AtomicStore | RunStore,
+    limits: BudgetLimits,
+    model: str,
+) -> tuple[PreflightReport, tuple[AtomicDocument, ...]]:
+    """Load one passed receipt without repeating extraction or token measurement."""
+    before = preflight_fingerprint(store)
+    base = _store(store)
+    preparation, report = _saved_preflight(base, limits, model)
+    if report.check is None:
+        raise IdentityMismatch("preflight did not pass for the current source")
+    snapshot = state.snapshot(base.root)
+    if not state.is_file(snapshot) or _file_hash(snapshot) != preparation.source_hash:
+        raise IdentityMismatch("preflight source snapshot differs from preparation")
+
+    document_ids = set(preparation.document_hashes)
+    disk_documents = {path.stem for path in state.glob(base.root / "documents", "*.json")}
+    if disk_documents != document_ids or any(
+        hashlib.sha256(state.read(base.path("documents", document_id))).hexdigest() != expected
+        for document_id, expected in preparation.document_hashes.items()
+    ):
+        raise IdentityMismatch("prepared document files changed")
+    inventory_ids = set(report.check.map_hashes)
+    disk_ids = {path.stem for path in state.glob(base.root / "inventories", "*.json")}
+    if inventory_ids != document_ids or disk_ids != inventory_ids:
+        raise IdentityMismatch("preflight inventory does not cover every prepared document")
+    inventory_raw: dict[str, bytes] = {}
+    by_id: dict[str, AtomicDocument] = {}
+    for document_id in inventory_ids:
+        path = base.path("inventories", document_id)
+        raw = state.read(path)
+        try:
+            inventory = parse_contract(raw, AtomicDocument, "epubox-atoms-1")
+        except Exception as error:
+            raise CorruptRecord(f"invalid {path}: {error}") from error
+        inventory_raw[document_id] = raw
+        by_id[document_id] = inventory
+    if any(
+        by_id[document_id].document.document_id != document_id
+        or by_id[document_id].document.source_hash != preparation.source_hash
+        or hashlib.sha256(canonical_json_bytes(by_id[document_id].document)).hexdigest()
+        != preparation.document_hashes[document_id]
+        for document_id in inventory_ids
+    ):
+        raise IdentityMismatch("preflight inventory documents differ from preparation")
+
+    map_hashes = {document_id: canonical_hash(by_id[document_id].source_map) for document_id in inventory_ids}
+    ordered_atoms = tuple(by_id[document_id] for document_id in sorted(inventory_ids))
+    atoms_hash = _sequence_hash(tuple(inventory_raw[document_id] for document_id in sorted(inventory_ids)))
+    resource_hashes = {
+        inventory.document.resource.path: inventory.document.resource.source_sha256 for inventory in ordered_atoms
+    }
+    budget_hash = canonical_hash(
+        {
+            "version": BUDGET_VERSION,
+            "preflight_version": PREFLIGHT_VERSION,
+            "model": model,
+            "limits": limits.to_dict(),
+            "pieces": tuple(piece.model_dump(mode="json") for piece in report.pieces),
+        }
+    )
+    expected = PreflightCheck(
+        source_hash=preparation.source_hash,
+        map_hashes=map_hashes,
+        atoms_hash=atoms_hash,
+        budget_hash=budget_hash,
+        passed=True,
+    )
+    if (
+        report.resource_hashes != resource_hashes
+        or report.map_hashes != map_hashes
+        or report.atoms_hash != atoms_hash
+        or report.budget_hash != budget_hash
+        or report.check != expected
+    ):
+        raise IdentityMismatch("preflight receipt hashes do not match its saved dependencies")
+    ordered_ids = (
+        *preparation.reading_order,
+        *(document_id for document_id in preparation.document_hashes if document_id not in preparation.reading_order),
+    )
+    after = preflight_fingerprint(store)
+    if after != before:
+        raise IdentityMismatch("preflight dependencies changed during verification")
+    _proofs[store] = after
+    return report, tuple(by_id[document_id] for document_id in ordered_ids)
+
+
+def _saved_preflight(
+    base: AtomicStore,
+    limits: BudgetLimits,
+    model: str,
+) -> tuple[PreparationPlan, PreflightReport]:
+    record = _read(
+        base.root / "checks" / "preflight.json",
+        _PreflightRecord,
+        "epubox-preflight-record-1",
+    )
+    preparation, preparation_hash = _preparation(base.root)
+    report = record.report
+    if record.preparation_hash != preparation_hash or record.translation_hash != canonical_hash(
+        preparation.translation_config
+    ):
+        raise IdentityMismatch("preflight preparation identity changed")
+    if report.model != model or report.limits != limits.to_dict():
+        raise IdentityMismatch("preflight model or budget limits changed")
+    if report.source_hash != preparation.source_hash:
+        raise IdentityMismatch("preflight source identity changed")
+    return preparation, report
 
 
 def require_preflight(store: AtomicStore | RunStore, limits: BudgetLimits, model: str) -> PreflightReport:
@@ -621,6 +767,24 @@ def _snapshot_resources(path: Path, inventories: Sequence[AtomicDocument]) -> di
         raise CorruptRecord(f"cannot read preflight resources from {path}: {error}") from error
 
 
+def _file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _sequence_hash(values: Sequence[bytes]) -> str:
+    digest = hashlib.sha256(b"[")
+    for index, value in enumerate(values):
+        if index:
+            digest.update(b",")
+        digest.update(value)
+    digest.update(b"]")
+    return digest.hexdigest()
+
+
 def _write_immutable(path: Path, value, model, expected_format: str) -> None:
     if state.exists(path):
         if _read(path, model, expected_format) != value:
@@ -631,7 +795,7 @@ def _write_immutable(path: Path, value, model, expected_format: str) -> None:
     AtomicStore.atomic_write_bytes(path, canonical_json_bytes(value, max_bytes=maximum))
 
 
-def _read(path: Path, model, expected_format: str):
+def _read[ModelT: FrozenModel](path: Path, model: type[ModelT], expected_format: str) -> ModelT:
     try:
         maximum = None if model is _PreflightRecord else MAX_JSON_BYTES
         return parse_contract(state.read(path), model, expected_format, max_bytes=maximum)
@@ -653,8 +817,12 @@ __all__ = [
     "PreflightDiagnostic",
     "PreflightPiece",
     "PreflightReport",
+    "load_preflight",
     "preflight_atomic_resources",
+    "preflight_fingerprint",
+    "preflight_verified",
     "prepare_preflight",
+    "read_preflight",
     "require_preflight",
     "write_preflight",
 ]

@@ -115,9 +115,9 @@ def test_plain_command_translates_titles_and_derives_navigation_without_translat
 
 def test_plain_command_rebuilds_only_unsent_blocked_local_budget_plan(tmp_path, monkeypatch):
     body = (
-        "<ul>"
-        + "".join(f'<li>Entry {number}, <a href="#p{number}">{number}</a></li>' for number in range(125))
-        + "</ul>"
+        "<table>"
+        + "".join(f'<tr><td>Entry {number}, <a href="#p{number}">{number}</a></td></tr>' for number in range(125))
+        + "</table>"
     )
     source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": body})
     config = PreparationConfig(

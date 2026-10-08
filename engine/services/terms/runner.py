@@ -30,7 +30,13 @@ from engine.services import state
 from engine.services.atomic import StoreError
 from engine.services.coherence import load_budget_overrides
 from engine.services.store import RunStore
-from engine.services.terms.planning import _tail_start, _term_applies, _term_occurs, _unit_lanes
+from engine.services.terms.planning import (
+    ATOMIC_TERM_PLANNER_VERSION,
+    _tail_start,
+    _term_applies,
+    _term_occurs,
+    _unit_lanes,
+)
 
 _TERM_OUTPUT_TOKENS_PER_ITEM = 1_300
 
@@ -466,28 +472,27 @@ class TermRunner:
         return min(limits)
 
     def _require_preflight(self) -> None:
-        from engine.services.preflight import require_preflight
+        from engine.services.preflight import (
+            load_preflight,
+            preflight_fingerprint,
+            preflight_verified,
+            require_preflight,
+        )
         from engine.services.ready import limits_for
 
         config = self.preparation.translation_config
         limits = limits_for(self.preparation)
-        paths = [
-            self.store.root / "preparation.json",
-            state.snapshot(self.store.root),
-            self.store.root / "checks" / "preflight.json",
-        ]
-        paths.extend(sorted(state.glob(self.store.root / "inventories", "*.json")))
-        paths.extend(sorted(state.glob(self.store.root / "documents", "*.json")))
         try:
-            fingerprint = tuple(
-                (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-                for path in paths
-                for stat in [state.stat(path)]
-            )
-            if getattr(self, "_preflight_fingerprint", None) == fingerprint:
+            fingerprint = preflight_fingerprint(self.store)
+            if getattr(self, "_preflight_fingerprint", None) == fingerprint or preflight_verified(self.store):
+                self._preflight_fingerprint = fingerprint
                 return
-            require_preflight(self.store, limits=limits, model=str(config.get("model", self.config["model"])))
-            self._preflight_fingerprint = fingerprint
+            model = str(config.get("model", self.config["model"]))
+            if self.preparation.extraction_config.get("strategy") == ATOMIC_TERM_PLANNER_VERSION:
+                load_preflight(self.store, limits=limits, model=model)
+            else:
+                require_preflight(self.store, limits=limits, model=model)
+            self._preflight_fingerprint = preflight_fingerprint(self.store)
         except (OSError, ValueError, StoreError) as error:
             raise TermBudgetPaused(f"atomic preflight is required before paid dispatch: {error}") from error
 

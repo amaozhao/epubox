@@ -13,6 +13,7 @@ from engine.schemas.base import MAX_JSON_BYTES
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import PreparationPlan, canonical_hash, canonical_json_bytes
 from engine.services import preflight as preflight_module
+from engine.services import state
 from engine.services.atomic import IdentityMismatch
 from engine.services.preflight import preflight_atomic_resources, prepare_preflight, require_preflight, write_preflight
 from engine.services.store import RunStore
@@ -61,6 +62,32 @@ def stored(tmp_path: Path, raw: bytes, *, translation: dict | None = None):
     (tmp_path / "documents" / f"{legacy.document_id}.json").write_bytes(canonical_json_bytes(legacy))
     (tmp_path / "preparation.json").write_bytes(canonical_json_bytes(preparation))
     return RunStore(tmp_path), atoms, {"OEBPS/chapter.xhtml": raw}
+
+
+def atomic_stored(tmp_path: Path, raw: bytes) -> RunStore:
+    epub = make_epub(tmp_path / "input.epub", {"chapter.xhtml": raw.decode()})
+    root = tmp_path / "work"
+    store = RunStore(root)
+    snapshot = root / "source.epub"
+    snapshot.write_bytes(epub.read_bytes())
+    source_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    atoms = inventory(raw, source_hash)
+    document_hash = store.write_document(atoms.document)
+    store.write_user_terms(())
+    store.write_preparation(
+        PreparationPlan(
+            source_hash=source_hash,
+            source_path="source.epub",
+            source_epub_version="3.0",
+            run_id="run",
+            document_hashes={atoms.document.document_id: document_hash},
+            reading_order=(atoms.document.document_id,),
+            unit_documents={unit.unit_id: atoms.document.document_id for unit in atoms.document.units},
+            user_terms_hash=canonical_hash(()),
+            translation_config={"model": "gpt-3.5-turbo"},
+        )
+    )
+    return store
 
 
 def test_whole_atomic_item_fails_at_2000_and_passes_at_5000_without_splitting() -> None:
@@ -140,6 +167,112 @@ def test_persisted_guard_recomputes_source_atoms_budget_and_frozen_configuration
     (tmp_path / "preparation.json").write_bytes(canonical_json_bytes(changed))
     with pytest.raises(IdentityMismatch, match="preparation identity"):
         require_preflight(store, limits(5000), "gpt-3.5-turbo")
+
+
+def test_saved_pass_loads_without_reextracting_or_rebudgeting(tmp_path: Path, monkeypatch) -> None:
+    store = atomic_stored(tmp_path, source("<p>Persisted paragraph.</p>"))
+    written = prepare_preflight(store, limits(5000), "gpt-3.5-turbo")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a passing receipt must not repeat full preflight work")
+
+    monkeypatch.setattr(preflight_module, "extract_resource", forbidden)
+    monkeypatch.setattr(preflight_module, "preflight_atomic_resources", forbidden)
+
+    loaded, inventories = preflight_module.load_preflight(store, limits(5000), "gpt-3.5-turbo")
+
+    assert loaded == written
+    assert tuple(inventory.document.document_id for inventory in inventories) == tuple(
+        store.read_preparation().reading_order
+    )
+
+
+def test_saved_pass_rejects_a_changed_source_snapshot(tmp_path: Path) -> None:
+    store = atomic_stored(tmp_path, source("<p>Persisted paragraph.</p>"))
+    prepare_preflight(store, limits(5000), "gpt-3.5-turbo")
+    snapshot = store.root / "source.epub"
+    snapshot.write_bytes(snapshot.read_bytes() + b"changed")
+
+    with pytest.raises(IdentityMismatch, match="source snapshot"):
+        preflight_module.load_preflight(store, limits(5000), "gpt-3.5-turbo")
+
+
+def test_saved_pass_recomputes_atoms_and_budget_hashes(tmp_path: Path) -> None:
+    store = atomic_stored(tmp_path, source("<p>Persisted paragraph.</p>"))
+    prepare_preflight(store, limits(5000), "gpt-3.5-turbo")
+    path = store.root / "checks" / "preflight.json"
+    record = preflight_module._read(
+        path,
+        preflight_module._PreflightRecord,
+        "epubox-preflight-record-1",
+    )
+    assert record.report.check is not None
+    changed = record.report.model_copy(
+        update={
+            "atoms_hash": "0" * 64,
+            "budget_hash": "1" * 64,
+            "check": record.report.check.model_copy(update={"atoms_hash": "0" * 64, "budget_hash": "1" * 64}),
+        }
+    )
+    path.write_bytes(canonical_json_bytes(record.model_copy(update={"report": changed}), max_bytes=None))
+
+    with pytest.raises(IdentityMismatch, match="receipt hashes"):
+        preflight_module.load_preflight(store, limits(5000), "gpt-3.5-turbo")
+
+
+def test_saved_pass_rejects_a_self_consistent_forged_inventory_document(tmp_path: Path) -> None:
+    store = atomic_stored(tmp_path, source("<p>Persisted paragraph.</p>"))
+    prepare_preflight(store, limits(5000), "gpt-3.5-turbo")
+    path = next((store.root / "inventories").glob("*.json"))
+    inventory = preflight_module._read(path, preflight_module.AtomicDocument, "epubox-atoms-1")
+    document = inventory.document.model_copy(
+        update={"resource": inventory.document.resource.model_copy(update={"media_type": "text/html"})}
+    )
+    forged = inventory.model_copy(update={"document": document})
+    path.write_bytes(canonical_json_bytes(forged))
+    receipt_path = store.root / "checks" / "preflight.json"
+    record = preflight_module._read(
+        receipt_path,
+        preflight_module._PreflightRecord,
+        "epubox-preflight-record-1",
+    )
+    assert record.report.check is not None
+    atoms_hash = canonical_hash((forged,))
+    check = record.report.check.model_copy(update={"atoms_hash": atoms_hash})
+    report = record.report.model_copy(update={"atoms_hash": atoms_hash, "check": check})
+    receipt_path.write_bytes(canonical_json_bytes(record.model_copy(update={"report": report}), max_bytes=None))
+
+    with pytest.raises(IdentityMismatch, match="inventory documents"):
+        preflight_module.load_preflight(store, limits(5000), "gpt-3.5-turbo")
+
+
+def test_compact_preflight_commits_all_inventories_and_receipt_once(tmp_path: Path, monkeypatch) -> None:
+    source_path = make_epub(
+        tmp_path / "book.epub",
+        {"one.xhtml": "<p>One.</p>", "two.xhtml": "<p>Two.</p>"},
+    )
+    root = tmp_path / "book"
+    state.initialize(root, source_path, hashlib.sha256(source_path.read_bytes()).hexdigest(), "run")
+    prepared = prepare_book(
+        source_path,
+        root,
+        PreparationConfig(run_id="run", translation_config={"model": "gpt-3.5-turbo"}),
+        StubChecker(),
+    )
+    commits = 0
+    commit = state._commit
+
+    def counted(*args, **kwargs):
+        nonlocal commits
+        commits += 1
+        return commit(*args, **kwargs)
+
+    monkeypatch.setattr(state, "_commit", counted)
+    report = prepare_preflight(RunStore(prepared.work_dir), limits(5000), "gpt-3.5-turbo")
+
+    assert report.passed and commits == 1
+    assert len(list(state.glob(root / "inventories", "*.json"))) == len(prepared.preparation.document_hashes)
+    assert state.is_file(root / "checks" / "preflight.json")
 
 
 def test_persist_rejects_resource_bytes_not_taken_from_the_frozen_snapshot(tmp_path: Path) -> None:

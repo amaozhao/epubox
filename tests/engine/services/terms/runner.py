@@ -11,13 +11,16 @@ from engine.agents.runtime import model_input_budget as runtime_input_budget
 from engine.epub.preparation import PreparationConfig, prepare_book
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import Attempt, RequestManifest, TermExtractionRecord
-from engine.services.preflight import prepare_preflight
+from engine.services import preflight as preflight_module
+from engine.services.preflight import load_preflight, prepare_preflight
 from engine.services.preparation import resume_preparation
+from engine.services.ready import limits_for
 from engine.services.store import RunStore
 from engine.services.terms.planning import TERM_PLANNER_VERSION, plan_term_extraction
-from engine.services.terms.runner import TermRunner
+from engine.services.terms.runner import TermBudgetPaused, TermRunner
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
+from tests.engine.services.terms.storage import atomic_plan
 
 
 def _prepare(tmp_path: Path, **extraction_overrides: int) -> tuple[RunStore, tuple[str, ...]]:
@@ -79,6 +82,46 @@ def _prepare(tmp_path: Path, **extraction_overrides: int) -> tuple[RunStore, tup
         model,
     )
     return store, tuple(item.item_id for item in plan.items)
+
+
+def test_paid_dispatch_reuses_the_validated_preflight_receipt(tmp_path: Path, monkeypatch) -> None:
+    store, inventory, plan = atomic_plan(tmp_path)
+    preparation = store.read_preparation()
+    load_preflight(store, limits_for(preparation), "gpt-3.5-turbo")
+    store.write_term_plan(plan, verified_inventories=(inventory,))
+    runner = TermRunner(store, transport=lambda *_: None)
+    item = runner.plan.items[0]
+    payload = runner._payload((item,), "request")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("validated preflight work must not run again before dispatch")
+
+    monkeypatch.setattr(preflight_module, "require_preflight", forbidden)
+    monkeypatch.setattr(preflight_module, "load_preflight", forbidden)
+    monkeypatch.setattr(preflight_module, "extract_resource", forbidden)
+
+    runner._guard_dispatch("terms", payload, runner.output_tokens)
+
+
+def test_paid_dispatch_rejects_changed_dependencies_without_full_repreflight(tmp_path: Path, monkeypatch) -> None:
+    store, inventory, plan = atomic_plan(tmp_path)
+    preparation = store.read_preparation()
+    load_preflight(store, limits_for(preparation), "gpt-3.5-turbo")
+    store.write_term_plan(plan, verified_inventories=(inventory,))
+    runner = TermRunner(store, transport=lambda *_: None)
+    item = runner.plan.items[0]
+    payload = runner._payload((item,), "request")
+    snapshot = store.root / "source.epub"
+    snapshot.write_bytes(snapshot.read_bytes() + b"changed")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("changed dependencies must use the bounded saved-receipt verifier")
+
+    monkeypatch.setattr(preflight_module, "require_preflight", forbidden)
+    monkeypatch.setattr(preflight_module, "extract_resource", forbidden)
+
+    with pytest.raises(TermBudgetPaused, match="source snapshot"):
+        runner._guard_dispatch("terms", payload, runner.output_tokens)
 
 
 def test_failed_term_window_does_not_stop_later_windows_or_reset_on_resume(tmp_path: Path) -> None:

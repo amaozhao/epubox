@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import zipfile
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS, extract_resource
@@ -18,22 +19,41 @@ if TYPE_CHECKING:
     from engine.services.store import RunStore
 
 
-def write_plan(store: RunStore, plan: TermExtractionPlan) -> str:
+def write_plan(
+    store: RunStore,
+    plan: TermExtractionPlan,
+    *,
+    verified_inventories: Sequence[AtomicDocument] | None = None,
+) -> str:
     """Persist exactly one replayed legacy or receipt-bound atomic term plan."""
     preparation = store.read_preparation()
     preparation_hash = store._file_hash(store.root / "preparation.json")
     if plan.source_hash != preparation.source_hash or plan.preparation_hash != preparation_hash:
         raise IdentityMismatch("term plan does not belong to the committed preparation")
 
-    trusted, documents = store._preparation_documents()
+    if verified_inventories is None:
+        trusted, documents = store._preparation_documents()
+    else:
+        trusted = preparation
+        documents = {inventory.document.document_id: inventory.document for inventory in verified_inventories}
+        if (
+            len(verified_inventories) != len(documents)
+            or set(documents) != set(preparation.document_hashes)
+            or any(document.source_hash != preparation.source_hash for document in documents.values())
+        ):
+            raise IdentityMismatch("verified inventories differ from the committed preparation")
     versions = {document.extractor_version for document in documents.values()}
     atomic = len(versions) == 1 and versions <= _SUPPORTED_EXTRACTOR_VERSIONS
     if atomic:
-        inventories = (
-            canonical_documents(store, trusted, documents)
-            if state.is_file(store.root / "glossary" / "plan.json")
-            else atomic_documents(store, trusted, documents)
-        )
+        if verified_inventories is None:
+            inventories = (
+                canonical_documents(store, trusted, documents)
+                if state.is_file(store.root / "glossary" / "plan.json")
+                else atomic_documents(store, trusted, documents)
+            )
+        else:
+            by_id = {inventory.document.document_id: inventory for inventory in verified_inventories}
+            inventories = tuple(by_id[document_id] for document_id in _ordered_ids(trusted))
         expected = _atomic_plan(store, trusted, inventories, preparation_hash)
     else:
         trusted, documents = store._trusted_preparation_documents()
@@ -107,6 +127,21 @@ def canonical_documents(
     return tuple(by_id[document_id] for document_id in _ordered_ids(preparation))
 
 
+def plan_dependencies(store: RunStore) -> tuple[tuple[int, int], ...]:
+    """Fingerprint only the immutable records that determine a term plan."""
+    paths = [
+        state.snapshot(store.root),
+        store.root / "preparation.json",
+        store.root / "checks" / "preflight.json",
+        store.root / "glossary" / "plan.json",
+        *sorted(state.glob(store.root / "documents", "*.json")),
+        *sorted(state.glob(store.root / "inventories", "*.json")),
+    ]
+    return tuple(
+        (status.st_mtime_ns, status.st_size) for path in paths if state.is_file(path) for status in (state.stat(path),)
+    )
+
+
 def _atomic_plan(
     store: RunStore,
     preparation: PreparationPlan,
@@ -166,4 +201,4 @@ def _model(preparation) -> str:
     return value
 
 
-__all__ = ["atomic_documents", "canonical_documents", "write_plan"]
+__all__ = ["atomic_documents", "canonical_documents", "plan_dependencies", "write_plan"]
