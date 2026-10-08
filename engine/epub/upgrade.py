@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlsplit
-from xml.sax.saxutils import quoteattr
 
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -203,12 +202,9 @@ def _normalize_xhtml(data: bytes) -> bytes:
         patches.append((byte_start, byte_end, "<!DOCTYPE html>".encode(indexed.encoding)))
 
     attribute = f"{{{_EPUB}}}prefix"
-    value = root.attrib.pop(attribute, None)
+    value = root.get(attribute)
     if value is not None:
         declarations = re.findall(r"([A-Za-z][\w.-]*):\s+(\S+)", value)
-        existing = root.get("prefix", "").strip()
-        existing_declarations = re.findall(r"([A-Za-z][\w.-]*):\s+(\S+)", existing)
-        existing_names = {prefix for prefix, _ in existing_declarations}
         used = {
             prefix
             for element in root.iter()
@@ -216,26 +212,17 @@ def _normalize_xhtml(data: bytes) -> bytes:
             if qname_local_name(name) != "prefix"
             for prefix in re.findall(r"\b([A-Za-z][\w.-]*):[\w.-]+", content)
         }
-        additions = [(prefix, iri) for prefix, iri in declarations if prefix in used and prefix not in existing_names]
-        merged = " ".join((existing, *(f"{prefix}: {iri}" for prefix, iri in additions))).strip()
+        # XHTML epub:type uses epub:prefix, not the separate unnamespaced RDFa prefix.
         span = indexed.nodes[()].starttag
         starttag = data[span.start : span.end].decode(indexed.encoding)
         aliases = sorted((name for name, iri in root.nsmap.items() if name and iri == _EPUB), key=len, reverse=True)
-        if aliases:
+        if aliases and not any(prefix in used for prefix, _ in declarations):
             names = "|".join(re.escape(name) for name in aliases)
             alias_match = re.search(rf"\s+(?:{names}):prefix\s*=\s*(['\"])(.*?)\1", starttag, re.DOTALL)
             if alias_match is not None:
                 byte_start = span.start + len(starttag[: alias_match.start()].encode(indexed.encoding))
                 byte_end = span.start + len(starttag[: alias_match.end()].encode(indexed.encoding))
-                replacement = " prefix=" + quoteattr(merged) if merged and not existing else ""
-                patches.append((byte_start, byte_end, replacement.encode(indexed.encoding)))
-        if existing and additions:
-            prefix_match = re.search(r"\s+prefix\s*=\s*(['\"])(.*?)\1", starttag, re.DOTALL)
-            if prefix_match is not None:
-                byte_start = span.start + len(starttag[: prefix_match.start()].encode(indexed.encoding))
-                byte_end = span.start + len(starttag[: prefix_match.end()].encode(indexed.encoding))
-                replacement = " prefix=" + quoteattr(merged)
-                patches.append((byte_start, byte_end, replacement.encode(indexed.encoding)))
+                patches.append((byte_start, byte_end, b""))
 
     for start, end, replacement in _entity_patches(data, indexed):
         if not any(start < patch_end and end > patch_start for patch_start, patch_end, _ in patches):

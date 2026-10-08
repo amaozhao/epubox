@@ -119,8 +119,10 @@ EPUB 标准自 2.0 开始。输入兼容 EPUB 2.x（包括 2.0、2.0.1 标记）
 
 优先复用已有 XHTML 目录；没有时按已翻译 NCX 的层级和链接生成 nav，NCX 目录为空时使用已翻译 spine 标题。保留原 NCX、章节顺序、linear、资源路径、ID、字体和图片。新增资源只允许必需的 nav；中文导航的固定标题使用“目录”等中文标签，不新增模型请求。
 
-旧 XHTML DOCTYPE 转换成 HTML5 DOCTYPE；受信任命名实体改成数值引用，以保持 XML 文本语义。CDATA、注释和处理指令不重写。旧的 namespaced `epub:prefix`（包括 namespace 别名）只在根标签中删除或合并为标准 prefix，CSS、脚本和代码保持原内容。表单、事件处理和 switch 所需的输出 manifest 声明按内容推导；既有不支持动态脚本等源格式的输入边界不变。
+旧 XHTML DOCTYPE 转换成 HTML5 DOCTYPE；受信任命名实体改成数值引用，以保持 XML 文本语义。CDATA、注释和处理指令不重写。XHTML 中已使用的 namespaced `epub:prefix`（包括 namespace 别名）保留原声明；未使用的声明可以删除。不能把它合并成无命名空间的 `prefix`：后者是 RDFa 属性，不能声明 `epub:type` 的扩展词汇，见 [W3C 前缀规范](https://www.w3.org/TR/epub-33/#sec-prefix-attribute)。CSS、脚本和代码保持原内容。表单、事件处理和 switch 所需的输出 manifest 声明按内容推导；既有不支持动态脚本等源格式的输入边界不变。
 
 最终候选必须通过 EPUBCheck，ERROR/FATAL 为零。原书诊断继续保存在 state.json，但不再作为新成品保留错误的理由。旧成品自动升级前必须验证发布归属、源哈希、目标哈希和旧校验证据；失败保留旧成品。重启还会检查实际 OPF 版本与干净校验记录的一致性。
 
 真实验证：`agentic-ai-platform-engineering-rethinking.epub` 的 2213 ERROR 降至 0 ERROR、0 FATAL、0 WARNING；仅修改 20 个条目，复用已有目录。另使用已完成的中文 `systems-thinking-agentic-ai-software-architects-cn.epub` 验证组装，正文及保护内容语义不变、未修改资源逐字节一致，输出同样为 EPUB 3.0 且 EPUBCheck 零错误。验证在临时目录进行，未重新翻译或修改原始文件。
+
+`ai-native-mandate-transform-your-company` 的 `ibooks:reader-start-page` 曾因升级器误改声明触发 OPF-028。修复后原目录声明正确保留，复用已接受的 1467 个单元完成中文 EPUB 3.0 打包，HTTP 保持 336，EPUBCheck 0 ERROR/FATAL/WARNING。没有重新翻译或修改原书。

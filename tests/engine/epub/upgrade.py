@@ -9,7 +9,7 @@ import pytest
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import parse_xml_bytes, qname_local_name
-from engine.epub.upgrade import _relative, _resolve, upgrade_package
+from engine.epub.upgrade import _normalize_xhtml, _relative, _resolve, upgrade_package
 from engine.epub.validation import ManifestItem, PackageInventory
 
 
@@ -358,13 +358,13 @@ def test_upgrade_removes_unused_legacy_epub_prefix_without_changing_text(tmp_pat
         assert protected in result
 
 
-def test_upgrade_merges_aliased_epub_prefix_into_existing_prefix_attribute(tmp_path: Path) -> None:
+def test_upgrade_keeps_epub_vocabulary_separate_from_rdfa_prefix(tmp_path: Path) -> None:
     source = tmp_path / "book.epub"
     inventory = _book(source, "2.0")
     document = (
         b'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:ops="http://www.idpf.org/2007/ops" '
         b'prefix="foo: urn:foo" ops:prefix="z3998: urn:z3998 custom: urn:custom" '
-        b'ops:type="z3998:poem custom:part foo:book"><head><title>Title</title></head>'
+        b'ops:type="z3998:poem custom:part" property="foo:book"><head><title>Title</title></head>'
         b"<body><p>Text</p></body></html>"
     )
 
@@ -372,11 +372,29 @@ def test_upgrade_merges_aliased_epub_prefix_into_existing_prefix_attribute(tmp_p
 
     result = upgraded["OEBPS/chapter.xhtml"]
     root = parse_xml_bytes(result).getroot()
-    declarations = root.get("prefix", "")
-    assert "foo: urn:foo" in declarations
+    assert root.get("prefix") == "foo: urn:foo"
+    declarations = root.get("{http://www.idpf.org/2007/ops}prefix", "")
     assert "z3998: urn:z3998" in declarations
     assert "custom: urn:custom" in declarations
-    assert b"ops:prefix" not in result and len(re.findall(rb"\sprefix=", result)) == 1
+    assert b"ops:prefix" in result and len(re.findall(rb"\sprefix=", result)) == 1
+
+
+@pytest.mark.parametrize("alias", ("epub", "ops"))
+def test_upgrade_preserves_used_ibooks_prefix_and_protected_bytes(alias: str) -> None:
+    raw = (
+        f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:{alias}="http://www.idpf.org/2007/ops" '
+        f'{alias}:prefix="ibooks: http://vocabulary.itunes.apple.com/rdf/ibooks/vocabulary-extensions-1.0">'
+        '<head><title>目录</title><style>pre::before{content:"  x  "}</style></head>'
+        f'<body><a {alias}:type="ibooks:reader-start-page" href="chapter.xhtml">正文</a>'
+        "<pre>  &lt;x&gt;  </pre></body></html>"
+    ).encode()
+    result = _normalize_xhtml(raw)
+    root = parse_xml_bytes(result).getroot()
+    assert root.get("{http://www.idpf.org/2007/ops}prefix") == (
+        "ibooks: http://vocabulary.itunes.apple.com/rdf/ibooks/vocabulary-extensions-1.0"
+    )
+    assert root.get("prefix") is None
+    assert result == raw
 
 
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le"])
