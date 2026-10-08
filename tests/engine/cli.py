@@ -462,26 +462,6 @@ def test_translate_command_resumes_frozen_bookplan_without_reentering_p1_or_prov
     assert provider_calls == 0
 
 
-def test_translate_refuses_to_restart_paid_work_with_changed_configuration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Keep data safe.</p>"})
-    work_root = tmp_path / "work"
-    checker = StubChecker()
-    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
-    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: checker)
-
-    async def advance(actual_source, output, actual_work_root, config, actual_checker, **_kwargs):
-        prepared = prepare_book(actual_source, actual_work_root, config, actual_checker)
-        return cli.RunOutcome("paused", prepared.work_dir, "terms")
-
-    monkeypatch.setattr(cli, "_advance_source", advance)
-    cli.translate_book(source, work_root=work_root)
-
-    with pytest.raises(ValueError, match="different frozen configuration"):
-        cli.translate_book(source, work_root=work_root, context_tokens=8192)
-
-
 def test_translate_refuses_changed_user_terms_without_repeating_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

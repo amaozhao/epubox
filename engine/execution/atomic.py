@@ -17,7 +17,7 @@ from engine.item.members import pack_members
 from engine.schemas.contracts import ItemStatus
 from engine.schemas.members import MemberBatch
 from engine.services.atomic import StoreError
-from engine.services.ready import limits_for
+from engine.services.ready import limits_from_config
 from engine.services.store import RunStore
 
 
@@ -333,7 +333,14 @@ def _pending_batches(
         batch.items[0].document_id for batch in initial if batch.items[0].channel == "navigation"
     )
     merge_navigation = {document for document, count in navigation_counts.items() if count > 1}
-    if fresh and not merge_navigation:
+    reusable = {
+        item_id
+        for batch in initial
+        if batch.manifest.context_unlimited
+        and (batch.items[0].channel != "navigation" or batch.items[0].document_id not in merge_navigation)
+        for item_id in batch.manifest.item_ids
+    }
+    if fresh and len(reusable) == sum(len(batch.manifest.item_ids) for batch in initial):
         return tuple(initial)
     session = journal.session
     partition_by_item: dict[str, int] = {}
@@ -346,14 +353,15 @@ def _pending_batches(
         [
             batch
             for batch in initial
-            if batch.items[0].channel != "navigation" or batch.items[0].document_id not in merge_navigation
+            if batch.manifest.context_unlimited
+            and (batch.items[0].channel != "navigation" or batch.items[0].document_id not in merge_navigation)
         ]
         if fresh
         else []
     )
     lanes = {}
     for member in session.index.members:
-        if fresh and (member.channel != "navigation" or member.document_id not in merge_navigation):
+        if fresh and member.item_id in reusable:
             continue
         record = records[member.item_id]
         if (
@@ -388,7 +396,7 @@ def _pending_batches(
             members,
             session.prepared.glossary,
             session.index,
-            limits_for(session.prepared.preparation),
+            limits_from_config(session.prepared.plan.translation_config, context_unlimited=True),
             record_versions=versions,
             feedback={
                 member.item_id: feedback

@@ -363,22 +363,23 @@ def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue
         if provider not in {"agnes", "cr_proxy"}:
             raise ValueError(f"unsupported translation provider: {provider!r}")
         default_model = settings.AGNES_MODEL if provider == "agnes" else settings.CR_PROXY_MODEL
-        context_default = translation.get("context_tokens", 32_768)
-        default_output = min(8_192, context_default // 2) if type(context_default) is int else 8_192
+        context = translation.get("context_tokens")
+        default_output = min(8_192, context // 2) if type(context) is int else 8_192
         defaults: dict[str, JsonValue] = {
             "provider": provider,
             "model": translation.get("model", default_model),
             "target_language": translation.get("target_language", "zh-Hans"),
             "max_source_tokens": settings.EPUB_CHUNK_MAX_TOKENS,
-            "context_tokens": context_default,
             "max_output_tokens": max(1, default_output),
             "prompt_version": "epubox-members-1",
             "planner_version": "epubox-member-planner-2",
             "input_budget_version": 2,
         }
-        defaults["max_input_tokens"] = translation.get("context_tokens", defaults["context_tokens"])
+        defaults["max_input_tokens"] = translation.get("context_tokens", 50_000)
         for name, value in defaults.items():
             translation.setdefault(name, value)
+        if "context_unlimited" not in translation and "context_tokens" not in translation:
+            translation["context_unlimited"] = True
         if translation["planner_version"] == "epubox-member-planner-2":
             translation.setdefault("output_budget_version", 6)
             translation.setdefault("minimum_source_tokens", settings.EPUB_CHUNK_MIN_TOKENS)
@@ -396,10 +397,16 @@ def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue
             minimum = translation["minimum_source_tokens"]
             if type(minimum) is not int or minimum < 1:
                 raise ValueError("translation_config minimum_source_tokens must be a positive integer")
-        for name in ("max_source_tokens", "context_tokens", "max_input_tokens", "max_output_tokens"):
+        for name in ("max_source_tokens", "max_input_tokens", "max_output_tokens"):
             value = translation[name]
             if type(value) is not int or value < 1:
                 raise ValueError(f"translation_config {name} must be a positive integer")
+        if "context_tokens" in translation and (
+            type(translation["context_tokens"]) is not int or translation["context_tokens"] < 1
+        ):
+            raise ValueError("translation_config context_tokens must be a positive integer")
+        if type(translation.get("context_unlimited", False)) is not bool:
+            raise ValueError("translation_config context_unlimited must be a boolean")
         for name in ("provider", "model", "target_language"):
             if not isinstance(translation[name], str) or not translation[name]:
                 raise ValueError(f"translation_config {name} must be a non-empty string")

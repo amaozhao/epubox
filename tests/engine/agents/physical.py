@@ -14,6 +14,7 @@ from engine.services.atomic import IdentityMismatch
 from engine.services.journal import BodyJournal
 from engine.services.resume import plan_resume
 from tests.engine.agents.runtime import FakeOpenAIClient
+from tests.engine.agents.wire import payload as wire_payload
 from tests.engine.agents.workflow import MODEL, prepare_case, review_item
 
 
@@ -34,6 +35,57 @@ class Model:
 
     def get_request_params(self, **_kwargs):
         return {"max_tokens": self.max_tokens}
+
+
+def test_v8_provider_hash_budget_and_saved_response_use_actual_slot_map():
+    book = wire_payload("review")
+    book["wire_version"] = "epubox-wire-8"
+    book["items"][0]["source"] = "⟦+g1⟧Source one.⟦-g1⟧⟦=x1⟧⟦+b1⟧Source two.⟦-b1⟧"
+    book["items"][0]["target"] = "⟦+g1⟧译文一。⟦-g1⟧⟦=x1⟧⟦+b1⟧译文二。⟦-b1⟧"
+    persisted = []
+    reserved = []
+    sent = []
+
+    class Completions:
+        async def create(self, **kwargs):
+            physical = json.loads(kwargs["messages"][1]["content"])
+            item = physical["items"][0]
+            assert isinstance(item["target"], dict)
+            sent.append(kwargs)
+            decision = review_item(item, decision="replace")
+            decision["target"] = {slot: "修订译文。" for slot in item["slot_ids"]}
+            raw = json.dumps({"protocol": book["protocol"], "request_id": book["request_id"], "items": [decision]})
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=raw), finish_reason="stop")],
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+                id="review-response",
+                model=MODEL,
+                system_fingerprint=None,
+            )
+
+    runtime = ModelRuntime(
+        model=Model(FakeOpenAIClient(Completions())),
+        model_max_output_tokens=8192,
+        input_budget_version=2,
+        provider_output_token_field="max_tokens",
+        reserve_attempt=lambda _, attempt: reserved.append(attempt),
+        persist_response=lambda *args: persisted.append(args[-1]),
+    )
+    result = asyncio.run(runtime.invoke("review", book, {"request_id": book["request_id"], "output_tokens": 8192}))
+    assert reserved[0].metadata["wire_version"] == "epubox-wire-8"
+    assert reserved[0].metadata["wire_hash"] == wire.digest(sent[0]["messages"], 8192)
+    assert persisted[0]["metadata"]["wire_version"] == "epubox-wire-8"
+    assert (
+        reserved[0].reservation["estimated_input_tokens"]
+        == model_input_budget(
+            "review",
+            book,
+            compact=True,
+            algorithm_version=2,
+        )["estimated_input_tokens"]
+    )
+    target = json.loads(result["raw"])["items"][0]["target"]
+    assert isinstance(target, str) and "⟦+" in target
 
 
 def make_case(tmp_path):

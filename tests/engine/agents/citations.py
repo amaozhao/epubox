@@ -99,6 +99,23 @@ def actual_member() -> RequestMember:
     return member().model_copy(update={"source_projection": source, "registry": refs})
 
 
+def caption_member(captions: tuple[str, ...]) -> RequestMember:
+    refs = {
+        f"g{index}": RegistryEntry(
+            ref_id=f"g{index}",
+            kind="g",
+            source_node_key=f"n{index}",
+            parent_ref="n1",
+            movement="locked",
+            source_text=caption,
+            hints={"element": "li", "source_view_boundary": "paragraph"},
+        )
+        for index, caption in enumerate(captions, 1)
+    }
+    source = "".join(f"⟦+g{index}⟧{caption}⟦-g{index}⟧" for index, caption in enumerate(captions, 1))
+    return member().model_copy(update={"source_projection": source, "registry": refs})
+
+
 @pytest.mark.parametrize("element", ("em", "i", "cite"))
 def test_exact_cited_paper_title_may_remain_english(element: str) -> None:
     target = f"这一方法源自论文⟦+g1⟧{TITLE}⟦-g1⟧（Yao 等，2022）。"
@@ -137,3 +154,39 @@ def test_other_english_residue_still_fails(value: RequestMember, target: str) ->
 
     assert result is not None
     assert result.startswith("untranslated English remains:")
+
+
+def test_proper_names_in_separate_captions_do_not_pool_english_stopwords() -> None:
+    value = caption_member(("The Zebra report.", "Women in Tech SEO survey.", "The Athletic article."))
+    target = "⟦+g1⟧The Zebra 报告。⟦-g1⟧⟦+g2⟧Women in Tech SEO 调查。⟦-g2⟧⟦+g3⟧The Athletic 文章。⟦-g3⟧"
+
+    assert error(value, target) is None
+
+
+def test_inline_ranges_do_not_hide_an_untranslated_english_sentence() -> None:
+    sentence = "This replacement remains entirely untranslated and contains a complete English sentence."
+    value = caption_member((sentence,))
+    value = value.model_copy(
+        update={
+            "source_projection": (
+                "⟦+g1⟧This replacement remains ⟦+g2⟧entirely untranslated⟦-g2⟧ "
+                "and contains a complete English sentence.⟦-g1⟧"
+            ),
+            "registry": value.registry
+            | {
+                "g2": RegistryEntry(
+                    ref_id="g2",
+                    kind="g",
+                    source_node_key="n-inline",
+                    parent_ref="g1",
+                    movement="same_parent",
+                    reorder_allowed=True,
+                    source_text="entirely untranslated",
+                    hints={"element": "em"},
+                )
+            },
+        }
+    )
+
+    result = error(value, value.source_projection)
+    assert result is not None and result.startswith("untranslated English remains:")

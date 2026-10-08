@@ -27,7 +27,6 @@ def translate(
     glossary: Path | None = typer.Option(None, "--glossary", exists=True, dir_okay=False),
     auto_extract: bool = typer.Option(True, "--auto-extract/--no-auto-extract"),
     provider: str = typer.Option("agnes", "--provider"),
-    context_tokens: int = typer.Option(32768, "--context-tokens", min=1),
     max_input_tokens: int = typer.Option(50000, "--max-input-tokens", min=1),
     max_output_tokens: int = typer.Option(8192, "--max-output-tokens", min=1),
     limit: int | None = typer.Option(
@@ -47,7 +46,6 @@ def translate(
             "glossary",
             "auto_extract",
             "provider",
-            "context_tokens",
             "max_input_tokens",
             "max_output_tokens",
             "limit",
@@ -66,7 +64,6 @@ def translate(
                 glossary=glossary,
                 auto_extract=auto_extract,
                 provider=provider,
-                context_tokens=context_tokens,
                 max_input_tokens=max_input_tokens,
                 max_output_tokens=max_output_tokens,
                 limit=limit,

@@ -35,15 +35,20 @@ def limits_for(preparation) -> BudgetLimits:
     return limits_from_config(preparation.translation_config)
 
 
-def limits_from_config(config) -> BudgetLimits:
-    context = _int(config, "context_tokens", 32768)
+def limits_from_config(config, *, context_unlimited: bool | None = None) -> BudgetLimits:
+    output = _int(config, "max_output_tokens", 4096)
+    unlimited = config.get("context_unlimited", False) if context_unlimited is None else context_unlimited
+    if type(unlimited) is not bool:
+        raise IdentityMismatch("context_unlimited must be a boolean")
+    context = _int(config, "context_tokens", 50000 + output + 256 if unlimited else 32768)
+    input_tokens = _int(config, "max_input_tokens", 50000 if unlimited else context)
     ratio = config.get("target_ratio", 1.6)
     if isinstance(ratio, bool) or not isinstance(ratio, (float, int)):
         raise IdentityMismatch("target_ratio must be a positive number")
     return BudgetLimits(
         source_tokens=_int(config, "max_source_tokens", 2000),
-        input_tokens=_int(config, "max_input_tokens", context),
-        output_tokens=_int(config, "max_output_tokens", 4096),
+        input_tokens=input_tokens,
+        output_tokens=output,
         context_tokens=context,
         safety_tokens=_int(config, "safety_margin", 256, zero=True),
         target_ratio=float(ratio),
@@ -54,6 +59,7 @@ def limits_from_config(config) -> BudgetLimits:
             else 0
         ),
         source_tolerance_tokens=(1000 if config.get("planner_version") == "epubox-member-planner-2" else 0),
+        context_unlimited=unlimited,
     )
 
 
@@ -459,7 +465,9 @@ class ReadySession:
         from engine.item.budget import measure_budget
 
         prepared = self.verify()
-        capacity = limits_for(prepared.preparation)
+        capacity = limits_from_config(
+            prepared.plan.translation_config, context_unlimited=batch.manifest.context_unlimited
+        )
         self.index.validate_items(
             batch.items,
             relaxed_adjacency=bool(capacity.minimum_source_tokens),

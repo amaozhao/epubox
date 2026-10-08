@@ -71,7 +71,7 @@ def test_restart_uses_successful_retry_after_malformed_translation(tmp_path, mal
     assert all(
         record.status == ItemStatus.REVIEWED for record in resumed.records(case.batch.manifest.item_ids).values()
     )
-    assert failed_request not in validations and validations.count(valid_request) == 2
+    assert failed_request not in validations and validations.count(valid_request) == 1
     assert not plan_resume(case.session.store.root).reasons
     assert run(resumed, succeeded).status == "completed"
     assert calls == ["translate", "review"]

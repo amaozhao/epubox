@@ -7,11 +7,16 @@ import pytest
 
 from engine.agents import workflow
 from engine.agents.workflow import run_workflow
+from engine.execution.atomic import _pending_batches
 from engine.schemas.contracts import ItemStatus
+from engine.services import journal as journal_module
 from engine.services import state
+from engine.services.atomic import CorruptRecord, IdentityMismatch
 from engine.services.journal import BodyJournal
+from engine.services.ready import ReadySession
 from engine.services.store import RunStore
 from tests.engine.agents.workflow import prepare_case
+from tests.engine.services.journal import _answer
 
 
 def _attention_case(tmp_path):
@@ -71,6 +76,84 @@ def test_saved_initial_translation_frame_reuses_ready_verification(tmp_path, mon
     monkeypatch.setattr(workflow, "pack_members", counted)
     BodyJournal(case.session.store)
     assert calls == 0
+
+
+def test_sparse_restart_reuses_saved_request_frames(tmp_path, monkeypatch) -> None:
+    journal, units = _attention_case(tmp_path)
+    journal.retry_units(units)
+    batch = _pending_batches(journal, tuple(journal.session._prepared_batches.values()))[0]
+
+    async def accepted(kind, payload):
+        return _answer(kind, payload)
+
+    result = asyncio.run(
+        run_workflow(
+            journal.session.prepared,
+            batch,
+            journal.session.index,
+            journal.runtime(transport=accepted),
+            session=journal.session,
+            save=journal.save,
+            records=journal.records(batch.manifest.item_ids),
+        )
+    )
+    assert result.status == "completed" and batch.manifest.sparse
+
+    session = ReadySession(journal.store)
+    calls = 0
+    original = journal_module.pack_members
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(journal_module, "pack_members", counted)
+    monkeypatch.setattr(workflow, "pack_members", counted)
+    resumed = BodyJournal(journal.store, session)
+    assert calls == 0
+    monkeypatch.setattr(
+        resumed,
+        "_translation_batch",
+        lambda _request: (_ for _ in ()).throw(AssertionError("terminal translation rebuilt")),
+    )
+    monkeypatch.setattr(
+        resumed,
+        "_review_batch",
+        lambda _request: (_ for _ in ()).throw(AssertionError("terminal review rebuilt")),
+    )
+    resumed.recover_results()
+
+
+def test_sparse_restart_rejects_changed_request_frame(tmp_path) -> None:
+    journal, units = _attention_case(tmp_path)
+    journal.retry_units(units)
+    batch = _pending_batches(journal, tuple(journal.session._prepared_batches.values()))[0]
+
+    async def accepted(kind, payload):
+        return _answer(kind, payload)
+
+    assert (
+        asyncio.run(
+            run_workflow(
+                journal.session.prepared,
+                batch,
+                journal.session.index,
+                journal.runtime(transport=accepted),
+                session=journal.session,
+                save=journal.save,
+                records=journal.records(batch.manifest.item_ids),
+            )
+        ).status
+        == "completed"
+    )
+    frame = next(state.glob(journal.store.root / "frames", "*.json"))
+    value = json.loads(state.text(frame))
+    value["payload"]["items"][0]["source"] = "changed"
+    state.write(frame, json.dumps(value).encode())
+    session = ReadySession(journal.store)
+    with pytest.raises((CorruptRecord, IdentityMismatch)):
+        BodyJournal(journal.store, session)
 
 
 def test_request_progress_reports_physical_wire_budget(tmp_path) -> None:

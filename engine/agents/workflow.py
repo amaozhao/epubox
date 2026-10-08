@@ -13,14 +13,14 @@ from engine.agents.protocol import ProtocolError, review_applicability, validate
 from engine.agents.runtime import ATOMIC_PROMPT_VERSION, ModelRuntime, RequestError
 from engine.agents.terms import validate_review_response
 from engine.core.quality import find_degenerate_translation, find_untranslated_english_texts
-from engine.item.citations import script_text_without_retained_titles
+from engine.item.citations import script_paragraphs_without_retained_titles
 from engine.item.inline import plain_text
 from engine.item.members import MemberIndex, pack_members, validate_member_target
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash
 from engine.schemas.members import MemberBatch, RequestMember
 from engine.schemas.ready import AtomicPreparedInput
 from engine.services import state
-from engine.services.ready import ReadySession, derived_record, limits_for
+from engine.services.ready import ReadySession, derived_record, limits_from_config
 
 type SaveCallback = Callable[[ItemRecord], None | Awaitable[None]]
 
@@ -406,7 +406,7 @@ def _guard_common(
         prepared.glossary
     ):
         raise ValueError("request glossary differs from the ready plan")
-    limits = _limits(prepared)
+    limits = _limits(prepared, context_unlimited=batch.manifest.context_unlimited)
     identity = batch.budget.identity
     if (
         identity.version != limits.output_version
@@ -414,6 +414,7 @@ def _guard_common(
         or identity.input_limit != min(limits.input_tokens, 50_000)
         or identity.output_limit != limits.output_tokens
         or identity.context_limit != limits.context_tokens
+        or identity.context_unlimited != limits.context_unlimited
         or identity.safety_tokens != limits.safety_tokens
         or identity.target_ratio != limits.target_ratio
     ):
@@ -427,8 +428,8 @@ def _guard_common(
             raise ValueError("request member owner differs from the committed ready plan")
 
 
-def _limits(prepared: AtomicPreparedInput):
-    return limits_for(prepared.preparation)
+def _limits(prepared: AtomicPreparedInput, *, context_unlimited: bool = True):
+    return limits_from_config(prepared.plan.translation_config, context_unlimited=context_unlimited)
 
 
 def _manifest(batch: MemberBatch) -> dict[str, Any]:
@@ -568,12 +569,22 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
             else ItemRecord.model_validate_json(state.read(session.store.root / "results" / f"{value}.json"))
         )
         versions[saved_member.unit_id] = max(versions.get(saved_member.unit_id, 0), _translation_epoch(saved))
+    initial = session._prepared_batches.get(request_id)
     packed = pack_members(
         "translate",
         members,
         session.prepared.glossary,
         session.index,
-        _limits(session.prepared),
+        _limits(
+            session.prepared,
+            context_unlimited=(
+                request.context_unlimited
+                if request is not None
+                else initial.manifest.context_unlimited
+                if initial is not None
+                else True
+            ),
+        ),
         record_versions=request.record_versions if request is not None else versions,
         plan_epochs=request.plan_epochs if request is not None else {member.unit_id: 0 for member in members},
         tokenizer_model=str(session.prepared.plan.translation_config["model"]),
@@ -641,15 +652,20 @@ def _target_error(member: RequestMember, target: str, wire: Mapping[str, Any]) -
     source_text, target_text = plain_text(member.source_projection), plain_text(target)
     if degeneration := find_degenerate_translation(source_text, target_text, markup=False):
         return degeneration
-    script_text = script_text_without_retained_titles(member.source_projection, target, member.registry)
+    script_paragraphs = list(
+        script_paragraphs_without_retained_titles(member.source_projection, target, member.registry)
+    )
     for term in wire.get("terms", ()):
         if isinstance(term, Mapping) and term.get("role") == "target":
             spelling = _source_variant(term, source_text) if term.get("mode") == "keep_source" else term.get("target")
             if isinstance(spelling, str):
                 flags = re.IGNORECASE if term.get("match_policy") == "casefold" else 0
-                script_text = re.sub(re.escape(spelling), "", script_text, flags=flags)
-    if residual := find_untranslated_english_texts(script_text, markup=False):
-        return f"untranslated English remains: {residual[0]}"
+                script_paragraphs = [
+                    re.sub(re.escape(spelling), "", paragraph, flags=flags) for paragraph in script_paragraphs
+                ]
+    for paragraph in script_paragraphs:
+        if residual := find_untranslated_english_texts(paragraph, markup=False):
+            return f"untranslated English remains: {residual[0]}"
     for term in wire.get("terms", ()):
         if not isinstance(term, Mapping) or term.get("role") != "target":
             continue

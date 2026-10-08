@@ -144,7 +144,7 @@ def _contains_forbidden_source(value: Any) -> bool:
 
 
 def request_messages(
-    kind: Stage, payload: dict[str, Any], *, compact: bool = False, wire_version: str = wire.VERSION
+    kind: Stage, payload: dict[str, Any], *, compact: bool = False, wire_version: str | None = None
 ) -> tuple[dict[str, str], ...]:
     if kind not in _PROTOCOLS:
         raise ValueError(f"unsupported request kind: {kind}")
@@ -165,6 +165,8 @@ def request_messages(
             else _SYSTEM_PROMPTS[kind]
         )
     if compact:
+        if wire_version is None:
+            wire_version = "epubox-wire-8" if payload.get("wire_version") == "epubox-wire-8" else wire.VERSION
         return wire.messages(kind, payload, prompt, version=wire_version)
     return (
         {"role": "system", "content": prompt},
@@ -209,7 +211,7 @@ def wire_hash(
     output_tokens: int | None = None,
     *,
     compact: bool = False,
-    wire_version: str = wire.VERSION,
+    wire_version: str | None = None,
 ) -> str:
     value = {
         "messages": request_messages(kind, payload, compact=compact, wire_version=wire_version),
@@ -603,7 +605,10 @@ class ModelRuntime:
         self._ensure_dispatch_allowed()
 
         wire_metadata = (
-            {"wire_version": wire.VERSION, "wire_hash": wire_hash(kind, payload, output_tokens_value, compact=True)}
+            {
+                "wire_version": "epubox-wire-8" if payload.get("wire_version") == "epubox-wire-8" else wire.VERSION,
+                "wire_hash": wire_hash(kind, payload, output_tokens_value, compact=True),
+            }
             if compact
             else {}
         )
@@ -770,7 +775,7 @@ class ModelRuntime:
                             raw,
                             request_id,
                             item_ids,
-                            version=wire.VERSION,
+                            version=str(wire_metadata["wire_version"]),
                             sources={item["item_id"]: item["source"] for item in payload["items"]},
                         )
                     }

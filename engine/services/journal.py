@@ -27,7 +27,7 @@ from engine.schemas.contracts import (
     canonical_json_bytes,
 )
 from engine.schemas.members import MemberBatch
-from engine.services import state
+from engine.services import frames, state
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, safe_id
 from engine.services.coherence import load_budget_overrides
 from engine.services.custody import bounded as _bounded
@@ -39,7 +39,7 @@ from engine.services.custody import persisted_response as _persisted_response
 from engine.services.custody import positive as _positive
 from engine.services.custody import review_draft, review_feedback
 from engine.services.custody import text as _text
-from engine.services.ready import ReadySession, limits_from_config
+from engine.services.ready import ReadySession
 from engine.services.store import ModelResponseStage, RunStore
 
 _FROZEN_RESULT_FIELDS = tuple(
@@ -65,6 +65,7 @@ class BodyJournal:
         self._reviews: dict[str, Mapping[str, Any]] = {}
         self._translation_batches: dict[str, tuple[RequestManifest, MemberBatch]] = {}
         self._review_batches: dict[str, tuple[RequestManifest, MemberBatch]] = {}
+        self._pending_frames: dict[str, frames.Frame] = {}
         self._initial_records: dict[str, ItemRecord] | None = None
         self._ambiguous_cache: dict[str, tuple[tuple[Any, ...], bool]] = {}
         frozen_limit = _bounded(self.session.prepared.plan.translation_config, "run_http_limit", 0, 0, 2**31 - 1)
@@ -72,13 +73,7 @@ class BodyJournal:
         if type(addition) is not int or addition < 0:
             raise CorruptRecord("body run limit addition must be a non-negative integer")
         self._run_limit = frozen_limit + addition if frozen_limit else 0
-        for stage in ("translate", "review"):
-            for request in self._requests.values():
-                if request.stage == stage and any(
-                    "wire_version" in attempt.metadata or "wire_hash" in attempt.metadata
-                    for attempt in request.attempts
-                ):
-                    (self._translation_batch if stage == "translate" else self._review_batch)(request)
+        frames.warm(self, progress)
         total = len(self._records)
         for position, record in enumerate(self._records.values(), 1):
             _validate_saved_record(self.session, record)
@@ -95,6 +90,7 @@ class BodyJournal:
                         "required_items": total,
                     }
                 )
+        frames.flush(self, include_active=False)
         self._initialize_counts()
 
     def records(self, item_ids: Sequence[str] | None = None) -> dict[str, ItemRecord]:
@@ -143,6 +139,7 @@ class BodyJournal:
                 elif record.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
                     self._translation_proof(record)
                 changes.append((current, record, path))
+            frames.flush(self)
             for _, record, path in changes:
                 self.store._base.atomic_write_bytes(path, canonical_json_bytes(record))
         for current, record, _ in changes:
@@ -150,20 +147,15 @@ class BodyJournal:
 
     def recover_results(self) -> dict[str, ItemRecord]:
         for request in tuple(self._requests.values()):
-            if request.stage == "translate" and any(
-                "wire_version" in attempt.metadata for attempt in request.attempts
-            ):
-                self._translation_batch(request)
-            if (
-                request.stage != "translate"
-                or (response := _persisted_response(self.store, request, reconcile=True, finish=self._finish)) is None
-            ):
-                continue
-            if not any(
-                _saved_epoch(self._records[item_id], "translation_epoch")
+            if request.stage != "translate" or not any(
+                self._records[item_id].status == ItemStatus.PENDING
+                and _saved_epoch(self._records[item_id], "translation_epoch")
                 == request.record_versions[request.item_unit_ids[item_id][0]]
                 for item_id in request.item_ids
             ):
+                continue
+            response = _persisted_response(self.store, request, reconcile=True, finish=self._finish)
+            if response is None:
                 continue
             batch = self._translation_batch(request)
             wires = _wire_items(batch)
@@ -225,12 +217,15 @@ class BodyJournal:
                 )
             self.save_many(recovered)
         for request in tuple(self._requests.values()):
-            if request.stage == "review" and any("wire_version" in attempt.metadata for attempt in request.attempts):
-                self._review_batch(request)
-            if (
-                request.stage != "review"
-                or (response := _persisted_response(self.store, request, reconcile=True, finish=self._finish)) is None
+            if request.stage != "review" or not any(
+                self._records[item_id].status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
+                and _saved_epoch(self._records[item_id], "review_epoch")
+                == request.revisions[request.item_unit_ids[item_id][0]]
+                for item_id in request.item_ids
             ):
+                continue
+            response = _persisted_response(self.store, request, reconcile=True, finish=self._finish)
+            if response is None:
                 continue
             batch = self._review_batch(request)
             expected = {
@@ -446,6 +441,9 @@ class BodyJournal:
         if cached is None and initial is not None and frozen == initial.manifest:
             cached = (frozen, initial)
             self._translation_batches[request.request_id] = cached
+        if cached is None and (saved := frames.restore(self, request)) is not None:
+            cached = (frozen, saved)
+            self._translation_batches[request.request_id] = cached
         if cached is not None:
             if cached[0] != frozen:
                 raise IdentityMismatch("persisted translation request changed after validation")
@@ -457,7 +455,7 @@ class BodyJournal:
             members,
             self.session.prepared.glossary,
             self.session.index,
-            limits_from_config(self.session.prepared.plan.translation_config),
+            frames.limits(self, request),
             record_versions=request.record_versions,
             plan_epochs=request.plan_epochs,
             feedback=request.feedback_by_item,
@@ -471,6 +469,7 @@ class BodyJournal:
             raise IdentityMismatch("persisted translation request differs from its frozen source frame")
         wire.verify(request, batch.payload, batch.budget.output_tokens)
         self._translation_batches[request.request_id] = (frozen, batch)
+        frames.remember(self, batch)
         return batch
 
     def _review_batch(self, request: RequestManifest):
@@ -481,6 +480,10 @@ class BodyJournal:
                 raise IdentityMismatch("persisted review request changed after validation")
             wire.verify(request, cached[1].payload, cached[1].budget.output_tokens)
             return cached[1]
+        if (saved := frames.restore(self, request)) is not None:
+            self._review_batches[request.request_id] = (frozen, saved)
+            wire.verify(request, saved.payload, saved.budget.output_tokens)
+            return saved
         members = tuple(self.session.index.members_by_id[item_id] for item_id in request.item_ids)
         targets = {
             item_id: self._review_target(
@@ -496,7 +499,7 @@ class BodyJournal:
             members,
             self.session.prepared.glossary,
             self.session.index,
-            limits_from_config(self.session.prepared.plan.translation_config),
+            frames.limits(self, request),
             targets=targets,
             revisions=request.revisions,
             record_versions=request.record_versions,
@@ -512,6 +515,7 @@ class BodyJournal:
             raise IdentityMismatch("persisted review request differs from its saved target frame")
         wire.verify(request, batch.payload, batch.budget.output_tokens)
         self._review_batches[request.request_id] = (frozen, batch)
+        frames.remember(self, batch)
         return batch
 
     def _review_target(self, item_id: str, target_hash: str, review_epoch: int) -> ItemRecord:
@@ -565,7 +569,7 @@ class BodyJournal:
         measured = measure_budget(
             stage=cast(Any, stage),
             payload=payload,
-            limits=limits_from_config(self.session.prepared.plan.translation_config),
+            limits=frames.limits(self, manifest),
             tokenizer_model=_text(self.session.prepared.plan.translation_config, "model"),
         )
         physical = context.get("physical_budget")
@@ -580,6 +584,7 @@ class BodyJournal:
                 raise StaleWrite("body request identity changed during resume")
         else:
             self._requests[manifest.request_id] = self.store.write_request(manifest)
+        frames.capture(self, manifest, payload, measured)
         self._started[manifest.request_id] = monotonic()
         self._emit(
             {
@@ -670,12 +675,13 @@ class BodyJournal:
             if (
                 type(reserved) is not int
                 or reserved > batch.budget.identity.input_limit
-                or (
+                or not request.context_unlimited
+                and (
                     reserved + batch.budget.output_tokens + batch.budget.identity.safety_tokens
                     > batch.budget.identity.context_limit
                 )
             ):
-                raise IdentityMismatch("physical request exceeds frozen input or context capacity")
+                raise IdentityMismatch("physical request exceeds frozen input capacity")
         attempt_number = attempt.reservation.get("attempt_number")
         if self._ambiguous(self._requests[request_id]) and attempt_number not in {2, 3}:
             raise RequestError("body request has an unknown provider outcome without a persisted response")

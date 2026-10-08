@@ -135,7 +135,7 @@ def measure_budget(
         failures.append(f"input budget {input_reserve} exceeds {input_limit}")
     if output_tokens > limits.output_tokens:
         failures.append(f"output budget {output_tokens} exceeds {limits.output_tokens}")
-    if context_tokens > limits.context_tokens:
+    if not limits.context_unlimited and context_tokens > limits.context_tokens:
         failures.append(f"context budget {context_tokens} exceeds {limits.context_tokens}")
 
     return BudgetResult(
@@ -163,6 +163,7 @@ def measure_budget(
             input_limit=input_limit,
             output_limit=limits.output_tokens,
             context_limit=limits.context_tokens,
+            context_unlimited=limits.context_unlimited,
         ),
         wire_hash=request_wire_hash(stage, payload, output_tokens),
     )

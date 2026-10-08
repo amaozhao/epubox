@@ -16,6 +16,19 @@ from tests.engine.agents.runtime import FakeOpenAIClient
 from tests.engine.agents.workflow import prepare_case, review_item
 
 
+def test_fresh_legacy_ready_batches_are_replanned_without_the_combined_context_gate(tmp_path) -> None:
+    case = prepare_case(tmp_path, "<p>First.</p>", ("First.",), output_budget_version=6)
+    journal = BodyJournal(case.session.store, case.session)
+    initial = tuple(case.session._prepared_batches.values())
+
+    assert initial and not any(batch.manifest.context_unlimited for batch in initial)
+    scheduled = _pending_batches(journal, initial)
+    assert scheduled and all(batch.manifest.context_unlimited for batch in scheduled)
+    assert {item.item_id for batch in scheduled for item in batch.items} == {
+        item.item_id for batch in initial for item in batch.items
+    }
+
+
 def _complete(tmp_path):
     case = prepare_case(tmp_path, "<p>First.</p>", ("First.",), output_budget_version=6)
     journal = BodyJournal(case.session.store, case.session)

@@ -246,7 +246,6 @@ def infer(options: Mapping[str, Any]) -> frozenset[str]:
         "glossary": None,
         "auto_extract": True,
         "provider": "agnes",
-        "context_tokens": 32768,
         "max_input_tokens": 50000,
         "max_output_tokens": 8192,
         "limit": None,
@@ -276,7 +275,6 @@ def validate_options(work_dir: Path, config: PreparationConfig, explicit: frozen
     }
     translation_fields = {
         "provider": ("provider", "model"),
-        "context_tokens": ("context_tokens",),
         "max_input_tokens": ("max_input_tokens",),
         "max_output_tokens": ("max_output_tokens",),
         "limit": ("max_source_tokens",),

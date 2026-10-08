@@ -11,8 +11,16 @@ from functools import lru_cache
 from typing import Any
 
 VERSION = "epubox-wire-7"
-VERSIONS = ("epubox-wire-2", "epubox-wire-3", "epubox-wire-4", "epubox-wire-5", "epubox-wire-6", VERSION)
-SLOT_VERSIONS = ("epubox-wire-4", "epubox-wire-5", "epubox-wire-6", VERSION)
+VERSIONS = (
+    "epubox-wire-2",
+    "epubox-wire-3",
+    "epubox-wire-4",
+    "epubox-wire-5",
+    "epubox-wire-6",
+    VERSION,
+    "epubox-wire-8",
+)
+SLOT_VERSIONS = ("epubox-wire-4", "epubox-wire-5", "epubox-wire-6", VERSION, "epubox-wire-8")
 
 _PROTOCOLS = {"translate": "epubox-text-1", "review": "epubox-review-2"}
 _REF = re.compile(r"[gbx][A-Za-z0-9_.:-]+\Z")
@@ -63,6 +71,11 @@ _PROMPTS_V7 = {
     "into an earlier slot and leave its own slot empty. Rephrase surrounding slots together for natural Chinese. "
     "During review, use replace with all slots to fix correctable omissions or awkward wording; do not merely report them."
     for kind, prompt in _PROMPTS_V6.items()
+}
+_PROMPTS_V8 = {
+    kind: prompt + " The supplied review target may be a read-only slot object keyed by source t numbers. "
+    "Compare those values with the matching source slots; marker structure is restored locally."
+    for kind, prompt in _PROMPTS_V7.items()
 }
 
 
@@ -174,12 +187,18 @@ def messages(
         _compact_item(item)
         if version in SLOT_VERSIONS and isinstance(source, str):
             item["source"] = _encode_slotted_source(source)
-            if version in {"epubox-wire-6", VERSION} or version == "epubox-wire-5" and kind == "review":
+            if (
+                version in {"epubox-wire-6", VERSION, "epubox-wire-8"}
+                or version == "epubox-wire-5"
+                and kind == "review"
+            ):
                 layout = _slot_layout(source)
                 item["slot_ids"] = [str(number) for number in range(1, layout.count("text") + 1)]
                 target = payload["items"][index - 1].get("target")
                 if kind == "review" and isinstance(target, str) and layout == _slot_layout(target):
-                    item["target"] = _encode_slotted_source(target)
+                    item["target"] = (
+                        _target_slots(target) if version == "epubox-wire-8" else _encode_slotted_source(target)
+                    )
     if not physical.get("context"):
         physical.pop("context", None)
     return (
@@ -197,6 +216,8 @@ def messages(
                 else _PROMPTS_V6[kind]
                 if version == "epubox-wire-6"
                 else _PROMPTS_V7[kind]
+                if version == VERSION
+                else _PROMPTS_V8[kind]
             ),
         },
         {
@@ -251,8 +272,8 @@ def decode(
                     item["target"] = _decode_slots(
                         sources[canonical_id],
                         item["target"],
-                        preserve_whitespace=version in {"epubox-wire-6", VERSION},
-                        diagnostics=version == VERSION,
+                        preserve_whitespace=version in {"epubox-wire-6", VERSION, "epubox-wire-8"},
+                        diagnostics=version in {VERSION, "epubox-wire-8"},
                     )
                 else:
                     item["target"] = decode_projection(item["target"])
@@ -375,6 +396,13 @@ def _encode_slotted_source(projection: str) -> str:
         else:
             parts.append(f"<{event.value[1:]}/>")
     return "".join(parts)
+
+
+def _target_slots(projection: str) -> dict[str, str]:
+    from engine.item.inline import parse_projection
+
+    texts = [event.value for event in parse_projection(projection) if event.kind == "text" and event.value.strip()]
+    return {str(index): value for index, value in enumerate(texts, 1)}
 
 
 def _decode_slots(source: str, target: Any, *, preserve_whitespace: bool = False, diagnostics: bool = False) -> str:

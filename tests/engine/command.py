@@ -122,6 +122,7 @@ def test_translate_help_separates_source_input_and_output_limits() -> None:
 
     assert result.exit_code == 0
     assert {"--limit", "--max-input-tokens", "--max-output-tokens"}.issubset(options)
+    assert "--context-tokens" not in options
 
 
 def test_translate_command_passes_only_commandline_configuration_sources(tmp_path, monkeypatch) -> None:
@@ -648,7 +649,6 @@ def test_matching_explicit_option_resumes_without_automatic_retry(tmp_path, monk
     ("kwargs", "explicit"),
     (
         ({"provider": "agnes"}, "provider"),
-        ({"context_tokens": 32768}, "context_tokens"),
         ({"max_input_tokens": 50000}, "max_input_tokens"),
         ({"max_output_tokens": 4096}, "max_output_tokens"),
         ({"limit": 2000}, "limit"),

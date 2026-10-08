@@ -1,7 +1,7 @@
 import json
 
 from engine.agents.runtime import wire_hash
-from engine.agents.wire import messages
+from engine.agents.wire import digest, messages
 from tests.engine.agents.wire import payload
 
 
@@ -12,6 +12,35 @@ def test_v4_translation_and_review_hashes_remain_frozen():
     assert wire_hash("review", payload("review"), 1000, compact=True, wire_version="epubox-wire-4") == (
         "e4961ccf05006ce31f2e42433223e3834681273f9ee526cb4c2d323ab19ff13b"
     )
+
+
+def test_v7_wire_hashes_remain_frozen_when_review_slot_map_is_added():
+    assert digest(messages("translate", payload(), "base", version="epubox-wire-7"), 8192) == (
+        "e2b897644fb7de7e0815cef143fe7b61aa893bd8c831376538bbef609f8e494b"
+    )
+    assert digest(messages("review", payload("review"), "base", version="epubox-wire-7"), 8192) == (
+        "c1ed0935f98392a29766f9fc9f918ddd3ab353db4284cc3806fe12ab79f588f3"
+    )
+
+
+def test_v8_review_target_map_matches_source_slots_without_duplicate_markers():
+    book = payload("review")
+    item = book["items"][0]
+    item["source"] = "⟦+b1⟧Tavily⟦-b1⟧⟦=x1⟧⟦+b2⟧ is used.⟦+g1⟧⟦-g1⟧ Its API is simple.⟦-b2⟧"
+    item["target"] = "⟦+b1⟧Tavily⟦-b1⟧⟦=x1⟧⟦+b2⟧用于搜索。⟦+g1⟧⟦-g1⟧其接口简单。⟦-b2⟧"
+    physical = json.loads(messages("review", book, "base", version="epubox-wire-8")[1]["content"])["items"][0]
+    assert physical["target"] == {"1": "Tavily", "2": "用于搜索。", "3": "其接口简单。"}
+    assert physical["slot_ids"] == ["1", "2", "3"]
+    assert "<x1/>" in physical["source"] and "<g1>" in physical["source"]
+
+
+def test_v8_review_keeps_projection_for_legacy_target_with_different_slot_layout():
+    book = payload("review")
+    item = book["items"][0]
+    item["source"] = "⟦+g1⟧One⟦-g1⟧⟦+g2⟧Two⟦-g2⟧"
+    item["target"] = "⟦+g2⟧二⟦-g2⟧⟦+g1⟧一⟦-g1⟧"
+    physical = json.loads(messages("review", book, "base", version="epubox-wire-8")[1]["content"])["items"][0]
+    assert physical["target"] == "<g2>二</g2><g1>一</g1>"
 
 
 def test_review_labels_matching_source_and_draft_slots_without_changing_old_wire():

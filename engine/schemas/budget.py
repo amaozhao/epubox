@@ -29,6 +29,7 @@ class BudgetLimits:
     output_version: Literal[2, 3, 4, 5, 6] = 2
     minimum_source_tokens: int = 0
     source_tolerance_tokens: int = 0
+    context_unlimited: bool = False
 
     def __post_init__(self) -> None:
         if type(self.output_version) is not int or self.output_version not in (2, 3, 4, 5, 6):
@@ -42,6 +43,8 @@ class BudgetLimits:
             raise ValueError("minimum source tokens must be a non-negative integer")
         if type(self.source_tolerance_tokens) is not int or not 0 <= self.source_tolerance_tokens <= 1000:
             raise ValueError("source tolerance must be between 0 and 1000 tokens")
+        if type(self.context_unlimited) is not bool:
+            raise TypeError("context_unlimited must be a boolean")
         if isinstance(self.target_ratio, bool) or not isinstance(self.target_ratio, (int, float)):
             raise TypeError("budget target ratio must be a number")
         if not math.isfinite(self.target_ratio) or self.target_ratio <= 0:
@@ -55,6 +58,8 @@ class BudgetLimits:
             values.pop("minimum_source_tokens")
         if not self.source_tolerance_tokens:
             values.pop("source_tolerance_tokens")
+        if not self.context_unlimited:
+            values.pop("context_unlimited")
         return values
 
     @property
@@ -79,6 +84,7 @@ class BudgetIdentity(FrozenModel):
     input_limit: int = Field(gt=0, strict=True)
     output_limit: int = Field(gt=0, strict=True)
     context_limit: int = Field(gt=0, strict=True)
+    context_unlimited: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
 
 
 class BudgetResult(FrozenModel):
@@ -133,7 +139,7 @@ class BudgetResult(FrozenModel):
             expected_failures.append(f"input budget {self.input_reserve} exceeds {self.identity.input_limit}")
         if self.output_tokens > self.identity.output_limit:
             expected_failures.append(f"output budget {self.output_tokens} exceeds {self.identity.output_limit}")
-        if self.context_tokens > self.identity.context_limit:
+        if not self.identity.context_unlimited and self.context_tokens > self.identity.context_limit:
             expected_failures.append(f"context budget {self.context_tokens} exceeds {self.identity.context_limit}")
         if self.failures != tuple(expected_failures):
             raise ValueError("budget failures do not match the measured limits")

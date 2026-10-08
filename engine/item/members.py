@@ -151,6 +151,7 @@ def _budget_limits_match(budget: BudgetResult, limits: Mapping[str, int | float]
     if identity.version != expected.pop("output_version", 2):
         return False
     expected.pop("minimum_source_tokens", None)
+    expected.setdefault("context_unlimited", False)
     expected["source_tokens"] += expected.pop("source_tolerance_tokens", 0)
     configured_input = expected.get("input_tokens")
     if type(configured_input) is not int:
@@ -161,6 +162,7 @@ def _budget_limits_match(budget: BudgetResult, limits: Mapping[str, int | float]
         "input_tokens": identity.input_limit,
         "output_tokens": identity.output_limit,
         "context_tokens": identity.context_limit,
+        "context_unlimited": identity.context_unlimited,
         "safety_tokens": identity.safety_tokens,
         "target_ratio": identity.target_ratio,
     } == expected
@@ -503,6 +505,9 @@ def fit_member_payload(
         for item in payload["items"]:
             item["constraints"] = {}
         budget = measure_budget(stage=stage, payload=payload, limits=limits, tokenizer_model=tokenizer_model)
+        if not budget.fits and stage == "review":
+            payload["wire_version"] = "epubox-wire-8"
+            budget = measure_budget(stage=stage, payload=payload, limits=limits, tokenizer_model=tokenizer_model)
     return payload, budget
 
 
@@ -942,6 +947,7 @@ def _batch(
         },
         wire_hash=budget.wire_hash,
         sparse=sparse,
+        context_unlimited=budget.identity.context_unlimited,
         feedback_by_item={
             item.item_id: wire[item.item_id]["repair"] for item in items if "repair" in wire[item.item_id]
         },

@@ -16,12 +16,12 @@ _CITATION_CUE = re.compile(
 )
 
 
-def script_text_without_retained_titles(
+def script_paragraphs_without_retained_titles(
     source_projection: str,
     target_projection: str,
     registry: Mapping[str, RegistryEntry],
-) -> str:
-    """Return target prose with exact, source-cited English title ranges omitted."""
+) -> tuple[str, ...]:
+    """Return semantic target paragraphs with exact cited English titles omitted."""
     source_events = parse_projection(source_projection)
     target_events = parse_projection(target_projection)
     source_ranges = _range_texts(source_events)
@@ -45,17 +45,31 @@ def script_text_without_retained_titles(
         ):
             retained.add(ref)
 
+    paragraphs: list[str] = []
     parts: list[str] = []
     stack: list[str] = []
+
+    def flush() -> None:
+        if text := "".join(parts):
+            paragraphs.append(text)
+        parts.clear()
+
     for event in target_events:
         if event.kind == "text":
             if not retained.intersection(stack):
                 parts.append(event.value)
         elif event.value.startswith("+"):
-            stack.append(event.value[1:])
+            ref = event.value[1:]
+            if registry[ref].hints.get("source_view_boundary") == "paragraph":
+                flush()
+            stack.append(ref)
         elif event.value.startswith("-"):
+            ref = event.value[1:]
+            if registry[ref].hints.get("source_view_boundary") == "paragraph":
+                flush()
             stack.pop()
-    return "".join(parts)
+    flush()
+    return tuple(paragraphs)
 
 
 def _range_texts(events: Sequence[Event]) -> dict[str, str]:

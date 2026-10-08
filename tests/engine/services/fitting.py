@@ -11,8 +11,10 @@ from engine.agents.protocol import validate_translation_response
 from engine.agents.workflow import run_workflow
 from engine.epub.preparation import PreparationConfig
 from engine.item.atoms import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_resource
-from engine.item.members import MemberIndex, fit_member_payload, validate_member_target
+from engine.item.inline import events_to_projection, parse_projection
+from engine.item.members import MemberIndex, fit_member_payload, pack_members, validate_member_target
 from engine.schemas.budget import BudgetLimits
+from engine.schemas.internal import Event
 from engine.services import state
 from engine.services.journal import BodyJournal
 from engine.services.preflight import preflight_atomic_resources
@@ -22,8 +24,69 @@ from engine.services.store import RunStore
 from tests.engine.agents.workflow import review_item
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
-from tests.engine.item.members import glossary, source
+from tests.engine.item.members import glossary, record, source
 from tests.engine.services.preparing import atomic_config
+
+
+def test_review_context_fallback_keeps_actual_draft_and_uses_readonly_target_slots():
+    raw = source("<ul>" + "".join(f'<li>Entry {i}, <a href="#p{i}">{i}</a></li>' for i in range(180)) + "</ul>")
+    inventory = extract_resource(raw, "OPS/chapter.xhtml", "book")
+    generous = BudgetLimits(10000, 200000, 100000, 300000, output_version=6)
+    report = preflight_atomic_resources((inventory,), {"OPS/chapter.xhtml": raw}, generous, "gpt-3.5-turbo")
+    index = MemberIndex((inventory,), report)
+    member = next(item for item in index.members if item.atomic_tag == "ul")
+    slot = 0
+    translated = []
+    for event in parse_projection(member.source_projection):
+        if event.kind == "text" and event.value.strip():
+            slot += 1
+            value = event.value if event.value.strip().isdigit() else f"词条{slot}，"
+            translated.append(Event(kind="text", value=value))
+        else:
+            translated.append(event)
+    target = events_to_projection(translated)
+    draft = record(member.item_id, target)
+    capacity = BudgetLimits(2000, 50000, 8192, 32768, output_version=6)
+    compact, measured = fit_member_payload(
+        "review",
+        (member,),
+        glossary(),
+        index,
+        capacity,
+        request_id="review-frame",
+        targets={member.item_id: draft},
+        revisions={member.unit_id: 0},
+    )
+    roomy, _ = fit_member_payload(
+        "review",
+        (member,),
+        glossary(),
+        index,
+        replace(capacity, context_tokens=100000),
+        request_id="review-frame",
+        targets={member.item_id: draft},
+        revisions={member.unit_id: 0},
+    )
+    assert compact["wire_version"] == "epubox-wire-8" and measured.fits
+    assert compact["items"][0]["target"] == target == draft.target_projection
+    physical = json.loads(wire.messages("review", compact, "base", version="epubox-wire-8")[1]["content"])
+    values = physical["items"][0]["target"]
+    assert isinstance(values, dict) and len(values) == slot
+    assert compact["items"][0]["constraints"] == {} and member.registry
+    assert roomy["wire_version"] == "epubox-wire-5"
+    assert isinstance(json.loads(wire.messages("review", roomy, "base")[1]["content"])["items"][0]["target"], str)
+
+    uncapped = pack_members(
+        "review",
+        (member,),
+        glossary(),
+        index,
+        replace(capacity, context_tokens=1, context_unlimited=True),
+        targets={member.item_id: draft},
+        revisions={member.unit_id: 0},
+    )
+    assert uncapped.ready and uncapped.batches[0].manifest.context_unlimited
+    assert uncapped.batches[0].budget.context_tokens > 1
 
 
 def test_compacted_member_survives_ready_dispatch_review_and_restart(tmp_path):

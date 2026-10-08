@@ -70,7 +70,7 @@ class PreflightReport(FrozenModel):
     format: Literal["epubox-preflight-1"] = PREFLIGHT_FORMAT
     version: Literal[1] = PREFLIGHT_VERSION
     model: str = Field(min_length=1)
-    limits: dict[str, int | float]
+    limits: dict[str, int | float | bool]
     source_hash: str = Field(min_length=1)
     resource_hashes: dict[str, str]
     map_hashes: dict[str, str]

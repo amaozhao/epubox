@@ -503,17 +503,18 @@ class TermRunner:
             MAX_MODEL_INPUT_TOKENS,
         )
         tpm = _optional_positive_int(config.get("tpm"))
+        unlimited = self.preparation.translation_config.get("context_unlimited", False) is True
         return (
             incoming <= min(MAX_MODEL_INPUT_TOKENS, maximum)
             and output_tokens <= self.output_tokens
-            and incoming + output_tokens + 256 <= context
+            and (unlimited or incoming + output_tokens + 256 <= context)
             and (tpm is None or incoming + output_tokens <= tpm)
         )
 
     def _guard_dispatch(self, kind, payload: dict[str, Any], output_tokens: int) -> None:
         self._require_preflight()
         if not self._request_fits(kind, payload, output_tokens):
-            raise TermBudgetPaused("complete terminology request exceeds frozen input/output/context/TPM limits")
+            raise TermBudgetPaused("complete terminology request exceeds frozen input/output/TPM limits")
 
     @staticmethod
     def _feedback(record: TermExtractionRecord) -> tuple[str, ...]:

@@ -102,7 +102,6 @@ def translate_book(
     glossary: Path | None = None,
     auto_extract: bool = True,
     provider: str = "agnes",
-    context_tokens: int = 32768,
     max_input_tokens: int = MAX_MODEL_INPUT_TOKENS,
     max_output_tokens: int = 8192,
     limit: int | None = None,
@@ -119,7 +118,7 @@ def translate_book(
     source = source.resolve(strict=True)
     output = output or source.with_name(f"{source.stem}-cn.epub")
     provider = _provider(provider)
-    if min(context_tokens, max_input_tokens, max_output_tokens, concurrency) < 1 or http_limit < 0:
+    if min(max_input_tokens, max_output_tokens, concurrency) < 1 or http_limit < 0:
         raise ValueError("model limits must be positive and HTTP limit non-negative")
     chunk_limit = resolve_chunk_limit(limit)
     model_id = _model_id(provider)
@@ -130,7 +129,7 @@ def translate_book(
         "planner_version": "epubox-member-planner-2",
         "minimum_source_tokens": settings.EPUB_CHUNK_MIN_TOKENS,
         "prompt_version": ATOMIC_PROMPT_VERSION,
-        "context_tokens": context_tokens,
+        "context_unlimited": True,
         "max_input_tokens": max_input_tokens,
         "max_source_tokens": chunk_limit,
         "max_output_tokens": max_output_tokens,
@@ -403,7 +402,11 @@ def _replan_local(root: Path, config: PreparationConfig) -> bool:
     if actual == expected:
         return False
     migrated = dict(actual) | {"max_output_tokens": 8192, "output_budget_version": 6}
-    if actual.get("max_output_tokens") != 4096 or expected.get("max_output_tokens") != 8192 or migrated != expected:
+    compatible = dict(expected)
+    compatible.pop("context_unlimited", None)
+    if "context_tokens" in actual:
+        compatible["context_tokens"] = actual["context_tokens"]
+    if actual.get("max_output_tokens") != 4096 or expected.get("max_output_tokens") != 8192 or migrated != compatible:
         return False
     report = value.get("report") if isinstance(value, dict) else None
     return isinstance(report, dict) and report.get("check") is None

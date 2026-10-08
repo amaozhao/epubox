@@ -264,8 +264,12 @@ def _expected_configs(config: PreparationConfig) -> tuple[tuple[dict[str, JsonVa
     legacy_translation = _frozen_translation_config(legacy)
     legacy_prior_extraction = dict(legacy_extraction) | {"max_output_tokens": 4096}
     legacy_prior_translation = dict(legacy_translation) | {"max_output_tokens": 4096}
+    legacy_context = dict(current[1])
+    legacy_context.pop("context_unlimited", None)
+    legacy_context["context_tokens"] = 32768
     return (
         current,
+        (current[0], legacy_context),
         (current[0], dict(current[1]) | {"output_budget_version": 5}),
         (prior_extraction, prior_output),
         (prior_extraction, prior),

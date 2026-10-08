@@ -33,8 +33,8 @@ def payload(stage: str, items: Sequence[Mapping[str, object]], *, padding: str =
     return result
 
 
-def limits(**changes: float) -> BudgetLimits:
-    values: dict[str, int | float] = {
+def limits(**changes: float | bool) -> BudgetLimits:
+    values: dict[str, int | float | bool] = {
         "source_tokens": 2000,
         "input_tokens": 50_000,
         "output_tokens": 4096,
@@ -123,6 +123,24 @@ def test_each_budget_dimension_reports_its_own_failure() -> None:
 
     assert {reason.split()[0] for reason in result.failures} == {"source", "input", "output", "context"}
     assert not result.fits
+
+
+def test_new_dispatch_can_disable_only_the_legacy_combined_context_gate() -> None:
+    request = payload("translate", (item("word " * 100),))
+    base = measure_budget(stage="translate", payload=request, limits=limits())
+    capacity = limits(
+        input_tokens=base.input_reserve,
+        output_tokens=base.output_tokens,
+        context_tokens=base.context_tokens - 1,
+        context_unlimited=True,
+    )
+
+    result = measure_budget(stage="translate", payload=request, limits=capacity)
+
+    assert result.fits
+    assert result.context_tokens > result.identity.context_limit
+    assert result.identity.context_unlimited
+    assert BudgetResult.model_validate(result.model_dump()) == result
 
 
 def test_review_actual_and_estimated_targets_are_distinct() -> None:

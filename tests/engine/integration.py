@@ -101,7 +101,8 @@ def test_one_pipeline_reaches_verified_epub_with_fake_model(tmp_path: Path, monk
             "model": "fake",
             "planner_version": PLANNER_VERSION,
             "prompt_version": PROMPT_VERSION,
-            "context_tokens": 8192,
+            "context_unlimited": True,
+            "max_input_tokens": 50000,
             "max_source_tokens": MAX_SOURCE_TOKENS,
             "max_output_tokens": 4096,
             "run_http_limit": 0,
@@ -138,9 +139,7 @@ def test_one_pipeline_reaches_verified_epub_with_fake_model(tmp_path: Path, monk
     )
     monkeypatch.setattr(cli, "checker_for_source", lambda *_args: StubChecker())
     calls_before = list(calls)
-    repeated = cli.translate_book(
-        source, output=output, work_root=tmp_path / "work", auto_extract=False, context_tokens=8192
-    )
+    repeated = cli.resume_book(result.work_dir, output=output)
 
     assert repeated.status == "completed"
     assert repeated.work_dir == result.work_dir
@@ -149,16 +148,14 @@ def test_one_pipeline_reaches_verified_epub_with_fake_model(tmp_path: Path, monk
 
     monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id="fake"))
     output.unlink()
-    republished = cli.translate_book(
-        source, output=output, work_root=tmp_path / "work", auto_extract=False, context_tokens=8192
-    )
+    republished = cli.resume_book(result.work_dir, output=output)
     assert republished.status == "completed" and output.is_file()
     assert republished.work_dir == result.work_dir
     assert calls == calls_before
 
     output.write_bytes(output.read_bytes() + b"tampered")
     with pytest.raises(FileExistsError, match="output already exists"):
-        cli.translate_book(source, output=output, work_root=tmp_path / "work", auto_extract=False, context_tokens=8192)
+        cli.resume_book(result.work_dir, output=output)
     assert calls == calls_before
 
 
