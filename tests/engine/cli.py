@@ -278,7 +278,14 @@ def test_default_work_root_migrates_legacy_progress_without_record_changes(
             for name in archive.namelist()
             if not name.endswith("/")
         )
-    assert {path.name for path in expected.iterdir()} == {"source", "state.json"}
+    assert {path.name for path in expected.iterdir()} == {
+        "source",
+        "origin.json",
+        "mapping.json",
+        "plan.json",
+        "terms.json",
+        "state.json",
+    }
     assert model_calls == 0
 
 

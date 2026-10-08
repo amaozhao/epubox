@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from functools import lru_cache
 from types import MappingProxyType
 from typing import Any
 
@@ -248,27 +249,35 @@ def select_terms(
     index: Any,
     contexts: tuple[tuple[Any, str], ...],
 ) -> list[dict[str, Any]]:
+    cached = getattr(index, "_term_matches", None)
+    if cached is None or cached[0] is not terms:
+        cached = (terms, tuple(sorted(terms, key=lambda value: value.term_id)), {})
+        index._term_matches = cached
+    ordered, matches = cached[1:]
+
+    def matching(member: Any, text: str) -> tuple[FrozenTerm, ...]:
+        key = (member.document_id, member.unit_id, text)
+        if key not in matches:
+            matches[key] = tuple(term for term in ordered if _applies(term, member) and _occurs(term, text))
+        return matches[key]
+
+    target = {term.term_id: term for term in matching(item, index.text(item))}
+    context = {term.term_id: term for prior, text in contexts for term in matching(prior, text)}
     selected: list[dict[str, Any]] = []
-    source = index.text(item)
-    for term in sorted(terms, key=lambda value: value.term_id):
-        role = None
-        if _applies(term, item) and _occurs(term, source):
-            role = "target"
-        elif any(_applies(term, prior) and _occurs(term, text) for prior, text in contexts):
-            role = "context"
-        if role is not None:
-            selected.append(
-                {
-                    "term_id": term.term_id,
-                    "source": term.source,
-                    "target": term.target,
-                    "aliases": list(term.aliases),
-                    "mode": term.mode,
-                    "match_policy": term.match_policy,
-                    "note": term.note,
-                    "role": role,
-                }
-            )
+    for term_id in sorted(target.keys() | context.keys()):
+        term = target.get(term_id) or context[term_id]
+        selected.append(
+            {
+                "term_id": term.term_id,
+                "source": term.source,
+                "target": term.target,
+                "aliases": list(term.aliases),
+                "mode": term.mode,
+                "match_policy": term.match_policy,
+                "note": term.note,
+                "role": "target" if term_id in target else "context",
+            }
+        )
     return selected
 
 
@@ -283,11 +292,16 @@ def _applies(term: FrozenTerm, item: AtomicItem) -> bool:
 def _occurs(term: FrozenTerm, text: str) -> bool:
     flags = re.IGNORECASE if term.match_policy == "casefold" else 0
     for spelling in (term.source, *term.aliases):
-        left = r"(?<!\w)" if spelling[0].isalnum() or spelling[0] == "_" else ""
-        right = r"(?!\w)" if spelling[-1].isalnum() or spelling[-1] == "_" else ""
-        if re.search(left + re.escape(spelling) + right, text, flags):
+        if _spelling_pattern(spelling, flags).search(text):
             return True
     return False
+
+
+@lru_cache(maxsize=8192)
+def _spelling_pattern(spelling: str, flags: int) -> re.Pattern[str]:
+    left = r"(?<!\w)" if spelling[0].isalnum() or spelling[0] == "_" else ""
+    right = r"(?!\w)" if spelling[-1].isalnum() or spelling[-1] == "_" else ""
+    return re.compile(left + re.escape(spelling) + right, flags)
 
 
 def marker_fields(item: Any) -> tuple[dict[str, Any], dict[str, Any]]:

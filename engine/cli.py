@@ -540,6 +540,12 @@ def resume_book(
     )
     checker = checker_for_source(source, epubcheck)
     with AtomicStore(work_dir if state.compact(work_dir) else work_dir.parent).lock(blocking=False):
+        if state.compact(work_dir):
+            if len(state.files(work_dir)) == 1 and progress:
+                progress(
+                    {"phase": "recovery", "notice": "恢复：将旧断点迁移为五个 JSON 分片，保留全部译文与请求记录。"}
+                )
+            state.migrate(work_dir)
         _authorize_resume_actions(
             store,
             retry_units=retry_units,

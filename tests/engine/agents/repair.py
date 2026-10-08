@@ -119,7 +119,7 @@ def test_real_anchor_slots_repair_with_diagnostics_and_resume(tmp_path, defect):
                 else:
                     values.append(value)
             elif member_id in slots:
-                assert len(payload["items"]) == 1
+                assert {entry["item_id"] for entry in payload["items"]} == set(slots)
                 repairs.append(item["repair"])
             values.append(value)
         raw = json.dumps({"protocol": payload["protocol"], "request_id": payload["request_id"], "items": values})

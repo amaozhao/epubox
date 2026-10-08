@@ -73,6 +73,20 @@ def test_session_caches_full_verification_but_not_changed_dependency(tmp_path: P
     assert calls == 1
 
 
+def test_session_recovery_uses_saved_batches_without_repacking(tmp_path: Path, monkeypatch) -> None:
+    import engine.item.members as members_module
+
+    store, original = prepared(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("recovery must not rebuild the frozen request plan")
+
+    monkeypatch.setattr(members_module, "pack_members", forbidden)
+    session = ReadySession(store)
+    assert session.prepared == original
+    assert set(session._prepared_batches) == set(original.plan.batch_hashes)
+
+
 def test_session_refuses_dependencies_changed_during_initial_verification(tmp_path: Path, monkeypatch) -> None:
     store, _ = prepared(tmp_path)
     original = ready_module._read_ready
@@ -171,6 +185,43 @@ def test_session_rebuilds_dynamic_payload_from_frozen_terminology(tmp_path: Path
     data["manifest"]["terms_hashes"][item.item_id] = canonical_hash(wire["terms"])
     forged = MemberBatch.model_validate(data)
     with pytest.raises(IdentityMismatch, match="frozen source, terms or context"):
+        session.verify_batch(forged)
+
+
+def test_batch_verification_reuses_frozen_glossary_hash_and_measured_budget(tmp_path: Path, monkeypatch) -> None:
+    import engine.item.members as members_module
+
+    store, _ = prepared(tmp_path)
+    session = ReadySession(store)
+    batch = next(iter(session._prepared_batches.values()))
+    original_hash = ready_module.canonical_hash
+    original_measure = members_module.measure_budget
+    measurements = 0
+
+    def guarded_hash(value):
+        if value is session.prepared.glossary:
+            raise AssertionError("verified glossary must not be rehashed for every batch")
+        return original_hash(value)
+
+    def counted_measure(*args, **kwargs):
+        nonlocal measurements
+        measurements += 1
+        return original_measure(*args, **kwargs)
+
+    monkeypatch.setattr(ready_module, "canonical_hash", guarded_hash)
+    monkeypatch.setattr(members_module, "measure_budget", counted_measure)
+    session.verify_batch(batch, initial=True)
+    assert measurements == 1
+
+
+def test_batch_verification_rejects_a_changed_saved_budget(tmp_path: Path) -> None:
+    store, _ = prepared(tmp_path)
+    session = ReadySession(store)
+    batch = next(iter(session._prepared_batches.values()))
+    forged = batch.model_copy(
+        update={"budget": batch.budget.model_copy(update={"source_tokens": batch.budget.source_tokens + 1})}
+    )
+    with pytest.raises(IdentityMismatch, match="frozen capacity"):
         session.verify_batch(forged)
 
 

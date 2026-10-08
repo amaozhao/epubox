@@ -36,7 +36,7 @@ def test_resume_reports_slow_checks_and_reuses_session_until_provider(tmp_path, 
     timeline: list[str] = []
     reads = 0
     read_ready = ready_module._read_ready
-    require_preflight = ready_module.require_preflight
+    load_preflight = ready_module.load_preflight
     pack_members = members_module.pack_members
 
     def counted_read(*args, **kwargs):
@@ -46,7 +46,7 @@ def test_resume_reports_slow_checks_and_reuses_session_until_provider(tmp_path, 
 
     def counted_preflight(*args, **kwargs):
         timeline.append("preflight")
-        return require_preflight(*args, **kwargs)
+        return load_preflight(*args, **kwargs)
 
     def counted_pack(*args, **kwargs):
         timeline.append("pack")
@@ -58,14 +58,14 @@ def test_resume_reports_slow_checks_and_reuses_session_until_provider(tmp_path, 
             timeline.append(notice)
 
     monkeypatch.setattr(ready_module, "_read_ready", counted_read)
-    monkeypatch.setattr(ready_module, "require_preflight", counted_preflight)
+    monkeypatch.setattr(ready_module, "load_preflight", counted_preflight)
     monkeypatch.setattr(members_module, "pack_members", counted_pack)
     resumed = asyncio.run(resume_preparation(prepared.work_dir, StubChecker(), progress=progress))
 
     assert resumed.ready_session is not None and reads == 1
     assert timeline.index("准备：验证原文快照和预检记录。") < timeline.index("preflight")
-    budget_notice = next(item for item in timeline if item.startswith("准备：复核 "))
-    assert timeline.index(budget_notice) < timeline.index("pack")
+    assert any(item.startswith("准备：源映射已核对，加载 ") for item in timeline)
+    assert "pack" not in timeline
 
     async def first_provider(_stage, _payload):
         raise FirstProviderCall

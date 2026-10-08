@@ -491,7 +491,8 @@ class RunStore:
 
     def _shared_fingerprint(self) -> tuple[tuple[int, int], ...]:
         if state.compact(self.root):
-            paths = (state.snapshot(self.root), state.artifact(self.root / "preparation.json"))
+            keys = ("preparation.json", "glossary.json", "glossary/freeze.json", "glossary/plan.json")
+            paths = (state.snapshot(self.root), *(state.artifact(self.root / key) for key in keys))
             return tuple((status.st_mtime_ns, status.st_size) for path in paths for status in (state.stat(path),))
         paths = (
             state.snapshot(self.root),

@@ -25,7 +25,7 @@ from tests.engine.epub.preparation import StubChecker
 from tests.engine.execution.atomic import answer
 
 
-def test_plain_command_completes_and_resumes_with_only_source_and_one_json(tmp_path, monkeypatch):
+def test_plain_command_completes_and_resumes_with_source_and_five_shards(tmp_path, monkeypatch):
     source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": '<h1 id="heading">Safe</h1><p>Keep data.</p>'})
     original = hashlib.sha256(source.read_bytes()).hexdigest()
     monkeypatch.setattr(cli, "build_run_model", lambda *args, **kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
@@ -49,7 +49,14 @@ def test_plain_command_completes_and_resumes_with_only_source_and_one_json(tmp_p
     root = source.with_suffix("")
     assert first.status == "completed"
     assert first.work_dir == root and first.report_path == root / "state.json"
-    assert {path.name for path in root.iterdir()} == {"source", "state.json"}
+    assert {path.name for path in root.iterdir()} == {
+        "source",
+        "origin.json",
+        "mapping.json",
+        "plan.json",
+        "terms.json",
+        "state.json",
+    }
     assert not (root / "source.epub").exists()
     assert calls and set(calls) == {"translate", "review"}
     assert first.output_path is not None
@@ -214,7 +221,14 @@ def test_plain_command_rebuilds_only_unsent_blocked_local_budget_plan(tmp_path, 
     result = cli.translate_book(source)
     assert result.status == "paused" and reached == [True]
     assert result.http_attempts == 0
-    assert {path.name for path in root.iterdir()} == {"source", "state.json"}
+    assert {path.name for path in root.iterdir()} == {
+        "source",
+        "origin.json",
+        "mapping.json",
+        "plan.json",
+        "terms.json",
+        "state.json",
+    }
 
 
 def test_interrupted_after_ready_derived_navigation_is_readonly_resumable(tmp_path):

@@ -293,6 +293,7 @@ class MemberIndex:
         self.documents = MappingProxyType(documents)
         self.members = supplied
         self.members_by_id = MappingProxyType({member.item_id: member for member in supplied})
+        self._glossary_digest: tuple[GlossarySnapshot, str] | None = None
         lane_positions: dict[tuple[str, str], int] = {}
         self._lane_positions: dict[str, int] = {}
         for member in supplied:
@@ -569,6 +570,7 @@ def pack_members(
     tokenizer_model: str = "gpt-3.5-turbo",
     sparse: bool = False,
     feedback: Mapping[str, str] | None = None,
+    whole: bool = False,
 ) -> MemberPackingResult:
     members = tuple(items)
     if stage not in {"translate", "review"}:
@@ -577,6 +579,8 @@ def pack_members(
         raise ValueError("translation planning cannot include review targets")
     if len({item.item_id for item in members}) != len(members):
         raise ValueError("member planning cannot repeat an item")
+    if whole and completed:
+        raise ValueError("whole-member planning cannot skip completed items")
     if feedback and (
         not set(feedback).issubset(item.item_id for item in members)
         or any(not isinstance(value, str) or not value.strip() or len(value) > 1200 for value in feedback.values())
@@ -599,7 +603,11 @@ def pack_members(
     for item in members:
         index.validate_items((item,))
     _validate_order(members, index.document_order)
-    glossary_hash = canonical_hash(glossary)
+    cached = index._glossary_digest
+    if cached is None or cached[0] is not glossary:
+        cached = (glossary, canonical_hash(glossary))
+        index._glossary_digest = cached
+    glossary_hash = cached[1]
     member_hashes = {item.item_id: canonical_hash(item) for item in members}
     target_hashes = {item.item_id: canonical_hash((targets or {}).get(item.item_id)) for item in members}
     limit_values = limits.to_dict()
@@ -660,6 +668,8 @@ def pack_members(
         )
 
     for position, item in enumerate(members):
+        if whole and position + 1 < len(members):
+            continue
         if item.item_id in completed:
             if not sparse:
                 close("completed")
@@ -682,17 +692,8 @@ def pack_members(
                     _, combined_budget = candidate((*batch.items, item, following))
                     if not combined_budget.fits:
                         close("heading", combined_budget.failures)
-        proposed = (*batch.items, item) if batch is not None else (item,)
+        proposed = members if whole else (*batch.items, item) if batch is not None else (item,)
         payload, budget = candidate(proposed)
-        if (
-            batch is not None
-            and limits.source_tolerance_tokens
-            and batch.budget.source_tokens >= limits.minimum_source_tokens
-            and budget.source_tokens > limits.source_tokens
-        ):
-            close("source")
-            proposed = (item,)
-            payload, budget = candidate(proposed)
         if not budget.fits and batch is not None:
             reason = cast(BoundaryReason, budget.failures[0].split(" ", 1)[0])
             close(reason, budget.failures)
@@ -704,16 +705,17 @@ def pack_members(
             )
         else:
             close("blocked", budget.failures)
-            blocked.append(
-                BlockedItem(
-                    item_id=item.item_id,
-                    document_id=item.document_id,
-                    resource_path=index.documents[item.document_id].resource.path,
-                    source_span=item.source_span,
-                    atomic_tag=item.atomic_tag,
-                    budget=budget,
+            for blocked_item in members if whole else (item,):
+                blocked.append(
+                    BlockedItem(
+                        item_id=blocked_item.item_id,
+                        document_id=blocked_item.document_id,
+                        resource_path=index.documents[blocked_item.document_id].resource.path,
+                        source_span=blocked_item.source_span,
+                        atomic_tag=blocked_item.atomic_tag,
+                        budget=budget,
+                    )
                 )
-            )
     close("end")
     minimum = limits.minimum_source_tokens
     if minimum:

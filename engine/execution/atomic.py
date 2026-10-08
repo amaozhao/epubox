@@ -13,6 +13,7 @@ from typing import Any
 from engine.agents.runtime import RuntimePaused
 from engine.agents.workflow import _review_epoch, _translation_epoch, run_workflow
 from engine.execution.state import TranslationRunResult
+from engine.item.budget import measure_budget
 from engine.item.members import pack_members
 from engine.schemas.contracts import ItemStatus
 from engine.schemas.members import MemberBatch
@@ -324,44 +325,69 @@ def _pending_batches(
         }
         if retry_items:
             partitions = _retry_partitions(journal, retry_items)
-    fresh = selected is None and all(
-        records[item].status == ItemStatus.PENDING and not _translation_epoch(records[item])
-        for batch in initial
-        for item in batch.manifest.item_ids
-    )
-    navigation_counts = Counter(
-        batch.items[0].document_id for batch in initial if batch.items[0].channel == "navigation"
-    )
-    merge_navigation = {document for document, count in navigation_counts.items() if count > 1}
-    reusable = {
-        item_id
-        for batch in initial
-        if batch.manifest.context_unlimited
-        and (batch.items[0].channel != "navigation" or batch.items[0].document_id not in merge_navigation)
-        for item_id in batch.manifest.item_ids
-    }
-    if fresh and len(reusable) == sum(len(batch.manifest.item_ids) for batch in initial):
-        return tuple(initial)
     session = journal.session
+    ambiguous_items, ambiguous_batches = _ambiguous_ownership(journal, set(selected) if selected is not None else None)
     partition_by_item: dict[str, int] = {}
     for position, partition in enumerate(partitions):
         for item_id in partition:
             if item_id in partition_by_item:
                 raise ValueError("retry partitions cannot overlap")
             partition_by_item[item_id] = position
-    batches = (
-        [
-            batch
-            for batch in initial
-            if batch.manifest.context_unlimited
-            and (batch.items[0].channel != "navigation" or batch.items[0].document_id not in merge_navigation)
-        ]
-        if fresh
-        else []
+    reuse_intact = selected is None
+    fresh = selected is None and all(
+        records[item].status == ItemStatus.PENDING and not _translation_epoch(records[item])
+        for batch in initial
+        for item in batch.manifest.item_ids
     )
+    sparse_counts = Counter(
+        (batch.items[0].document_id, batch.items[0].channel)
+        for batch in initial
+        if batch.items[0].channel in {"attribute", "metadata", "navigation"}
+    )
+    started_sparse = {
+        (batch.items[0].document_id, batch.items[0].channel)
+        for batch in initial
+        if ambiguous_items.intersection(batch.manifest.item_ids)
+    }
+    merge_sparse = {lane for lane, count in sparse_counts.items() if count > 1 and lane not in started_sparse}
+    untouched_body: set[str] = set()
+    changed_body: set[str] = set()
+    if reuse_intact:
+        for member in session.index.members:
+            if member.channel != "body":
+                continue
+            untouched_body.add(member.document_id)
+            if (
+                member.item_id in partition_by_item
+                or member.item_id in ambiguous_items
+                or records[member.item_id].status != ItemStatus.PENDING
+                or _translation_epoch(records[member.item_id])
+            ):
+                changed_body.add(member.document_id)
+        untouched_body.difference_update(changed_body)
+    reusable_batches = [
+        batch
+        for batch in initial
+        if batch.manifest.context_unlimited
+        and not any(item_id in partition_by_item for item_id in batch.manifest.item_ids)
+        and not ambiguous_items.intersection(batch.manifest.item_ids)
+        and (
+            (batch.items[0].channel == "body" and batch.items[0].document_id in untouched_body)
+            or (fresh and (batch.items[0].document_id, batch.items[0].channel) not in merge_sparse)
+        )
+    ]
+    reusable_batches = [*ambiguous_batches, *_merge_reusable_body(journal, reusable_batches, ambiguous_items)]
+    reusable = {item_id for batch in reusable_batches for item_id in batch.manifest.item_ids}
+    if (
+        fresh
+        and len(reusable_batches) == len(initial)
+        and len(reusable) == sum(len(batch.manifest.item_ids) for batch in initial)
+    ):
+        return tuple(initial)
+    batches = reusable_batches
     lanes = {}
     for member in session.index.members:
-        if fresh and member.item_id in reusable:
+        if member.item_id in reusable:
             continue
         record = records[member.item_id]
         if (
@@ -385,31 +411,150 @@ def _pending_batches(
                 break
         else:
             lanes[key].append(([member], {member.unit_id: epoch}))
+    limits = limits_from_config(session.prepared.plan.translation_config, context_unlimited=True)
+    model = str(session.prepared.plan.translation_config["model"])
     for members, _ in (group for groups in lanes.values() for group in groups):
-        versions = {}
-        for member in members:
-            versions[member.unit_id] = max(
-                versions.get(member.unit_id, 0), _translation_epoch(records[member.item_id])
+        groups = [tuple(members)]
+        feedback = {
+            member.item_id: value
+            for member in members
+            if isinstance((value := records[member.item_id].checks.get("retry_feedback")), str)
+        }
+        if records[members[0].item_id].target_projection is not None:
+            review = pack_members(
+                "review",
+                members,
+                session.prepared.glossary,
+                session.index,
+                limits,
+                targets={member.item_id: records[member.item_id] for member in members},
+                revisions={member.unit_id: _review_epoch(records[member.item_id]) for member in members},
+                feedback=feedback,
+                tokenizer_model=model,
+                sparse=True,
             )
-        packed = pack_members(
-            "translate",
-            members,
-            session.prepared.glossary,
-            session.index,
-            limits_from_config(session.prepared.plan.translation_config, context_unlimited=True),
-            record_versions=versions,
-            feedback={
-                member.item_id: feedback
-                for member in members
-                if isinstance((feedback := records[member.item_id].checks.get("retry_feedback")), str)
-            },
-            tokenizer_model=str(session.prepared.plan.translation_config["model"]),
-            sparse=True,
-        )
-        if packed.blocked:
-            raise ValueError("checkpoint members exceed the saved request capacity")
-        batches.extend(packed.batches)
+            if not review.blocked:
+                groups = [batch.items for batch in review.batches]
+        for group in groups:
+            versions = {}
+            for member in group:
+                versions[member.unit_id] = max(
+                    versions.get(member.unit_id, 0), _translation_epoch(records[member.item_id])
+                )
+            packed = pack_members(
+                "translate",
+                group,
+                session.prepared.glossary,
+                session.index,
+                limits,
+                record_versions=versions,
+                feedback={member.item_id: feedback[member.item_id] for member in group if member.item_id in feedback},
+                tokenizer_model=model,
+                sparse=True,
+            )
+            if packed.blocked:
+                raise ValueError("checkpoint members exceed the saved request capacity")
+            batches.extend(packed.batches)
     return tuple(batches)
+
+
+def _merge_reusable_body(journal, batches: Sequence[MemberBatch], ambiguous_items: set[str]) -> list[MemberBatch]:
+    session = journal.session
+    limits = limits_from_config(session.prepared.plan.translation_config, context_unlimited=True)
+    model = str(session.prepared.plan.translation_config["model"])
+    lanes: dict[str, list[MemberBatch]] = {}
+    for batch in batches:
+        if batch.items[0].channel == "body":
+            lanes.setdefault(batch.items[0].document_id, []).append(batch)
+    replacements: dict[int, list[MemberBatch]] = {}
+    skipped: set[int] = set()
+    for values in lanes.values():
+        merged: list[MemberBatch] = []
+        current = values[0]
+        for following in values[1:]:
+            candidate = None
+            if (
+                not ambiguous_items.intersection(current.manifest.item_ids)
+                and not ambiguous_items.intersection(following.manifest.item_ids)
+                and current.budget.source_tokens + following.budget.source_tokens <= limits.source_ceiling
+                and _epochs_match(current, following)
+            ):
+                packed = pack_members(
+                    "translate",
+                    (*current.items, *following.items),
+                    session.prepared.glossary,
+                    session.index,
+                    limits,
+                    record_versions=current.manifest.record_versions | following.manifest.record_versions,
+                    plan_epochs=current.manifest.plan_epochs | following.manifest.plan_epochs,
+                    feedback=current.manifest.feedback_by_item | following.manifest.feedback_by_item,
+                    tokenizer_model=model,
+                    sparse=True,
+                    whole=True,
+                )
+                if (
+                    len(packed.batches) == 1
+                    and not packed.blocked
+                    and _estimated_review_fits(packed.batches[0], limits, model)
+                ):
+                    candidate = packed.batches[0]
+            if candidate is None:
+                merged.append(current)
+                current = following
+            else:
+                current = candidate
+        merged.append(current)
+        replacements[id(values[0])] = merged
+        skipped.update(id(value) for value in values[1:])
+    result: list[MemberBatch] = []
+    for batch in batches:
+        if replacement := replacements.get(id(batch)):
+            result.extend(replacement)
+        elif id(batch) not in skipped:
+            result.append(batch)
+    return result
+
+
+def _ambiguous_ownership(journal, selected: set[str] | None) -> tuple[set[str], list[MemberBatch]]:
+    ambiguous = getattr(journal, "_ambiguous", None)
+    items: set[str] = set()
+    batches: list[MemberBatch] = []
+    for request in getattr(journal, "_requests", {}).values():
+        if (
+            selected is not None
+            and not selected.intersection(request.item_ids)
+            or not bool(ambiguous(request) if callable(ambiguous) else request.attempts)
+        ):
+            continue
+        items.update(request.item_ids)
+        restore = getattr(journal, "_translation_batch", None)
+        if request.stage == "translate" and callable(restore):
+            batch = restore(request)
+            if not isinstance(batch, MemberBatch):
+                raise TypeError("ambiguous translation request has no restorable batch")
+            batches.append(batch)
+    return items, batches
+
+
+def _epochs_match(left: MemberBatch, right: MemberBatch) -> bool:
+    for field in ("record_versions", "plan_epochs"):
+        first, second = getattr(left.manifest, field), getattr(right.manifest, field)
+        if any(first[unit] != second[unit] for unit in set(first) & set(second)):
+            return False
+    return True
+
+
+def _estimated_review_fits(batch: MemberBatch, limits, model: str) -> bool:
+    payload = dict(batch.payload)
+    payload["protocol"] = "epubox-review-2"
+    payload.pop("target_language", None)
+    return measure_budget(
+        stage="review",
+        payload=payload,
+        limits=limits,
+        review_targets="estimated",
+        tokenizer_model=model,
+    ).fits
 
 
 def _structural_failure(record) -> bool:
@@ -459,7 +604,6 @@ def _retry_partitions(journal, selected: Collection[str]) -> tuple[tuple[str, ..
             truncated.setdefault(match.group(1), []).append(item_id)
 
     partitions: list[tuple[str, ...]] = []
-    claimed: set[str] = set()
     for request_id in truncated:
         request = journal._requests[request_id]
         members = tuple(item_id for item_id in request.item_ids if item_id in wanted)
@@ -469,10 +613,6 @@ def _retry_partitions(journal, selected: Collection[str]) -> tuple[tuple[str, ..
         partitions.append(members[:middle])
         if members[middle:]:
             partitions.append(members[middle:])
-        claimed.update(members)
-    for item_id in _session_order(journal, wanted - claimed):
-        if _isolation_failure(records[item_id]):
-            partitions.append((item_id,))
     return tuple(partitions)
 
 
@@ -488,40 +628,8 @@ def _failure_detail(message: str) -> str:
     return re.sub(r"^(?:translate|review):tx-[^:]+:\s*", "", message)
 
 
-def _isolation_failure(record) -> bool:
-    message = _retry_message(record)
-    if not isinstance(message, str):
-        return False
-    return _failure_detail(message).startswith(
-        (
-            "text moved across",
-            "reference moved across",
-            "locked reference order changed",
-            "plain text and metadata units",
-            "marker inventory mismatch",
-            "crossed or unmatched",
-            "unclosed target",
-            "duplicate target",
-            "unknown projection marker",
-            "unclosed projection marker",
-            "literal closing delimiter",
-            "unsupported projection escape",
-            "dangling projection escape",
-            "target must be",
-            "target decoding failed:",
-            "target contains invalid XML",
-            "duplicate item_id",
-        )
-    )
-
-
 def _selected_partitions(
     partitions: Sequence[Collection[str]], selected: Collection[str]
 ) -> tuple[tuple[str, ...], ...]:
     wanted = set(selected)
     return tuple(values for partition in partitions if (values := tuple(item for item in partition if item in wanted)))
-
-
-def _session_order(journal, selected: Collection[str]) -> tuple[str, ...]:
-    wanted = set(selected)
-    return tuple(member.item_id for member in journal.session.index.members if member.item_id in wanted)

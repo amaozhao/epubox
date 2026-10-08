@@ -130,6 +130,42 @@ def test_soft_body_target_floats_up_to_absorb_a_tail_instead_of_sending_it_alone
     assert planned.batches[0].payload["wire_version"] == "epubox-wire-5"
 
 
+def test_source_tolerance_uses_the_full_ceiling_before_splitting():
+    inventory, report = prepared("<p>" + "word " * 800 + "</p><p>" + "word " * 1000 + "</p>", cap=3000)
+    members = materialize_members((inventory,), report)
+    capacity = replace(
+        limits(),
+        source_tokens=2000,
+        source_tolerance_tokens=1000,
+        minimum_source_tokens=500,
+        output_version=6,
+        output_tokens=10000,
+    )
+
+    planned = pack_members("translate", members, glossary(), MemberIndex((inventory,), report, members), capacity)
+
+    assert planned.ready and len(planned.batches) == 1
+    assert 2000 >= planned.batches[0].budget.source_tokens > 1700
+
+
+def test_source_tolerance_still_splits_above_the_hard_ceiling():
+    inventory, report = prepared("<p>" + "word " * 1600 + "</p><p>" + "word " * 1600 + "</p>", cap=3000)
+    members = materialize_members((inventory,), report)
+    capacity = replace(
+        limits(),
+        source_tokens=2000,
+        source_tolerance_tokens=1000,
+        minimum_source_tokens=500,
+        output_version=6,
+        output_tokens=10000,
+    )
+
+    planned = pack_members("translate", members, glossary(), MemberIndex((inventory,), report, members), capacity)
+
+    assert planned.ready and len(planned.batches) == 2
+    assert all(batch.budget.source_tokens < capacity.source_ceiling for batch in planned.batches)
+
+
 def test_no_small_split_body_request_is_emitted_when_provider_limits_prevent_merging():
     body = "".join("<p>" + "word " * 100 + "</p>" for _ in range(6))
     inventory, report = prepared(body, cap=2000)

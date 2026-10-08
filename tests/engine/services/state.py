@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from engine.services import state
+from engine.services import shards, state
 from engine.services.atomic import AtomicStore, StoreLocked
 
 
@@ -19,12 +19,21 @@ def _try_lock(root: str, queue: multiprocessing.Queue[bool]) -> None:
         queue.put(False)
 
 
+def _hold_lock(root: str, ready: multiprocessing.Queue[bool], release: multiprocessing.Queue[bool]) -> None:
+    with AtomicStore(root, compact=True).lock():
+        ready.put(True)
+        release.get(timeout=5)
+
+
 def _compact(tmp_path: Path) -> tuple[Path, Path]:
     source = tmp_path / "book.epub"
     source.write_bytes(b"epub")
     root = tmp_path / "book"
     state.initialize(root, source, hashlib.sha256(b"epub").hexdigest(), "run-1")
     return root, source
+
+
+_FILES = {"origin.json", "mapping.json", "plan.json", "terms.json", "state.json"}
 
 
 def test_compact_store_keeps_only_source_and_state_and_round_trips_exact_bytes(tmp_path: Path) -> None:
@@ -36,12 +45,12 @@ def test_compact_store_keeps_only_source_and_state_and_round_trips_exact_bytes(t
 
     assert state.compact(root)
     assert state.snapshot(root) == source
-    assert state.artifact(path) == root / "state.json"
+    assert state.artifact(path) == root / "origin.json"
     assert state.read(path) == payload
     state._cache.clear()
     assert state.read(path) == payload
     assert state.text(path) == payload.decode()
-    assert {item.name for item in root.iterdir()} == {"source", "state.json"}
+    assert {item.name for item in root.iterdir()} == {"source", *_FILES}
 
 
 def test_compact_filesystem_helpers_expose_logical_records(tmp_path: Path) -> None:
@@ -80,12 +89,12 @@ def test_record_stat_is_stable_when_an_unrelated_record_changes(tmp_path: Path) 
 
 def test_external_state_change_refreshes_the_cache(tmp_path: Path) -> None:
     root, _ = _compact(tmp_path)
-    path = root / "units" / "u1.json"
+    path = root / "results" / "u1.json"
     state.write(path, b"before")
     assert state.read(path) == b"before"
     physical = root / "state.json"
     value = json.loads(physical.read_text())
-    value["records"]["units/u1.json"]["data"] = "after!"
+    value["records"]["results/u1.json"]["data"] = "after!"
     physical.write_text(json.dumps(value), encoding="utf-8")
 
     assert state.read(path) == b"after!"
@@ -146,7 +155,7 @@ def test_initialize_migrates_legacy_records_in_the_header_commit(tmp_path: Path)
 
     assert state.read(root / "units" / "u1.json") == payload
     assert (legacy / "units" / "u1.json").read_bytes() == payload
-    assert {item.name for item in root.iterdir()} == {"source", "state.json"}
+    assert {item.name for item in root.iterdir()} == {"source", *_FILES}
 
 
 def test_initialize_recovers_an_existing_empty_header_from_legacy(tmp_path: Path) -> None:
@@ -168,7 +177,7 @@ def test_failed_migration_leaves_no_header_and_preserves_legacy(tmp_path: Path, 
     record = legacy / "report.json"
     record.write_bytes(b"report")
     root = tmp_path / "book"
-    monkeypatch.setattr(state, "_commit", lambda *_args: (_ for _ in ()).throw(OSError("stop")))
+    monkeypatch.setattr(shards, "initialize", lambda *_args: (_ for _ in ()).throw(OSError("stop")))
 
     with pytest.raises(OSError, match="stop"):
         state.initialize(root, source, hashlib.sha256(b"epub").hexdigest(), "run-1", legacy)
@@ -284,7 +293,7 @@ def test_reset_records_is_one_compact_commit_and_preserves_header(tmp_path: Path
 
     assert state.header(root) == before
     assert list(state.glob(root, "**/*")) == []
-    assert {item.name for item in root.iterdir()} == {"source", "state.json"}
+    assert {item.name for item in root.iterdir()} == {"source", *_FILES}
 
 
 def test_header_rejects_tampered_schema(tmp_path: Path) -> None:
@@ -332,3 +341,337 @@ def test_legacy_paths_keep_native_filesystem_behavior(tmp_path: Path) -> None:
     assert list(state.glob(root / "records", "*.txt")) == [path]
     assert state.snapshot(root) == root.resolve() / "source.epub"
     assert state.artifact(path) == path
+
+
+def test_new_store_uses_five_stable_files_and_routes_records(tmp_path: Path) -> None:
+    root, _ = _compact(tmp_path)
+    paths = {
+        "documents/d.json": "origin.json",
+        "inventories/i.json": "mapping.json",
+        "batches/b.json": "plan.json",
+        "glossary/plan.json": "terms.json",
+        "report.json": "state.json",
+    }
+
+    for key, physical in paths.items():
+        logical = root / key
+        state.write(logical, key.encode())
+        assert state.artifact(logical) == root / physical
+
+    assert state.artifact(root / "documents") == root / "origin.json"
+    assert state.artifact(root / "inventories") == root / "mapping.json"
+    assert state.artifact(root / "batches") == root / "plan.json"
+    assert state.artifact(root / "units") == root / "plan.json"
+    assert state.artifact(root / "glossary") == root / "terms.json"
+    assert state.artifact(root / "glossary.json") == root / "terms.json"
+    assert state.artifact(root / "source.json") == root / "origin.json"
+
+    assert state.files(root) == tuple(root / name for name in shards.FILES)
+    assert {path.name for path in root.glob("*.json")} == _FILES
+
+
+def test_v1_migration_preserves_exact_records_stamps_header_and_source(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"original")
+    root = tmp_path / "book"
+    root.mkdir()
+    (root / "source").mkdir()
+    records = {
+        "documents/d.json": {"data": '{ "document": "中" }\n', "stamp": 17},
+        "results/r.json": {"data": "result\n", "stamp": 23},
+    }
+    value = {
+        "format": state.FORMAT,
+        "source": {
+            "path": str(source.resolve()),
+            "hash": hashlib.sha256(b"original").hexdigest(),
+            "st_dev": source.stat().st_dev,
+            "st_ino": source.stat().st_ino,
+        },
+        "run_id": "run-1",
+        "records": records,
+    }
+    (root / "state.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    before_source = source.read_bytes()
+
+    state.migrate(root)
+
+    assert state.header(root) == {key: value[key] for key in ("format", "source", "run_id")}
+    assert source.read_bytes() == before_source
+    for key, record in records.items():
+        assert state.read(root / key) == record["data"].encode()
+        assert state.stat(root / key).st_mtime_ns == record["stamp"]
+    assert {path.name for path in root.glob("*.json")} == _FILES
+
+
+def test_first_v1_write_migrates_automatically(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"original")
+    root = tmp_path / "book"
+    root.mkdir()
+    (root / "source").mkdir()
+    value = {
+        "format": state.FORMAT,
+        "source": {
+            "path": str(source.resolve()),
+            "hash": hashlib.sha256(b"original").hexdigest(),
+            "st_dev": source.stat().st_dev,
+            "st_ino": source.stat().st_ino,
+        },
+        "run_id": "run-1",
+        "records": {"documents/d.json": {"data": "before", "stamp": 17}},
+    }
+    (root / "state.json").write_text(json.dumps(value), encoding="utf-8")
+
+    state.write(root / "results" / "r.json", b"after")
+
+    assert state.read(root / "documents" / "d.json") == b"before"
+    assert state.read(root / "results" / "r.json") == b"after"
+    assert {path.name for path in root.glob("*.json")} == _FILES
+
+
+def test_cold_load_cache_uses_the_same_order_as_physical_files(tmp_path: Path, monkeypatch) -> None:
+    root, _ = _compact(tmp_path)
+    path = root / "documents" / "d.json"
+    state.write(path, b"document")
+    state._cache.clear()
+    state._owners.clear()
+    state._versions.clear()
+    original = shards.load
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(shards, "load", counted)
+
+    assert state.read(path) == b"document"
+    assert state.read(path) == b"document"
+    assert state.artifact(path) == root / "origin.json"
+    assert state.files(root) == tuple(root / name for name in shards.FILES)
+    assert calls == 1
+
+
+def test_runtime_only_update_does_not_read_static_sidecars(tmp_path: Path, monkeypatch) -> None:
+    root, _ = _compact(tmp_path)
+    state.write(root / "documents" / "d.json", b"document")
+    original = shards._read
+    reads: list[str] = []
+
+    def counted(path):
+        reads.append(path.name)
+        return original(path)
+
+    monkeypatch.setattr(shards, "_read", counted)
+
+    state.write(root / "report.json", b"report")
+
+    assert reads == []
+    assert state.read(root / "documents" / "d.json") == b"document"
+
+
+def test_v1_files_ignore_uncommitted_sidecar_names(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"original")
+    root = tmp_path / "book"
+    root.mkdir()
+    (root / "source").mkdir()
+    value = {
+        "format": state.FORMAT,
+        "source": {
+            "path": str(source.resolve()),
+            "hash": hashlib.sha256(b"original").hexdigest(),
+            "st_dev": source.stat().st_dev,
+            "st_ino": source.stat().st_ino,
+        },
+        "run_id": "run-1",
+        "records": {"report.json": {"data": "saved", "stamp": 17}},
+    }
+    (root / "state.json").write_text(json.dumps(value), encoding="utf-8")
+    for name in shards.FILES[:-1]:
+        (root / name).write_text("orphan", encoding="utf-8")
+
+    assert state.files(root) == (root / "state.json",)
+    assert state.read(root / "report.json") == b"saved"
+
+
+def test_single_record_update_rewrites_only_its_shard_and_state(tmp_path: Path) -> None:
+    root, _ = _compact(tmp_path)
+    path = root / "documents" / "d.json"
+    state.write(path, b"before")
+    before = {name: (root / name).stat().st_ino for name in shards.FILES}
+
+    state.write(path, b"after")
+
+    after = {name: (root / name).stat().st_ino for name in shards.FILES}
+    assert before["origin.json"] != after["origin.json"]
+    assert before["state.json"] != after["state.json"]
+    assert all(before[name] == after[name] for name in ("mapping.json", "plan.json", "terms.json"))
+
+
+def test_external_shard_tampering_is_rejected(tmp_path: Path) -> None:
+    root, _ = _compact(tmp_path)
+    path = root / "documents" / "d.json"
+    state.write(path, b"safe")
+    physical = root / "origin.json"
+    value = json.loads(physical.read_text())
+    value["records"]["documents/d.json"]["data"] = "tampered"
+    physical.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(state.StateError, match="does not match state.json"):
+        state.read(path)
+
+
+def test_interrupted_cross_shard_commit_is_replayed_on_read(tmp_path: Path, monkeypatch) -> None:
+    root, _ = _compact(tmp_path)
+    path = root / "documents" / "d.json"
+    original = shards._install
+    calls = 0
+
+    def interrupt(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("crash")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(shards, "_install", interrupt)
+    with pytest.raises(OSError, match="crash"):
+        state.write(path, b"saved")
+    monkeypatch.setattr(shards, "_install", original)
+
+    assert state.read(path) == b"saved"
+    assert "transaction" not in json.loads((root / "state.json").read_text())["storage"]
+
+
+def test_size_limit_rebalances_whole_records_without_loss(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(shards, "MAX_BYTES", 2_500)
+    root, _ = _compact(tmp_path)
+    payloads = {f"documents/d{index}.json": (str(index) * 240).encode() for index in range(12)}
+
+    with state.batch(root):
+        for key, payload in payloads.items():
+            state.write(root / key, payload)
+
+    assert all(path.stat().st_size < shards.MAX_BYTES for path in state.files(root))
+    assert {key: state.read(root / key) for key in payloads} == payloads
+
+
+def test_failed_staging_changes_no_files_and_leaves_no_transaction(tmp_path: Path, monkeypatch) -> None:
+    root, _ = _compact(tmp_path)
+    before = {path.name: path.read_bytes() for path in state.files(root)}
+    original = shards._stage
+    calls = 0
+
+    def fail_second(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("disk full")
+        return original(*args)
+
+    monkeypatch.setattr(shards, "_stage", fail_second)
+    with pytest.raises(OSError, match="disk full"):
+        state.write(root / "documents" / "d.json", b"document")
+
+    assert {path.name: path.read_bytes() for path in state.files(root)} == before
+    assert not list(root.glob(".*.tmp"))
+
+
+def test_record_that_cannot_fit_rolls_back_without_data_loss(tmp_path: Path, monkeypatch) -> None:
+    root, _ = _compact(tmp_path)
+    before = {path.name: path.read_bytes() for path in state.files(root)}
+    monkeypatch.setattr(shards, "MAX_BYTES", 900)
+
+    with pytest.raises(state.StateError, match="shard limit|cannot fit"):
+        state.write(root / "documents" / "large.json", b"x" * 2_000)
+
+    assert {path.name: path.read_bytes() for path in state.files(root)} == before
+    assert not state.exists(root / "documents" / "large.json")
+
+
+def test_pending_transaction_waits_for_the_authoritative_process_lock(tmp_path: Path, monkeypatch) -> None:
+    root, _ = _compact(tmp_path)
+    path = root / "documents" / "d.json"
+    original = shards._finish
+    monkeypatch.setattr(shards, "_finish", lambda *_args: (_ for _ in ()).throw(OSError("crash")))
+    with pytest.raises(OSError, match="crash"):
+        state.write(path, b"saved")
+    monkeypatch.setattr(shards, "_finish", original)
+    context = multiprocessing.get_context("spawn")
+    ready: multiprocessing.Queue[bool] = context.Queue()
+    release: multiprocessing.Queue[bool] = context.Queue()
+    process = context.Process(target=_hold_lock, args=(str(root), ready, release))
+    process.start()
+    assert ready.get(timeout=5)
+
+    with pytest.raises(state.StateError, match="transaction is pending"):
+        state.read(path)
+
+    release.put(True)
+    process.join(timeout=5)
+    assert process.exitcode == 0
+    assert state.read(path) == b"saved"
+
+
+def test_interrupted_initialization_replays_from_the_state_journal(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"epub")
+    root = tmp_path / "book"
+    original = shards._install
+    calls = 0
+
+    def interrupt(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("crash")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(shards, "_install", interrupt)
+    with pytest.raises(OSError, match="crash"):
+        state.initialize(root, source, hashlib.sha256(b"epub").hexdigest(), "run-1")
+    assert "transaction" in json.loads((root / "state.json").read_text())["storage"]
+    monkeypatch.setattr(shards, "_install", original)
+
+    state.initialize(root, source, hashlib.sha256(b"epub").hexdigest(), "run-1")
+
+    assert state.header(root)["run_id"] == "run-1"
+    assert {path.name for path in root.glob("*.json")} == _FILES
+
+
+def test_recovery_rejects_a_changed_stable_shard(tmp_path: Path, monkeypatch) -> None:
+    root, _ = _compact(tmp_path)
+    original = shards._install
+    calls = 0
+
+    def interrupt(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("crash")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(shards, "_install", interrupt)
+    with pytest.raises(OSError, match="crash"):
+        state.write(root / "documents" / "d.json", b"saved")
+    monkeypatch.setattr(shards, "_install", original)
+    (root / "origin.json").write_bytes(b"unexpected")
+
+    with pytest.raises(state.StateError, match="stable shard changed"):
+        state.read(root / "documents" / "d.json")
+
+
+def test_initialization_cleans_only_regular_allowlisted_orphan_temporaries(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    source.write_bytes(b"epub")
+    root = tmp_path / "book"
+    root.mkdir()
+    orphan = root / ".origin.abcd.tmp"
+    orphan.write_bytes(b"orphan")
+
+    state.initialize(root, source, hashlib.sha256(b"epub").hexdigest(), "run-1")
+
+    assert not orphan.exists()

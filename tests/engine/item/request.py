@@ -6,11 +6,63 @@ from typing import Literal
 import pytest
 
 from engine.item.atoms import extract_resource
-from engine.item.request import SourceIndex, build_payload
+from engine.item.request import SourceIndex, build_payload, select_terms
 from engine.schemas.bridge import AtomicDocument
 from engine.schemas.contracts import FrozenTerm, GlossarySnapshot, ItemRecord, TermScope, canonical_hash
 
 XHTML = "http://www.w3.org/1999/xhtml"
+
+
+def test_repeated_term_selection_reuses_matches_and_keeps_context_and_glossary_local(monkeypatch):
+    import engine.item.request as requests
+
+    doc = inventory("<p>Memory allocation.</p><p>RAM model.</p>")
+    previous, current = doc.items
+    index = SourceIndex((doc,))
+    terms = (
+        term("memory", "Memory", "内存", TermScope(kind="book"), aliases=("RAM",)),
+        term("allocation", "allocation", "分配", TermScope(kind="book")),
+    )
+    contexts = ((previous, index.text(previous)),)
+    calls = []
+    occurs = requests._occurs
+
+    def counted(*args):
+        calls.append(args)
+        return occurs(*args)
+
+    monkeypatch.setattr(requests, "_occurs", counted)
+    selected = select_terms(current, terms, index, contexts)
+    assert {value["term_id"]: value["role"] for value in selected} == {
+        "memory": "target",
+        "allocation": "context",
+    }
+    count = len(calls)
+    selected[0]["target"] = "corrupted return value"
+    repeated = select_terms(current, terms, index, contexts)
+    assert len(calls) == count
+    assert all(value["target"] != "corrupted return value" for value in repeated)
+    without_context = select_terms(current, terms, index, ((previous, "Other text."),))
+    assert [value["term_id"] for value in without_context] == ["memory"]
+    changed = (terms[0].model_copy(update={"target": "新译文"}),)
+    assert select_terms(current, changed, index, ())[0]["target"] == "新译文"
+
+
+@pytest.mark.parametrize(
+    ("spelling", "text", "match_policy", "expected"),
+    (
+        ("RAM", "RAMBO", "exact", False),
+        ("RAM", "ram", "casefold", True),
+        ("C++", "C++ model", "exact", True),
+        ("memory", "memory_cache", "exact", False),
+    ),
+)
+def test_cached_term_matching_keeps_literal_word_boundaries(spelling, text, match_policy, expected):
+    import engine.item.request as requests
+
+    value = term("term", spelling, "译文", TermScope(kind="book"), match_policy=match_policy)
+    assert requests._occurs(value, text) is expected
+    assert requests._occurs(value, text) is expected
 
 
 def source(body: str) -> bytes:

@@ -13,7 +13,7 @@ from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
 
 
-def test_compact_preparation_resumes_from_one_state_file(tmp_path: Path) -> None:
+def test_compact_preparation_resumes_from_five_shards(tmp_path: Path) -> None:
     source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>Memory allocation is fast.</p>"})
     root = source.with_suffix("")
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -31,4 +31,11 @@ def test_compact_preparation_resumes_from_one_state_file(tmp_path: Path) -> None
     assert result.work_dir == root
     assert find(source) == root
     assert plan_resume(root).phase == "translation"
-    assert {path.name for path in root.iterdir()} == {"source", "state.json"}
+    assert {path.name for path in root.iterdir()} == {
+        "source",
+        "origin.json",
+        "mapping.json",
+        "plan.json",
+        "terms.json",
+        "state.json",
+    }

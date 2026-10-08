@@ -228,6 +228,51 @@ def test_packing_hashes_stable_identity_components_once(monkeypatch: pytest.Monk
     assert limit_calls == 1
 
 
+def test_whole_pack_measures_only_the_complete_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    inventory, report = prepared("<p>" + "word " * 800 + "</p><p>" + "word " * 1000 + "</p>", cap=3000)
+    index = MemberIndex((inventory,), report)
+    capacity = replace(
+        limits(),
+        source_tokens=2000,
+        source_tolerance_tokens=1000,
+        minimum_source_tokens=500,
+        output_version=6,
+        output_tokens=10000,
+        context_unlimited=True,
+    )
+    calls: list[tuple[str, ...]] = []
+    real_fit = members_module.fit_member_payload
+
+    def tracked(stage, items, *args, **kwargs):
+        calls.append(tuple(item.item_id for item in items))
+        return real_fit(stage, items, *args, **kwargs)
+
+    monkeypatch.setattr(members_module, "fit_member_payload", tracked)
+    planned = pack_members("translate", index.members, glossary(), index, capacity, sparse=True, whole=True)
+
+    assert planned.ready and len(planned.batches) == 1
+    assert calls == [tuple(member.item_id for member in index.members)]
+
+
+def test_member_index_hashes_each_glossary_object_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    inventory, report = prepared("<p>First.</p><p>Second.</p>")
+    index = MemberIndex((inventory,), report)
+    first, second = glossary(), glossary()
+    calls = {id(first): 0, id(second): 0}
+    real_hash = members_module.canonical_hash
+
+    def tracked(value):
+        if id(value) in calls:
+            calls[id(value)] += 1
+        return real_hash(value)
+
+    monkeypatch.setattr(members_module, "canonical_hash", tracked)
+    for frozen in (first, first, second, second):
+        assert pack_members("translate", index.members, frozen, index, limits(), sparse=True, whole=True).ready
+
+    assert calls == {id(first): 1, id(second): 1}
+
+
 def test_review_payload_binds_each_piece_target_and_parent_revision() -> None:
     paragraph = "word " * 850
     inventory, report = prepared(paragraph + ". " + paragraph + ". " + paragraph + ".", cap=2000)

@@ -1,4 +1,4 @@
-"""Single-file persistence for compact book sessions."""
+"""Logical persistence for compact book sessions."""
 
 from __future__ import annotations
 
@@ -15,10 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from engine.services import shards
+
 FORMAT = "epubox-state-1"
 _STATE = "state.json"
 _SOURCE = "source"
-_cache: dict[Path, tuple[tuple[int, int, int, int], dict[str, Any]]] = {}
+_cache: dict[Path, tuple[tuple[tuple[str, int, int, int, int], ...], dict[str, Any]]] = {}
+_owners: dict[Path, dict[str, str]] = {}
+_versions: dict[Path, bool] = {}
 _cache_lock = threading.RLock()
 _local = threading.local()
 
@@ -108,11 +112,15 @@ def initialize(
                 key: {"data": data, "stamp": stamp + offset} for offset, (key, data) in enumerate(imported.items())
             },
         }
-        _available_root(root, legacy_workdir)
         root.mkdir(parents=True, exist_ok=True)
+        locks.enter_context(AtomicStore(root, compact=True).lock())
+        try:
+            shards.cleanup(root)
+        except shards.ShardError as error:
+            raise StateError(str(error)) from error
+        _available_root(root, legacy_workdir)
         (root / _SOURCE).mkdir(exist_ok=True)
         path = root / _STATE
-        locks.enter_context(AtomicStore(root, compact=True).lock())
         if path.exists():
             current = _load(root)
             if _header(current) != _header(value):
@@ -124,7 +132,8 @@ def initialize(
                 elif current_data != imported:
                     raise StateError("existing compact records differ from the legacy checkpoint")
             return
-        _commit(root, value)
+        shards.initialize(root, value)
+        _refresh(root)
 
 
 @contextmanager
@@ -340,7 +349,35 @@ def snapshot(root: Path | str) -> Path:
 def artifact(path: Path | str) -> Path:
     path = Path(path)
     located = _locate(path)
-    return located[0] / _STATE if located is not None else path
+    if located is None:
+        return path
+    root, key = located
+    _load(root)
+    owners = _owners.get(root, {})
+    return shards.physical(root, key, owners) if _sharded(root) else root / _STATE
+
+
+def files(root: Path | str) -> tuple[Path, ...]:
+    root = Path(root).resolve()
+    if not compact(root):
+        return ()
+    if not _sharded(root):
+        return (root / _STATE,)
+    return tuple(root / name for name in shards.FILES)
+
+
+def migrate(root: Path | str) -> None:
+    root = Path(root).resolve()
+    path = root / _STATE
+    if not path.is_file() or path.is_symlink():
+        return
+    from engine.services.atomic import AtomicStore
+
+    with AtomicStore(root, compact=True).lock(blocking=False):
+        if not compact(root) or _sharded(root):
+            return
+        value = _load(root)
+        _commit(root, value)
 
 
 def header(root: Path | str) -> Mapping[str, Any]:
@@ -394,7 +431,7 @@ def _locate(path: Path) -> tuple[Path, str] | None:
             relative = absolute.relative_to(parent)
         except ValueError:
             continue
-        if not relative.parts or relative.parts[0] in {_SOURCE, _STATE}:
+        if not relative.parts or relative.parts[0] == _SOURCE or relative.as_posix() in shards.FILES:
             return None
         root = parent.resolve()
         _load(root)
@@ -471,20 +508,46 @@ def _legacy_records(legacy_workdir: Path) -> dict[str, str]:
 
 
 def _load(root: Path) -> dict[str, Any]:
-    path = root / _STATE
-    metadata = path.stat()
-    signature = (metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
     with _cache_lock:
-        cached = _cache.get(root)
-        if cached is not None and cached[0] == signature:
-            return cached[1]
         try:
-            value = json.loads(path.read_bytes(), object_pairs_hook=_object)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            cached = _cache.get(root)
+            if cached is not None:
+                signature = _disk_signature(root, cached[0])
+                if cached[0] == signature:
+                    return cached[1]
+            value, owners, signature = shards.load(root, _object)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, shards.ShardError) as error:
             raise StateError(f"invalid state.json: {error}") from error
         _validate(value)
         _cache[root] = (signature, value)
+        _owners[root] = owners
+        _versions[root] = len(signature) == len(shards.FILES)
         return value
+
+
+def _refresh(root: Path) -> dict[str, Any]:
+    with _cache_lock:
+        _cache.pop(root, None)
+        _owners.pop(root, None)
+        _versions.pop(root, None)
+    return _load(root)
+
+
+def _sharded(root: Path) -> bool:
+    with _cache_lock:
+        if root not in _cache:
+            _load(root)
+        return _versions.get(root, False)
+
+
+def _disk_signature(
+    root: Path, previous: tuple[tuple[str, int, int, int, int], ...]
+) -> tuple[tuple[str, int, int, int, int], ...]:
+    values = []
+    for name, *_ in previous:
+        metadata = (root / name).stat()
+        values.append((name, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns))
+    return tuple(values)
 
 
 def _validate(value: Any) -> None:
@@ -520,7 +583,8 @@ def _valid_key(key: Any) -> bool:
     return (
         not path.is_absolute()
         and path.as_posix() == key
-        and path.parts[0] not in {_SOURCE, _STATE}
+        and path.parts[0] != _SOURCE
+        and key not in shards.FILES
         and all(part not in {"", ".", ".."} for part in path.parts)
     )
 
@@ -547,28 +611,18 @@ def _header(state: dict[str, Any]) -> dict[str, Any]:
 
 def _commit(root: Path, value: dict[str, Any]) -> None:
     _validate(value)
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    path = root / _STATE
-    descriptor, name = tempfile.mkstemp(prefix=".state.", suffix=".tmp", dir=root)
-    temporary = Path(name)
+    with _cache_lock:
+        cached = _cache.get(root)
+        before = cached[1] if cached is not None else None
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        descriptor = os.open(root, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    metadata = path.stat()
-    signature = (metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+        owners = shards.commit(root, value, _owners.get(root), before)
+    except shards.ShardError as error:
+        raise StateError(str(error)) from error
+    signature = shards.signatures(root)
     with _cache_lock:
         _cache[root] = (signature, value)
+        _owners[root] = owners
+        _versions[root] = True
 
 
 def _native_write(path: Path, data: bytes) -> str:
@@ -608,12 +662,14 @@ __all__ = [
     "batch",
     "compact",
     "exists",
+    "files",
     "glob",
     "header",
     "import_records",
     "initialize",
     "is_dir",
     "is_file",
+    "migrate",
     "read",
     "reset_records",
     "snapshot",

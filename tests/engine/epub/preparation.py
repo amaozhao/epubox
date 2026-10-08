@@ -33,7 +33,7 @@ class StubChecker:
         return EpubCheckResult(("stub-epubcheck",), 0)
 
 
-def test_compact_preparation_extracts_source_and_keeps_records_in_one_json(tmp_path: Path) -> None:
+def test_compact_preparation_extracts_source_and_keeps_records_in_five_shards(tmp_path: Path) -> None:
     source = make_epub(tmp_path / "book.epub")
     source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
     root = tmp_path / "book"
@@ -53,7 +53,14 @@ def test_compact_preparation_extracts_source_and_keeps_records_in_one_json(tmp_p
     assert not (root / "preparation.json").exists()
     assert hashlib.sha256(state.read(root / "preparation.json")).hexdigest() == prepared.preparation_hash
     assert not (root / source_hash).exists()
-    assert {path.name for path in root.iterdir()} == {"source", "state.json"}
+    assert {path.name for path in root.iterdir()} == {
+        "source",
+        "origin.json",
+        "mapping.json",
+        "plan.json",
+        "terms.json",
+        "state.json",
+    }
 
 
 def test_compact_preparation_preserves_explicit_empty_directory_for_publication(tmp_path: Path) -> None:
