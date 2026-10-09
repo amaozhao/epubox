@@ -36,7 +36,11 @@ async def test_terms_response_is_journaled_before_attempt_succeeds() -> None:
             "raw": '{"items":[]}',
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
             "finish_reason": "length",
-            "metadata": {"response_id": "response-1", "finish_reason": "length"},
+            "metadata": {
+                "response_id": "response-1",
+                "finish_reason": "length",
+                "output_unlimited": "true",
+            },
         }
         events.append(f"persisted:{stage}")
 

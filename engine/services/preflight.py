@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import zipfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -35,6 +36,7 @@ from engine.schemas.contracts import (
 from engine.schemas.internal import Event
 from engine.services import state
 from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite
+from engine.services.parallel import PROCESS_MIN_BYTES, ordered_map
 
 if TYPE_CHECKING:
     from engine.services.store import RunStore
@@ -42,6 +44,8 @@ if TYPE_CHECKING:
 PREFLIGHT_FORMAT = "epubox-preflight-1"
 PREFLIGHT_VERSION = 1
 _proofs: WeakKeyDictionary[object, tuple[tuple[str, int, int, int, int, int], ...]] = WeakKeyDictionary()
+_PRIMARY_RECEIPT = Path("checks/preflight.json")
+_OUTPUT_RECEIPT = Path("checks/output.json")
 
 
 class PreflightPiece(FrozenModel):
@@ -74,7 +78,7 @@ class PreflightReport(FrozenModel):
     format: Literal["epubox-preflight-1"] = PREFLIGHT_FORMAT
     version: Literal[1] = PREFLIGHT_VERSION
     model: str = Field(min_length=1)
-    limits: dict[str, int | float | bool]
+    limits: dict[str, int | float | bool | None]
     source_hash: str = Field(min_length=1)
     resource_hashes: dict[str, str]
     map_hashes: dict[str, str]
@@ -96,11 +100,28 @@ class _PreflightRecord(FrozenModel):
     report: PreflightReport
 
 
+@dataclass(frozen=True)
+class _PreflightInput:
+    inventory: AtomicDocument
+    raw: bytes
+    limits: BudgetLimits
+    model: str
+
+
+@dataclass(frozen=True)
+class _ExtractInput:
+    document: DocumentPlan
+    raw: bytes
+    source_hash: str
+
+
 def preflight_atomic_resources(
     inventories: Sequence[AtomicDocument],
     raw_by_resource: Mapping[str, bytes],
     limits: BudgetLimits,
     model: str,
+    *,
+    workers: int | None = None,
 ) -> PreflightReport:
     """Prove byte-local replay and conservative translation/review budgets."""
     ordered = tuple(sorted(inventories, key=lambda value: value.document.document_id))
@@ -116,17 +137,18 @@ def preflight_atomic_resources(
     if len(set(paths)) != len(paths) or set(raw_by_resource) != set(paths):
         raise ValueError("raw resources must exactly match the atomic inventory")
 
-    pieces: list[PreflightPiece] = []
-    diagnostics: list[PreflightDiagnostic] = []
-    for inventory in ordered:
-        path = inventory.document.resource.path
-        raw = raw_by_resource[path]
-        targets = {item.item_id: item.source_projection for item in inventory.items}
-        fill_resource(raw, inventory, targets, identity=True)
-        for item in inventory.items:
-            item_pieces, diagnostic = _preflight_item(inventory, raw, item, limits, model)
-            pieces.extend(item_pieces)
-            diagnostics.append(diagnostic)
+    checked = ordered_map(
+        _preflight_document,
+        (
+            _PreflightInput(inventory, raw_by_resource[inventory.document.resource.path], limits, model)
+            for inventory in ordered
+        ),
+        workers=workers,
+    )
+    pieces = [piece for document_pieces, _document_diagnostics in checked for piece in document_pieces]
+    diagnostics = [
+        diagnostic for _document_pieces, document_diagnostics in checked for diagnostic in document_diagnostics
+    ]
 
     map_hashes = {inventory.document.document_id: canonical_hash(inventory.source_map) for inventory in ordered}
     atoms_hash = canonical_hash(ordered)
@@ -179,6 +201,7 @@ def write_preflight(
         translation_hash=canonical_hash(preparation.translation_config),
         report=report,
     )
+    target = _write_receipt_path(base, limits)
     with base.lock(), state.batch(base.root):
         for inventory in inventories:
             _write_immutable(
@@ -188,7 +211,7 @@ def write_preflight(
                 "epubox-atoms-1",
             )
         _write_immutable(
-            base.root / "checks" / "preflight.json",
+            target,
             record,
             _PreflightRecord,
             "epubox-preflight-record-1",
@@ -203,24 +226,89 @@ def prepare_preflight(
 ) -> PreflightReport:
     """Rebuild T05 inventories from every frozen prepared resource and persist T08."""
     base = _store(store)
-    preparation, _preparation_hash = _preparation(base.root)
+    preparation, preparation_hash = _preparation(base.root)
     documents = _prepared_documents(base.root, preparation)
     try:
         with zipfile.ZipFile(state.snapshot(base.root)) as archive:
             raw = {document.resource.path: archive.read(document.resource.path) for document in documents}
     except (OSError, KeyError, zipfile.BadZipFile) as error:
         raise CorruptRecord(f"cannot read prepared resources: {error}") from error
-    inventories = tuple(
-        extract_resource(
-            raw[document.resource.path],
-            document.resource.path,
-            preparation.source_hash,
-            document.resource.media_type,
-            extractor_version=_extractor_version(document),
+    inventories = _upgrade_inventories(base, preparation, preparation_hash, limits)
+    if inventories is None:
+        process = len(documents) > 1 and sum(map(len, raw.values())) >= PROCESS_MIN_BYTES
+        inventories = ordered_map(
+            _extract_inventory,
+            (_ExtractInput(document, raw[document.resource.path], preparation.source_hash) for document in documents),
+            workers=None if process else 1,
+            process=process,
         )
-        for document in documents
-    )
     return write_preflight(base, inventories, raw, limits, model)
+
+
+def receipt_path(root: Path) -> Path:
+    """Return the active logical preflight receipt without changing old records."""
+    overlay = root / _OUTPUT_RECEIPT
+    return overlay if state.is_file(overlay) else root / _PRIMARY_RECEIPT
+
+
+def _write_receipt_path(base: AtomicStore, limits: BudgetLimits) -> Path:
+    primary = base.root / _PRIMARY_RECEIPT
+    overlay = base.root / _OUTPUT_RECEIPT
+    if limits.output_version != 7:
+        return primary
+    if state.is_file(overlay):
+        return overlay
+    if not state.is_file(primary):
+        return primary
+    original = _read(primary, _PreflightRecord, "epubox-preflight-record-1")
+    return overlay if original.report.limits.get("output_version", 2) in {2, 3, 4, 5, 6} else primary
+
+
+def _receipt_limits(base: AtomicStore, limits: BudgetLimits) -> BudgetLimits:
+    record = _read(receipt_path(base.root), _PreflightRecord, "epubox-preflight-record-1")
+    if record.report.limits.get("output_version", 2) != 7:
+        return limits
+    if limits.output_version == 7:
+        return limits
+    if limits.output_version not in {2, 3, 4, 5, 6}:
+        raise IdentityMismatch("output overlay requires a saved legacy budget policy")
+    context = limits.context_tokens
+    legacy_default = 50_000 + (limits.output_tokens or 0) + 256
+    unlimited_default = 50_000 + 256
+    if (
+        limits.context_unlimited
+        and context == legacy_default
+        and record.report.limits.get("context_tokens") == unlimited_default
+    ):
+        context = unlimited_default
+    return replace(limits, output_tokens=None, output_version=7, context_tokens=context)
+
+
+def _upgrade_inventories(
+    base: AtomicStore,
+    preparation: PreparationPlan,
+    preparation_hash: str,
+    limits: BudgetLimits,
+) -> tuple[AtomicDocument, ...] | None:
+    primary = base.root / _PRIMARY_RECEIPT
+    if limits.output_version != 7 or not state.is_file(primary):
+        return None
+    original = _read(primary, _PreflightRecord, "epubox-preflight-record-1")
+    if original.report.limits.get("output_version", 2) not in {2, 3, 4, 5, 6}:
+        return None
+    if original.preparation_hash != preparation_hash or original.translation_hash != canonical_hash(
+        preparation.translation_config
+    ):
+        raise IdentityMismatch("preflight preparation identity changed")
+    expected = set(preparation.document_hashes)
+    inventory_ids = set(original.report.map_hashes)
+    disk_ids = {path.stem for path in state.glob(base.root / "inventories", "*.json")}
+    if inventory_ids != expected or disk_ids != expected:
+        raise IdentityMismatch("preflight inventory does not cover every prepared document")
+    return tuple(
+        _read(base.path("inventories", document_id), AtomicDocument, "epubox-atoms-1")
+        for document_id in sorted(inventory_ids)
+    )
 
 
 def preflight_fingerprint(
@@ -231,7 +319,7 @@ def preflight_fingerprint(
     paths = [
         state.snapshot(base.root),
         base.root / "preparation.json",
-        base.root / "checks" / "preflight.json",
+        receipt_path(base.root),
         *sorted(state.glob(base.root / "documents", "*.json")),
         *sorted(state.glob(base.root / "inventories", "*.json")),
     ]
@@ -265,7 +353,8 @@ def load_preflight(
     """Load one passed receipt without repeating extraction or token measurement."""
     before = preflight_fingerprint(store)
     base = _store(store)
-    preparation, report = _saved_preflight(base, limits, model)
+    effective_limits = _receipt_limits(base, limits)
+    preparation, report = _saved_preflight(base, effective_limits, model)
     if report.check is None:
         raise IdentityMismatch("preflight did not pass for the current source")
     snapshot = state.snapshot(base.root)
@@ -314,7 +403,7 @@ def load_preflight(
             "version": BUDGET_VERSION,
             "preflight_version": PREFLIGHT_VERSION,
             "model": model,
-            "limits": limits.to_dict(),
+            "limits": effective_limits.to_dict(),
             "pieces": tuple(piece.model_dump(mode="json") for piece in report.pieces),
         }
     )
@@ -349,8 +438,9 @@ def _saved_preflight(
     limits: BudgetLimits,
     model: str,
 ) -> tuple[PreparationPlan, PreflightReport]:
+    effective_limits = _receipt_limits(base, limits)
     record = _read(
-        base.root / "checks" / "preflight.json",
+        receipt_path(base.root),
         _PreflightRecord,
         "epubox-preflight-record-1",
     )
@@ -360,7 +450,7 @@ def _saved_preflight(
         preparation.translation_config
     ):
         raise IdentityMismatch("preflight preparation identity changed")
-    if report.model != model or report.limits != limits.to_dict():
+    if report.model != model or report.limits != effective_limits.to_dict():
         raise IdentityMismatch("preflight model or budget limits changed")
     if report.source_hash != preparation.source_hash:
         raise IdentityMismatch("preflight source identity changed")
@@ -370,8 +460,9 @@ def _saved_preflight(
 def require_preflight(store: AtomicStore | RunStore, limits: BudgetLimits, model: str) -> PreflightReport:
     """Recompute a saved pass receipt from the frozen snapshot before dispatch."""
     base = _store(store)
+    effective_limits = _receipt_limits(base, limits)
     record = _read(
-        base.root / "checks" / "preflight.json",
+        receipt_path(base.root),
         _PreflightRecord,
         "epubox-preflight-record-1",
     )
@@ -388,7 +479,7 @@ def require_preflight(store: AtomicStore | RunStore, limits: BudgetLimits, model
     )
     raw = _snapshot_resources(state.snapshot(base.root), inventories)
     _verify_snapshot(base.root, preparation, inventories, raw)
-    actual = preflight_atomic_resources(inventories, raw, limits, model)
+    actual = preflight_atomic_resources(inventories, raw, effective_limits, model)
     if actual != record.report or actual.check is None:
         raise IdentityMismatch("preflight receipt does not match the current source, atoms, or budget")
     return actual
@@ -433,6 +524,32 @@ def _preflight_item(
     )
 
 
+def _preflight_document(
+    work: _PreflightInput,
+) -> tuple[tuple[PreflightPiece, ...], tuple[PreflightDiagnostic, ...]]:
+    inventory, raw = work.inventory, work.raw
+    targets = {item.item_id: item.source_projection for item in inventory.items}
+    fill_resource(raw, inventory, targets, identity=True)
+    pieces: list[PreflightPiece] = []
+    diagnostics: list[PreflightDiagnostic] = []
+    for item in inventory.items:
+        item_pieces, diagnostic = _preflight_item(inventory, raw, item, work.limits, work.model)
+        pieces.extend(item_pieces)
+        diagnostics.append(diagnostic)
+    return tuple(pieces), tuple(diagnostics)
+
+
+def _extract_inventory(work: _ExtractInput) -> AtomicDocument:
+    document = work.document
+    return extract_resource(
+        work.raw,
+        document.resource.path,
+        work.source_hash,
+        document.resource.media_type,
+        extractor_version=_extractor_version(document),
+    )
+
+
 def _piece(
     inventory: AtomicDocument,
     item: AtomicItem,
@@ -446,7 +563,7 @@ def _piece(
     wire = [{"item_id": piece_id, "source": source}]
     translate_payload = base | {"protocol": "epubox-text-1", "items": wire}
     review_payload = base | {"protocol": "epubox-review-2", "items": wire}
-    if limits.output_version in {5, 6}:
+    if limits.output_version in {5, 6, 7}:
         translate_payload["prompt_version"] = "epubox-members-1"
         review_payload["prompt_version"] = "epubox-members-1"
     return PreflightPiece(
@@ -725,14 +842,14 @@ def _verify_snapshot(
             or hashlib.sha256(raw[path]).hexdigest() != inventory.document.resource.source_sha256
         ):
             raise IdentityMismatch("preflight resource bytes changed")
-        document = expected_documents[path]
-        canonical = extract_resource(
-            raw[path],
-            path,
-            preparation.source_hash,
-            document.resource.media_type,
-            extractor_version=_extractor_version(document),
-        )
+    process = len(by_path) > 1 and sum(map(len, raw.values())) >= PROCESS_MIN_BYTES
+    canonicals = ordered_map(
+        _extract_inventory,
+        (_ExtractInput(expected_documents[path], raw[path], preparation.source_hash) for path in by_path),
+        workers=None if process else 1,
+        process=process,
+    )
+    for inventory, canonical in zip(by_path.values(), canonicals, strict=True):
         if inventory != canonical:
             raise IdentityMismatch("preflight inventory differs from canonical extraction")
 
@@ -823,6 +940,7 @@ __all__ = [
     "preflight_verified",
     "prepare_preflight",
     "read_preflight",
+    "receipt_path",
     "require_preflight",
     "write_preflight",
 ]

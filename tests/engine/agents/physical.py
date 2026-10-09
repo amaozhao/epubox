@@ -73,7 +73,8 @@ def test_v8_provider_hash_budget_and_saved_response_use_actual_slot_map():
     )
     result = asyncio.run(runtime.invoke("review", book, {"request_id": book["request_id"], "output_tokens": 8192}))
     assert reserved[0].metadata["wire_version"] == "epubox-wire-8"
-    assert reserved[0].metadata["wire_hash"] == wire.digest(sent[0]["messages"], 8192)
+    assert reserved[0].metadata["wire_hash"] == wire.digest(sent[0]["messages"], None)
+    assert reserved[0].metadata["output_unlimited"] == "true"
     assert persisted[0]["metadata"]["wire_version"] == "epubox-wire-8"
     assert (
         reserved[0].reservation["estimated_input_tokens"]
@@ -137,7 +138,8 @@ def test_real_provider_adapter_saves_physical_wire_and_replays_canonical_results
                     for item, decision in zip(payload["items"], items, strict=True):
                         decision["target"] = {slot: "修订译文。" for slot in re.findall(r"<t(\d+)>", item["source"])}
             raw = json.dumps({"protocol": payload["protocol"], "request_id": payload["request_id"], "items": items})
-            sent[payload["request_id"]] = (kwargs["messages"], kwargs["max_tokens"], raw)
+            assert "max_tokens" not in kwargs and "max_completion_tokens" not in kwargs
+            sent[payload["request_id"]] = (kwargs["messages"], raw)
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=raw), finish_reason="stop")],
                 usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
@@ -161,11 +163,12 @@ def test_real_provider_adapter_saves_physical_wire_and_replays_canonical_results
     else:
         assert asyncio.run(workflow).status == "completed"
     restored = BodyJournal(case.session.store)
-    for request_id, (messages, cap, raw) in sent.items():
+    for request_id, (messages, raw) in sent.items():
         request = restored.store.read_request(request_id)
         attempt = request.attempts[-1]
         assert attempt.metadata["wire_version"] == wire.VERSION
-        assert attempt.metadata["wire_hash"] == wire.digest(messages, cap)
+        assert attempt.metadata["wire_hash"] == wire.digest(messages, None)
+        assert attempt.metadata["output_unlimited"] == "true"
         path = restored.store.root / "responses" / request.stage / request_id / f"{attempt.attempt_id}.json"
         saved = json.loads(state.read(path))
         assert saved["response"]["raw"] == raw

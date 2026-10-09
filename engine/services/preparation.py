@@ -425,7 +425,7 @@ async def _advance_atomic(
 ) -> PreparationPipelineResult:
     from engine.epub.bindings import resolve_derived_navigation
     from engine.item.members import MemberIndex, materialize_members, pack_members
-    from engine.services.ready import ReadySession, limits_for, write_ready
+    from engine.services.ready import ReadySession, limits_for, limits_from_config, write_ready
     from engine.services.terms.planning import plan_atomic_terms
 
     if state.is_file(store.root / "prepared.json"):
@@ -451,12 +451,13 @@ async def _advance_atomic(
         )
 
     from engine.services.preflight import load_preflight
+    from engine.services.preflight import receipt_path as preflight_receipt
 
     _emit(
         progress,
         PreparationProgress("preflight", 0, 0, 0, 0, _http_attempts(store), "准备：核对已保存的预检结果和原文身份。"),
     )
-    receipt_path = store.root / "checks" / "preflight.json"
+    receipt_path = preflight_receipt(store.root)
     receipt = strict_json_loads(state.read(receipt_path), max_bytes=None) if state.is_file(receipt_path) else None
     saved_report = receipt.get("report") if isinstance(receipt, dict) else None
     capacity = limits_for(preparation)
@@ -464,7 +465,7 @@ async def _advance_atomic(
     if isinstance(saved_report, dict) and saved_report.get("check") is not None:
         report, inventories = load_preflight(store, capacity, tokenizer)
     else:
-        report = _ensure_preflight(store, preparation)
+        report = _ensure_preflight(store, preparation, output_unlimited=True)
         inventories = () if report.check is None else load_preflight(store, capacity, tokenizer)[1]
     del receipt, saved_report
     if report.check is None:
@@ -600,7 +601,7 @@ async def _advance_atomic(
     glossary = store.read_glossary()
     members = materialize_members(inventories, report)
     index = MemberIndex(inventories, report, members)
-    limits = limits_for(preparation)
+    limits = limits_from_config(preparation.translation_config, context_unlimited=True, output_unlimited=True)
     tokenizer = str(preparation.translation_config["model"])
     resolved = resolve_derived_navigation(documents)
     derived_sources = {
@@ -729,13 +730,13 @@ def _pipeline_config(config: PreparationConfig) -> PreparationConfig:
     )
 
 
-def _ensure_preflight(store: RunStore, preparation: PreparationPlan):
-    from engine.services.ready import limits_for
+def _ensure_preflight(store: RunStore, preparation: PreparationPlan, *, output_unlimited: bool = False):
+    from engine.services.ready import limits_from_config
 
     config = preparation.translation_config
     return prepare_preflight(
         store,
-        limits=limits_for(preparation),
+        limits=limits_from_config(config, output_unlimited=output_unlimited or None),
         model=str(config.get("model", preparation.extraction_config.get("model", ""))),
     )
 

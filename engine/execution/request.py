@@ -43,15 +43,8 @@ from engine.services.atomic import IdentityMismatch
 
 class Request(Review):
     def _mark_truncated_batch(self, manifest: RequestManifest, jobs: tuple[_Job, ...], raw: str | bytes) -> None:
-        try:
-            self._apply_response(manifest, jobs, raw)
-        except ProtocolError:
-            pass
-        pending = [
-            job
-            for job in jobs
-            if self.records[job.unit_id].items[job.item_id].status in {ItemStatus.IN_FLIGHT, ItemStatus.RETRY_WAIT}
-        ]
+        _ = raw
+        pending = list(jobs)
         if len(pending) == 1:
             job = pending[0]
             self._fail_item(
@@ -62,8 +55,6 @@ class Request(Review):
                 retry=False,
                 code="model_response_truncated",
             )
-            return
-        if not pending:
             return
         midpoint = len(pending) // 2
         for index, group in enumerate((pending[:midpoint], pending[midpoint:])):
@@ -121,28 +112,6 @@ class Request(Review):
                     code="model_input_oversized",
                 )
             return
-        if output_tokens > self.output_tokens:
-            if len(jobs) > 1:
-                midpoint = len(jobs) // 2
-                await self._run_batch(jobs[:midpoint])
-                await self._run_batch(jobs[midpoint:])
-                return
-            upgraded: set[str] = set()
-            for job in jobs:
-                if job.unit_id not in upgraded and self._upgrade_cut_plan(
-                    job.unit_id, "request output budget exceeded"
-                ):
-                    upgraded.add(job.unit_id)
-                elif job.unit_id not in upgraded:
-                    self._fail_item(
-                        self.records[job.unit_id],
-                        job.item_id,
-                        stage,
-                        "request output budget exceeded",
-                        retry=False,
-                        code=("translation_output_oversized" if stage == "translate" else "review_output_oversized"),
-                    )
-            return
         manifest = self._manifest(request_id, stage, jobs, payload, output_tokens)
         manifest = self.store.write_request(manifest)
         self._request_cache[request_id] = manifest
@@ -170,10 +139,11 @@ class Request(Review):
                     "request_id": request_id,
                     "item_ids": tuple(job.item_id for job in jobs),
                     "estimated_tokens": estimated_tokens,
-                    "output_tokens": output_tokens,
+                    "output_tokens": None,
+                    "estimated_output_tokens": output_tokens,
                 },
             )
-            if response.get("finish_reason") == "length":
+            if response.get("finish_reason") in {"length", "max_tokens"}:
                 self._mark_truncated_batch(manifest, jobs, response["raw"])
                 return
             self._apply_response(manifest, jobs, response["raw"])
@@ -206,7 +176,8 @@ class Request(Review):
             owner_id=jobs[0].item_id,
             item_ids=tuple(job.item_id for job in jobs),
             input_hashes={job.item_id: records[job.unit_id].input_hash or "" for job in jobs},
-            wire_hash=wire_hash(stage, payload, output_tokens),
+            wire_hash=wire_hash(stage, payload, None),
+            output_unlimited=True,
             record_versions={unit_id: record.record_version + 1 for unit_id, record in records.items()},
             item_unit_ids={job.item_id: (job.unit_id,) for job in jobs},
             unit_document_ids={unit_id: record.document_id for unit_id, record in records.items()},

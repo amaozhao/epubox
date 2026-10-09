@@ -104,13 +104,20 @@ def test_shared_runtime_refills_configured_concurrency_without_double_ownership(
     assert 1 < maximum <= 2
 
 
-def test_real_provider_pauses_legacy_output_budget_without_dispatch(tmp_path, monkeypatch):
+def test_legacy_output_budget_does_not_block_new_unlimited_dispatch(tmp_path, monkeypatch):
     case = prepare_case(tmp_path, "<p>First.</p>", ("First.",), output_budget_version=2)
-    monkeypatch.setattr(BodyJournal, "runtime", lambda *args, **kwargs: object())
+    original = BodyJournal.runtime
+    calls = []
+
+    async def transport(kind, payload):
+        calls.append(kind)
+        return answer(kind, payload)
+
+    monkeypatch.setattr(BodyJournal, "runtime", lambda self, *args, **kwargs: original(self, transport=transport))
     result = asyncio.run(run_translation(case.session.store.root))
-    assert result.status == "paused"
-    assert "output budget v2" in (result.reason or "")
-    assert result.http_attempts == 0
+    assert result.status == "translated"
+    assert "translate" in calls and "review" in calls
+    assert result.http_attempts == len(calls)
 
 
 @pytest.mark.parametrize("finish", ("length", "max_tokens"))

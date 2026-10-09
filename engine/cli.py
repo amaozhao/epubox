@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from engine.agents.models import build_run_model
+from engine.agents.pool import limit_workflows
 from engine.agents.runtime import (
     ATOMIC_PROMPT_VERSION,
     MAX_MODEL_INPUT_TOKENS,
@@ -94,6 +95,7 @@ def check_output(source: Path, output: Path, *, overwrite: bool) -> None:
         raise PermissionError(f"output directory is not writable: {output.parent}")
 
 
+@limit_workflows
 def translate_book(
     source: Path,
     *,
@@ -103,10 +105,10 @@ def translate_book(
     auto_extract: bool = True,
     provider: str = "agnes",
     max_input_tokens: int = MAX_MODEL_INPUT_TOKENS,
-    max_output_tokens: int = 8192,
+    max_output_tokens: int | None = None,
     limit: int | None = None,
     http_limit: int = 0,
-    concurrency: int = 2,
+    concurrency: int | None = None,
     epubcheck: str | None = None,
     overwrite: bool = False,
     repair_terms: bool = False,
@@ -118,7 +120,7 @@ def translate_book(
     source = source.resolve(strict=True)
     output = output or source.with_name(f"{source.stem}-cn.epub")
     provider = _provider(provider)
-    if min(max_input_tokens, max_output_tokens, concurrency) < 1 or http_limit < 0:
+    if min(max_input_tokens, concurrency or 2) < 1 or concurrency == 0 or http_limit < 0:
         raise ValueError("model limits must be positive and HTTP limit non-negative")
     chunk_limit = resolve_chunk_limit(limit)
     model_id = _model_id(provider)
@@ -132,11 +134,11 @@ def translate_book(
         "context_unlimited": True,
         "max_input_tokens": max_input_tokens,
         "max_source_tokens": chunk_limit,
-        "max_output_tokens": max_output_tokens,
+        "source_hard_limit": chunk_limit,
         "input_budget_version": 2,
-        "output_budget_version": 6,
+        "output_budget_version": 7,
         "run_http_limit": http_limit,
-        "concurrency": concurrency,
+        "concurrency": 2 if provider == "agnes" else concurrency or 2,
     }
     if provider == "agnes":
         translation_config["rpm"] = settings.AGNES_TEXT_RPM
@@ -187,7 +189,7 @@ def translate_book(
         check_output(source, output, overwrite=overwrite)
         assert config.run_id is not None
         _write_source_hint(work_root / source_hash / config.run_id, source, source_hash, config.run_id)
-        model = build_run_model(provider, model_id, max_output_tokens=max_output_tokens)
+        model = build_run_model(provider, model_id, max_output_tokens=None)
         checker = checker_for_source(source, epubcheck)
         if resumable_work_dir is not None:
             from engine.services.session import remember
@@ -273,8 +275,7 @@ def _advance_adjacent(source, output, config, epubcheck, overwrite, progress, ex
                 extraction_config=dict(previous.extraction_config),
                 translation_config=dict(previous.translation_config)
                 | {
-                    "max_output_tokens": config.translation_config["max_output_tokens"],
-                    "output_budget_version": 6,
+                    "output_budget_version": 7,
                 },
             )
             state.reset_records(root)
@@ -302,13 +303,10 @@ def _advance_adjacent(source, output, config, epubcheck, overwrite, progress, ex
         check_output(source, output, overwrite=overwrite)
         _write_source_hint(root, source, str(config.expected_source_hash), run_id)
         translation = config.translation_config
-        output_tokens = translation.get("max_output_tokens")
-        if type(output_tokens) is not int or output_tokens < 1:
-            raise ValueError("max_output_tokens must be a positive integer")
         model = build_run_model(
             str(translation["provider"]),
             str(translation["model"]),
-            max_output_tokens=output_tokens,
+            max_output_tokens=None,
         )
         return asyncio.run(
             _advance_source(
@@ -530,13 +528,10 @@ def resume_book(
         preparation.translation_config if extraction.get("strategy") == ATOMIC_TERM_PLANNER_VERSION else extraction
     )
     provider = _provider(str(model_config["provider"]))
-    output_tokens = model_config.get("max_output_tokens", 4096)
-    if type(output_tokens) is not int or output_tokens < 1:
-        raise ValueError("frozen max_output_tokens must be a positive integer")
     model = build_run_model(
         provider,
         str(model_config["model"]),
-        max_output_tokens=output_tokens,
+        max_output_tokens=None,
     )
     checker = checker_for_source(source, epubcheck)
     with AtomicStore(work_dir if state.compact(work_dir) else work_dir.parent).lock(blocking=False):

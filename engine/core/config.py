@@ -2,11 +2,14 @@
 Configuration settings for the Epubox application.
 """
 
+import os
 from pathlib import Path
 from typing import Literal
 
 from pydantic import PositiveInt
 from pydantic_settings import BaseSettings
+
+from engine.schemas.budget import MAX_CHUNK_TOKENS
 
 
 class Settings(BaseSettings):
@@ -66,7 +69,7 @@ class Settings(BaseSettings):
     CR_PROXY_BASE_URL: str = "http://3.93.42.33:3000/api/v1"
 
     # EPUB 分块配置
-    EPUB_CHUNK_MAX_TOKENS: PositiveInt = 2000
+    EPUB_CHUNK_MAX_TOKENS: PositiveInt = MAX_CHUNK_TOKENS
     EPUB_CHUNK_MIN_TOKENS: PositiveInt = 500
 
     # 日志设置
@@ -97,9 +100,32 @@ def get_settings() -> Settings:
     return settings
 
 
+def agnes_keys(configured: object | None = None) -> tuple[str, ...]:
+    """Return unique configured Agnes keys without persisting or logging them."""
+    configured = settings if configured is None else configured
+    values: dict[str, object] = {"AGNES_API_KEY": getattr(configured, "AGNES_API_KEY", "")}
+    extras = getattr(configured, "model_extra", None) or {}
+    values.update((name, extras[name]) for name in sorted(extras) if name.startswith("AGNES_API_KEY_"))
+    values.update(
+        (name, os.environ[name])
+        for name in sorted(os.environ)
+        if name == "AGNES_API_KEY" or name.startswith("AGNES_API_KEY_")
+    )
+
+    result: list[str] = []
+    for value in values.values():
+        if not isinstance(value, str):
+            continue
+        key = value.strip()
+        if key in {"", "sk-", "your-api-key-here"} or key in result:
+            continue
+        result.append(key)
+    return tuple(result)
+
+
 def resolve_chunk_limit(limit: int | None = None, *, configured: int | None = None) -> int:
     """Resolve an explicit chunk limit before the configured environment value."""
     value = limit if limit is not None else settings.EPUB_CHUNK_MAX_TOKENS if configured is None else configured
     if type(value) is not int or value < 1:
         raise ValueError("chunk token limit must be a positive integer")
-    return value
+    return min(value, MAX_CHUNK_TOKENS)

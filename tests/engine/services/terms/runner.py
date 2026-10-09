@@ -100,7 +100,7 @@ def test_paid_dispatch_reuses_the_validated_preflight_receipt(tmp_path: Path, mo
     monkeypatch.setattr(preflight_module, "load_preflight", forbidden)
     monkeypatch.setattr(preflight_module, "extract_resource", forbidden)
 
-    runner._guard_dispatch("terms", payload, runner.output_tokens)
+    runner._guard_dispatch("terms", payload)
 
 
 def test_paid_dispatch_rejects_changed_dependencies_without_full_repreflight(tmp_path: Path, monkeypatch) -> None:
@@ -121,7 +121,7 @@ def test_paid_dispatch_rejects_changed_dependencies_without_full_repreflight(tmp
     monkeypatch.setattr(preflight_module, "extract_resource", forbidden)
 
     with pytest.raises(TermBudgetPaused, match="source snapshot"):
-        runner._guard_dispatch("terms", payload, runner.output_tokens)
+        runner._guard_dispatch("terms", payload)
 
 
 def test_failed_term_window_does_not_stop_later_windows_or_reset_on_resume(tmp_path: Path) -> None:
@@ -377,14 +377,14 @@ def test_unplannable_term_windows_do_not_enter_an_unbounded_retry_loop(tmp_path:
     assert result.http_attempts == 0
 
 
-def test_term_payload_uses_compact_view_maps_and_complete_context_limit(tmp_path: Path) -> None:
+def test_term_payload_uses_compact_view_maps_without_legacy_output_reservation(tmp_path: Path) -> None:
     store, _item_ids = _prepare(tmp_path, context_tokens=1_000, max_output_tokens=900)
     runner = TermRunner(store, transport=lambda *_: None)
     item = runner.plan.items[0]
     payload = runner._payload((item,), "request-1")
     wire_item = payload["items"][0]
 
-    assert runner._input_limit() == 0
+    assert runner._input_limit() == 50_000
     assert isinstance(wire_item["views"], dict) and wire_item["views"]
     assert "context" not in wire_item
     assert len(payload["context"]) <= 2
@@ -445,7 +445,7 @@ def test_context_is_shared_once_and_excludes_all_primary_members(tmp_path: Path)
     shortened = runner._payload((first,), "request-1")
     shortened["context"].pop(0)
     incoming = runtime_input_budget("terms", shortened, algorithm_version=2)["estimated_input_tokens"]
-    runner.config["context_tokens"] = incoming + runner.output_tokens + 256
+    runner.config["max_input_tokens"] = incoming
     records = {first.item_id: runner._record(first)}
 
     batch, budgeted, _ = runner._next_batch((first,), records, "request-1")
@@ -484,7 +484,7 @@ def test_term_items_share_one_budgeted_request_and_charge_each_item(tmp_path: Pa
     assert all(store.read_extraction(item_id).counters["http_attempts"] == 1 for item_id in item_ids)
 
 
-def test_term_batches_reserve_output_for_at_most_three_items(tmp_path: Path) -> None:
+def test_term_batches_do_not_use_legacy_output_cap_as_an_item_limit(tmp_path: Path) -> None:
     store, item_ids = _prepare(tmp_path, max_output_tokens=4_096)
     batches: list[tuple[str, ...]] = []
 
@@ -505,7 +505,7 @@ def test_term_batches_reserve_output_for_at_most_three_items(tmp_path: Path) -> 
     result = asyncio.run(TermRunner(store, transport=transport).run())
 
     assert result.status == "closed"
-    assert all(1 <= len(batch) <= 3 for batch in batches)
+    assert batches == [item_ids]
     assert tuple(item_id for batch in batches for item_id in batch) == item_ids
 
 
@@ -544,7 +544,8 @@ def test_oversized_term_item_is_local_and_later_items_continue(tmp_path: Path, m
     assert all(item_ids[0] not in request.item_ids for request in TermRunner(store, transport=transport)._requests())
 
 
-def test_truncated_multi_item_response_retries_smaller_batches(tmp_path: Path) -> None:
+@pytest.mark.parametrize("finish_reason", ("length", "max_tokens"))
+def test_truncated_multi_item_response_retries_smaller_batches(tmp_path: Path, finish_reason: str) -> None:
     store, item_ids = _prepare(tmp_path)
     batches: list[tuple[str, ...]] = []
 
@@ -555,7 +556,7 @@ def test_truncated_multi_item_response_retries_smaller_batches(tmp_path: Path) -
         if len(batches) == 1:
             return {
                 "raw": "",
-                "finish_reason": "length",
+                "finish_reason": finish_reason,
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             }
         return {
@@ -705,7 +706,8 @@ def test_journaled_input_over_limit_pauses_before_fresh_http(tmp_path: Path, mon
     assert request.attempts[0].usage is not None and request.attempts[0].usage.input_tokens == 50_001
 
 
-def test_replayed_truncated_batch_keeps_binary_split(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("finish_reason", ("length", "max_tokens"))
+def test_replayed_truncated_batch_keeps_binary_split(tmp_path: Path, monkeypatch, finish_reason: str) -> None:
     store, item_ids = _prepare(tmp_path)
     items = {item.item_id: item for item in store.read_term_plan().items}
     active = item_ids[:4]
@@ -727,7 +729,7 @@ def test_replayed_truncated_batch_keeps_binary_split(tmp_path: Path, monkeypatch
         batches.append(requested)
         return {
             "raw": "",
-            "finish_reason": "length",
+            "finish_reason": finish_reason,
             "usage": {"input_tokens": 1, "output_tokens": 1},
         }
 

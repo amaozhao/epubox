@@ -115,13 +115,14 @@ def active_case(tmp_path: Path, **translation):
     return source, result
 
 
-def test_translate_help_separates_source_input_and_output_limits() -> None:
+def test_translate_help_keeps_source_input_limits_and_removes_output_limit() -> None:
     result = CliRunner().invoke(app, ["translate", "--help"], terminal_width=200)
     command = cast(Group, typer.main.get_command(app)).commands["translate"]
     options = {option for parameter in command.params for option in parameter.opts}
 
     assert result.exit_code == 0
-    assert {"--limit", "--max-input-tokens", "--max-output-tokens"}.issubset(options)
+    assert {"--limit", "--max-input-tokens"}.issubset(options)
+    assert "--max-output-tokens" not in options
     assert "--context-tokens" not in options
 
 
@@ -169,8 +170,10 @@ def test_translate_freezes_atomic_versions_and_explicit_chunk_limit(
     assert config.extraction_config["strategy"] == ATOMIC_TERM_PLANNER_VERSION
     assert config.translation_config["prompt_version"] == "epubox-members-1"
     assert config.translation_config["input_budget_version"] == 2
-    assert config.translation_config["output_budget_version"] == 6
-    assert config.translation_config["max_source_tokens"] == 5000
+    assert config.translation_config["output_budget_version"] == 7
+    assert "max_output_tokens" not in config.translation_config
+    assert config.translation_config["max_source_tokens"] == 1500
+    assert config.translation_config["source_hard_limit"] == 1500
     assert config.translation_config["max_input_tokens"] == 24000
     assert config.translation_config["rpm"] == cli.settings.AGNES_TEXT_RPM
     from engine.services.legacy import _expected_configs
@@ -214,7 +217,7 @@ def test_implicit_environment_limit_change_reuses_run_but_explicit_change_refuse
     assert run_ids == [first.work_dir.name]
     assert resumed == [first.work_dir]
     with pytest.raises(ValueError, match="different frozen configuration"):
-        cli.translate_book(source, work_root=work_root, limit=5000)
+        cli.translate_book(source, work_root=work_root, limit=1000)
 
 
 def test_startup_progress_is_emitted_before_source_hashing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -282,7 +285,7 @@ def test_atomic_batch_progress_keeps_estimates_reserves_and_actual_usage_distinc
 
     assert "批次=tx-1" in output and "结果=修订，修订=是" in output and "耗时=2.5秒" in output
     assert "输入估算=1800 tokens" in output and "输入预留=2956 tokens" in output
-    assert "输出预留=4096 tokens" in output and "实际累计输出=777 tokens" in output
+    assert "输出估算=4096 tokens（未设上限）" in output and "实际累计输出=777 tokens" in output
     assert "本次实际输入=333 tokens" in output and "本次实际输出=77 tokens" in output
     assert "原因=术语已修正" in output
 
@@ -382,7 +385,7 @@ def test_atomic_resume_uses_frozen_body_model_and_nondefault_output_cap(
     result = cli.resume_book(work_dir, output=tmp_path / "book-cn.epub")
 
     assert result.status == "paused"
-    assert built == [("cr_proxy", "body-model", 8192)]
+    assert built == [("cr_proxy", "body-model", None)]
     assert automatic == [False]
 
 
@@ -562,7 +565,8 @@ def test_v3_cli_pipeline_reserves_full_output_and_completed_resume_sends_nothing
     result = cli.translate_book(source, auto_extract=False, progress=events.append)
     assert result.status == "completed"
     requests = [event for event in events if event.get("event") == "request"]
-    assert requests and all(event["reserved_output_tokens"] == 8192 for event in requests)
+    assert requests and all(event["reserved_output_tokens"] > 0 for event in requests)
+    assert all(event["reserved_output_tokens"] < 8192 for event in requests)
     before = len(calls)
     repeated = cli.translate_book(source, auto_extract=False)
     assert repeated.status == "completed"
@@ -650,7 +654,6 @@ def test_matching_explicit_option_resumes_without_automatic_retry(tmp_path, monk
     (
         ({"provider": "agnes"}, "provider"),
         ({"max_input_tokens": 50000}, "max_input_tokens"),
-        ({"max_output_tokens": 4096}, "max_output_tokens"),
         ({"limit": 2000}, "limit"),
         ({"http_limit": 0}, "http_limit"),
         ({"concurrency": 2}, "concurrency"),

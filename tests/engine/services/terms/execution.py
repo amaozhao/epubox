@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from engine.agents.runtime import ProviderError
+from engine.agents.runtime import ProviderError, model_input_budget
 from engine.schemas.contracts import TermExtractionRecord
 from engine.services.atomic import IdentityMismatch
 from engine.services.terms.runner import TermRunner
@@ -28,8 +28,18 @@ def _response(payload: dict) -> dict:
     }
 
 
-def test_concurrency_refills_before_the_slow_batch_finishes(tmp_path: Path) -> None:
-    store, item_ids = _prepare(tmp_path, concurrency=2, max_output_tokens=1_300)
+def _one_item_batches(monkeypatch) -> None:
+    def measured(kind, payload, *, algorithm_version=1):
+        return model_input_budget(kind, payload, algorithm_version=algorithm_version) | {
+            "estimated_input_tokens": len(payload["items"]) * 1_000
+        }
+
+    monkeypatch.setattr("engine.services.terms.runner.model_input_budget", measured)
+
+
+def test_concurrency_refills_before_the_slow_batch_finishes(tmp_path: Path, monkeypatch) -> None:
+    store, item_ids = _prepare(tmp_path, concurrency=2, max_input_tokens=1_500)
+    _one_item_batches(monkeypatch)
     active: set[str] = set()
     started: list[str] = []
     third_started = asyncio.Event()
@@ -63,8 +73,9 @@ def test_concurrency_refills_before_the_slow_batch_finishes(tmp_path: Path) -> N
     assert len(started) == len(set(started)) == len(item_ids)
 
 
-def test_pause_drains_paid_response_and_resume_skips_it(tmp_path: Path) -> None:
-    store, item_ids = _prepare(tmp_path, concurrency=2, max_output_tokens=1_300)
+def test_pause_drains_paid_response_and_resume_skips_it(tmp_path: Path, monkeypatch) -> None:
+    store, item_ids = _prepare(tmp_path, concurrency=2, max_input_tokens=1_500)
+    _one_item_batches(monkeypatch)
     pause_started = asyncio.Event()
     calls: Counter[str] = Counter()
 
@@ -98,7 +109,8 @@ def test_pause_drains_paid_response_and_resume_skips_it(tmp_path: Path) -> None:
 
 
 def test_cancel_keeps_completed_journal_and_unknown_attempt_for_resume(tmp_path: Path, monkeypatch) -> None:
-    store, item_ids = _prepare(tmp_path, concurrency=2, max_output_tokens=1_300)
+    store, item_ids = _prepare(tmp_path, concurrency=2, max_input_tokens=1_500)
+    _one_item_batches(monkeypatch)
     items = {item.item_id: item for item in store.read_term_plan().items}
     for item_id in item_ids[2:]:
         item = items[item_id]

@@ -28,6 +28,16 @@ WRAPPER_HEADROOM_TOKENS = 256
 BUDGET_STRATEGY = "cl100k+50pct+256"
 
 
+def request_source_tokens(payload: Mapping[str, Any], tokenizer_model: str) -> int:
+    """Count translatable source text, excluding markers and shared context."""
+    items = payload.get("items")
+    if not isinstance(items, list) or any(not isinstance(item, Mapping) for item in items):
+        raise TypeError("body request requires an items array")
+    _validate_items(items)
+    tokenizer, _name, _fallback = _tokenizer(tokenizer_model)
+    return sum(_projection_parts(_source(item), tokenizer)[0] for item in items)
+
+
 def measure_budget(
     *,
     stage: BudgetStage,
@@ -49,14 +59,14 @@ def measure_budget(
     messages = (
         request_messages(stage, payload, compact=True, wire_version="epubox-wire-5")
         if limits.output_version == 5
-        else request_messages(stage, payload, compact=limits.output_version == 6)
+        else request_messages(stage, payload, compact=limits.output_version in {6, 7})
     )
 
     tokenizer, tokenizer_name, fallback = _tokenizer(tokenizer_model)
     source_wire = [{"item_id": _item_id(item), "source": _source(item)} for item in items]
     source_tokens = (
         sum(_projection_parts(_source(item), tokenizer)[0] for item in items)
-        if limits.output_version in {4, 5, 6}
+        if limits.output_version in {4, 5, 6, 7}
         else _count(_json(source_wire), tokenizer)
     )
     input_tokens = _count(_json({"messages": list(messages)}), tokenizer)
@@ -72,7 +82,7 @@ def measure_budget(
                 raise ValueError(f"review actual budget requires saved targets: {', '.join(missing)}")
         elif review_targets == "estimated":
             output_items = tuple(_without_target(item) for item in items)
-            if limits.output_version in {4, 5, 6}:
+            if limits.output_version in {4, 5, 6, 7}:
                 review_target_input_tokens = sum(
                     markers + math.ceil(text * limits.target_ratio)
                     for item in items
@@ -103,14 +113,14 @@ def measure_budget(
     output_tokenizer = _planner_tokenizer()
     if output_tokenizer is None or output_tokenizer.name != tokenizer_name:
         raise RuntimeError("output tokenizer does not match budget tokenizer")
-    if limits.output_version in {5, 6}:
+    if limits.output_version in {5, 6, 7}:
         output_tokens = _slotted_output_tokens(
             stage,
             output_items,
             payload,
             limits,
             tokenizer,
-            formatted=limits.output_version == 6,
+            formatted=limits.output_version in {6, 7},
         )
     elif limits.output_version == 4:
         output_tokens = _v4_output_tokens(stage, output_items, payload, limits, estimate_config, tokenizer)
@@ -122,6 +132,7 @@ def measure_budget(
             request_id=str(payload.get("request_id", "r00000000000000000000000000000000")),
         )
     if limits.output_version == 3:
+        assert limits.output_tokens is not None
         estimated_output = (
             output_tokens + math.ceil(output_tokens * TOKENIZER_MARGIN_PERCENT / 100) + WRAPPER_HEADROOM_TOKENS
         )
@@ -133,10 +144,11 @@ def measure_budget(
         failures.append(f"source budget {source_tokens} exceeds {limits.source_ceiling}")
     if input_reserve > input_limit:
         failures.append(f"input budget {input_reserve} exceeds {input_limit}")
-    if output_tokens > limits.output_tokens:
+    if limits.output_tokens is not None and output_tokens > limits.output_tokens:
         failures.append(f"output budget {output_tokens} exceeds {limits.output_tokens}")
-    if not limits.context_unlimited and context_tokens > limits.context_tokens:
-        failures.append(f"context budget {context_tokens} exceeds {limits.context_tokens}")
+    context_gate = input_reserve + limits.safety_tokens if limits.output_version == 7 else context_tokens
+    if not limits.context_unlimited and context_gate > limits.context_tokens:
+        failures.append(f"context budget {context_gate} exceeds {limits.context_tokens}")
 
     return BudgetResult(
         stage=stage,
@@ -160,12 +172,13 @@ def measure_budget(
             safety_tokens=limits.safety_tokens,
             target_ratio=limits.target_ratio,
             source_limit=limits.source_ceiling,
+            source_hard_limit=limits.source_hard_limit,
             input_limit=input_limit,
             output_limit=limits.output_tokens,
             context_limit=limits.context_tokens,
             context_unlimited=limits.context_unlimited,
         ),
-        wire_hash=request_wire_hash(stage, payload, output_tokens),
+        wire_hash=request_wire_hash(stage, payload, None if limits.output_version == 7 else output_tokens),
     )
 
 
@@ -238,7 +251,7 @@ def _v4_output_tokens(
         content += markers + math.ceil(text * limits.target_ratio)
     complete = envelope + content
     reserved = complete + math.ceil(complete * TOKENIZER_MARGIN_PERCENT / 100) + WRAPPER_HEADROOM_TOKENS
-    return max(limits.output_tokens, reserved)
+    return reserved if limits.output_tokens is None else max(limits.output_tokens, reserved)
 
 
 def _slotted_output_tokens(
@@ -280,7 +293,7 @@ def _slotted_output_tokens(
     encoded = json.dumps(response, ensure_ascii=False, sort_keys=True, indent=2) if formatted else _json(response)
     complete = text_tokens + _count(encoded, tokenizer)
     reserved = complete + math.ceil(complete * TOKENIZER_MARGIN_PERCENT / 100) + WRAPPER_HEADROOM_TOKENS
-    return max(limits.output_tokens, reserved)
+    return reserved if limits.output_tokens is None else max(limits.output_tokens, reserved)
 
 
 def _item_id(item: Mapping[str, Any]) -> str:
@@ -322,4 +335,4 @@ def _validate_items(items: Sequence[Mapping[str, Any]]) -> None:
             raise ValueError(f"budget item {item_id} has conflicting targets")
 
 
-__all__ = ["BUDGET_VERSION", "BudgetLimits", "BudgetResult", "measure_budget"]
+__all__ = ["BUDGET_VERSION", "BudgetLimits", "BudgetResult", "measure_budget", "request_source_tokens"]

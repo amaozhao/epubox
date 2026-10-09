@@ -9,7 +9,7 @@ import stat as statmod
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -387,6 +387,27 @@ def header(root: Path | str) -> Mapping[str, Any]:
     return _header(_load(root))
 
 
+def dependency_fingerprint(
+    root: Path | str,
+    *,
+    exact: Sequence[str] = (),
+    prefixes: Sequence[str] = (),
+) -> tuple[tuple[str, int, str], ...]:
+    """Bind selected record contents without treating runtime reloads as source changes."""
+    root = Path(root).resolve()
+    selected = set(exact)
+    prefix_values = tuple(prefixes)
+    with _cache_lock:
+        records = _view(root)["records"]
+        return tuple(
+            sorted(
+                (key, record["stamp"], record["data"])
+                for key, record in records.items()
+                if key in selected or key.startswith(prefix_values)
+            )
+        )
+
+
 def import_records(root: Path | str, legacy_workdir: Path | str) -> None:
     root = Path(root).resolve()
     if not compact(root):
@@ -661,6 +682,7 @@ __all__ = [
     "artifact",
     "batch",
     "compact",
+    "dependency_fingerprint",
     "exists",
     "files",
     "glob",

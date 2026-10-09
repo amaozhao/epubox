@@ -20,11 +20,13 @@ from tests.engine.execution.support import (
 
 
 @pytest.mark.asyncio
-async def test_one_oversized_item_does_not_upgrade_or_fail_its_batch_siblings(
+async def test_one_oversized_input_does_not_dispatch_or_fail_its_batch_siblings(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = await ready_batch_store(tmp_path, "oversized-run")
-    engine = TranslationEngine(store, transport=PartialBatchTransport())
+    transport = PartialBatchTransport()
+    transport.omitted = "disabled"
+    engine = TranslationEngine(store, transport=transport)
     jobs = engine._ready_jobs()
     bad = jobs[0]
     normal_ids = {job.item_id for job in jobs[1:]}
@@ -38,12 +40,14 @@ async def test_one_oversized_item_does_not_upgrade_or_fail_its_batch_siblings(
 
     monkeypatch.setattr(engine, "_payload_item", payload)
     batches = engine._pack_jobs(jobs)
-    planned_ids = {job.item_id for batch in batches for job in batch}
+    for batch in batches:
+        await engine._run_batch(batch)
+    dispatched_ids = {item_id for stage, item_ids in transport.calls if stage == "translate" for item_id in item_ids}
 
-    assert bad.item_id not in planned_ids
-    assert normal_ids.issubset(planned_ids)
+    assert bad.item_id not in dispatched_ids
+    assert normal_ids.issubset(dispatched_ids)
     assert store.read_unit(bad.unit_id).items[bad.item_id].status == ItemStatus.NEEDS_ATTENTION
-    assert all(store.read_unit(job.unit_id).items[job.item_id].status == ItemStatus.PENDING for job in jobs[1:])
+    assert all(store.read_unit(job.unit_id).items[job.item_id].status == ItemStatus.LOCAL_VALID for job in jobs[1:])
 
 
 @pytest.mark.asyncio

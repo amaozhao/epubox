@@ -38,11 +38,13 @@ from engine.services.terms.planning import (
     _unit_lanes,
 )
 
-_TERM_OUTPUT_TOKENS_PER_ITEM = 1_300
-
 
 class TermBudgetPaused(RuntimeError):
     pass
+
+
+def _response_truncated(finish_reason: object) -> bool:
+    return finish_reason in {"length", "max_tokens"}
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,7 @@ class TermRunner:
         if model is not None and getattr(model, "id", config["model"]) != config["model"]:
             raise ValueError("provider model differs from frozen terminology identity")
         self.config = config
+        # Historical output limits are retained only as TPM traffic estimates.
         self.output_tokens = _positive_int(config.get("max_output_tokens"), 4096)
         self.max_concurrency = _positive_int(config.get("concurrency"), 2)
         configured_limit = _nonnegative_int(config.get("run_http_limit"), 0)
@@ -103,7 +106,7 @@ class TermRunner:
             rpm=_optional_positive_int(config.get("rpm")),
             tpm=_optional_positive_int(config.get("tpm")),
             max_inflight=self.max_concurrency,
-            model_max_output_tokens=self.output_tokens,
+            model_max_output_tokens=None,
             reserve_attempt=self._reserve,
             finish_attempt=self._finish,
             persist_response=self.store.save_model_response,
@@ -111,6 +114,7 @@ class TermRunner:
             input_budget_version=2,
             request_timeout_seconds=float(timeout),
         )
+        self.max_concurrency = self.runtime.workflow_capacity
 
     def _requests(self) -> tuple[RequestManifest, ...]:
         for path in sorted(state.glob(self.store.root / "requests", "*.json")):
@@ -447,7 +451,7 @@ class TermRunner:
             elif attempt.state != "succeeded":
                 raise ValueError("journaled term response has an invalid attempt state")
             try:
-                if response.finish_reason == "length":
+                if _response_truncated(response.finish_reason):
                     raise ProtocolError("term response was truncated")
                 return self._accept_response(item, record, request_id, response.raw, set(request.item_ids))
             except ProtocolError as error:
@@ -463,12 +467,9 @@ class TermRunner:
         input_cap = self.config.get("max_input_tokens", self.preparation.translation_config.get("max_input_tokens"))
         if input_cap is not None:
             limits.append(_positive_int(input_cap, MAX_MODEL_INPUT_TOKENS))
-        context_cap = self.config.get("context_tokens", self.preparation.translation_config.get("context_tokens"))
-        if context_cap is not None:
-            limits.append(max(0, _positive_int(context_cap, 32768) - self.output_tokens - 256))
         tpm = _optional_positive_int(self.config.get("tpm"))
         if tpm is not None:
-            limits.append(max(0, tpm - self.output_tokens))
+            limits.append(tpm)
         return min(limits)
 
     def _require_preflight(self) -> None:
@@ -496,30 +497,14 @@ class TermRunner:
         except (OSError, ValueError, StoreError) as error:
             raise TermBudgetPaused(f"atomic preflight is required before paid dispatch: {error}") from error
 
-    def _request_fits(self, kind, payload: dict[str, Any], output_tokens: int) -> bool:
+    def _request_fits(self, kind, payload: dict[str, Any]) -> bool:
         budget = model_input_budget(kind, payload, algorithm_version=2)
-        incoming = budget["estimated_input_tokens"]
-        config = self.config
-        context = _positive_int(
-            config.get("context_tokens", self.preparation.translation_config.get("context_tokens")), 32768
-        )
-        maximum = _positive_int(
-            config.get("max_input_tokens", self.preparation.translation_config.get("max_input_tokens")),
-            MAX_MODEL_INPUT_TOKENS,
-        )
-        tpm = _optional_positive_int(config.get("tpm"))
-        unlimited = self.preparation.translation_config.get("context_unlimited", False) is True
-        return (
-            incoming <= min(MAX_MODEL_INPUT_TOKENS, maximum)
-            and output_tokens <= self.output_tokens
-            and (unlimited or incoming + output_tokens + 256 <= context)
-            and (tpm is None or incoming + output_tokens <= tpm)
-        )
+        return budget["estimated_input_tokens"] <= self._input_limit()
 
-    def _guard_dispatch(self, kind, payload: dict[str, Any], output_tokens: int) -> None:
+    def _guard_dispatch(self, kind, payload: dict[str, Any]) -> None:
         self._require_preflight()
-        if not self._request_fits(kind, payload, output_tokens):
-            raise TermBudgetPaused("complete terminology request exceeds frozen input/output/TPM limits")
+        if not self._request_fits(kind, payload):
+            raise TermBudgetPaused("complete terminology request exceeds frozen input/TPM limits")
 
     @staticmethod
     def _feedback(record: TermExtractionRecord) -> tuple[str, ...]:
@@ -582,24 +567,20 @@ class TermRunner:
         payload: dict[str, Any] | None = None
         estimated_input = 0
         input_limit = self._input_limit()
-        # ponytail: historical p90 output is ~1,300 tokens/item; replace with adaptive sizing if models drift.
-        item_cap = min(256, max(1, self.output_tokens // _TERM_OUTPUT_TOKENS_PER_ITEM))
-        for item in pool[:item_cap]:
+        for item in pool[:256]:
             proposed = (*batch, item)
             proposed_payload = self._payload(
                 proposed,
                 request_id,
                 {entry.item_id: self._feedback(records[entry.item_id]) for entry in proposed},
             )
-            while proposed_payload["context"] and not self._request_fits(
-                "terms", proposed_payload, self.output_tokens
-            ):
+            while proposed_payload["context"] and not self._request_fits("terms", proposed_payload):
                 proposed_payload["context"].pop(0)
                 self._filter_context_terms(proposed_payload)
             proposed_input = model_input_budget("terms", proposed_payload, algorithm_version=2)[
                 "estimated_input_tokens"
             ]
-            if proposed_input > input_limit or not self._request_fits("terms", proposed_payload, self.output_tokens):
+            if proposed_input > input_limit or not self._request_fits("terms", proposed_payload):
                 if not batch:
                     records[item.item_id] = self._save(
                         records[item.item_id],
@@ -654,7 +635,7 @@ class TermRunner:
         if dispatch_stopped.is_set():
             return pause_reasons[0] if pause_reasons else None
         try:
-            self._guard_dispatch("terms", payload, self.output_tokens)
+            self._guard_dispatch("terms", payload)
         except TermBudgetPaused as error:
             dispatch_stopped.set()
             if not pause_reasons:
@@ -670,7 +651,8 @@ class TermRunner:
                     owner_id=item_ids[0],
                     item_ids=item_ids,
                     input_hashes={item.item_id: item.extraction_input_hash for item in batch},
-                    wire_hash=wire_hash("terms", payload, self.output_tokens),
+                    wire_hash=wire_hash("terms", payload, None),
+                    output_unlimited=True,
                 )
             )
         )
@@ -686,11 +668,12 @@ class TermRunner:
                 {
                     "request_id": request_id,
                     "item_ids": item_ids,
-                    "estimated_tokens": estimated_input,
-                    "output_tokens": self.output_tokens,
+                    "estimated_tokens": estimated_input + self.output_tokens,
+                    "estimated_output_tokens": self.output_tokens,
+                    "output_tokens": None,
                 },
             )
-            if response.get("finish_reason") == "length":
+            if _response_truncated(response.get("finish_reason")):
                 raise ProtocolError("term response was truncated")
         except (TermBudgetPaused, RuntimePaused) as error:
             dispatch_stopped.set()

@@ -204,7 +204,7 @@ def test_packing_hashes_stable_identity_components_once(monkeypatch: pytest.Monk
             calls[name] += 1
         return real_hash(value)
 
-    def limits_spy(value: BudgetLimits) -> dict[str, int | float]:
+    def limits_spy(value: BudgetLimits) -> dict[str, int | float | None]:
         nonlocal limit_calls
         limit_calls += 1
         return real_limits(value)
@@ -226,6 +226,25 @@ def test_packing_hashes_stable_identity_components_once(monkeypatch: pytest.Monk
     assert canonical_hash(packed) == "3219eb1ac551bd11147cbce7de8ed2cf2c26bbfd2664c81fff87d485d1c50f58"
     assert set(calls.values()) == {1}
     assert limit_calls == 1
+
+
+def test_packing_materializes_only_finalized_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = "".join(f"<p>Small paragraph {number}.</p>" for number in range(24))
+    inventory, report = prepared(body)
+    index = MemberIndex((inventory,), report)
+    calls = 0
+    real_batch = members_module._batch
+
+    def tracked(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_batch(*args, **kwargs)
+
+    monkeypatch.setattr(members_module, "_batch", tracked)
+    packed = pack_members("translate", index.members, glossary(), index, limits())
+
+    assert packed.ready and len(packed.batches) == 1
+    assert calls == len(packed.batches)
 
 
 def test_whole_pack_measures_only_the_complete_candidate(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -290,6 +290,8 @@ class RequestBatch(FrozenModel):
 def validate_batch_identity(batch: Any, *, allow_pieces: bool = False) -> Any:
     if batch.manifest.stage not in {"translate", "review"}:
         raise ValueError("body batches require translate or review stage")
+    if batch.manifest.source_hard_limit != batch.budget.identity.source_hard_limit:
+        raise ValueError("batch manifest and budget source hard limits differ")
     if not batch.items or tuple(item.item_id for item in batch.items) != batch.manifest.item_ids:
         raise ValueError("ordered batch members must match the manifest")
     if not allow_pieces and len({item.unit_id for item in batch.items}) != len(batch.items):
@@ -320,7 +322,9 @@ def validate_batch_identity(batch: Any, *, allow_pieces: bool = False) -> Any:
             raise ValueError("batch document owner differs from the manifest")
     if batch.budget.stage != batch.manifest.stage or not batch.budget.fits:
         raise ValueError("batch requires a fitting budget for its current stage")
-    payload_hash = wire_hash(batch.budget.stage, batch.payload, batch.budget.output_tokens)
+    payload_hash = wire_hash(
+        batch.budget.stage, batch.payload, None if batch.manifest.output_unlimited else batch.budget.output_tokens
+    )
     if batch.budget.wire_hash != payload_hash or batch.manifest.wire_hash != payload_hash:
         raise ValueError("batch budget and manifest must bind the complete payload")
     if batch.payload.get("request_id") != batch.manifest.request_id:

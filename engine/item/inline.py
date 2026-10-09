@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from functools import lru_cache
 from typing import Any
 
 from engine.schemas.bridge import AtomicItem
@@ -43,6 +44,12 @@ def parse_projection(projection: str) -> tuple[Event, ...]:
     """Decode a projection with a character scanner; malformed syntax is fatal."""
     if not isinstance(projection, str):
         raise ProjectionError("projection must be a string")
+    return _parse_projection(projection)
+
+
+@lru_cache(maxsize=128)
+def _parse_projection(projection: str) -> tuple[Event, ...]:
+    # Frozen events can be reused across repeated budget and binding checks.
 
     events: list[Event] = []
     text: list[str] = []

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,9 +10,10 @@ import pytest
 import engine.services.ready as ready_module
 from engine.item.members import pack_members
 from engine.schemas.contracts import canonical_json_bytes
+from engine.services import state
 from engine.services.atomic import IdentityMismatch
 from engine.services.preparation import prepare_translation
-from engine.services.ready import ReadySession, limits_for, read_ready
+from engine.services.ready import ReadySession, limits_for, limits_from_config, read_ready
 from engine.services.store import RunStore
 from tests.engine.epub.factory import make_epub
 from tests.engine.epub.preparation import StubChecker
@@ -23,6 +25,14 @@ def prepared(tmp_path: Path, **config):
     result = asyncio.run(prepare_translation(source, tmp_path / "work", atomic_config(**config), StubChecker()))
     assert result.status == "ready" and result.prepared is not None
     return RunStore(result.work_dir), result.prepared
+
+
+def compact_prepared(tmp_path: Path):
+    legacy, original = prepared(tmp_path)
+    root = tmp_path / "compact"
+    source = legacy.root / "source.epub"
+    state.initialize(root, source, original.preparation.source_hash, original.preparation.run_id, legacy.root)
+    return RunStore(root), original
 
 
 @pytest.mark.parametrize("directory", ("documents", "inventories", "members", "batches"))
@@ -73,6 +83,97 @@ def test_session_caches_full_verification_but_not_changed_dependency(tmp_path: P
     assert calls == 1
 
 
+def test_compact_session_ignores_runtime_writes_without_rescanning_dependencies(tmp_path: Path, monkeypatch) -> None:
+    store, original = compact_prepared(tmp_path)
+    session = ReadySession(store)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("runtime writes must not rescan immutable ready dependencies")
+
+    monkeypatch.setattr(session, "_fingerprint", forbidden)
+    monkeypatch.setattr(ready_module, "_read_ready", forbidden)
+    state.write(store.root / "report.json", b"{}")
+
+    assert session.verify() == original
+
+
+def test_compact_verification_survives_runtime_only_reload_during_read(tmp_path: Path, monkeypatch) -> None:
+    store, original = compact_prepared(tmp_path)
+    state.write(store.root / "report.json", b"{}")
+    read = ready_module._read_ready
+
+    def with_external_progress(*args, **kwargs):
+        result = read(*args, **kwargs)
+        path = store.root / "state.json"
+        value = json.loads(path.read_text())
+        value["records"]["report.json"]["data"] = '{"progress":1}'
+        path.write_text(json.dumps(value))
+        return result
+
+    monkeypatch.setattr(ready_module, "_read_ready", with_external_progress)
+    session = ReadySession(store)
+    assert session.verify() == original
+
+
+def test_compact_session_rejects_changed_logical_dependency(tmp_path: Path) -> None:
+    store, _ = compact_prepared(tmp_path)
+    session = ReadySession(store)
+    path = next(path for path in state.glob(store.root / "members", "*.json") if b"Translate" in state.read(path))
+    data = json.loads(state.text(path))
+    data["source_projection"] += "Changed."
+    state.write(path, json.dumps(data).encode())
+
+    with pytest.raises(IdentityMismatch, match="member"):
+        session.verify()
+
+
+def test_compact_session_rejects_pending_dependency_change(tmp_path: Path) -> None:
+    store, _ = compact_prepared(tmp_path)
+    session = ReadySession(store)
+    path = next(path for path in state.glob(store.root / "members", "*.json") if b"Translate" in state.read(path))
+    data = json.loads(state.text(path))
+    data["source_projection"] += "Changed."
+
+    with state.batch(store.root):
+        state.write(path, json.dumps(data).encode())
+        with pytest.raises(IdentityMismatch, match="member"):
+            session.verify()
+
+
+def test_compact_session_revalidates_consistent_external_tampering(tmp_path: Path, monkeypatch) -> None:
+    store, _ = compact_prepared(tmp_path)
+    session = ReadySession(store)
+    path = next(path for path in state.glob(store.root / "members", "*.json") if b"Translate" in state.read(path))
+    key = path.relative_to(store.root).as_posix()
+    physical = state.artifact(path)
+    shard = json.loads(physical.read_text())
+    record = shard["records"][key]
+    original_stamp = record["stamp"]
+    original_size = len(record["data"].encode())
+    record["data"] = record["data"].replace("Translate", "Changedxx")
+    assert "Changedxx" in record["data"]
+    assert record["stamp"] == original_stamp
+    assert len(record["data"].encode()) == original_size
+    raw = canonical_json_bytes(shard)
+    physical.write_bytes(raw)
+    saved = json.loads((store.root / "state.json").read_text())
+    metadata = saved["storage"]["shards"][physical.stem]
+    metadata.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+    (store.root / "state.json").write_bytes(canonical_json_bytes(saved))
+    calls = 0
+    original = ready_module._read_ready
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ready_module, "_read_ready", counted)
+    with pytest.raises(IdentityMismatch, match="member"):
+        session.verify()
+    assert calls == 1
+
+
 def test_session_recovery_uses_saved_batches_without_repacking(tmp_path: Path, monkeypatch) -> None:
     import engine.item.members as members_module
 
@@ -85,6 +186,15 @@ def test_session_recovery_uses_saved_batches_without_repacking(tmp_path: Path, m
     session = ReadySession(store)
     assert session.prepared == original
     assert set(session._prepared_batches) == set(original.plan.batch_hashes)
+
+
+def test_restored_batches_share_verified_source_members(tmp_path: Path) -> None:
+    store, original = prepared(tmp_path)
+    session = ReadySession(store)
+    for request_id, batch in session._prepared_batches.items():
+        assert ready_module.canonical_hash(batch) == original.plan.batch_hashes[request_id]
+        for member in batch.items:
+            assert member is session.index.items_by_id[member.item_id]
 
 
 def test_session_refuses_dependencies_changed_during_initial_verification(tmp_path: Path, monkeypatch) -> None:
@@ -172,7 +282,11 @@ def test_session_rebuilds_dynamic_payload_from_frozen_terminology(tmp_path: Path
     budget = measure_budget(
         stage="translate",
         payload=data["payload"],
-        limits=limits_for(session.prepared.preparation),
+        limits=limits_from_config(
+            session.prepared.plan.translation_config,
+            output_unlimited=batch.manifest.output_unlimited,
+            context_unlimited=batch.manifest.context_unlimited,
+        ),
         tokenizer_model="fake",
     )
     data["budget"] = budget.model_dump(mode="python")

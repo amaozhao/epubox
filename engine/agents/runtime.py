@@ -11,6 +11,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -23,7 +24,8 @@ from engine.core.tokens import _get_tokenizer, count_tokens
 from engine.schemas.internal import Attempt, Usage
 
 from . import wire
-from .models import build_primary_model
+from .models import build_key_models, build_primary_model
+from .pool import PoolUnavailable, WorkflowPool, WorkflowState, finite_cooldown
 from .streaming import StreamingOpenAILike
 
 type Stage = Literal["terms", "resolution", "translate", "review", "coherence"]
@@ -309,6 +311,7 @@ class ModelRuntime:
         provider_output_token_field: Literal["max_tokens", "max_completion_tokens"] | None = None,
         prior_input_limit_breach: int | None = None,
         input_budget_version: Literal[1, 2] = 1,
+        events: Callable[[dict[str, Any]], None] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -324,8 +327,6 @@ class ModelRuntime:
             raise ValueError("max_service_failures must be positive")
         if request_timeout_seconds <= 0:
             raise ValueError("request_timeout_seconds must be positive")
-        if model_max_output_tokens is not None and model_max_output_tokens < 1:
-            raise ValueError("model_max_output_tokens must be positive")
         if prior_input_limit_breach is not None and prior_input_limit_breach <= MAX_MODEL_INPUT_TOKENS:
             raise ValueError("prior_input_limit_breach must exceed the model input limit")
         if type(input_budget_version) is not int or input_budget_version not in {1, 2}:
@@ -333,8 +334,8 @@ class ModelRuntime:
 
         self.rpm = rpm
         self.tpm = tpm
+        self._max_inflight = max_inflight
         self._model_id = getattr(model, "id", None)
-        self._semaphore = asyncio.Semaphore(max_inflight)
         self._rate_lock = asyncio.Lock()
         self._reservations: deque[tuple[float, int]] = deque()
         self._cooldown_until = 0.0
@@ -351,30 +352,47 @@ class ModelRuntime:
         self._actual_input_limit_breached = prior_input_limit_breach
         self._input_budget_version = input_budget_version
         self._request_timeout_seconds = request_timeout_seconds
-        self._model_max_output_tokens = model_max_output_tokens
-        self._provider_output_token_field = provider_output_token_field
-        self._output_cap: ContextVar[int | None] = ContextVar("epubox_output_cap", default=None)
+        self._model_max_output_tokens = None
+        _ = model_max_output_tokens, provider_output_token_field
         self._compact: bool = transport is None
         self._physical_wire: ContextVar[bool] = ContextVar("epubox_physical_wire", default=False)
         self._sleep = sleep
         self._monotonic = monotonic
+        self._events = events
+        self._http_active = 0
+        self._http_peak = 0
+        self._workflow_metrics: ContextVar[dict[str, Any] | None] = ContextVar("epubox_workflow_metrics", default=None)
+        self._pool: WorkflowPool | None = None
+        self._api_keys: tuple[Any, ...] = ()
 
         self._transport: Transport
         if transport is None:
-            configured_model = copy.copy(model or build_primary_model())
-            self._model_id = getattr(configured_model, "id", None)
-            if self._provider_output_token_field is None:
-                provider = str(getattr(configured_model, "provider", "")).casefold()
-                self._provider_output_token_field = "max_tokens" if provider == "agnes" else "max_completion_tokens"
-            configured_model.max_retries = 0
-            configured_limit = getattr(configured_model, self._provider_output_token_field, None)
-            if self._model_max_output_tokens is None and isinstance(configured_limit, int):
-                self._model_max_output_tokens = configured_limit
-            elif isinstance(configured_limit, int) and self._model_max_output_tokens is not None:
-                self._model_max_output_tokens = min(self._model_max_output_tokens, configured_limit)
-            self._transport = self._agno_transport(configured_model)
+            source_model = model or build_primary_model()
+            pooled = bool(getattr(source_model, "_epubox_keys", ()))
+            key_models = build_key_models(source_model)
+            configured_models = tuple(item if pooled else copy.copy(item) for item in key_models)
+            self._model_id = getattr(source_model, "id", None)
+            for item in configured_models:
+                item.max_retries = 0
+            transports = tuple(self._agno_transport(item) for item in configured_models)
+            self._transport = transports[0]
+            self._api_keys = tuple(getattr(item, "api_key", None) for item in configured_models)
+            if pooled:
+                pool_state = getattr(source_model, "_epubox_pool_state", None)
+                if not isinstance(pool_state, WorkflowState):
+                    pool_state = WorkflowState(len(transports))
+                    source_model._epubox_pool_state = pool_state
+                self._pool = WorkflowPool(
+                    transports,
+                    rpm=rpm,
+                    tpm=tpm,
+                    sleep=sleep,
+                    monotonic=monotonic,
+                    state=pool_state,
+                )
         else:
             self._transport = transport
+        self._semaphore = asyncio.Semaphore(self._pool.size if self._pool is not None else max_inflight)
 
     @property
     def input_budget_version(self) -> int:
@@ -388,23 +406,141 @@ class ModelRuntime:
     def model_max_output_tokens(self) -> int | None:
         return self._model_max_output_tokens
 
+    @property
+    def key_count(self) -> int:
+        return self._pool.size if self._pool is not None else 0
+
+    @property
+    def workflow_capacity(self) -> int:
+        return self._pool.capacity if self._pool is not None else self._max_inflight
+
+    @property
+    def snapshot(self) -> dict[str, int]:
+        keys = (
+            self._pool.snapshot()
+            if self._pool is not None
+            else {"key_count": 0, "enabled_keys": 0, "verified_keys": 0, "cooling_keys": 0, "leased_keys": 0}
+        )
+        return keys | {
+            "http_active": self._http_active,
+            "http_peak": self._http_peak,
+            "workflow_capacity": self.workflow_capacity,
+        }
+
+    @property
+    def workflow_stats(self) -> dict[str, Any]:
+        metrics = self._workflow_metrics.get()
+        if metrics is None:
+            return {
+                "keys_used": (),
+                "key_wait_seconds": 0.0,
+                "rate_wait_seconds": 0.0,
+                "http_seconds": 0.0,
+                "http_attempts": 0,
+            }
+        return {
+            "keys_used": tuple(sorted(metrics["keys_used"])),
+            "key_wait_seconds": metrics["key_wait_seconds"],
+            "rate_wait_seconds": metrics["rate_wait_seconds"],
+            "http_seconds": metrics["http_seconds"],
+            "http_attempts": metrics["http_attempts"],
+        }
+
+    @asynccontextmanager
+    async def workflow(self):
+        nested = self._workflow_metrics.get() is not None
+        token = None
+        if not nested:
+            token = self._workflow_metrics.set(
+                {
+                    "keys_used": set(),
+                    "key_wait_seconds": 0.0,
+                    "rate_wait_seconds": 0.0,
+                    "http_seconds": 0.0,
+                    "http_attempts": 0,
+                }
+            )
+        try:
+            if self._pool is None:
+                yield
+            else:
+                async with self._pool.workflow():
+                    yield
+        finally:
+            if token is not None:
+                self._workflow_metrics.reset(token)
+
+    def _metric(self, field: str, value: float) -> None:
+        metrics = self._workflow_metrics.get()
+        if metrics is not None:
+            metrics[field] += value
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        if self._events is None:
+            return
+        self._events(event)
+
+    def _key_event(self, key_slot: str, status_code: int | None) -> None:
+        snapshot = self.snapshot
+        if status_code in {401, 402, 403}:
+            state = "disabled"
+            reason = f"认证失败（HTTP {status_code}），已停用"
+        elif status_code == 429:
+            state = "cooling"
+            reason = "触发限流（HTTP 429），进入冷却"
+        else:
+            state = "cooling"
+            reason = f"服务失败（HTTP {status_code}），进入冷却" if status_code else "请求超时或连接失败，进入冷却"
+        self._emit(
+            {
+                "event": "key_state",
+                "key_slot": key_slot,
+                "state": state,
+                "status_code": status_code,
+                "notice": (
+                    f"密钥槽 {key_slot} {reason}；可尝试 {snapshot['enabled_keys']}/{snapshot['key_count']}，"
+                    f"已验证可用 {snapshot['verified_keys']}。"
+                ),
+                **snapshot,
+            }
+        )
+
+    def _verified_event(self, key_slot: str) -> None:
+        snapshot = self.snapshot
+        self._emit(
+            {
+                "event": "key_state",
+                "key_slot": key_slot,
+                "state": "verified",
+                "status_code": None,
+                "notice": (
+                    f"密钥槽 {key_slot} 已验证可用；可尝试 {snapshot['enabled_keys']}/{snapshot['key_count']}，"
+                    f"已验证可用 {snapshot['verified_keys']}。"
+                ),
+                **snapshot,
+            }
+        )
+
+    def _redact_provider_error(self, error: Exception) -> str:
+        message = str(error)
+        for key in self._api_keys:
+            message = _redact_api_key(message, key)
+        return message
+
     def _agno_transport(self, model: Any) -> Transport:
         async def call(kind: Stage, payload: dict[str, Any]) -> dict[str, Any]:
             request_model = copy.copy(model)
-            if self._provider_output_token_field == "max_tokens":
-                request_model.max_tokens = self._output_cap.get()
-                request_model.max_completion_tokens = None
-            else:
-                request_model.max_completion_tokens = self._output_cap.get()
             messages = request_messages(kind, payload, compact=self._physical_wire.get())
             formatted_messages = request_model._format_all_messages(
                 [Message(role=message["role"], content=message["content"]) for message in messages], False
             )
-            params = request_model.get_request_params(
-                response_format={"type": "json_object"}, tools=None, tool_choice=None, run_response=None
+            params = wire.unlimited_params(
+                request_model.get_request_params(
+                    response_format={"type": "json_object"}, tools=None, tool_choice=None, run_response=None
+                )
             )
             try:
-                client = _without_implicit_retries(request_model.get_async_client(), self._request_timeout_seconds)
+                client = _without_implicit_retries(model.get_async_client(), self._request_timeout_seconds)
                 if isinstance(request_model, StreamingOpenAILike):
                     stream = await client.chat.completions.create(
                         model=request_model.id,
@@ -540,6 +676,9 @@ class ModelRuntime:
         *,
         dispatch_guard: DispatchGuard | None = None,
     ) -> dict[str, Any]:
+        if self._pool is not None and not self._pool.active:
+            async with self.workflow():
+                return await self.invoke(kind, payload, context_manifest, dispatch_guard=dispatch_guard)
         budget = model_input_budget(kind, payload, algorithm_version=self._input_budget_version)
         compact = False
         if (
@@ -558,8 +697,6 @@ class ModelRuntime:
             ):
                 budget, compact = physical_budget, True
         estimated_input_tokens = budget["estimated_input_tokens"]
-        if estimated_input_tokens > MAX_MODEL_INPUT_TOKENS:
-            raise InputBudgetError(estimated_input_tokens)
         request_id = context_manifest.get("request_id") or payload.get("request_id")
         if not isinstance(request_id, str) or not request_id:
             raise ValueError("request_id is required")
@@ -579,15 +716,12 @@ class ModelRuntime:
         if legacy_estimated_tokens < 0:
             raise ValueError("estimated_tokens cannot be negative")
         output_tokens_value = context_manifest.get("output_tokens")
-        if type(output_tokens_value) is not int or output_tokens_value < 1:
-            raise ValueError("context manifest requires a positive output_tokens cap")
-        if self._model_max_output_tokens is None:
-            raise ValueError("model_max_output_tokens must be configured before using a request output cap")
-        if output_tokens_value > self._model_max_output_tokens:
-            raise RequestError("request output_tokens exceeds the configured model maximum", attempts=0)
-        estimated_tpm_tokens = estimated_input_tokens + output_tokens_value
-        if self.tpm is not None and estimated_tpm_tokens > self.tpm:
-            raise RequestError("estimated request tokens exceed TPM capacity", attempts=0)
+        if output_tokens_value is not None and (type(output_tokens_value) is not int or output_tokens_value < 1):
+            raise ValueError("context output_tokens must be null or a positive historical value")
+        estimated_output_tokens = context_manifest.get("estimated_output_tokens", output_tokens_value or 0)
+        if type(estimated_output_tokens) is not int or estimated_output_tokens < 0:
+            raise ValueError("estimated_output_tokens must be a non-negative integer")
+        estimated_tpm_tokens = estimated_input_tokens
 
         if self._prepare_request is not None:
             context = dict(context_manifest) | ({"physical_budget": budget} if compact else {})
@@ -602,15 +736,21 @@ class ModelRuntime:
                 if not isinstance(replayed, dict):
                     raise TypeError("replayed response must be a dictionary")
                 return replayed
+        wire.enforce_source_limit(kind, payload, self.model_id, context_manifest.get("source_hard_limit"))
+        if estimated_input_tokens > MAX_MODEL_INPUT_TOKENS:
+            raise InputBudgetError(estimated_input_tokens)
+        if self.tpm is not None and estimated_tpm_tokens > self.tpm:
+            raise RequestError("estimated request tokens exceed TPM capacity", attempts=0)
         self._ensure_dispatch_allowed()
 
         wire_metadata = (
             {
                 "wire_version": "epubox-wire-8" if payload.get("wire_version") == "epubox-wire-8" else wire.VERSION,
-                "wire_hash": wire_hash(kind, payload, output_tokens_value, compact=True),
+                "wire_hash": wire_hash(kind, payload, None, compact=True),
+                "output_unlimited": "true",
             }
             if compact
-            else {}
+            else {"output_unlimited": "true"}
         )
 
         for attempt_index in range(self._max_transport_retries + 1):
@@ -631,17 +771,38 @@ class ModelRuntime:
                         if budget["algorithm_version"] == 2
                         else {}
                     ),
-                    "reserved_output_tokens": output_tokens_value,
+                    "reserved_output_tokens": estimated_output_tokens,
+                    "estimated_output_tokens": estimated_output_tokens,
                     "estimated_tpm_tokens": estimated_tpm_tokens,
-                    "output_tokens": output_tokens_value,
+                    **({"output_tokens": output_tokens_value} if output_tokens_value is not None else {}),
                     "attempt_number": attempt_index + 1,
                 },
                 created_at=created_at,
                 metadata={key: value for key, value in wire_metadata.items()},
             )
+            key_wait_started = self._monotonic()
+            try:
+                transport = await self._pool.item() if self._pool is not None else self._transport
+            except PoolUnavailable as exc:
+                raise RuntimePaused(str(exc), status_code=401 if exc.all_disabled else None) from exc
+            finally:
+                self._metric("key_wait_seconds", max(0.0, self._monotonic() - key_wait_started))
+            key_metadata = {"key_slot": self._pool.slot_label} if self._pool is not None else {}
+            metrics = self._workflow_metrics.get()
+            if metrics is not None and key_metadata:
+                metrics["keys_used"].add(key_metadata["key_slot"])
+            if key_metadata:
+                attempt = attempt.model_copy(update={"metadata": attempt.metadata | key_metadata})
             async with self._semaphore:
                 self._ensure_dispatch_allowed()
-                await self._reserve_rate_capacity(estimated_tpm_tokens)
+                rate_wait_started = self._monotonic()
+                try:
+                    if self._pool is not None:
+                        await self._pool.reserve(estimated_tpm_tokens)
+                    else:
+                        await self._reserve_rate_capacity(estimated_tpm_tokens)
+                finally:
+                    self._metric("rate_wait_seconds", max(0.0, self._monotonic() - rate_wait_started))
                 self._ensure_dispatch_allowed()
                 if dispatch_guard is not None:
                     guarded = dispatch_guard()
@@ -665,13 +826,40 @@ class ModelRuntime:
                             finished_at=_utc_now(),
                         )
                     )
+                    if self._pool is not None:
+                        await asyncio.shield(self._pool.release())
                     raise
-                cap_token = self._output_cap.set(output_tokens_value)
                 wire_token = self._physical_wire.set(compact)
+                http_started = self._monotonic()
+                self._http_active += 1
+                self._http_peak = max(self._http_peak, self._http_active)
+                self._metric("http_attempts", 1)
+                self._emit(
+                    {
+                        "event": "http_start",
+                        "stage": kind,
+                        "request_id": request_id,
+                        "key_slot": key_metadata.get("key_slot"),
+                        **self.snapshot,
+                    }
+                )
                 try:
-                    result = await asyncio.wait_for(
-                        self._transport(kind, payload), timeout=self._request_timeout_seconds
-                    )
+                    try:
+                        result = await asyncio.wait_for(
+                            transport(kind, payload), timeout=self._request_timeout_seconds
+                        )
+                    finally:
+                        self._metric("http_seconds", max(0.0, self._monotonic() - http_started))
+                        self._http_active -= 1
+                        self._emit(
+                            {
+                                "event": "http_end",
+                                "stage": kind,
+                                "request_id": request_id,
+                                "key_slot": key_metadata.get("key_slot"),
+                                **self.snapshot,
+                            }
+                        )
                 except asyncio.CancelledError:
                     await asyncio.shield(
                         self._finish(
@@ -683,10 +871,12 @@ class ModelRuntime:
                             finished_at=_utc_now(),
                         )
                     )
+                    if self._pool is not None:
+                        await asyncio.shield(self._pool.release())
                     raise
                 except (ProviderError, OSError, TimeoutError) as exc:
                     status_code = _status_code(exc)
-                    error_text = str(exc)
+                    error_text = self._redact_provider_error(exc)
                     state: Literal["failed", "unknown"] = "failed" if status_code is not None else "unknown"
                     await self._finish(
                         request_id,
@@ -696,29 +886,51 @@ class ModelRuntime:
                         sent_at=sent_at,
                         finished_at=_utc_now(),
                     )
-                    if self._shared_service_failures and status_code in {401, 402, 403}:
+                    retryable = status_code is None or status_code in {401, 402, 403, 429} or status_code >= 500
+                    if self._pool is not None and retryable:
+                        cooldown = (
+                            finite_cooldown(getattr(exc, "retry_after", None), self._cooldown_seconds)
+                            if status_code == 429
+                            else min(self._cooldown_seconds, float(2**attempt_index))
+                        )
+                        all_disabled, all_exhausted = await self._pool.failed(
+                            cooldown=cooldown,
+                            disabled=status_code in {401, 402, 403},
+                            max_failures=self._max_service_failures,
+                        )
+                        self._key_event(str(key_metadata["key_slot"]), status_code)
+                        if all_disabled:
+                            raise RuntimePaused("all Agnes API keys are disabled", status_code=status_code) from exc
+                        if self._shared_service_failures and all_exhausted:
+                            raise RuntimePaused(
+                                "all Agnes API keys exhausted the service recovery limit",
+                                status_code=status_code,
+                            ) from exc
+                    elif self._shared_service_failures and status_code in {401, 402, 403}:
                         raise RuntimePaused(error_text, status_code=status_code) from exc
-                    if self._shared_service_failures and (
-                        status_code is None or status_code == 429 or status_code >= 500
+                    if (
+                        self._pool is None
+                        and self._shared_service_failures
+                        and (status_code is None or status_code == 429 or status_code >= 500)
                     ):
                         self._service_failures += 1
                         if self._service_failures >= self._max_service_failures:
                             raise RuntimePaused(
                                 "shared model service recovery limit exhausted", status_code=status_code
                             ) from exc
-                    retryable = status_code is None or status_code == 429 or status_code >= 500
                     if not retryable or attempt_index >= self._max_transport_retries:
                         raise RequestError(error_text, status_code=status_code, attempts=attempt_index + 1) from exc
+                    if self._pool is not None:
+                        continue
                     if status_code == 429:
                         retry_after = getattr(exc, "retry_after", None)
-                        cooldown = retry_after if isinstance(retry_after, (int, float)) else self._cooldown_seconds
+                        cooldown = finite_cooldown(retry_after, self._cooldown_seconds)
                         async with self._rate_lock:
                             self._cooldown_until = max(self._cooldown_until, self._monotonic() + cooldown)
                     else:
                         await self._sleep(2**attempt_index)
                     continue
                 finally:
-                    self._output_cap.reset(cap_token)
                     self._physical_wire.reset(wire_token)
 
                 usage_value = result.get("usage") if isinstance(result, Mapping) else None
@@ -745,7 +957,9 @@ class ModelRuntime:
 
                 if self._shared_service_failures:
                     self._service_failures = 0
-                metadata = _provider_metadata(metadata_value, finish_reason) | wire_metadata
+                if self._pool is not None and await self._pool.succeeded():
+                    self._verified_event(str(key_metadata["key_slot"]))
+                metadata = _provider_metadata(metadata_value, finish_reason) | wire_metadata | key_metadata
                 raw = result["raw"]
                 response = {
                     "raw": raw,

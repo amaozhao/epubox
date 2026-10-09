@@ -37,6 +37,7 @@ from engine.services.atomic import CorruptRecord, safe_id
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.custody import review_draft, review_feedback
 from engine.services.preflight import PreflightReport
+from engine.services.preflight import receipt_path as preflight_receipt
 from engine.services.ready import derived_record, limits_from_config
 from engine.services.store import RunStore
 
@@ -74,7 +75,7 @@ def plan_resume(work_dir: Path | str) -> ResumePlan:
         return ResumePlan("preparation", "unsupported_format", ("start_new_run",), ("old preparation format",))
     _ = preparation
     term_path = root / "glossary" / "plan.json"
-    preflight_path = root / "checks" / "preflight.json"
+    preflight_path = preflight_receipt(root)
     if state.exists(preflight_path) and not state.exists(term_path):
         try:
             value = strict_json_loads(state.read(preflight_path), max_bytes=None)
@@ -206,7 +207,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
             root / "preparation.json": plan.preparation_hash,
             root / "glossary.json": plan.glossary_file_sha256,
             root / "glossary" / "freeze.json": plan.freeze_file_sha256,
-            root / "checks" / "preflight.json": plan.preflight_file_sha256,
+            preflight_receipt(root): plan.preflight_file_sha256,
             **{
                 root / "documents" / f"{safe_id(identifier)}.json": digest
                 for identifier, digest in plan.document_hashes.items()
@@ -313,7 +314,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
 
 
 def _atomic_preflight(root: Path, ready: AtomicPreparedInput) -> PreflightReport:
-    value = strict_json_loads(state.read(root / "checks" / "preflight.json"), max_bytes=None)
+    value = strict_json_loads(state.read(preflight_receipt(root)), max_bytes=None)
     if (
         not isinstance(value, dict)
         or set(value) != {"format", "preparation_hash", "translation_hash", "report"}
@@ -358,7 +359,12 @@ def _compact_request_proofs(root, ready, members, records, index, requests) -> N
                 tuple(members[key] for key in request.item_ids),
                 ready.glossary,
                 index,
-                limits_from_config(ready.plan.translation_config, context_unlimited=request.context_unlimited),
+                limits_from_config(
+                    ready.plan.translation_config,
+                    context_unlimited=request.context_unlimited,
+                    output_unlimited=request.output_unlimited,
+                    source_hard_limit=request.source_hard_limit,
+                ),
                 targets=targets,
                 revisions=request.revisions if stage == "review" else None,
                 record_versions=request.record_versions,
@@ -415,7 +421,12 @@ def _atomic_record_frame(
         selected,
         ready.glossary,
         index,
-        limits_from_config(ready.plan.translation_config, context_unlimited=request.context_unlimited),
+        limits_from_config(
+            ready.plan.translation_config,
+            context_unlimited=request.context_unlimited,
+            output_unlimited=request.output_unlimited,
+            source_hard_limit=request.source_hard_limit,
+        ),
         record_versions=request.record_versions,
         plan_epochs=request.plan_epochs,
         feedback=request.feedback_by_item,

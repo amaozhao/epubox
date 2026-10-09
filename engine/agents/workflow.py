@@ -20,7 +20,9 @@ from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash
 from engine.schemas.members import MemberBatch, RequestMember
 from engine.schemas.ready import AtomicPreparedInput
 from engine.services import state
-from engine.services.ready import ReadySession, derived_record, limits_from_config
+from engine.services.ready import ReadySession, derived_record, limits_from_config, request_source_limit
+
+_CURRENT_SOURCE_LIMIT = object()
 
 type SaveCallback = Callable[[ItemRecord], None | Awaitable[None]]
 
@@ -33,6 +35,20 @@ class WorkflowResult:
 
 
 async def run_workflow(
+    prepared: AtomicPreparedInput,
+    batch: MemberBatch,
+    index: MemberIndex,
+    runtime: ModelRuntime,
+    *,
+    session: ReadySession,
+    save: SaveCallback,
+    records: Mapping[str, ItemRecord] | None = None,
+) -> WorkflowResult:
+    async with runtime.workflow():
+        return await _run_workflow(prepared, batch, index, runtime, session=session, save=save, records=records)
+
+
+async def _run_workflow(
     prepared: AtomicPreparedInput,
     batch: MemberBatch,
     index: MemberIndex,
@@ -396,17 +412,25 @@ def _guard_common(
         raise ValueError("atomic workflow requires runtime input budget version 2")
     if runtime.model_id != config.get("model"):
         raise ValueError("runtime model differs from the frozen ready plan")
-    if runtime.model_max_output_tokens is None or runtime.model_max_output_tokens < _integer(
-        config, "max_output_tokens"
+    declared = config.get("source_hard_limit")
+    if declared is not None and (
+        type(declared) is not int
+        or batch.manifest.source_hard_limit is None
+        or batch.manifest.source_hard_limit > declared
     ):
-        raise ValueError("runtime output capacity is below the frozen ready plan")
+        raise ValueError("request source hard limit exceeds the frozen ready plan")
     if index.source_hash != plan.source_hash or prepared.glossary.freeze_id != plan.freeze_id:
         raise ValueError("workflow source or glossary differs from the ready plan")
     if batch.manifest.freeze_id != plan.freeze_id or batch.manifest.glossary_file_sha256 != canonical_hash(
         prepared.glossary
     ):
         raise ValueError("request glossary differs from the ready plan")
-    limits = _limits(prepared, context_unlimited=batch.manifest.context_unlimited)
+    limits = _limits(
+        prepared,
+        context_unlimited=batch.manifest.context_unlimited,
+        output_unlimited=batch.manifest.output_unlimited,
+        source_hard_limit=batch.manifest.source_hard_limit,
+    )
     identity = batch.budget.identity
     if (
         identity.version != limits.output_version
@@ -428,12 +452,30 @@ def _guard_common(
             raise ValueError("request member owner differs from the committed ready plan")
 
 
-def _limits(prepared: AtomicPreparedInput, *, context_unlimited: bool = True):
-    return limits_from_config(prepared.plan.translation_config, context_unlimited=context_unlimited)
+def _limits(
+    prepared: AtomicPreparedInput,
+    *,
+    context_unlimited: bool = True,
+    output_unlimited: bool = True,
+    source_hard_limit: int | None | object = _CURRENT_SOURCE_LIMIT,
+):
+    return limits_from_config(
+        prepared.plan.translation_config,
+        context_unlimited=context_unlimited,
+        output_unlimited=output_unlimited,
+        source_hard_limit=(
+            request_source_limit(prepared.plan.translation_config)
+            if source_hard_limit is _CURRENT_SOURCE_LIMIT
+            else cast(int | None, source_hard_limit)
+        ),
+    )
 
 
 def _manifest(batch: MemberBatch) -> dict[str, Any]:
-    return batch.manifest.model_dump(mode="python") | {"output_tokens": batch.budget.output_tokens}
+    return batch.manifest.model_dump(mode="python") | {
+        "output_tokens": None if batch.manifest.output_unlimited else batch.budget.output_tokens,
+        "estimated_output_tokens": batch.budget.output_tokens,
+    }
 
 
 def _wire_items(batch: MemberBatch) -> dict[str, dict[str, Any]]:
@@ -584,6 +626,20 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
                 if initial is not None
                 else True
             ),
+            output_unlimited=(
+                request.output_unlimited
+                if request is not None
+                else initial.manifest.output_unlimited
+                if initial is not None
+                else False
+            ),
+            source_hard_limit=(
+                request.source_hard_limit
+                if request is not None
+                else initial.manifest.source_hard_limit
+                if initial is not None
+                else None
+            ),
         ),
         record_versions=request.record_versions if request is not None else versions,
         plan_epochs=request.plan_epochs if request is not None else {member.unit_id: 0 for member in members},
@@ -591,6 +647,38 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
         sparse=request.sparse if request is not None else False,
         feedback=request.feedback_by_item if request is not None else None,
     )
+    if (
+        request is None
+        and initial is None
+        and (len(packed.batches) != 1 or packed.batches[0].manifest.request_id != request_id)
+    ):
+        packed = pack_members(
+            "translate",
+            members,
+            session.prepared.glossary,
+            session.index,
+            _limits(session.prepared, context_unlimited=True, output_unlimited=True),
+            record_versions=versions,
+            plan_epochs={member.unit_id: 0 for member in members},
+            tokenizer_model=str(session.prepared.plan.translation_config["model"]),
+            sparse=False,
+        )
+    if (
+        request is None
+        and initial is None
+        and (len(packed.batches) != 1 or packed.batches[0].manifest.request_id != request_id)
+    ):
+        packed = pack_members(
+            "translate",
+            members,
+            session.prepared.glossary,
+            session.index,
+            _limits(session.prepared, context_unlimited=True, output_unlimited=True, source_hard_limit=None),
+            record_versions=versions,
+            plan_epochs={member.unit_id: 0 for member in members},
+            tokenizer_model=str(session.prepared.plan.translation_config["model"]),
+            sparse=False,
+        )
     if len(packed.batches) != 1 or packed.blocked:
         raise ValueError("saved translation frame is not a canonical fitting batch")
     batch = packed.batches[0]
@@ -752,7 +840,9 @@ async def _save_group(callback: SaveCallback, records: Sequence[ItemRecord]) -> 
     owner = getattr(callback, "__self__", None)
     save_many = getattr(callback, "save_many", None) or getattr(owner, "save_many", None)
     if callable(save_many):
-        save_many(tuple(records))
+        result = save_many(tuple(records))
+        if inspect.isawaitable(result):
+            await result
         return
     for record in records:
         await _save(callback, record)

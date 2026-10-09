@@ -133,29 +133,21 @@ async def test_coherence_budget_splits_before_manifest_and_transport(
 
 
 @pytest.mark.asyncio
-async def test_coherence_budget_reserves_output_only_when_tpm_is_configured(tmp_path) -> None:
+async def test_coherence_tpm_applies_only_to_input(tmp_path) -> None:
     store = await ready_batch_store(tmp_path, "coherence-tpm", tpm=40_000)
     engine = TranslationEngine(store, transport=PartialBatchTransport())
 
-    assert engine._coherence_input_limit() == 40_000 - engine.output_tokens
+    assert engine._coherence_input_limit() == 40_000
 
 
 @pytest.mark.asyncio
-async def test_coherence_minimum_output_splits_before_manifest_and_transport(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_coherence_output_estimate_does_not_split_request(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     chapter = "".join(f"<div><p>Item {index}.</p></div>" for index in range(8))
     store = await ready_batch_store(tmp_path, "coherence-output-split", {"chapter.xhtml": chapter})
     transport = PartialBatchTransport()
     transport.omitted = "disabled"
     engine = TranslationEngine(store, transport=transport)
-    original = engine._coherence_min_output_tokens
-
-    monkeypatch.setattr(
-        engine,
-        "_coherence_min_output_tokens",
-        lambda items: engine.output_tokens + 1 if len(items) > 3 else original(items),
-    )
+    monkeypatch.setattr(engine, "_coherence_min_output_tokens", lambda items: 1_000_000)
     result = await engine.run()
     coherence_calls = [ids for stage, ids in transport.calls if stage == "coherence"]
     manifests = [
@@ -165,9 +157,10 @@ async def test_coherence_minimum_output_splits_before_manifest_and_transport(
     ]
 
     assert result.status == "translated"
-    assert len(coherence_calls) > 1
-    assert all(len(ids) <= 3 for ids in coherence_calls)
-    assert all(len(manifest.item_ids) <= 3 for manifest in manifests)
+    assert len(coherence_calls) == 1
+    assert len(coherence_calls[0]) > 3
+    assert len(manifests) == 1 and manifests[0].output_unlimited is True
+    assert manifests[0].attempts[0].reservation["estimated_output_tokens"] == 1_000_000
 
 
 @pytest.mark.asyncio

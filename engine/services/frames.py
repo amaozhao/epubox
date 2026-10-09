@@ -194,7 +194,10 @@ def limits(journal: BodyJournal, request: RequestManifest):
     from engine.services.ready import limits_from_config
 
     return limits_from_config(
-        journal.session.prepared.plan.translation_config, context_unlimited=request.context_unlimited
+        journal.session.prepared.plan.translation_config,
+        context_unlimited=request.context_unlimited,
+        output_unlimited=request.output_unlimited,
+        source_hard_limit=request.source_hard_limit,
     )
 
 

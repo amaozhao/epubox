@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,7 +21,7 @@ from engine.core.tokens import count_tokens
 from engine.schemas.contracts import JsonValue, RequestManifest, Usage
 from engine.services.store import RunStore
 from engine.services.terms.freeze import ResolutionDecision, prepare_candidate_pool
-from engine.services.terms.runner import TermBudgetPaused, TermRunner
+from engine.services.terms.runner import TermBudgetPaused, TermRunner, _response_truncated
 
 
 @dataclass(frozen=True)
@@ -152,7 +153,7 @@ class TermResolutionRunner:
                     continue
                 self._finish_replayed_attempt(request.request_id, attempt, response)
                 try:
-                    if response.finish_reason == "length":
+                    if _response_truncated(response.finish_reason):
                         raise ProtocolError("resolution response was truncated")
                     result = validate_resolution_response(
                         response.raw,
@@ -253,17 +254,7 @@ class TermResolutionRunner:
             payload = self._payload(current, request_id)
             encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
             estimated_tokens = count_tokens(encoded) + self.term_runner.output_tokens
-            if self._minimal_v1_response_tokens(current) > self.term_runner.output_tokens:
-                self._save_group(
-                    group_id,
-                    {
-                        "decision": "defer",
-                        "status": "deferred_conflict",
-                        "reason": "unplannable_output_budget",
-                    },
-                )
-                continue
-            if not self.term_runner._request_fits("resolution", payload, self.term_runner.output_tokens):
+            if not self.term_runner._request_fits("resolution", payload):
                 self._save_group(
                     group_id,
                     {
@@ -284,11 +275,12 @@ class TermResolutionRunner:
                     owner_id=group_id,
                     item_ids=(group_id,),
                     input_hashes={group_id: input_hash},
-                    wire_hash=wire_hash("resolution", payload, self.term_runner.output_tokens),
+                    wire_hash=wire_hash("resolution", payload, None),
+                    output_unlimited=True,
                 )
             )
             try:
-                self.term_runner._guard_dispatch("resolution", payload, self.term_runner.output_tokens)
+                self.term_runner._guard_dispatch("resolution", payload)
                 response = await self.term_runner.runtime.invoke(
                     "resolution",
                     payload,
@@ -296,10 +288,11 @@ class TermResolutionRunner:
                         "request_id": request_id,
                         "item_ids": (group_id,),
                         "estimated_tokens": estimated_tokens,
-                        "output_tokens": self.term_runner.output_tokens,
+                        "estimated_output_tokens": self.term_runner.output_tokens,
+                        "output_tokens": None,
                     },
                 )
-                if response.get("finish_reason") == "length":
+                if _response_truncated(response.get("finish_reason")):
                     raise ProtocolError("resolution response was truncated")
                 result = validate_resolution_response(
                     response["raw"],
@@ -344,18 +337,6 @@ class TermResolutionRunner:
             paused_reason,
         )
 
-    @staticmethod
-    def _minimal_v1_response_tokens(group: dict[str, JsonValue]) -> int:
-        envelope = {
-            "protocol": "epubox-term-resolution-1",
-            "request_id": "rr-" + "0" * 32,
-            "group_id": group["group_id"],
-            "decision": "defer",
-            "selected_candidate_ids": [],
-            "reason": "x",
-        }
-        return count_tokens(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")))
-
     def _eligible_v2_groups(self) -> tuple[dict[str, JsonValue], ...]:
         groups = sorted(self.pool.conflict_groups, key=lambda group: str(group.get("group_id")))
         for group in groups[self.term_runner.plan.resolution_group_limit :]:
@@ -369,27 +350,7 @@ class TermResolutionRunner:
 
     def _budget_ok(self, groups: tuple[dict[str, JsonValue], ...]) -> bool:
         payload = self._batch_payload(groups, "rr-" + "0" * 32)
-        return (
-            self.term_runner._request_fits("resolution", payload, self.term_runner.output_tokens)
-            and self._minimal_response_tokens(groups) <= self.term_runner.output_tokens
-        )
-
-    @staticmethod
-    def _minimal_response_tokens(groups: tuple[dict[str, JsonValue], ...]) -> int:
-        envelope = {
-            "protocol": RESOLUTION_PROTOCOL_VERSION,
-            "request_id": "rr-" + "0" * 32,
-            "items": [
-                {
-                    "group_id": group["group_id"],
-                    "decision": "defer",
-                    "selected_candidate_ids": [],
-                    "reason": "x",
-                }
-                for group in groups
-            ],
-        }
-        return count_tokens(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")))
+        return self.term_runner._request_fits("resolution", payload)
 
     def _batches(self, groups: tuple[dict[str, JsonValue], ...]) -> tuple[tuple[dict[str, JsonValue], ...], ...]:
         batches: list[tuple[dict[str, JsonValue], ...]] = []
@@ -473,7 +434,7 @@ class TermResolutionRunner:
                 if response is None:
                     continue
                 self._finish_replayed_attempt(request.request_id, attempt, response)
-                if response.finish_reason == "length":
+                if _response_truncated(response.finish_reason):
                     if len(groups) > 1:
                         middle = len(groups) // 2
                         self._replayed_splits.extend((groups[:middle], groups[middle:]))
@@ -524,7 +485,8 @@ class TermResolutionRunner:
                 owner_id=max(ids, key=self.term_runner._spent),
                 item_ids=ids,
                 input_hashes=hashes,
-                wire_hash=wire_hash("resolution", payload, self.term_runner.output_tokens),
+                wire_hash=wire_hash("resolution", payload, None),
+                output_unlimited=True,
             )
         )
 
@@ -547,19 +509,14 @@ class TermResolutionRunner:
                 right = await self._dispatch_v2(groups[middle:])
                 return left or right
             only = next(iter(groups))
-            reason = (
-                "unplannable_output_budget"
-                if self._minimal_response_tokens(groups) > self.term_runner.output_tokens
-                else "unplannable_input_budget"
-            )
             self._save_group(
                 str(only["group_id"]),
-                {"decision": "defer", "status": "deferred_conflict", "reason": reason},
+                {"decision": "defer", "status": "deferred_conflict", "reason": "unplannable_input_budget"},
             )
             return True
         request_id = f"rr-{uuid4().hex}"
         payload = self._batch_payload(groups, request_id)
-        if not self.term_runner._request_fits("resolution", payload, self.term_runner.output_tokens):
+        if not self.term_runner._request_fits("resolution", payload):
             if len(groups) > 1:
                 middle = len(groups) // 2
                 left = await self._dispatch_v2(groups[:middle])
@@ -573,7 +530,7 @@ class TermResolutionRunner:
             return True
         self._write_batch_request(groups, request_id, payload)
         try:
-            self.term_runner._guard_dispatch("resolution", payload, self.term_runner.output_tokens)
+            self.term_runner._guard_dispatch("resolution", payload)
             response = await self.term_runner.runtime.invoke(
                 "resolution",
                 payload,
@@ -582,7 +539,8 @@ class TermResolutionRunner:
                     "item_ids": tuple(str(group["group_id"]) for group in groups),
                     "estimated_tokens": count_tokens(json.dumps(payload, ensure_ascii=False, sort_keys=True))
                     + self.term_runner.output_tokens,
-                    "output_tokens": self.term_runner.output_tokens,
+                    "estimated_output_tokens": self.term_runner.output_tokens,
+                    "output_tokens": None,
                 },
             )
         except (RuntimePaused, TermBudgetPaused):
@@ -599,7 +557,7 @@ class TermResolutionRunner:
                         },
                     )
             return True
-        if response.get("finish_reason") == "length":
+        if _response_truncated(response.get("finish_reason")):
             if len(groups) > 1:
                 middle = len(groups) // 2
                 await self._dispatch_v2(groups[:middle])
@@ -624,8 +582,7 @@ class TermResolutionRunner:
         self._replay_v2(eligible)
         paused_reason: str | None = None
         try:
-            for batch in self._replayed_splits:
-                await self._dispatch_v2(batch)
+            await self._dispatch_batches(self._replayed_splits)
         except (RuntimePaused, TermBudgetPaused) as error:
             paused_reason = str(error)
         while True:
@@ -655,8 +612,7 @@ class TermResolutionRunner:
             if paused_reason:
                 break
             try:
-                for batch in self._batches(tuple(pending)):
-                    await self._dispatch_v2(batch)
+                await self._dispatch_batches(self._batches(tuple(pending)))
             except (RuntimePaused, TermBudgetPaused) as error:
                 paused_reason = paused_reason or str(error)
                 break
@@ -671,6 +627,38 @@ class TermResolutionRunner:
             self.term_runner._spent(actual=True),
             paused_reason,
         )
+
+    async def _dispatch_batches(self, batches) -> None:
+        runtime = self.term_runner.runtime
+        if not runtime.key_count:
+            for batch in batches:
+                await self._dispatch_v2(batch)
+            return
+        pending = iter(batches)
+        active: set[asyncio.Task] = set()
+        paused: BaseException | None = None
+        try:
+            while True:
+                while paused is None and len(active) < runtime.workflow_capacity:
+                    batch = next(pending, None)
+                    if batch is None:
+                        break
+                    active.add(asyncio.create_task(self._dispatch_v2(batch)))
+                if not active:
+                    break
+                done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        task.result()
+                    except (RuntimePaused, TermBudgetPaused) as error:
+                        paused = paused or error
+            if paused is not None:
+                raise paused
+        except BaseException:
+            for task in active:
+                task.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
+            raise
 
     def decisions(self) -> tuple[ResolutionDecision, ...]:
         if any(group.get("decision") not in {"select", "defer"} for group in self.pool.conflict_groups):

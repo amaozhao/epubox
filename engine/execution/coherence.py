@@ -66,7 +66,7 @@ class Coherence(State):
             response = self._journaled_response(manifest)
             if response is None:
                 continue
-            if response.finish_reason == "length":
+            if response.finish_reason in {"length", "max_tokens"}:
                 truncated = [pending[item_id] for item_id in current_ids]
                 if len(truncated) == 1:
                     item_id = current_ids[0]
@@ -156,7 +156,7 @@ class Coherence(State):
                         "request_id": request_id,
                         "items": pending_batch,
                     }
-                    output_tokens = self.output_tokens
+                    output_tokens = self._coherence_min_output_tokens(pending_batch)
                     item_units: dict[str, tuple[str, ...]] = {}
                     item_vectors: dict[str, dict[str, int]] = {}
                     for item in pending_batch:
@@ -177,7 +177,8 @@ class Coherence(State):
                         owner_id=item_ids[0],
                         item_ids=item_ids,
                         input_hashes={str(item["item_id"]): canonical_hash(item) for item in pending_batch},
-                        wire_hash=wire_hash("coherence", payload, output_tokens),
+                        wire_hash=wire_hash("coherence", payload, None),
+                        output_unlimited=True,
                         record_versions={unit_id: self.records[unit_id].record_version for unit_id in unit_ids},
                         item_unit_ids=item_units,
                         unit_document_ids={unit_id: self.records[unit_id].document_id for unit_id in unit_ids},
@@ -212,10 +213,11 @@ class Coherence(State):
                                 "request_id": request_id,
                                 "item_ids": item_ids,
                                 "estimated_tokens": count_tokens(encoded) + output_tokens,
-                                "output_tokens": output_tokens,
+                                "output_tokens": None,
+                                "estimated_output_tokens": output_tokens,
                             },
                         )
-                        if response.get("finish_reason") == "length":
+                        if response.get("finish_reason") in {"length", "max_tokens"}:
                             if len(pending_batch) > 1:
                                 midpoint = len(pending_batch) // 2
                                 split_batches = [pending_batch[:midpoint], pending_batch[midpoint:]]
@@ -325,10 +327,7 @@ class Coherence(State):
             candidate = [*current, item]
             payload = {"protocol": "epubox-coherence-1", "request_id": "co-" + "0" * 32, "items": candidate}
             tokens = model_input_budget("coherence", payload)["estimated_input_tokens"]
-            if current and (
-                tokens > self._coherence_input_limit()
-                or self._coherence_min_output_tokens(candidate) > self.output_tokens
-            ):
+            if current and tokens > self._coherence_input_limit():
                 batches.append(tuple(current))
                 current = [item]
             else:
@@ -379,7 +378,7 @@ class Coherence(State):
     def _coherence_input_limit(self) -> int:
         if self.runtime.tpm is None:
             return MAX_MODEL_INPUT_TOKENS
-        return min(MAX_MODEL_INPUT_TOKENS, self.runtime.tpm - self.output_tokens)
+        return min(MAX_MODEL_INPUT_TOKENS, self.runtime.tpm)
 
     def _schedule_coherence_revision(
         self,

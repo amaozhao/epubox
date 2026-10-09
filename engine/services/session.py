@@ -247,10 +247,10 @@ def infer(options: Mapping[str, Any]) -> frozenset[str]:
         "auto_extract": True,
         "provider": "agnes",
         "max_input_tokens": 50000,
-        "max_output_tokens": 8192,
+        "max_output_tokens": None,
         "limit": None,
         "http_limit": 0,
-        "concurrency": 2,
+        "concurrency": None,
         "repair_terms": False,
     }
     return frozenset(name for name, default in defaults.items() if options.get(name) != default)
@@ -266,6 +266,9 @@ def validate_options(work_dir: Path, config: PreparationConfig, explicit: frozen
     preparation, documents = store._trusted_preparation_documents()
     expected_extraction = _frozen_extraction_config(config)
     expected_translation = _frozen_translation_config(config)
+    explicit = explicit - {"max_output_tokens"}
+    if preparation.translation_config.get("provider", "agnes") == "agnes":
+        explicit = explicit - {"concurrency"}
     extraction_fields = {
         "auto_extract": ("auto_extract",),
         "provider": ("provider", "model"),
@@ -310,7 +313,7 @@ def reopen(work_dir: Path) -> tuple[str, ...]:
     store = RunStore(work_dir)
     with store.lock(blocking=False):
         journal = BodyJournal(store)
-        if journal.session.prepared.plan.translation_config.get("output_budget_version", 2) not in {3, 4, 5, 6}:
+        if journal.session.prepared.plan.translation_config.get("output_budget_version", 2) not in {3, 4, 5, 6, 7}:
             return ()
         records = journal.recover_results()
         units = {

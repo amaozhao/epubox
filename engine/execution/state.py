@@ -387,7 +387,7 @@ class State:
             response = self._journaled_response(manifest)
             if response is None:
                 continue
-            if response.finish_reason == "length":
+            if response.finish_reason in {"length", "max_tokens"}:
                 self._mark_truncated_batch(manifest, tuple(jobs), response.raw)
                 continue
             try:

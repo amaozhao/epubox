@@ -28,12 +28,14 @@ CONFIG = {
     "max_input_tokens": 50000,
     "max_output_tokens": 10000,
     "context_tokens": 60000,
+    "output_budget_version": 7,
+    "source_hard_limit": 1500,
 }
 
 
 def _case(*, large_second: bool = False):
-    second = "word " * 3000 if large_second else "Other"
-    tail = "tail " * 3000 if large_second else "Other tail"
+    second = "word " * 900 if large_second else "Other"
+    tail = "tail " * 900 if large_second else "Other tail"
     raws = {
         "OPS/one.xhtml": source(
             '<p>First<img alt="One" title="Two"/></p><p>Middle</p>'
@@ -77,6 +79,53 @@ def _case(*, large_second: bool = False):
         return records if item_ids is None else {item_id: records[item_id] for item_id in item_ids}
 
     return SimpleNamespace(session=session, records=saved, _requests={}), initial, records
+
+
+def test_resume_reuses_unchanged_batches_inside_a_partly_completed_html(monkeypatch):
+    import engine.execution.atomic as atomic_module
+
+    journal, initial, records = _case(large_second=True)
+    initial = tuple(atomic_module._unlimited_batches(journal, initial))
+    document = journal.session.index.document_order[1]
+    body = [batch for batch in initial if batch.items[0].document_id == document and batch.items[0].channel == "body"]
+    assert len(body) == 2
+    completed = body[0].items[0]
+    records[completed.item_id] = records[completed.item_id].model_copy(update={"status": ItemStatus.REVIEWED})
+    untouched = body[1]
+    original = atomic_module.pack_members
+
+    def tracked(stage, members, *args, **kwargs):
+        assert not set(untouched.manifest.item_ids).intersection(member.item_id for member in members)
+        return original(stage, members, *args, **kwargs)
+
+    monkeypatch.setattr(atomic_module, "pack_members", tracked)
+    scheduled = _pending_batches(journal, initial, output_unlimited=True)
+    assert any(batch is untouched for batch in scheduled)
+    assert all(completed.item_id not in batch.manifest.item_ids for batch in scheduled)
+
+
+def test_regrouping_sorts_sparse_retries_around_an_untouched_batch():
+    journal, initial, records = _case()
+    document = journal.session.index.document_order[0]
+    body = [item for item in journal.session.index.members if item.document_id == document and item.channel == "body"]
+    first = pack_members(
+        "translate",
+        body[:2],
+        journal.session.prepared.glossary,
+        journal.session.index,
+        limits_from_config(CONFIG, context_unlimited=True),
+        sparse=True,
+    ).batches[0]
+    replaced = {item.item_id for item in body[:2]}
+    initial = tuple(batch for batch in initial if not replaced.intersection(batch.manifest.item_ids)) + (first,)
+    records[body[1].item_id] = records[body[1].item_id].model_copy(update={"status": ItemStatus.REVIEWED})
+    records[body[3].item_id] = records[body[3].item_id].model_copy(update={"checks": {"translation_epoch": 1}})
+    planned = _pending_batches(journal, initial, output_unlimited=True)
+    batches = [
+        batch for batch in planned if batch.items[0].document_id == document and batch.items[0].channel == "body"
+    ]
+    assert len(batches) == 1
+    assert batches[0].manifest.item_ids == tuple(body[index].item_id for index in (0, 2, 3))
 
 
 def test_first_dispatch_merges_sparse_text_lanes_per_html():
@@ -319,7 +368,7 @@ def test_saved_review_targets_split_when_the_combined_actual_input_overflows():
     ]
     for member in body:
         target = events_to_projection(
-            Event(kind="text", value="甲乙丙丁戊己庚辛壬癸" * 300)
+            Event(kind="text", value="甲乙丙丁戊己庚辛壬癸" * 1000)
             if event.kind == "text" and event.value.strip()
             else event
             for event in parse_projection(member.source_projection)

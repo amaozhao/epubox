@@ -98,7 +98,7 @@ def test_sparse_packing_keeps_html_boundaries_budgets_and_piece_ownership():
 
 @pytest.mark.parametrize("stage", ("translate", "review"))
 def test_sparse_schedule_keeps_mixed_retry_epochs_of_split_unit_separate(stage):
-    inventory, report = prepared(("word " * 850 + ". ") * 6, cap=2000)
+    inventory, report = prepared(("word " * 850 + ". ") * 6, cap=1000)
     index = MemberIndex((inventory,), report)
     assert len(index.members) >= 3 and len({member.unit_id for member in index.members}) == 1
     epoch_key = "review_epoch" if stage == "review" else "translation_epoch"
@@ -131,7 +131,8 @@ def test_sparse_schedule_keeps_mixed_retry_epochs_of_split_unit_separate(stage):
     journal = SimpleNamespace(session=session, records=lambda: records)
     initial = pack_members("translate", index.members, glossary(), index, limits(10000)).batches
     batches = _pending_batches(journal, initial)
-    assert len(batches) == 2
+    assert len(batches) >= 2
+    assert all(batch.budget.source_tokens <= 1500 for batch in batches)
     assert {member.item_id for batch in batches for member in batch.items} == set(records)
     for batch in batches:
         epochs = {cast(int, records[member.item_id].checks.get(epoch_key, 0)) for member in batch.items}

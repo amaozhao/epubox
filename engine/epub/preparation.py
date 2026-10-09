@@ -8,6 +8,7 @@ import re
 import shutil
 import uuid
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -21,9 +22,10 @@ from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.atoms import extract_resource
 from engine.item.extractor import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
 from engine.item.structure import select_primary_title
-from engine.schemas.contracts import JsonValue, PreparationPlan, canonical_json_bytes
+from engine.schemas.contracts import DocumentPlan, JsonValue, PreparationPlan, canonical_json_bytes
 from engine.services import state
 from engine.services.atomic import AtomicStore, IdentityMismatch
+from engine.services.parallel import PROCESS_MIN_BYTES, ordered_map
 from engine.services.store import RunStore
 from engine.services.terms.inputs import load_atomic_terms, load_user_terms
 from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION, TERM_PLANNER_VERSION
@@ -51,6 +53,17 @@ class PreparedBook:
     inventory: PackageInventory
     preparation: PreparationPlan
     preparation_hash: str
+
+
+@dataclass(frozen=True)
+class _ResourceInput:
+    raw: bytes
+    path: str
+    source_hash: str
+    media_type: str
+    book_title: str
+    atomic: bool
+    styles: Mapping[str, str]
 
 
 def prepare_book(
@@ -119,7 +132,6 @@ def prepare_book(
                     {"source_validation": {"source_hash": source_hash, **inventory.epubcheck.to_dict()}}
                 ),
             )
-        documents = []
         atomic = _atomic_config(config)
         with zipfile.ZipFile(snapshot) as archive:
             manifest = {item.path: item for item in inventory.manifest}
@@ -130,27 +142,30 @@ def prepare_book(
             }
             book_title = _book_title(archive.read(inventory.opf_path).decode("utf-8"))
             paths = tuple(dict.fromkeys((*inventory.documents, inventory.ncx_path, inventory.opf_path)))
-            for resource_path in (path for path in paths if path):
-                item = manifest.get(resource_path)
-                media_type = item.media_type if item else _container_media_type(resource_path)
-                raw = archive.read(resource_path)
-                if atomic:
-                    document = extract_resource(
-                        raw,
-                        resource_path,
-                        source_hash,
-                        media_type=media_type,
-                        config={"book_title": book_title},
-                    ).document
-                else:
-                    document = extract_document(
-                        raw.decode("utf-8"),
-                        resource_path,
-                        source_hash,
-                        media_type=media_type,
-                        config={"book_title": book_title},
-                        styles=styles,
-                    )
+            resource_paths = tuple(path for path in paths if path)
+            process = (
+                len(resource_paths) > 1
+                and sum(archive.getinfo(resource_path).file_size for resource_path in resource_paths)
+                >= PROCESS_MIN_BYTES
+            )
+            inputs = (
+                _ResourceInput(
+                    raw=archive.read(resource_path),
+                    path=resource_path,
+                    source_hash=source_hash,
+                    media_type=(
+                        manifest[resource_path].media_type
+                        if resource_path in manifest
+                        else _container_media_type(resource_path)
+                    ),
+                    book_title=book_title,
+                    atomic=atomic,
+                    styles=styles,
+                )
+                for resource_path in resource_paths
+            )
+            documents = list(ordered_map(_extract_document, inputs, workers=None if process else 1, process=process))
+            for document in documents:
                 if document.adapter_version != config.adapter_version:
                     raise ValueError(
                         f"Adapter version mismatch: {document.adapter_version} != {config.adapter_version}"
@@ -159,7 +174,6 @@ def prepare_book(
                     raise ValueError(
                         f"Extractor version mismatch: {document.extractor_version} != {config.extractor_version}"
                     )
-                documents.append(document)
 
         if compact and _sha256_file(snapshot) != source_hash:
             raise IdentityMismatch("source EPUB changed while it was being prepared")
@@ -220,6 +234,25 @@ def _stable_snapshot(source: Path, work_root: Path) -> tuple[Path, str]:
         raise
     temporary.unlink(missing_ok=True)
     raise OSError("Source EPUB kept changing while creating immutable snapshot")
+
+
+def _extract_document(resource: _ResourceInput) -> DocumentPlan:
+    if resource.atomic:
+        return extract_resource(
+            resource.raw,
+            resource.path,
+            resource.source_hash,
+            media_type=resource.media_type,
+            config={"book_title": resource.book_title},
+        ).document
+    return extract_document(
+        resource.raw.decode("utf-8"),
+        resource.path,
+        resource.source_hash,
+        media_type=resource.media_type,
+        config={"book_title": resource.book_title},
+        styles=resource.styles,
+    )
 
 
 def _stable_hash(source: Path) -> str:
@@ -350,6 +383,7 @@ def _frozen_extraction_config(config: PreparationConfig) -> dict[str, JsonValue]
         "tpm",
         "concurrency",
         "request_timeout_seconds",
+        "output_budget_version",
     ):
         if name not in extraction and name in config.translation_config:
             extraction[name] = config.translation_config[name]
@@ -370,11 +404,12 @@ def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue
             "model": translation.get("model", default_model),
             "target_language": translation.get("target_language", "zh-Hans"),
             "max_source_tokens": settings.EPUB_CHUNK_MAX_TOKENS,
-            "max_output_tokens": max(1, default_output),
             "prompt_version": "epubox-members-1",
             "planner_version": "epubox-member-planner-2",
             "input_budget_version": 2,
         }
+        if translation.get("output_budget_version", 6) != 7:
+            defaults["max_output_tokens"] = max(1, default_output)
         defaults["max_input_tokens"] = translation.get("context_tokens", 50_000)
         for name, value in defaults.items():
             translation.setdefault(name, value)
@@ -398,6 +433,8 @@ def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue
             if type(minimum) is not int or minimum < 1:
                 raise ValueError("translation_config minimum_source_tokens must be a positive integer")
         for name in ("max_source_tokens", "max_input_tokens", "max_output_tokens"):
+            if name == "max_output_tokens" and translation.get("output_budget_version") == 7:
+                continue
             value = translation[name]
             if type(value) is not int or value < 1:
                 raise ValueError(f"translation_config {name} must be a positive integer")

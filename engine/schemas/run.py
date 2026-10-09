@@ -16,6 +16,7 @@ from engine.schemas.base import (
     _hash_payload,
     canonical_hash,
 )
+from engine.schemas.budget import MAX_CHUNK_TOKENS
 
 
 class Segment(FrozenModel):
@@ -262,6 +263,10 @@ class RequestManifest(FrozenModel):
     wire_hash: str = Field(min_length=1)
     sparse: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     context_unlimited: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
+    output_unlimited: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
+    source_hard_limit: int | None = Field(
+        default=None, gt=0, le=MAX_CHUNK_TOKENS, strict=True, exclude_if=lambda value: value is None
+    )
     feedback_by_item: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
     record_versions: dict[str, int] = Field(default_factory=dict)
     item_unit_ids: dict[str, tuple[str, ...]] = Field(default_factory=dict)

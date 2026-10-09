@@ -17,9 +17,6 @@ from engine.execution.utility import (
     _recoverable_failure,
     _segment,
 )
-from engine.item.planner import (
-    batch_request,
-)
 from engine.schemas.contracts import (
     ItemRecord,
     ItemStatus,
@@ -483,7 +480,7 @@ class Workflow(Coherence):
             if attempt.state != "succeeded":
                 continue
             response = self.store.read_model_response("review", request_id, attempt.attempt_id)
-            if response is None or response.finish_reason == "length":
+            if response is None or response.finish_reason in {"length", "max_tokens"}:
                 continue
             try:
                 parsed = validate_review_response(response.raw, request_id, expected)
@@ -499,28 +496,7 @@ class Workflow(Coherence):
     def _pack_jobs(self, jobs: Sequence[_Job]) -> list[tuple[_Job, ...]]:
         result: list[tuple[_Job, ...]] = []
         for stage in ("translate", "review"):
-            staged: list[_Job] = []
-            for job in (job for job in jobs if job.stage == stage):
-                try:
-                    batch_request(
-                        [self._payload_item(job)],
-                        self.planner_config,
-                        stage="translation" if stage == "translate" else "review",
-                    )
-                except ValueError as error:
-                    if not self._upgrade_cut_plan(job.unit_id, str(error)):
-                        self._fail_item(
-                            self.records[job.unit_id],
-                            job.item_id,
-                            stage,
-                            str(error),
-                            retry=False,
-                            code=(
-                                "translation_output_oversized" if stage == "translate" else "review_output_oversized"
-                            ),
-                        )
-                    continue
-                staged.append(job)
+            staged = [job for job in jobs if job.stage == stage]
             forced: dict[str, list[_Job]] = {}
             singletons: list[_Job] = []
             ordinary: list[_Job] = []
@@ -546,16 +522,5 @@ class Workflow(Coherence):
                 current.append(job)
             if current:
                 chunks.append(current)
-            for chunk in chunks:
-                payloads = [self._payload_item(job) for job in chunk]
-                try:
-                    groups = batch_request(
-                        payloads, self.planner_config, stage="translation" if stage == "translate" else "review"
-                    )
-                except ValueError as error:
-                    _ = error
-                    result.extend((job,) for job in chunk)
-                    continue
-                by_id = {job.item_id: job for job in chunk}
-                result.extend(tuple(by_id[str(item["item_id"])] for item in group) for group in groups)
+            result.extend(tuple(chunk) for chunk in chunks)
         return result

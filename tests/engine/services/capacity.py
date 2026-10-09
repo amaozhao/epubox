@@ -33,7 +33,7 @@ def test_physical_reserve_is_checked_even_when_frozen_logical_request_fits(tmp_p
     reserve = (
         measured.identity.input_limit + 1
         if limit == "input"
-        else measured.identity.context_limit - measured.output_tokens - measured.identity.safety_tokens + 1
+        else measured.identity.context_limit - measured.identity.safety_tokens + 1
     )
     context = case.batch.manifest.model_dump(mode="python") | {
         "output_tokens": case.batch.budget.output_tokens,

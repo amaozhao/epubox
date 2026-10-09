@@ -1,8 +1,8 @@
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 
-from engine.core.styles import ReorderPolicy, scan_css, scan_inline_style, scan_stylesheets, selector_policy
+import engine.item.inline as inline_module
 from engine.item.inline import (
     Event,
     ProjectionError,
@@ -731,3 +731,28 @@ def test_frozen_document_relations_cover_table_rows_notes_and_independent_seams(
     )
     assert len(description_plan.segments) > 1
     assert all(window["scope"] == "unit" and window["relation"] == "seam" for window in opf_windows)
+
+
+def test_repeated_projection_parsing_reuses_immutable_events(monkeypatch):
+    calls = 0
+    original = inline_module.Event
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inline_module, "Event", counted)
+    source = "Cache regression ⟦+gcache⟧immutable text⟦-gcache⟧"
+    first = inline_module.parse_projection(source)
+    initial_calls = calls
+    assert initial_calls > 0
+    assert inline_module.parse_projection(source) == first
+    assert calls == initial_calls
+    with pytest.raises(ValueError):
+        first[0].value = "changed"
+    with pytest.raises(inline_module.ProjectionError, match="must be a string"):
+        inline_module.parse_projection(cast(str, []))
+
+
+from engine.core.styles import ReorderPolicy, scan_css, scan_inline_style, scan_stylesheets, selector_policy

@@ -354,6 +354,7 @@ class BodyJournal:
         self._progress = progress
         self._started: dict[str, float] = {}
         runtime = ModelRuntime(
+            events=lambda event: self._emit(event) if event.get("event") == "key_state" else None,
             model=runtime_model,
             transport=transport,
             rpm=_optional(config, "rpm"),
@@ -366,10 +367,6 @@ class BodyJournal:
             replay_response=self._replay,
             max_transport_retries=_bounded(config, "max_transport_retries", 2, 0, 2),
             request_timeout_seconds=_number(config, "request_timeout_seconds", 120.0),
-            model_max_output_tokens=_positive(config, "max_output_tokens", 4096),
-            provider_output_token_field=(
-                "max_tokens" if config.get("provider", "agnes") == "agnes" else "max_completion_tokens"
-            ),
             prior_input_limit_breach=self._prior_input_breach,
             input_budget_version=2,
             shared_service_failures=False,
@@ -561,7 +558,7 @@ class BodyJournal:
     def _prepare(self, stage: str, payload: dict[str, Any], context: Mapping[str, Any]) -> None:
         self.session.verify()
         manifest = _manifest(context)
-        output = context.get("output_tokens")
+        output = None if manifest.output_unlimited else context.get("output_tokens")
         if stage != manifest.stage or wire_hash(cast(Any, stage), payload, cast(int, output)) != manifest.wire_hash:
             raise IdentityMismatch("body request wire differs from its frozen manifest")
         if not set(manifest.item_ids).issubset(self.session.index.members_by_id):
@@ -677,7 +674,9 @@ class BodyJournal:
                 or reserved > batch.budget.identity.input_limit
                 or not request.context_unlimited
                 and (
-                    reserved + batch.budget.output_tokens + batch.budget.identity.safety_tokens
+                    reserved
+                    + (0 if request.output_unlimited else batch.budget.output_tokens)
+                    + batch.budget.identity.safety_tokens
                     > batch.budget.identity.context_limit
                 )
             ):

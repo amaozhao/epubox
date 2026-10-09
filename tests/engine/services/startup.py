@@ -70,7 +70,7 @@ def test_resume_reports_slow_checks_and_reuses_session_until_provider(tmp_path, 
     async def first_provider(_stage, _payload):
         raise FirstProviderCall
 
-    with pytest.raises(FirstProviderCall):
+    with pytest.raises((FirstProviderCall, BaseExceptionGroup)) as raised:
         asyncio.run(
             run_translation(
                 prepared.work_dir,
@@ -79,6 +79,8 @@ def test_resume_reports_slow_checks_and_reuses_session_until_provider(tmp_path, 
                 progress=progress,
             )
         )
+    if isinstance(raised.value, BaseExceptionGroup):
+        assert all(isinstance(error, FirstProviderCall) for error in raised.value.exceptions)
     assert reads == 1
 
 

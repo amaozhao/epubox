@@ -290,6 +290,23 @@ def digest(wire_messages: Sequence[Mapping[str, str]], output_tokens: int | None
     return hashlib.sha256(encoded).hexdigest()
 
 
+def unlimited_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove provider output-limit fields while preserving unrelated request options."""
+    cleaned = dict(params)
+    for field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+        cleaned.pop(field, None)
+    extra = cleaned.get("extra_body")
+    if isinstance(extra, Mapping):
+        body = dict(extra)
+        for field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+            body.pop(field, None)
+        if body:
+            cleaned["extra_body"] = body
+        else:
+            cleaned.pop("extra_body")
+    return cleaned
+
+
 def identity(request: Any, attempt_id: str) -> tuple[str | None, str]:
     """Read and validate a persisted attempt's physical wire identity."""
     attempts = _field(request, "attempts", ())
@@ -315,7 +332,7 @@ def identity(request: Any, attempt_id: str) -> tuple[str | None, str]:
     return version, wire_hash
 
 
-def verify(request: Any, payload: dict[str, Any], output_tokens: int) -> None:
+def verify(request: Any, payload: dict[str, Any], output_tokens: int | None) -> None:
     """Anchor reserved physical identities to the verified logical batch."""
     physical = [
         (attempt, identity(request, attempt.attempt_id))
@@ -325,23 +342,37 @@ def verify(request: Any, payload: dict[str, Any], output_tokens: int) -> None:
     if not physical:
         return
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    logical_cap = None if bool(_field(request, "output_unlimited", False)) else output_tokens
     for attempt, (version, actual) in physical:
         if version is None:
             continue
-        logical, expected = _hashes(request.stage, encoded, output_tokens, version)
+        metadata = _field(attempt, "metadata", {})
+        unlimited = _field(metadata, "output_unlimited")
+        if unlimited not in {None, "true"}:
+            raise ValueError("physical wire output policy is invalid")
+        physical_cap = None if unlimited == "true" else output_tokens
+        logical, expected = _hashes(request.stage, encoded, logical_cap, physical_cap, version)
         if request.wire_hash != logical:
             raise ValueError("physical wire has no matching frozen logical payload")
-        if version is not None and (attempt.reservation.get("output_tokens") != output_tokens or actual != expected):
+        if unlimited != "true" and attempt.reservation.get("output_tokens") != output_tokens:
+            raise ValueError("physical wire differs from the verified payload or output cap")
+        if actual != expected:
             raise ValueError("physical wire differs from the verified payload or output cap")
 
 
 @lru_cache(maxsize=512)
-def _hashes(kind: Any, encoded: str, output_tokens: int, version: str) -> tuple[str, str]:
+def _hashes(
+    kind: Any,
+    encoded: str,
+    logical_cap: int | None,
+    physical_cap: int | None,
+    version: str,
+) -> tuple[str, str]:
     from engine.agents.runtime import wire_hash
 
     payload = json.loads(encoded)
-    return wire_hash(kind, payload, output_tokens), wire_hash(
-        kind, payload, output_tokens, compact=True, wire_version=version
+    return wire_hash(kind, payload, logical_cap), wire_hash(
+        kind, payload, physical_cap, compact=True, wire_version=version
     )
 
 
@@ -497,6 +528,21 @@ def _parents(source: str) -> dict[str, str]:
     return parents
 
 
+def enforce_source_limit(kind: str, payload: dict[str, Any], model: str | None, limit: object = None) -> None:
+    if kind not in {"translate", "review"}:
+        return
+    from engine.agents.runtime import RequestError
+    from engine.item.budget import request_source_tokens
+    from engine.schemas.budget import MAX_CHUNK_TOKENS
+
+    ceiling = MAX_CHUNK_TOKENS if limit is None else limit
+    if type(ceiling) is not int or not 0 < ceiling <= MAX_CHUNK_TOKENS:
+        raise RequestError("invalid source hard limit", attempts=0)
+    measured = request_source_tokens(payload, model or "gpt-3.5-turbo")
+    if measured > ceiling:
+        raise RequestError(f"source budget {measured} exceeds hard limit {ceiling}", attempts=0)
+
+
 def _escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -507,4 +553,13 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
     return getattr(value, name, default)
 
 
-__all__ = ["VERSION", "decode", "decode_projection", "digest", "encode_projection", "identity", "messages"]
+__all__ = [
+    "VERSION",
+    "decode",
+    "decode_projection",
+    "digest",
+    "encode_projection",
+    "identity",
+    "messages",
+    "unlimited_params",
+]

@@ -141,6 +141,37 @@ def saved_draft(case: ReadyCase, target: str) -> ItemRecord:
 
 
 @pytest.mark.asyncio
+async def test_async_group_save_finishes_before_review_and_completion(multi: ReadyCase):
+    groups: list[tuple[ItemRecord, ...]] = []
+
+    class Writer:
+        async def save(self, record):
+            raise AssertionError("a chunk must be saved as one group")
+
+        async def save_many(self, records):
+            await asyncio.sleep(0)
+            groups.append(tuple(records))
+
+    async def transport(kind, payload):
+        if kind == "translate":
+            items = [{"item_id": item["item_id"], "target": "译文。"} for item in payload["items"]]
+        else:
+            assert len(groups) == 1 and len(groups[0]) == len(multi.batch.items)
+            items = [review_item(item, decision="no_change") for item in payload["items"]]
+        return {
+            "raw": json.dumps({"protocol": payload["protocol"], "request_id": payload["request_id"], "items": items})
+        }
+
+    writer = Writer()
+    result = await run_workflow(
+        multi.prepared, multi.batch, multi.index, runtime(transport), session=multi.session, save=writer.save
+    )
+    assert result.status == "completed"
+    assert len(groups) == 2 and all(len(group) == len(multi.batch.items) for group in groups)
+    assert all(record.status == ItemStatus.REVIEWED for record in groups[-1])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("decision", "final"), (("no_change", "你好，世界。"), ("replace", "您好，世界。")))
 async def test_three_steps_save_initial_then_apply_current_review(case: ReadyCase, decision: str, final: str) -> None:
     calls: list[str] = []

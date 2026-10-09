@@ -190,7 +190,6 @@ def test_plain_command_rebuilds_only_unsent_blocked_local_budget_plan(tmp_path, 
     monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: pytest.fail("conflict built a model"))
     conflicts: tuple[tuple[dict[str, Any], frozenset[str]], ...] = (
         ({"provider": "proxy"}, frozenset({"provider"})),
-        ({"concurrency": 3}, frozenset({"concurrency"})),
         ({"glossary": glossary}, frozenset({"glossary"})),
     )
     for options, explicit in conflicts:
@@ -205,19 +204,24 @@ def test_plain_command_rebuilds_only_unsent_blocked_local_budget_plan(tmp_path, 
     monkeypatch.setattr(cli, "checker_for_source", lambda *args: StubChecker())
     reached = []
 
-    async def local(actual_source, output, work_root, updated, checker, **kwargs):
-        assert updated.auto_extract is False
-        new = prepare_book(actual_source, work_root, updated, checker)
+    async def local(work_root, output, checker, **kwargs):
+        from engine.services.preflight import receipt_path
+
+        saved = RunStore(work_root).read_preparation()
+        original = state.read(work_root / "checks" / "preflight.json")
         report = prepare_preflight(
-            RunStore(work_root), limits_from_config(new.preparation.translation_config), cli.settings.AGNES_MODEL
+            RunStore(work_root),
+            limits_from_config(saved.translation_config, output_unlimited=True),
+            cli.settings.AGNES_MODEL,
         )
-        assert report.passed and updated.translation_config["output_budget_version"] == 6
-        assert updated.translation_config["max_output_tokens"] == 8192
-        assert updated.extraction_config["max_output_tokens"] == 4096
+        assert report.passed and saved.translation_config["output_budget_version"] == 6
+        assert saved.translation_config["max_output_tokens"] == 4096
+        assert receipt_path(work_root).name == "output.json"
+        assert state.read(work_root / "checks" / "preflight.json") == original
         reached.append(True)
         return cli._record(cli.RunOutcome("paused", work_root, "preflight"))
 
-    monkeypatch.setattr(cli, "_advance_source", local)
+    monkeypatch.setattr(cli, "_advance_work_dir", local)
     result = cli.translate_book(source)
     assert result.status == "paused" and reached == [True]
     assert result.http_attempts == 0

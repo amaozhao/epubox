@@ -21,8 +21,8 @@ def test_fresh_legacy_ready_batches_are_replanned_without_the_combined_context_g
     journal = BodyJournal(case.session.store, case.session)
     initial = tuple(case.session._prepared_batches.values())
 
-    assert initial and not any(batch.manifest.context_unlimited for batch in initial)
-    scheduled = _pending_batches(journal, initial)
+    assert initial and all(batch.manifest.output_unlimited for batch in initial)
+    scheduled = _pending_batches(journal, initial, output_unlimited=True)
     assert scheduled and all(batch.manifest.context_unlimited for batch in scheduled)
     assert {item.item_id for batch in scheduled for item in batch.items} == {
         item.item_id for batch in initial for item in batch.items

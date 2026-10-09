@@ -24,7 +24,7 @@ def test_translate_cli_uses_one_pipeline_and_defaults_to_auto_terms(tmp_path: Pa
     assert len(called) == 1
     assert called[0][1]["auto_extract"] is True
     assert called[0][1]["work_root"] is None
-    assert called[0][1]["max_output_tokens"] == 8192
+    assert "max_output_tokens" not in called[0][1]
     assert "输出：" in result.output
 
 

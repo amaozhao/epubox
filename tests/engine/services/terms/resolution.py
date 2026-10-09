@@ -178,7 +178,8 @@ def test_v2_batches_groups_and_retries_only_a_missing_group(tmp_path: Path) -> N
     assert batch_sizes == [2, 1]
 
 
-def test_v2_splits_a_truncated_batch_before_retrying(tmp_path: Path) -> None:
+@pytest.mark.parametrize("finish_reason", ("length", "max_tokens"))
+def test_v2_splits_a_truncated_batch_before_retrying(tmp_path: Path, finish_reason: str) -> None:
     store, pool = _seed_conflict(tmp_path)
     _add_conflict(store, pool)
     batch_sizes: list[int] = []
@@ -186,7 +187,7 @@ def test_v2_splits_a_truncated_batch_before_retrying(tmp_path: Path) -> None:
     async def transport(_kind, payload):
         batch_sizes.append(len(payload["items"]))
         if len(payload["items"]) > 1:
-            return {"raw": "{}", "finish_reason": "length", "usage": {"input_tokens": 1, "output_tokens": 1}}
+            return {"raw": "{}", "finish_reason": finish_reason, "usage": {"input_tokens": 1, "output_tokens": 1}}
         group = payload["items"][0]
         return {
             "raw": json.dumps(
@@ -213,12 +214,13 @@ def test_v2_splits_a_truncated_batch_before_retrying(tmp_path: Path) -> None:
     assert batch_sizes == [2, 1, 1]
 
 
-def test_v2_replays_truncation_as_split_batches_after_restart(tmp_path: Path) -> None:
+@pytest.mark.parametrize("finish_reason", ("length", "max_tokens"))
+def test_v2_replays_truncation_as_split_batches_after_restart(tmp_path: Path, finish_reason: str) -> None:
     store, pool = _seed_conflict(tmp_path)
     _add_conflict(store, pool)
 
     async def truncated(_kind, _payload):
-        return {"raw": "{}", "finish_reason": "length", "usage": {"input_tokens": 1, "output_tokens": 1}}
+        return {"raw": "{}", "finish_reason": finish_reason, "usage": {"input_tokens": 1, "output_tokens": 1}}
 
     interrupted = TermResolutionRunner(store, transport=truncated)
     invoke = interrupted.term_runner.runtime.invoke
@@ -261,8 +263,8 @@ def test_v2_replays_truncation_as_split_batches_after_restart(tmp_path: Path) ->
     assert batch_sizes == [1, 1]
 
 
-def test_v2_defers_an_oversize_group_before_writing_a_manifest(tmp_path: Path) -> None:
-    store, _ = _seed_conflict(tmp_path, context_tokens=1_000, max_output_tokens=900)
+def test_v2_defers_an_oversize_input_group_before_writing_a_manifest(tmp_path: Path) -> None:
+    store, _ = _seed_conflict(tmp_path, max_input_tokens=900, max_output_tokens=900)
 
     async def forbidden(*_args):
         raise AssertionError("oversize resolution group must not dispatch")
@@ -274,8 +276,8 @@ def test_v2_defers_an_oversize_group_before_writing_a_manifest(tmp_path: Path) -
     assert not tuple((store.root / "requests").glob("*.json"))
 
 
-def test_v2_packs_to_frozen_context_limit_before_manifest(tmp_path: Path) -> None:
-    store, pool = _seed_conflict(tmp_path, context_tokens=1_700, max_output_tokens=256)
+def test_v2_packs_to_frozen_input_limit_before_manifest(tmp_path: Path) -> None:
+    store, pool = _seed_conflict(tmp_path, max_input_tokens=1_100, max_output_tokens=256)
     pool = _add_conflict(store, pool)
     groups = pool.conflict_groups
     batch_sizes: list[int] = []
@@ -302,7 +304,7 @@ def test_v2_packs_to_frozen_context_limit_before_manifest(tmp_path: Path) -> Non
         }
 
     runner = TermResolutionRunner(store, transport=transport)
-    assert runner.term_runner._input_limit() == 1_188
+    assert runner.term_runner._input_limit() == 1_100
     assert all(runner._budget_ok((group,)) for group in groups)
     assert not runner._budget_ok(groups)
 
@@ -313,9 +315,9 @@ def test_v2_packs_to_frozen_context_limit_before_manifest(tmp_path: Path) -> Non
     assert all(len(request.item_ids) == 1 for request in runner.term_runner._requests())
 
 
-def test_v2_splits_many_tiny_groups_for_minimum_output_envelope(tmp_path: Path) -> None:
+def test_v2_does_not_split_groups_for_a_legacy_output_cap(tmp_path: Path) -> None:
     store, pool = _seed_conflict(tmp_path, max_output_tokens=80)
-    groups = _add_conflict(store, pool).conflict_groups
+    _add_conflict(store, pool)
     batch_sizes: list[int] = []
 
     async def transport(_kind, payload):
@@ -340,25 +342,17 @@ def test_v2_splits_many_tiny_groups_for_minimum_output_envelope(tmp_path: Path) 
         }
 
     runner = TermResolutionRunner(store, transport=transport)
-    assert runner._minimal_response_tokens(groups) > runner.term_runner.output_tokens
-    assert all(runner._minimal_response_tokens((group,)) <= runner.term_runner.output_tokens for group in groups)
-
     result = asyncio.run(runner.run())
 
     assert result.status == "closed"
     assert result.deferred == 2
     assert sum(batch_sizes) == 2
-    assert batch_sizes == [1, 1]
-    by_id = {str(group["group_id"]): group for group in groups}
-    assert all(
-        runner._minimal_response_tokens(tuple(by_id[group_id] for group_id in request.item_ids))
-        <= runner.term_runner.output_tokens
-        for request in runner.term_runner._requests()
-    )
+    assert batch_sizes == [2]
+    assert len(runner.term_runner._requests()[0].item_ids) == 2
 
 
-def test_v1_defers_oversize_group_before_manifest_or_http(tmp_path: Path) -> None:
-    store, _ = _seed_conflict(tmp_path, context_tokens=1_000, max_output_tokens=900)
+def test_v1_defers_oversize_input_group_before_manifest_or_http(tmp_path: Path) -> None:
+    store, _ = _seed_conflict(tmp_path, max_input_tokens=1)
 
     async def forbidden(*_args):
         raise AssertionError("oversize v1 resolution group must not dispatch")
@@ -371,17 +365,30 @@ def test_v1_defers_oversize_group_before_manifest_or_http(tmp_path: Path) -> Non
     assert not tuple((store.root / "requests").glob("*.json"))
 
 
-def test_v1_defers_when_even_the_minimum_response_exceeds_output_budget(tmp_path: Path) -> None:
+def test_v1_dispatches_when_the_legacy_output_cap_is_tiny(tmp_path: Path) -> None:
     store, _ = _seed_conflict(tmp_path, max_output_tokens=1)
 
-    async def forbidden(*_args):
-        raise AssertionError("resolution with no response budget must not dispatch")
+    async def transport(_kind, payload):
+        group_id = payload["group_id"]
+        return {
+            "raw": json.dumps(
+                {
+                    "protocol": "epubox-term-resolution-1",
+                    "request_id": payload["request_id"],
+                    "group_id": group_id,
+                    "decision": "defer",
+                    "selected_candidate_ids": [],
+                    "reason": "No preference.",
+                }
+            ),
+            "usage": {"input_tokens": 1, "output_tokens": 100},
+        }
 
-    result = asyncio.run(TermResolutionRunner(store, transport=forbidden)._run_v1())
+    result = asyncio.run(TermResolutionRunner(store, transport=transport)._run_v1())
 
     assert result.status == "closed"
     assert result.deferred == 1
-    assert not tuple((store.root / "requests").glob("*.json"))
+    assert len(tuple((store.root / "requests").glob("*.json"))) == 1
 
 
 @pytest.mark.parametrize(

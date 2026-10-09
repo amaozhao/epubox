@@ -28,12 +28,13 @@ def translate(
     auto_extract: bool = typer.Option(True, "--auto-extract/--no-auto-extract"),
     provider: str = typer.Option("agnes", "--provider"),
     max_input_tokens: int = typer.Option(50000, "--max-input-tokens", min=1),
-    max_output_tokens: int = typer.Option(8192, "--max-output-tokens", min=1),
     limit: int | None = typer.Option(
         None, "--limit", min=1, help="单个源片段可翻译正文的最大 token 数；默认读取环境配置。"
     ),
     http_limit: int = typer.Option(0, "--http-limit", min=0),
-    concurrency: int = typer.Option(2, "--concurrency", min=1),
+    concurrency: int | None = typer.Option(
+        None, "--concurrency", min=1, help="总并行 workflow 上限；Agnes 默认按去重后的 key 数量。"
+    ),
     epubcheck: str | None = typer.Option(None, "--epubcheck-command"),
     overwrite: bool = typer.Option(False, "--overwrite"),
     repair_terms: bool = typer.Option(False, "--repair-terms"),
@@ -47,7 +48,6 @@ def translate(
             "auto_extract",
             "provider",
             "max_input_tokens",
-            "max_output_tokens",
             "limit",
             "http_limit",
             "concurrency",
@@ -65,7 +65,6 @@ def translate(
                 auto_extract=auto_extract,
                 provider=provider,
                 max_input_tokens=max_input_tokens,
-                max_output_tokens=max_output_tokens,
                 limit=limit,
                 http_limit=http_limit,
                 concurrency=concurrency,
@@ -168,10 +167,25 @@ def _progress_printer():
     def show(report: dict[str, Any]) -> None:
         nonlocal last
         phase = str(report.get("phase", "running"))
-        if phase == "waiting" or "result_item_id" in report or report.get("event") in {"request", "response"}:
-            return
         if isinstance(report.get("notice"), str):
             typer.echo(report["notice"])
+            return
+        stop_reason = report.get("stop_reason")
+        if report.get("execution_state") == "stopped" and isinstance(stop_reason, str) and stop_reason:
+            key = ("stopped", stop_reason, report.get("http_attempts"))
+            if key != last:
+                last = key
+                typer.echo(
+                    f"翻译已暂停：{stop_reason.splitlines()[0][:240]}；"
+                    f"已接受={report.get('accepted_units', 0)}/{report.get('required_units', 0)}；"
+                    f"累计HTTP={report.get('http_attempts', 0)}"
+                )
+            return
+        if (
+            phase == "waiting"
+            or "result_item_id" in report
+            or report.get("event") in {"request", "response", "http_start", "http_end"}
+        ):
             return
         if "request_id" in report:
             values = tuple(
@@ -226,6 +240,23 @@ def _progress_printer():
             source_label = {"body": "正文", "metadata": "元数据", "navigation": "导航", "attribute": "属性"}.get(
                 str(report.get("source_channel", "body")), "文本"
             )
+            runtime = report.get("runtime")
+            timing = report.get("workflow_timing")
+            scheduling = ""
+            if isinstance(runtime, dict) and isinstance(timing, dict):
+                key_wait = float(timing.get("key_wait_seconds", 0))
+                rate_wait = float(timing.get("rate_wait_seconds", 0))
+                http = float(timing.get("http_seconds", 0))
+                local = max(0.0, float(report.get("elapsed_seconds", 0)) - key_wait - rate_wait - http)
+                scheduling = (
+                    f"；key={','.join(timing.get('keys_used', ())) or '-'}，"
+                    f"已验证key={runtime.get('verified_keys', 0)}/{runtime.get('key_count', 0)}，"
+                    f"可尝试key={runtime.get('enabled_keys', 0)}，"
+                    f"当前接口并发={runtime.get('http_active', 0)}/{runtime.get('workflow_capacity', 0)}，"
+                    f"累计接口峰值={runtime.get('http_peak', 0)}；"
+                    f"等待key={key_wait:.1f}秒，限速等待={rate_wait:.1f}秒，"
+                    f"接口等待={http:.1f}秒（{timing.get('http_attempts', 0)}次），本地/调度={local:.1f}秒"
+                )
             typer.echo(
                 f"{phase}: 批次={report.get('request_id', '-')}，结果="
                 f"{result}，修订={'是' if report.get('revised') else '否'}，"
@@ -236,10 +267,12 @@ def _progress_printer():
                 f"{source_label}估算={report.get('source_tokens', '-')} tokens，"
                 f"输入估算={report.get('estimated_input_tokens', '-')} tokens，"
                 f"输入预留={report.get('reserved_input_tokens', '-')} tokens，"
-                f"输出预留={report.get('reserved_output_tokens', '-')} tokens，"
+                f"输出估算={report.get('reserved_output_tokens', '-')} tokens（未设上限），"
                 f"实际累计输入={report.get('input_tokens', 0)} tokens，"
                 f"实际累计输出={report.get('output_tokens', 0)} tokens，HTTP={report.get('http_attempts', 0)}"
                 + actual
+                + scheduling
+                + (f"；文档={report['document_path']}" if report.get("document_path") else "")
                 + (f"；原因={reason}" if reason else "")
             )
             return

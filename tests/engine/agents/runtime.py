@@ -409,7 +409,7 @@ async def test_boundary_dispatch_separates_input_output_and_stops_after_provider
     assert attempt.reservation["input_budget_algorithm_version"] == 1
     assert attempt.reservation["cl100k_input_tokens"] < 50_000
     assert attempt.reservation["reserved_output_tokens"] == 10
-    assert attempt.reservation["estimated_tpm_tokens"] == 50_010
+    assert attempt.reservation["estimated_tpm_tokens"] == 50_000
     with pytest.raises(RuntimePaused, match="future dispatch is stopped"):
         await runtime.invoke("translate", payload("translate", "r2"), context("r2"))
     assert calls == 1
@@ -596,7 +596,12 @@ async def test_runtime_records_each_real_http_attempt_in_the_run_store(tmp_path)
     assert attempt.state == "succeeded"
     assert attempt.affected_items == ("i1",)
     assert attempt.usage is not None and attempt.usage.input_tokens == 2
-    assert attempt.metadata == {"response_id": "resp", "model": "model", "finish_reason": "stop"}
+    assert attempt.metadata == {
+        "response_id": "resp",
+        "model": "model",
+        "finish_reason": "stop",
+        "output_unlimited": "true",
+    }
 
 
 @pytest.mark.asyncio
@@ -679,7 +684,7 @@ async def test_repeated_connection_failures_pause_after_three_unknown_attempts(t
     attempts = store.read_request("r1").attempts
     assert len(attempts) == 3
     assert all(attempt.state == "unknown" for attempt in attempts)
-    assert all(attempt.usage is None and attempt.metadata == {} for attempt in attempts)
+    assert all(attempt.usage is None and attempt.metadata == {"output_unlimited": "true"} for attempt in attempts)
 
 
 @pytest.mark.asyncio
@@ -722,7 +727,7 @@ async def test_cancellation_marks_a_reserved_attempt_unknown(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_request_larger_than_tpm_fails_before_reservation_or_http():
+async def test_output_estimate_does_not_act_as_a_tpm_output_limit():
     called = False
 
     async def transport(kind, payload):
@@ -730,20 +735,23 @@ async def test_request_larger_than_tpm_fails_before_reservation_or_http():
         called = True
         return {"raw": "{}"}
 
-    runtime = ModelRuntime(transport=transport, tpm=10, model_max_output_tokens=100)
-    with pytest.raises(RequestError, match="exceed TPM"):
-        await runtime.invoke("translate", payload("translate"), context(estimated_tokens=11))
-    assert called is False
+    runtime = ModelRuntime(transport=transport, tpm=10_000, model_max_output_tokens=1)
+    await runtime.invoke(
+        "translate",
+        payload("translate"),
+        context(output_tokens=None, estimated_output_tokens=100_000),
+    )
+    assert called is True
 
 
 @pytest.mark.asyncio
-async def test_concurrent_output_caps_do_not_mutate_each_other_or_the_payload():
-    seen: list[tuple[str, int | None]] = []
+async def test_concurrent_historical_output_values_do_not_mutate_the_payload():
+    seen: list[str] = []
     gate = asyncio.Event()
     runtime: ModelRuntime
 
     async def transport(kind, request_payload):
-        seen.append((request_payload["request_id"], runtime._output_cap.get()))
+        seen.append(request_payload["request_id"])
         if len(seen) == 2:
             gate.set()
         await gate.wait()
@@ -755,18 +763,18 @@ async def test_concurrent_output_caps_do_not_mutate_each_other_or_the_payload():
         runtime.invoke("translate", payload("translate", "r1"), context("r1", output_tokens=10)),
         runtime.invoke("translate", payload("translate", "r2"), context("r2", output_tokens=20)),
     )
-    assert sorted(seen) == [("r1", 10), ("r2", 20)]
+    assert sorted(seen) == ["r1", "r2"]
 
 
 @pytest.mark.asyncio
 async def test_default_provider_uses_per_request_model_copies_and_preserves_response_metadata():
-    caps: list[int] = []
+    requests: list[dict] = []
     gate = asyncio.Event()
 
     class Completions:
         async def create(self, **kwargs):
-            caps.append(kwargs["max_completion_tokens"])
-            if len(caps) == 2:
+            requests.append(kwargs)
+            if len(requests) == 2:
                 gate.set()
             await gate.wait()
             request_id = kwargs["messages"][1]["content"]
@@ -810,7 +818,7 @@ async def test_default_provider_uses_per_request_model_copies_and_preserves_resp
         runtime.invoke("translate", payload("translate", "r2"), context("r2", output_tokens=20)),
     )
 
-    assert sorted(caps) == [10, 20]
+    assert all("max_completion_tokens" not in request for request in requests)
     assert model.max_completion_tokens == 100
     assert results[0]["usage"] == {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
     assert results[0]["finish_reason"] == "stop"
@@ -820,7 +828,7 @@ async def test_default_provider_uses_per_request_model_copies_and_preserves_resp
 
 
 @pytest.mark.asyncio
-async def test_agnes_provider_sends_max_tokens_and_clears_max_completion_tokens():
+async def test_agnes_provider_sends_no_output_limit_fields():
     requests: list[dict] = []
 
     class Completions:
@@ -867,7 +875,7 @@ async def test_agnes_provider_sends_max_tokens_and_clears_max_completion_tokens(
     runtime = ModelRuntime(model=model, model_max_output_tokens=65_536)
     await runtime.invoke("translate", payload("translate"), context(output_tokens=321))
 
-    assert requests[0]["max_tokens"] == 321
+    assert "max_tokens" not in requests[0]
     assert "max_completion_tokens" not in requests[0]
     assert model.max_tokens == 65_536
     assert model.max_completion_tokens == 999

@@ -145,14 +145,19 @@ def materialize_members(inventories: Sequence[AtomicDocument], report: Preflight
     return tuple(result)
 
 
-def _budget_limits_match(budget: BudgetResult, limits: Mapping[str, int | float]) -> bool:
+def _budget_limits_match(budget: BudgetResult, limits: Mapping[str, int | float | None]) -> bool:
     identity = budget.identity
     expected = dict(limits)
     if identity.version != expected.pop("output_version", 2):
         return False
     expected.pop("minimum_source_tokens", None)
     expected.setdefault("context_unlimited", False)
-    expected["source_tokens"] += expected.pop("source_tolerance_tokens", 0)
+    source_tokens, tolerance, hard_limit = expected["source_tokens"], expected.pop("source_tolerance_tokens", 0), expected.pop("source_hard_limit", None)
+    if type(source_tokens) is not int or type(tolerance) is not int:
+        return False
+    if (hard_limit is not None and type(hard_limit) is not int) or identity.source_hard_limit != hard_limit:
+        return False
+    expected["source_tokens"] = min(source_tokens + tolerance, hard_limit) if hard_limit is not None else source_tokens + tolerance
     configured_input = expected.get("input_tokens")
     if type(configured_input) is not int:
         return False
@@ -497,13 +502,13 @@ def fit_member_payload(
             sparse=sparse,
             feedback=feedback,
         )
-        if limits.output_version in {5, 6}:
+        if limits.output_version in {5, 6, 7}:
             payload["wire_version"] = "epubox-wire-5"
         budget = measure_budget(stage=stage, payload=payload, limits=limits, tokenizer_model=tokenizer_model)
         if budget.fits:
             return payload, budget
     assert budget is not None
-    if limits.output_version == 6:
+    if limits.output_version in {6, 7}:
         # Slot replies restore every marker locally; keep full constraints in the member registry.
         for item in payload["items"]:
             item["constraints"] = {}
@@ -615,7 +620,9 @@ def pack_members(
     boundaries: list[BatchBoundary] = []
     blocked: list[BlockedItem] = []
     skipped: list[str] = []
-    batch: MemberBatch | None = None
+    pending: tuple[RequestMember, ...] = ()
+    pending_payload: dict[str, Any] | None = None
+    pending_budget: BudgetResult | None = None
 
     def adjacent(left: RequestMember, right: RequestMember) -> bool:
         if sparse:
@@ -623,11 +630,13 @@ def pack_members(
         return index.adjacent(left, right) if limits.minimum_source_tokens else _adjacent(left, right)
 
     def close(reason: BoundaryReason, failures: tuple[str, ...] = ()) -> None:
-        nonlocal batch
-        if batch is not None:
+        nonlocal pending, pending_payload, pending_budget
+        if pending:
+            assert pending_payload is not None and pending_budget is not None
+            batch = _batch(pending, glossary, glossary_hash, pending_payload, pending_budget, revisions, record_versions, plan_epochs, sparse)  # fmt: skip
             batches.append(batch)
             boundaries.append(BatchBoundary(request_id=batch.manifest.request_id, reason=reason, failures=failures))
-            batch = None
+            pending, pending_payload, pending_budget = (), None, None
 
     def candidate(values: tuple[RequestMember, ...]) -> tuple[dict[str, Any], BudgetResult]:
         identity = {
@@ -675,8 +684,8 @@ def pack_members(
                 close("completed")
             skipped.append(item.item_id)
             continue
-        if batch is not None and not adjacent(batch.items[-1], item):
-            previous = batch.items[-1]
+        if pending and not adjacent(pending[-1], item):
+            previous = pending[-1]
             close(
                 "resource"
                 if previous.document_id != item.document_id
@@ -684,25 +693,23 @@ def pack_members(
                 if previous.channel != item.channel
                 else "adjacency"
             )
-        if batch is not None and item.kind == "heading" and position + 1 < len(members):
+        if pending and item.kind == "heading" and position + 1 < len(members):
             following = members[position + 1]
             if following.item_id not in completed and adjacent(item, following):
                 _, pair_budget = candidate((item, following))
                 if pair_budget.fits:
-                    _, combined_budget = candidate((*batch.items, item, following))
+                    _, combined_budget = candidate((*pending, item, following))
                     if not combined_budget.fits:
                         close("heading", combined_budget.failures)
-        proposed = members if whole else (*batch.items, item) if batch is not None else (item,)
+        proposed = members if whole else (*pending, item) if pending else (item,)
         payload, budget = candidate(proposed)
-        if not budget.fits and batch is not None:
+        if not budget.fits and pending:
             reason = cast(BoundaryReason, budget.failures[0].split(" ", 1)[0])
             close(reason, budget.failures)
             proposed = (item,)
             payload, budget = candidate(proposed)
         if budget.fits:
-            batch = _batch(
-                proposed, glossary, glossary_hash, payload, budget, revisions, record_versions, plan_epochs, sparse
-            )
+            pending, pending_payload, pending_budget = proposed, payload, budget
         else:
             close("blocked", budget.failures)
             for blocked_item in members if whole else (item,):
@@ -841,7 +848,7 @@ def pack_members(
                 )
             position += 1
         if (
-            limits.output_version in {5, 6}
+            limits.output_version in {5, 6, 7}
             and stage == "translate"
             and not sparse
             and not any((record_versions or {}).values())
@@ -855,7 +862,7 @@ def pack_members(
                     and value.budget.source_tokens < minimum
                     and index.body_tokens.get(document, 0) >= minimum
                     and not (
-                        limits.output_version == 6
+                        limits.output_version in {6, 7}
                         and boundary.reason == "minimum_unavoidable"
                         and any(
                             budget in failure
@@ -952,6 +959,8 @@ def _batch(
         wire_hash=budget.wire_hash,
         sparse=sparse,
         context_unlimited=budget.identity.context_unlimited,
+        output_unlimited=budget.identity.output_limit is None,
+        source_hard_limit=budget.identity.source_hard_limit,
         feedback_by_item={
             item.item_id: wire[item.item_id]["repair"] for item in items if "repair" in wire[item.item_id]
         },

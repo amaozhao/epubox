@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from engine.epub.bindings import resolve_derived_navigation
 from engine.schemas.bridge import AtomicDocument
-from engine.schemas.budget import BudgetLimits
+from engine.schemas.budget import MAX_CHUNK_TOKENS, BudgetLimits
 from engine.schemas.contracts import (
     ItemRecord,
     ItemStatus,
@@ -23,7 +23,7 @@ from engine.schemas.members import MemberBatch
 from engine.schemas.ready import AtomicPlan, AtomicPreparedInput
 from engine.services import state
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, safe_id
-from engine.services.preflight import load_preflight, require_preflight
+from engine.services.preflight import load_preflight, receipt_path, require_preflight
 
 if TYPE_CHECKING:
     from engine.item.members import MemberIndex
@@ -36,16 +36,44 @@ def limits_for(preparation) -> BudgetLimits:
     return limits_from_config(preparation.translation_config)
 
 
-def limits_from_config(config, *, context_unlimited: bool | None = None) -> BudgetLimits:
-    output = _int(config, "max_output_tokens", 4096)
+def request_source_limit(config) -> int:
+    configured = config.get("source_hard_limit")
+    values = (
+        MAX_CHUNK_TOKENS,
+        config.get("max_source_tokens", MAX_CHUNK_TOKENS),
+        MAX_CHUNK_TOKENS if configured is None else configured,
+    )
+    if any(type(value) is not int or value < 1 for value in values):
+        raise ValueError("source limits must be positive integers")
+    return min(values)
+
+
+_UNSET = object()
+
+
+def limits_from_config(
+    config,
+    *,
+    context_unlimited: bool | None = None,
+    output_unlimited: bool | None = None,
+    source_hard_limit: int | None | object = _UNSET,
+) -> BudgetLimits:
+    version = _int(config, "output_budget_version", 2)
+    unlimited_output = version == 7 if output_unlimited is None else output_unlimited
+    if type(unlimited_output) is not bool:
+        raise IdentityMismatch("output_unlimited must be a boolean")
+    output = None if unlimited_output else _int(config, "max_output_tokens", 4096)
     unlimited = config.get("context_unlimited", False) if context_unlimited is None else context_unlimited
     if type(unlimited) is not bool:
         raise IdentityMismatch("context_unlimited must be a boolean")
-    context = _int(config, "context_tokens", 50000 + output + 256 if unlimited else 32768)
+    context = _int(config, "context_tokens", 50000 + (output or 0) + 256 if unlimited else 32768)
     input_tokens = _int(config, "max_input_tokens", 50000 if unlimited else context)
     ratio = config.get("target_ratio", 1.6)
     if isinstance(ratio, bool) or not isinstance(ratio, (float, int)):
         raise IdentityMismatch("target_ratio must be a positive number")
+    hard_limit = cast(
+        int | None, config.get("source_hard_limit") if source_hard_limit is _UNSET else source_hard_limit
+    )
     return BudgetLimits(
         source_tokens=_int(config, "max_source_tokens", 2000),
         input_tokens=input_tokens,
@@ -53,13 +81,16 @@ def limits_from_config(config, *, context_unlimited: bool | None = None) -> Budg
         context_tokens=context,
         safety_tokens=_int(config, "safety_margin", 256, zero=True),
         target_ratio=float(ratio),
-        output_version=cast(Literal[2, 3, 4, 5, 6], _int(config, "output_budget_version", 2)),
+        output_version=cast(Literal[2, 3, 4, 5, 6, 7], 7 if unlimited_output else version),
         minimum_source_tokens=(
             _int(config, "minimum_source_tokens", 500)
             if config.get("planner_version") == "epubox-member-planner-2"
             else 0
         ),
-        source_tolerance_tokens=(1000 if config.get("planner_version") == "epubox-member-planner-2" else 0),
+        source_tolerance_tokens=(
+            1000 if hard_limit is None and config.get("planner_version") == "epubox-member-planner-2" else 0
+        ),
+        source_hard_limit=hard_limit,
         context_unlimited=unlimited,
     )
 
@@ -99,12 +130,24 @@ def write_ready(
     derived_ids = {member.item_id for member in members if member.unit_id in expected_derived}
     if progress:
         progress(f"准备：复核 {len(members)} 个片段的请求计划。")
+    policies = {
+        (batch.manifest.context_unlimited, batch.manifest.output_unlimited, batch.manifest.source_hard_limit)
+        for batch in packing.batches
+    }
+    if len(policies) > 1:
+        raise IdentityMismatch("atomic ready request plan mixes budget policies")
+    context_unlimited, output_unlimited, source_hard_limit = next(iter(policies), (None, None, None))
     expected = pack_members(
         "translate",
         tuple(members),
         glossary,
         index,
-        limits_for(preparation),
+        limits_from_config(
+            preparation.translation_config,
+            context_unlimited=context_unlimited,
+            output_unlimited=output_unlimited,
+            source_hard_limit=source_hard_limit,
+        ),
         completed=derived_ids,
         tokenizer_model=_model(preparation),
     )
@@ -150,7 +193,7 @@ def write_ready(
             derived_sources=expected_derived,
             required_unit_count=len(unit_ids),
             translation_config=preparation.translation_config,
-            preflight_file_sha256=_sha(store.root / "checks" / "preflight.json"),
+            preflight_file_sha256=_sha(receipt_path(store.root)),
             output_policy_hash=output_policy_hash,
         )
         if current.check is None:
@@ -217,7 +260,7 @@ def _verify(store: RunStore, ready: AtomicPreparedInput, progress: Callable[[str
         raise IdentityMismatch("atomic ready preparation file changed")
     if _sha(store.root / "glossary.json") != ready.plan.glossary_file_sha256:
         raise IdentityMismatch("atomic ready glossary file changed")
-    if _sha(store.root / "checks" / "preflight.json") != ready.plan.preflight_file_sha256:
+    if _sha(receipt_path(store.root)) != ready.plan.preflight_file_sha256:
         raise IdentityMismatch("atomic ready preflight file changed")
     if _read(store.root / "plans" / "book.json", AtomicPlan, "epubox-plan-1") != ready.plan:
         raise IdentityMismatch("atomic ready plan changed")
@@ -255,12 +298,10 @@ def _verify(store: RunStore, ready: AtomicPreparedInput, progress: Callable[[str
     if progress:
         progress(f"准备：源映射已核对，加载 {len(ready.plan.batch_hashes)} 个已保存请求批次。")
     _exact_files(store.root / "batches", set(ready.plan.batch_hashes))
-    batches = tuple(
-        _read(store.root / "batches" / f"{safe_id(request_id)}.json", MemberBatch, "epubox-batch-2")
-        for request_id in ready.plan.batch_hashes
-    )
+    batches: list[MemberBatch] = []
     covered: list[str] = []
-    for request_id, batch in zip(ready.plan.batch_hashes, batches, strict=True):
+    for request_id in ready.plan.batch_hashes:
+        batch = _read(store.root / "batches" / f"{safe_id(request_id)}.json", MemberBatch, "epubox-batch-2")
         if batch.manifest.request_id != request_id or canonical_hash(batch) != ready.plan.batch_hashes[request_id]:
             raise IdentityMismatch("atomic ready batch changed")
         if (
@@ -274,6 +315,10 @@ def _verify(store: RunStore, ready: AtomicPreparedInput, progress: Callable[[str
             if member.unit_id in ready.plan.derived_sources or index.items_by_id.get(member.item_id) != member:
                 raise IdentityMismatch("atomic ready batch member changed")
             covered.append(member.item_id)
+        # Retain the verified mapping once, rather than a second full book in request batches.
+        batches.append(
+            batch.model_copy(update={"items": tuple(index.items_by_id[item.item_id] for item in batch.items)})
+        )
     expected_ids = tuple(member.item_id for member in members if member.unit_id not in ready.plan.derived_sources)
     if len(covered) != len(set(covered)) or set(covered) != set(expected_ids):
         raise IdentityMismatch("atomic ready batches do not exactly cover dispatchable members")
@@ -283,7 +328,7 @@ def _verify(store: RunStore, ready: AtomicPreparedInput, progress: Callable[[str
         if result.item_id != member.item_id or result.segment_id != member.item_id:
             raise IdentityMismatch("atomic ready result ownership changed")
     _terminal_requests(store)
-    return index, batches
+    return index, tuple(batches)
 
 
 def derived_record(item_id: str, source_id: str) -> ItemRecord:
@@ -452,6 +497,8 @@ class ReadySession:
     def verify(self) -> AtomicPreparedInput:
         checkpoint = self._quick_fingerprint()
         if checkpoint is not None and checkpoint == self._checkpoint:
+            # Drop references to an older reload's equivalent source strings.
+            self._signature = self._checkpoint = checkpoint
             return self.prepared
         self._saved_batches.clear()
         self._frame_requests.clear()
@@ -470,8 +517,16 @@ class ReadySession:
 
     def verify_batch(self, batch, *, initial: bool = False) -> None:
         prepared = self.verify()
+        configured = prepared.plan.translation_config.get("source_hard_limit")
+        if configured is not None and (
+            batch.manifest.source_hard_limit is None or batch.manifest.source_hard_limit > configured
+        ):
+            raise IdentityMismatch("request source hard limit exceeds the frozen plan")
         capacity = limits_from_config(
-            prepared.plan.translation_config, context_unlimited=batch.manifest.context_unlimited
+            prepared.plan.translation_config,
+            context_unlimited=batch.manifest.context_unlimited,
+            output_unlimited=batch.manifest.output_unlimited,
+            source_hard_limit=batch.manifest.source_hard_limit,
         )
         self.index.validate_items(
             batch.items,
@@ -526,6 +581,8 @@ class ReadySession:
 
     def _fingerprint(self, *, include_prepared: bool = True):
         root = self.store.root
+        if state.compact(root):
+            return self._compact_fingerprint(include_prepared=include_prepared)
         paths = [
             state.snapshot(root),
             *(
@@ -535,7 +592,7 @@ class ReadySession:
                     "prepared.json",
                     "glossary.json",
                     "plans/book.json",
-                    "checks/preflight.json",
+                    str(receipt_path(root).relative_to(root)),
                 )
                 if include_prepared or value != "prepared.json"
             ),
@@ -557,12 +614,31 @@ class ReadySession:
     def _quick_fingerprint(self):
         if not state.compact(self.store.root):
             return None
-        paths = (*state.files(self.store.root), state.snapshot(self.store.root))
+        return self._compact_fingerprint()
+
+    def _compact_fingerprint(self, *, include_prepared: bool = True):
+        root = self.store.root
+        exact = [
+            "preparation.json",
+            "glossary.json",
+            "plans/book.json",
+            str(receipt_path(root).relative_to(root)),
+        ]
+        if include_prepared:
+            exact.append("prepared.json")
         try:
-            return tuple(
-                (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
-                for path in paths
-                for status in [path.stat()]
+            dependencies = state.dependency_fingerprint(
+                root,
+                exact=exact,
+                prefixes=("documents/", "inventories/", "members/", "batches/", "glossary/"),
             )
-        except OSError as error:
+            source = state.snapshot(root).stat()
+            return dependencies, (
+                source.st_dev,
+                source.st_ino,
+                source.st_size,
+                source.st_mtime_ns,
+                source.st_ctime_ns,
+            )
+        except (OSError, state.StateError) as error:
             raise IdentityMismatch(f"workflow ready dependency is unavailable: {error}") from error
