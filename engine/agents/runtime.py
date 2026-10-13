@@ -24,9 +24,14 @@ from engine.core.tokens import _get_tokenizer, count_tokens
 from engine.schemas.internal import Attempt, Usage
 
 from . import wire
-from .models import build_key_models, build_primary_model
+from .models import (
+    REQUEST_TIMEOUT_SECONDS,
+    build_key_models,
+    build_primary_model,
+    close_model_clients,
+    runtime_owned_models,
+)
 from .pool import PoolUnavailable, WorkflowPool, WorkflowState, finite_cooldown
-from .streaming import StreamingOpenAILike
 
 type Stage = Literal["terms", "resolution", "translate", "review", "coherence"]
 type Transport = Callable[[Stage, dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -306,7 +311,6 @@ class ModelRuntime:
         cooldown_seconds: float = 10.0,
         max_service_failures: int = 3,
         shared_service_failures: bool = True,
-        request_timeout_seconds: float = 120.0,
         model_max_output_tokens: int | None = None,
         provider_output_token_field: Literal["max_tokens", "max_completion_tokens"] | None = None,
         prior_input_limit_breach: int | None = None,
@@ -325,13 +329,10 @@ class ModelRuntime:
             raise ValueError("max_transport_retries must be between 0 and 2")
         if max_service_failures < 1:
             raise ValueError("max_service_failures must be positive")
-        if request_timeout_seconds <= 0:
-            raise ValueError("request_timeout_seconds must be positive")
         if prior_input_limit_breach is not None and prior_input_limit_breach <= MAX_MODEL_INPUT_TOKENS:
             raise ValueError("prior_input_limit_breach must exceed the model input limit")
         if type(input_budget_version) is not int or input_budget_version not in {1, 2}:
             raise ValueError("unsupported input budget algorithm version")
-
         self.rpm = rpm
         self.tpm = tpm
         self._max_inflight = max_inflight
@@ -351,7 +352,7 @@ class ModelRuntime:
         self._service_failures = 0
         self._actual_input_limit_breached = prior_input_limit_breach
         self._input_budget_version = input_budget_version
-        self._request_timeout_seconds = request_timeout_seconds
+        self._request_timeout_seconds = REQUEST_TIMEOUT_SECONDS
         self._model_max_output_tokens = None
         _ = model_max_output_tokens, provider_output_token_field
         self._compact: bool = transport is None
@@ -364,13 +365,13 @@ class ModelRuntime:
         self._workflow_metrics: ContextVar[dict[str, Any] | None] = ContextVar("epubox_workflow_metrics", default=None)
         self._pool: WorkflowPool | None = None
         self._api_keys: tuple[Any, ...] = ()
-
+        self._owned_models: tuple[Any, ...] = ()
         self._transport: Transport
         if transport is None:
             source_model = model or build_primary_model()
             pooled = bool(getattr(source_model, "_epubox_keys", ()))
-            key_models = build_key_models(source_model)
-            configured_models = tuple(item if pooled else copy.copy(item) for item in key_models)
+            configured_models = tuple(item if pooled else copy.copy(item) for item in build_key_models(source_model))
+            self._owned_models = runtime_owned_models(configured_models)
             self._model_id = getattr(source_model, "id", None)
             for item in configured_models:
                 item.max_retries = 0
@@ -393,6 +394,9 @@ class ModelRuntime:
         else:
             self._transport = transport
         self._semaphore = asyncio.Semaphore(self._pool.size if self._pool is not None else max_inflight)
+
+    async def aclose(self) -> None:
+        await close_model_clients(self._owned_models)
 
     @property
     def input_budget_version(self) -> int:
@@ -522,7 +526,9 @@ class ModelRuntime:
         )
 
     def _redact_provider_error(self, error: Exception) -> str:
-        message = str(error)
+        message = str(error).strip() or (
+            "request timed out" if isinstance(error, TimeoutError) else type(error).__name__
+        )
         for key in self._api_keys:
             message = _redact_api_key(message, key)
         return message
@@ -539,60 +545,29 @@ class ModelRuntime:
                     response_format={"type": "json_object"}, tools=None, tool_choice=None, run_response=None
                 )
             )
+            params.pop("stream", None)
+            params.pop("stream_options", None)
             try:
                 client = _without_implicit_retries(model.get_async_client(), self._request_timeout_seconds)
-                if isinstance(request_model, StreamingOpenAILike):
-                    stream = await client.chat.completions.create(
-                        model=request_model.id,
-                        messages=formatted_messages,
-                        stream=True,
-                        stream_options={"include_usage": True},
-                        **params,
-                    )
-                    parts: list[str] = []
-                    finish_reason = None
-                    response_usage = None
-                    metadata: dict[str, Any] = {}
-                    async for chunk in stream:
-                        if chunk.choices:
-                            delta = chunk.choices[0].delta
-                            if delta.content is not None:
-                                parts.append(delta.content)
-                            if chunk.choices[0].finish_reason is not None:
-                                finish_reason = chunk.choices[0].finish_reason
-                        if chunk.usage is not None:
-                            response_usage = chunk.usage
-                        metadata.update(
-                            {
-                                key: value
-                                for key, value in {
-                                    "response_id": chunk.id,
-                                    "model": chunk.model,
-                                    "system_fingerprint": chunk.system_fingerprint,
-                                }.items()
-                                if value is not None
-                            }
-                        )
-                    raw = "".join(parts)
-                else:
-                    response = await client.chat.completions.create(
-                        model=request_model.id,
-                        messages=formatted_messages,
-                        **params,
-                    )
-                    choice = response.choices[0]
-                    raw = choice.message.content or ""
-                    finish_reason = choice.finish_reason
-                    response_usage = response.usage
-                    metadata = {
-                        key: value
-                        for key, value in {
-                            "response_id": response.id,
-                            "model": response.model,
-                            "system_fingerprint": response.system_fingerprint,
-                        }.items()
-                        if value is not None
-                    }
+                response = await client.chat.completions.create(
+                    model=request_model.id,
+                    messages=formatted_messages,
+                    stream=False,
+                    **params,
+                )
+                choice = response.choices[0]
+                raw = choice.message.content or ""
+                finish_reason = choice.finish_reason
+                response_usage = response.usage
+                metadata = {
+                    key: value
+                    for key, value in {
+                        "response_id": response.id,
+                        "model": response.model,
+                        "system_fingerprint": response.system_fingerprint,
+                    }.items()
+                    if value is not None
+                }
             except (RateLimitError, AuthenticationError, APIConnectionError, APIStatusError) as exc:
                 retry_after = None
                 response = getattr(exc, "response", None)
@@ -755,7 +730,6 @@ class ModelRuntime:
 
         for attempt_index in range(self._max_transport_retries + 1):
             attempt_id = str(uuid4())
-            created_at = _utc_now()
             attempt = Attempt(
                 attempt_id=attempt_id,
                 affected_items=item_ids,
@@ -777,7 +751,7 @@ class ModelRuntime:
                     **({"output_tokens": output_tokens_value} if output_tokens_value is not None else {}),
                     "attempt_number": attempt_index + 1,
                 },
-                created_at=created_at,
+                created_at=_utc_now(),
                 metadata={key: value for key, value in wire_metadata.items()},
             )
             key_wait_started = self._monotonic()
@@ -991,6 +965,7 @@ class ModelRuntime:
                             item_ids,
                             version=str(wire_metadata["wire_version"]),
                             sources={item["item_id"]: item["source"] for item in payload["items"]},
+                            hints={item["item_id"]: item.get("hints", {}) for item in payload["items"]},
                         )
                     }
                 return response

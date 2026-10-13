@@ -30,6 +30,7 @@ from engine.epub.preparation import (
     _sha256_file,
 )
 from engine.epub.publication import publish_book, recover_publication
+from engine.epub.styles import FONT_POLICY
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.orchestrator import (
@@ -53,6 +54,7 @@ from engine.services.coherence import add_http_budget, retry_document_check
 from engine.services.legacy import _default_work_root, _existing_run_id, _resolve_work_root
 from engine.services.preparation import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.report import write_report
+from engine.services.retry import restart_command
 from engine.services.store import RunStore
 from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION
 
@@ -96,6 +98,7 @@ def check_output(source: Path, output: Path, *, overwrite: bool) -> None:
 
 
 @limit_workflows
+@restart_command
 def translate_book(
     source: Path,
     *,
@@ -434,7 +437,11 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
         if published is None:
             return None
         proof = published.get("verification")
-        if not isinstance(proof, dict) or proof.get("epub_version") != "3.0":
+        if (
+            not isinstance(proof, dict)
+            or proof.get("epub_version") != "3.0"
+            or proof.get("font_policy") != FONT_POLICY
+        ):
             from engine.epub.publish import publish_atomic
 
             published = publish_atomic(
@@ -460,7 +467,7 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
         verify_baseline(
             state.snapshot(work_dir), output, verification, checker_for_source(state.snapshot(work_dir), epubcheck)
         )
-        if verification.get("epub_version") != "3.0":
+        if verification.get("epub_version") != "3.0" or verification.get("font_policy") != FONT_POLICY:
             converted = publish_book(
                 store, output, checker_for_source(state.snapshot(work_dir), epubcheck), overwrite=True
             )
@@ -482,6 +489,7 @@ def _completed_outcome(work_dir: Path, output: Path, count: int, digest: str) ->
     )
 
 
+@restart_command
 def resume_book(
     work_dir: Path,
     *,
@@ -793,6 +801,9 @@ async def _finish(
         raise
     store = RunStore(work_dir)
     atomic = state.is_file(work_dir / "prepared.json")
+    verified_journal = translated.journal
+    if atomic and verified_journal is not None:
+        ready_session = verified_journal.session
     if atomic:
         from engine.services.ready import read_ready
 
@@ -821,7 +832,8 @@ async def _finish(
         if atomic:
             from engine.epub.publish import publish_atomic
 
-            published = publish_atomic(store, output, checker, overwrite=overwrite, session=ready_session)
+            options = {"journal": verified_journal} if verified_journal is not None else {}
+            published = publish_atomic(store, output, checker, overwrite=overwrite, session=ready_session, **options)
         else:
             published = publish_book(store, output, checker, overwrite=overwrite)
         if progress is not None:

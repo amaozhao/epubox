@@ -16,7 +16,7 @@
 
 - 单个单词文件名，扩展名除外；每个文本文件最多 1000 个物理行，包含注释、空行与无末尾换行的最后一行。
 - 用户已授权工具固定名称例外。明确保留 __init__.py（Python 包）、pyproject.toml（项目和工具配置）、.gitignore（Git）、.env.example（既有 dotenv 模板）。uv.lock 为既有依赖锁文件；本轮不改依赖。
-- pytest 已使用 python_files = ["*.py"]，无需以 test_ 为文件名前缀。函数名仍沿用 pytest 的测试约定。
+- pytest 只收集 `test_*.py`。测试文件统一采用 `test_<单词>.py`，工具前缀后的主体必须是一个英文单词；函数名继续沿用 pytest 的测试约定。
 - contracts.py 按共享 JSON/基础、源、术语、执行记录拆为 base.py、source.py、terms.py、run.py；旧公开入口仍从 contracts.py 导出，JSON 格式、字段、验证和哈希语义不变。
 - source_internal.py 改名 internal.py；atomic_store.py 改名 atomic.py；所有导入同步。文档改名及历史长文档按章节拆分，历史内容仍可阅读。
 - 其余文件的改名/拆分由清单中的责任任务执行；本阶段不宣称整个仓库已经满足最后的全量验收。

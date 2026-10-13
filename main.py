@@ -13,11 +13,13 @@ from engine.cli import RunOutcome, resume_book, translate_book
 from engine.services import state
 from engine.services.atomic import StoreLocked
 from engine.services.resume import plan_resume
+from engine.services.retry import restart_command
 
 app = typer.Typer()
 
 
 @app.command("translate", help="完整翻译一本 EPUB，未完成时自动续跑，最多 5 轮（含首次）。")
+@restart_command
 def translate(
     ctx: typer.Context,
     epub_path: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False, readable=True),
@@ -55,6 +57,7 @@ def translate(
         )
         if getattr(ctx.get_parameter_source(name), "name", None) == "COMMANDLINE"
     )
+    previous_attention: tuple[object, ...] | None = None
     for attempt in range(1, 6):
         try:
             result = translate_book(
@@ -78,12 +81,35 @@ def translate(
             typer.echo("同一本书已有翻译进程在运行；请等它退出后，用相同命令继续。", err=True)
             raise typer.Exit(1) from error
         except Exception as error:
+            previous_attention = None
             if attempt == 5:
                 typer.echo(f"翻译未完成：{error}", err=True)
                 raise typer.Exit(1) from error
+            typer.echo(f"本轮翻译中断：{error}", err=True)
         else:
             explicit = frozenset()  # Later rounds resume the configuration validated by the first result.
-            if result.status == "completed" or attempt == 5:
+            if result.status == "completed":
+                _print_result(result)
+                return
+            if result.status == "needs_attention" and result.phase == "translation":
+                attention = (
+                    result.work_dir,
+                    result.accepted_units,
+                    result.required_units,
+                    result.http_attempts,
+                    result.reason,
+                )
+                if attention == previous_attention:
+                    typer.echo("自动续跑停止：翻译结果没有新增已接受单元或 HTTP 请求。")
+                    typer.echo("本次命令的恢复机会已使用；再次启动命令可继续重试失败项，历史计数和已完成内容保留。")
+                    if result.reason:
+                        typer.echo(f"重复失败：{result.reason}", err=True)
+                    _print_result(result)
+                    return
+                previous_attention = attention
+            else:
+                previous_attention = None
+            if attempt == 5:
                 _print_result(result)
                 return
         typer.echo(f"自动续跑：第 {attempt + 1}/5 轮，复用已保存的进度。")
@@ -227,6 +253,7 @@ def _progress_printer():
                 report.get("result_status", report.get("batch_status", report.get("execution_state", "-"))),
             )
             issues = report.get("batch_issues")
+            warnings = report.get("batch_warnings")
             reason = report.get("reason")
             if isinstance(reason, dict):
                 reason = reason.get("message") or reason.get("code") or str(reason)
@@ -274,6 +301,11 @@ def _progress_printer():
                 + scheduling
                 + (f"；文档={report['document_path']}" if report.get("document_path") else "")
                 + (f"；原因={reason}" if reason else "")
+                + (
+                    f"；提示={'；'.join(map(str, warnings))}"
+                    if isinstance(warnings, (list, tuple)) and warnings
+                    else ""
+                )
             )
             return
         planned = report.get("planned", report.get("required_units", 0))

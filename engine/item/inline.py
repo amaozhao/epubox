@@ -437,7 +437,10 @@ def _unit_allows_markers(unit: Any, refs: Mapping[str, Any], inventory: set[str]
         return True
     kind = str(_field(unit, "unit_type", "kind", default="")).lower()
     region = _field(unit, "region", default={})
-    if kind == "navigation" and isinstance(region, Mapping) and region.get("navigation_anchor") is True:
+    materialized_navigation = _field(unit, "format") == "epubox-member-1"
+    if kind == "navigation" and (
+        isinstance(region, Mapping) and region.get("navigation_anchor") is True or materialized_navigation
+    ):
         return (
             bool(inventory)
             and set(refs) == inventory

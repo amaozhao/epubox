@@ -3,23 +3,52 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 from typing import Any
 
 from engine.agents.runtime import RuntimePaused
 from engine.agents.workflow import _review_epoch, _translation_epoch, run_workflow
+from engine.execution import recovery
+from engine.execution.parts import WithoutRecords, ensure_part_plans, owns_request
+from engine.execution.recovery import (
+    retry_partitions as _retry_partitions,
+)
+from engine.execution.recovery import (
+    selected_partitions as _selected_partitions,
+)
+from engine.execution.recovery import (
+    structural_failure as _structural_failure,
+)
 from engine.execution.state import TranslationRunResult
 from engine.item.budget import measure_budget
 from engine.item.members import pack_members
 from engine.schemas.contracts import ItemStatus
 from engine.schemas.members import MemberBatch
+from engine.schemas.parts import PartPlan
 from engine.services.atomic import StoreError
+from engine.services.failures import (
+    CONTENT_FAILURE_LIMIT,
+    automatically_reopenable_units,
+    content_retry_available,
+    failure_budget_available,
+    failure_count,
+    isolate_retry,
+    retryable_units,
+)
 from engine.services.ready import limits_from_config, request_source_limit
+from engine.services.retry import claim_restart, isolate_restart_items, restart_partitions
 from engine.services.store import RunStore
+
+
+@dataclass(frozen=True)
+class _PartJob:
+    plan: PartPlan
+    document_id: str
+    ordinal: int
 
 
 async def run_atomic(
@@ -41,8 +70,11 @@ async def run_atomic(
         session = journal.session
         ready = session.prepared
         journal.recover_results()
+        user_restart = claim_restart(store.root)
+        plans = ensure_part_plans(journal)
+        part_parents = {plan.parent_id for plan in plans}
         recovery_partitions: tuple[tuple[str, ...], ...] = ()
-        if reopen_attention:
+        if reopen_attention or user_restart:
             records = journal.records()
             attention = {
                 item_id
@@ -56,17 +88,54 @@ async def run_atomic(
                 for unit_id, item_ids in ready.plan.unit_members.items()
                 if any(records[item_id].status == ItemStatus.NEEDS_ATTENTION for item_id in item_ids)
             }
+            ambiguous_units: set[str] = set()
             for request in journal._requests.values():
-                if request.stage in {"translate", "review"} and journal._ambiguous(request):
-                    units.update(unit_id for owners in request.item_unit_ids.values() for unit_id in owners)
+                if (
+                    request.stage in {"translate", "review"}
+                    and owns_request(journal, request)
+                    and journal._ambiguous(request)
+                ):
+                    ambiguous_units.update(unit_id for owners in request.item_unit_ids.values() for unit_id in owners)
+            units.update(ambiguous_units)
+            units.difference_update(
+                unit_id
+                for unit_id in tuple(units)
+                if unit_id not in ambiguous_units
+                and all(
+                    item_id in part_parents or records[item_id].status != ItemStatus.NEEDS_ATTENTION
+                    for item_id in ready.plan.unit_members[unit_id]
+                )
+                and any(item_id in part_parents for item_id in ready.plan.unit_members[unit_id])
+            )
+            if not user_restart:
+                units = automatically_reopenable_units(journal, ready.plan.unit_members, records, units)
+            reopened: set[str] = set()
             if units:
                 reopened = set(journal.retry_units(tuple(sorted(units))))
                 recovery_partitions = _selected_partitions(recovery_partitions, reopened)
             if progress:
-                progress({"phase": "recovery", "notice": f"恢复：正文断点处理完成，重试 {len(units)} 个单元。"})
+                split_count = sum(records[item].status != ItemStatus.REVIEWED for item in part_parents)
+                direct_count = len({session.index.members_by_id[item].unit_id for item in reopened - part_parents})
+                progress(
+                    {
+                        "phase": "recovery",
+                        "notice": f"恢复：正文断点处理完成，直接重试 {direct_count} 个单元，拆分恢复 {split_count} 个单元。",
+                    }
+                )
+        records = journal.records()
+        pending_items = {
+            item_id
+            for item_id, record in records.items()
+            if record.status != ItemStatus.REVIEWED and item_id not in part_parents
+        }
         order = {document: index for index, document in enumerate(session.index.document_order)}
         batches = sorted(
-            session._prepared_batches.values(),
+            (
+                batch
+                for request_id in session._prepared_batches
+                for batch in (session._prepared_batches[request_id],)
+                if pending_items.intersection(batch.manifest.item_ids)
+            ),
             key=lambda batch: (order[batch.items[0].document_id], batch.items[0].ordinal, batch.items[0].piece_index),
         )
         configured = ready.plan.translation_config.get("concurrency", 2)
@@ -76,13 +145,48 @@ async def run_atomic(
             progress({"phase": "recovery", "notice": "恢复：复用未变的完整批次，合并其余待处理片段。"})
         from engine.services.ceiling import mark_oversized
 
-        mark_oversized(journal)
-        scheduled = _pending_batches(journal, batches, partitions=recovery_partitions, output_unlimited=True)
+        ambiguous_part_items = frozenset(
+            item_id
+            for request in journal._requests.values()
+            if request.stage in {"translate", "review"}
+            and part_parents.intersection(request.item_ids)
+            and journal._ambiguous(request)
+            for item_id in request.item_ids
+        )
+        blocked_part_parents = part_parents.intersection(ambiguous_part_items)
+        root_excluded = frozenset(part_parents).union(ambiguous_part_items)
+        mark_oversized(WithoutRecords(journal, part_parents))
+        scheduled = _pending_batches(
+            journal,
+            batches,
+            partitions=recovery_partitions,
+            output_unlimited=True,
+            excluded=root_excluded,
+        )
+        part_jobs = tuple(
+            _PartJob(
+                plan=plan,
+                document_id=session.index.members_by_id[plan.parent_id].document_id,
+                ordinal=session.index.members_by_id[plan.parent_id].ordinal,
+            )
+            for plan in plans
+            if plan.parent_id not in blocked_part_parents
+            and journal.records((plan.parent_id,))[plan.parent_id].status != ItemStatus.REVIEWED
+        )
         if progress:
-            progress({"phase": "recovery", "notice": f"恢复：待处理请求已就绪，共 {len(scheduled)} 个批次。"})
+            progress(
+                {
+                    "phase": "recovery",
+                    "notice": f"恢复：待处理请求已就绪，共 {len(scheduled)} 个批次、{len(part_jobs)} 个细分任务。",
+                }
+            )
         retry_failures: set[str] = set()
+        part_failures = [
+            f"translate:{parent_id}: saved request has an unknown provider outcome"
+            for parent_id in sorted(blocked_part_parents)
+        ]
         retry_round = 0
-        pending = iter(_document_batches(scheduled))
+        pending = iter(_document_batches((*scheduled, *part_jobs)))
         active: dict[asyncio.Task, str] = {}
         stopped: str | None = None
         save_lock = asyncio.Lock()
@@ -96,7 +200,7 @@ async def run_atomic(
                 report.update(
                     request_id=batch.manifest.request_id,
                     item_ids=batch.manifest.item_ids,
-                    document_path=session.index.documents[batch.items[0].document_id].resource.path,
+                    document_path=session.index.resource_paths[batch.items[0].document_id],
                     chunk_items=len(batch.items),
                     source_tokens=batch.budget.source_tokens,
                     estimated_input_tokens=batch.budget.input_tokens,
@@ -128,136 +232,238 @@ async def run_atomic(
             progress(report)
 
         runtime = journal.runtime(model=model, transport=transport, progress=request_event)
-        if (
-            runtime.key_count
-            and not runtime.snapshot["enabled_keys"]
-            and journal.progress_snapshot()["accepted_units"] < ready.plan.required_unit_count
-        ):
-            stopped = "全部 Agnes key 已停用，等待修正配置后继续。"
-        if stopped is None:
-            configured = runtime.workflow_capacity
-        if stopped is None and runtime.key_count and progress:
-            progress(
-                {
-                    "phase": "translation",
-                    "notice": f"翻译：{runtime.key_count} 个去重后的 key，并行 HTML 最多 {configured} 个。",
-                }
-            )
 
-        async def execute(document_batches: tuple[MemberBatch, ...]):
-            def observe(record):
-                if record.status == ItemStatus.NEEDS_ATTENTION and (
-                    record.stage == "review"
-                    and record.target_projection is not None
-                    or record.stage == "translate"
-                    and _structural_failure(record)
-                ):
-                    retry_failures.add(record.item_id)
-                request_id = record.checks.get("review_request_id", record.request_id)
-                details = requests.get(request_id, {}) if isinstance(request_id, str) else {}
-                if progress is not None:
-                    progress(
-                        dict(journal.progress_snapshot())
-                        | details
-                        | {
-                            "phase": record.stage,
-                            "execution_state": "running",
-                            "request_id": request_id,
-                            "result_item_id": record.item_id,
-                            "result_status": str(record.status),
-                            "decision": record.checks.get("decision"),
-                            "revised": record.checks.get("decision") == "replace",
-                            "reason": record.failure,
-                            "elapsed_seconds": monotonic() - started,
+        async def execute(document_batches: tuple[MemberBatch | _PartJob, ...]):
+            async def execute_one(owner, batch: MemberBatch, *, root_scope: bool) -> None:
+                started = monotonic()
+
+                def observe(record, *, content_failure: bool = False):
+                    if (
+                        root_scope
+                        and record.status == ItemStatus.NEEDS_ATTENTION
+                        and (
+                            content_failure
+                            or record.stage == "review"
+                            and record.target_projection is not None
+                            or record.stage == "translate"
+                            and _structural_failure(record)
+                        )
+                    ):
+                        retry_failures.add(record.item_id)
+                    request_id = record.checks.get("review_request_id", record.request_id)
+                    details = requests.get(request_id, {}) if isinstance(request_id, str) else {}
+                    if progress is not None:
+                        progress(
+                            dict(journal.progress_snapshot())
+                            | details
+                            | {
+                                "phase": record.stage,
+                                "execution_state": "running",
+                                "request_id": request_id,
+                                "result_item_id": record.item_id,
+                                "result_status": str(record.status),
+                                "decision": record.checks.get("decision"),
+                                "revised": record.checks.get("decision") == "replace",
+                                "reason": record.failure,
+                                "elapsed_seconds": monotonic() - started,
+                            }
+                        )
+
+                async def save(record):
+                    await save_many((record,))
+
+                async def save_many(records):
+                    async with save_lock:
+                        owner.save_many(records)
+                        content_failures = {
+                            record.item_id: record.stage in {"translate", "review"}
+                            and failure_count(owner, record, record.stage) > 0
+                            and failure_budget_available(owner, record.item_id)
+                            for record in records
                         }
-                    )
+                        for record in records:
+                            observe(record, content_failure=content_failures[record.item_id])
 
-            async def save(record):
-                await save_many((record,))
-
-            async def save_many(records):
-                async with save_lock:
-                    journal.save_many(records)
-                    for record in records:
-                        observe(record)
-
-            save.save_many = save_many  # type: ignore[attr-defined]
-
-            async with runtime.workflow():
-                for batch in document_batches:
-                    records = journal.records(batch.manifest.item_ids)
-                    if all(record.status == ItemStatus.REVIEWED for record in records.values()):
-                        continue
-                    task = asyncio.current_task()
-                    current_requests.pop(task, None)
-                    chunk_attempts[task] = {}
-                    started = monotonic()
-                    before = runtime.workflow_stats
+                save.save_many = save_many  # type: ignore[attr-defined]
+                records = owner.records(batch.manifest.item_ids)
+                if all(record.status == ItemStatus.REVIEWED for record in records.values()):
+                    return
+                task = asyncio.current_task()
+                current_requests.pop(task, None)
+                chunk_attempts[task] = {}
+                before = runtime.workflow_stats
+                activator = getattr(owner, "root", journal)
+                with activator.activate(owner):
                     result = await run_workflow(
-                        ready,
+                        owner.session.prepared,
                         batch,
-                        session.index,
+                        owner.session.index,
                         runtime,
-                        session=session,
+                        session=owner.session,
                         save=save,
                         records=records,
                     )
-                    after = runtime.workflow_stats
-                    keys_used = {
-                        key_slot
-                        for request_id, prior in chunk_attempts.pop(task).items()
-                        for attempt in journal._requests[request_id].attempts[prior:]
-                        if isinstance((key_slot := attempt.metadata.get("key_slot")), str)
-                    }
-                    timing = {
-                        key: max(0, after[key] - before[key])
-                        for key in ("key_wait_seconds", "rate_wait_seconds", "http_seconds", "http_attempts")
-                    } | {"keys_used": tuple(sorted(keys_used))}
-                    revised = any(record.checks.get("decision") == "replace" for record in result.results.values())
-                    identifier = current_requests.get(task)
-                    details = requests.get(identifier or "", {})
-                    emit(
-                        "workflow",
-                        batch,
-                        monotonic() - started,
+                after = runtime.workflow_stats
+                keys_used = {
+                    key_slot
+                    for request_id, prior in chunk_attempts.pop(task, {}).items()
+                    for attempt in journal._requests[request_id].attempts[prior:]
+                    if isinstance((key_slot := attempt.metadata.get("key_slot")), str)
+                }
+                timing = {
+                    key: max(0, after[key] - before[key])
+                    for key in ("key_wait_seconds", "rate_wait_seconds", "http_seconds", "http_attempts")
+                } | {"keys_used": tuple(sorted(keys_used))}
+                revised = any(record.checks.get("decision") == "replace" for record in result.results.values())
+                identifier = current_requests.get(task)
+                details = requests.get(identifier or "", {})
+                emit(
+                    "workflow",
+                    batch,
+                    monotonic() - started,
+                    **{
                         **{
-                            **{
-                                key: details[key]
-                                for key in (
-                                    "source_tokens",
-                                    "source_channel",
-                                    "estimated_input_tokens",
-                                    "reserved_input_tokens",
-                                    "reserved_output_tokens",
-                                )
-                                if key in details
-                            },
-                            "request_id": identifier,
-                            "batch_status": result.status,
-                            "batch_issues": result.issues,
-                            "decision": "needs_attention"
-                            if result.status == "needs_attention"
-                            else "replace"
-                            if revised
-                            else "no_change",
-                            "revised": revised,
-                            "reason": "; ".join(result.issues) or None,
-                            "runtime": runtime.snapshot,
-                            "workflow_timing": timing,
+                            key: details[key]
+                            for key in (
+                                "source_tokens",
+                                "source_channel",
+                                "estimated_input_tokens",
+                                "reserved_input_tokens",
+                                "reserved_output_tokens",
+                            )
+                            if key in details
                         },
+                        "request_id": identifier,
+                        "batch_status": result.status,
+                        "batch_issues": result.issues if result.status == "needs_attention" else (),
+                        "batch_warnings": result.issues if result.status == "completed" else (),
+                        "decision": "needs_attention"
+                        if result.status == "needs_attention"
+                        else "replace"
+                        if revised
+                        else "no_change",
+                        "revised": revised,
+                        "reason": "; ".join(result.issues) if result.status == "needs_attention" else None,
+                        "runtime": runtime.snapshot,
+                        "workflow_timing": timing,
+                    },
+                )
+
+            async def execute_part(root_owner, plan: PartPlan):
+                from engine.services.parts import PartJournal
+
+                async with save_lock:
+                    part = PartJournal.initialize(root_owner, plan)
+                    part.recover_results()
+                    part_restart = claim_restart(store.root, plan.parent_id)
+                    ensure_part_plans(part)
+                    if reopen_attention or part_restart:
+                        part_units = {child.unit_id for child in plan.children}
+                        if not part_restart:
+                            part_units = automatically_reopenable_units(
+                                part, part._unit_members(), part.records(), part_units
+                            )
+                        if part_units:
+                            part.retry_units(tuple(sorted(part_units)))
+                processed: set[str] = set()
+                network_rounds = 0
+                while True:
+                    failed = tuple(
+                        record for record in part.records().values() if record.status == ItemStatus.NEEDS_ATTENTION
                     )
+                    nested = tuple(
+                        candidate
+                        for candidate in ensure_part_plans(part)
+                        if candidate.parent_id not in processed
+                        and part.records((candidate.parent_id,))[candidate.parent_id].status != ItemStatus.REVIEWED
+                    )
+                    if nested:
+                        for candidate in nested:
+                            processed.add(candidate.parent_id)
+                            await execute_part(part, candidate)
+                        failed = tuple(
+                            record for record in part.records().values() if record.status == ItemStatus.NEEDS_ATTENTION
+                        )
+                        if any(record.item_id in processed for record in failed):
+                            break
+                    for batch in part.pending_batches():
+                        await execute_one(part, batch, root_scope=False)
+                    failed = tuple(
+                        record for record in part.records().values() if record.status == ItemStatus.NEEDS_ATTENTION
+                    )
+                    if not failed:
+                        break
+                    nested = tuple(
+                        candidate
+                        for candidate in ensure_part_plans(part)
+                        if candidate.parent_id not in processed
+                        and candidate.parent_id in {record.item_id for record in failed}
+                    )
+                    if nested:
+                        continue
+                    retryable = tuple(record for record in failed if content_retry_available(part, record))
+                    if not retryable:
+                        retryable = tuple(
+                            record
+                            for record in failed
+                            if network_rounds < 3
+                            and isinstance((record.failure or {}).get("message"), str)
+                            and "unknown provider outcome" in str((record.failure or {})["message"])
+                        )
+                        if not retryable:
+                            break
+                        network_rounds += 1
+                    async with save_lock:
+                        part.retry_units(
+                            tuple(
+                                sorted(
+                                    {part.session.index.members_by_id[record.item_id].unit_id for record in retryable}
+                                )
+                            )
+                        )
+                async with save_lock:
+                    composed = part.compose()
+                return composed, failed
+
+            async with runtime.workflow():
+                for work in document_batches:
+                    if isinstance(work, MemberBatch):
+                        await execute_one(journal, work, root_scope=True)
+                        continue
+                    composed, failed = await execute_part(journal, work.plan)
+                    if composed is None:
+                        part_failures.extend(
+                            f"{record.stage}:{record.item_id}: {record.failure['message']}"
+                            for record in failed
+                            if record.failure is not None and isinstance(record.failure.get("message"), str)
+                        )
 
         try:
+            if (
+                runtime.key_count
+                and not runtime.snapshot["enabled_keys"]
+                and journal.progress_snapshot()["accepted_units"] < ready.plan.required_unit_count
+            ):
+                stopped = "全部 Agnes key 已停用，等待修正配置后继续。"
+            if stopped is None:
+                configured = runtime.workflow_capacity
+            if stopped is None and runtime.key_count and progress:
+                progress(
+                    {
+                        "phase": "translation",
+                        "notice": f"翻译：{runtime.key_count} 个去重后的 key，并行 HTML 最多 {configured} 个。",
+                    }
+                )
             emit("translation")
             while True:
                 while stopped is None and len(active) < runtime.workflow_capacity:
                     document_batches = next(pending, None)
                     if document_batches is None:
                         break
-                    document_id = document_batches[0].items[0].document_id
+                    document_id = _document_id(document_batches[0])
                     active[asyncio.create_task(execute(document_batches))] = document_id
                 if not active:
-                    if stopped is None and retry_round < 2:
+                    if stopped is None and retry_round < CONTENT_FAILURE_LIMIT:
                         records = journal.records()
                         units = set()
                         for unit_id in {session.index.members_by_id[item].unit_id for item in retry_failures}:
@@ -275,29 +481,52 @@ async def run_atomic(
                         groups = [
                             {unit for owners in request.item_unit_ids.values() for unit in owners}
                             for request in journal._requests.values()
-                            if request.stage in {"translate", "review"} and journal._ambiguous(request)
+                            if request.stage in {"translate", "review"}
+                            and owns_request(journal, request)
+                            and journal._ambiguous(request)
                         ]
                         units.difference_update(set().union(*groups) if groups else set())
-                        if units:
+                        new_plans = tuple(
+                            plan
+                            for plan in ensure_part_plans(journal)
+                            if plan.parent_id not in part_parents and plan.parent_id in retry_failures
+                        )
+                        if new_plans:
+                            part_parents.update(plan.parent_id for plan in new_plans)
+                            split_units = {session.index.members_by_id[plan.parent_id].unit_id for plan in new_plans}
+                            units.difference_update(split_units)
+                        units = retryable_units(journal, ready.plan.unit_members, records, units)
+                        if units or new_plans:
                             partitions = _retry_partitions(journal, retry_failures, output_unlimited=True)
-                            reopened = set(journal.retry_units(tuple(sorted(units))))
+                            reopened = set(journal.retry_units(tuple(sorted(units)))) if units else set()
                             retry_round += 1
-                            pending = iter(
-                                _document_batches(
-                                    _pending_batches(
-                                        journal,
-                                        batches,
-                                        reopened,
-                                        partitions=_selected_partitions(partitions, reopened),
-                                        output_unlimited=True,
-                                    )
+                            retried = (
+                                _pending_batches(
+                                    journal,
+                                    batches,
+                                    reopened,
+                                    partitions=_selected_partitions(partitions, reopened),
+                                    output_unlimited=True,
+                                    excluded=root_excluded.union(part_parents),
                                 )
+                                if reopened
+                                else ()
                             )
+                            jobs = tuple(
+                                _PartJob(
+                                    plan=plan,
+                                    document_id=session.index.members_by_id[plan.parent_id].document_id,
+                                    ordinal=session.index.members_by_id[plan.parent_id].ordinal,
+                                )
+                                for plan in new_plans
+                            )
+                            pending = iter(_document_batches((*retried, *jobs)))
                             if progress:
                                 progress(
                                     {
                                         "phase": "review",
-                                        "notice": f"正文自动重试：第 {retry_round}/2 轮，{len(units)} 个单元；已有有效初译继续复用。",
+                                        "notice": f"正文内容重试：第 {retry_round}/{CONTENT_FAILURE_LIMIT} 轮，"
+                                        f"{len(units)} 个单元；已有有效初译继续复用。",
                                     }
                                 )
                             continue
@@ -338,6 +567,8 @@ async def run_atomic(
                     task.cancel()
             await asyncio.gather(*active, return_exceptions=True)
             raise
+        finally:
+            await runtime.aclose()
         snapshot = dict(journal.progress_snapshot())
         accepted = int(snapshot.get("accepted_units", 0))
         attention = int(snapshot.get("needs_attention_units", 0))
@@ -353,7 +584,7 @@ async def run_atomic(
             and record.failure is not None
             and isinstance(record.failure.get("message"), str)
         )
-        reason = stopped or ("; ".join(dict.fromkeys(failures)) if not complete else None) or None
+        reason = stopped or ("; ".join(dict.fromkeys((*failures, *part_failures))) if not complete else None) or None
         if progress is not None:
             progress(
                 snapshot
@@ -372,13 +603,22 @@ async def run_atomic(
             http_attempts=int(snapshot.get("http_attempts", 0)),
             predicted_http_requests=2 * len(batches),
             reason=reason,
+            journal=journal,
         )
 
 
-def _document_batches(batches: Sequence[MemberBatch]) -> tuple[tuple[MemberBatch, ...], ...]:
-    grouped: dict[str, list[MemberBatch]] = {}
+def _document_id(work: MemberBatch | _PartJob) -> str:
+    return work.items[0].document_id if isinstance(work, MemberBatch) else work.document_id
+
+
+def _document_batches(
+    batches: Sequence[MemberBatch | _PartJob],
+) -> tuple[tuple[MemberBatch | _PartJob, ...], ...]:
+    grouped: dict[str, list[MemberBatch | _PartJob]] = {}
     for batch in batches:
-        grouped.setdefault(batch.items[0].document_id, []).append(batch)
+        grouped.setdefault(_document_id(batch), []).append(batch)
+    for group in grouped.values():
+        group.sort(key=lambda work: work.items[0].ordinal if isinstance(work, MemberBatch) else work.ordinal)
     return tuple(tuple(group) for group in grouped.values())
 
 
@@ -393,9 +633,29 @@ def _pending_batches(
     *,
     partitions: Sequence[Collection[str]] = (),
     output_unlimited: bool = False,
+    excluded: Collection[str] = (),
 ) -> tuple[MemberBatch, ...]:
-    """Regroup a checkpoint by HTML, channel and next step, preserving completed members."""
     records = journal.records()
+    excluded = frozenset(excluded)
+    isolate_restart_items(
+        journal.store.root,
+        {
+            item_id
+            for item_id, record in records.items()
+            if record.status == ItemStatus.NEEDS_ATTENTION and isolate_retry(journal, record)
+        },
+    )
+    isolated = restart_partitions(journal.store.root, set(records))
+    if isolated:
+        isolated_ids = {item for group in isolated for item in group}
+        partitions = (
+            *(
+                remaining
+                for group in partitions
+                if (remaining := tuple(item for item in group if item not in isolated_ids))
+            ),
+            *isolated,
+        )
     if not partitions:
         retry_items = {
             item_id
@@ -407,6 +667,8 @@ def _pending_batches(
             partitions = _retry_partitions(journal, retry_items, output_unlimited=output_unlimited)
     session = journal.session
     ambiguous_items, ambiguous_batches = _ambiguous_ownership(journal, set(selected) if selected is not None else None)
+    ambiguous_items.difference_update(excluded)
+    ambiguous_batches = [batch for batch in ambiguous_batches if not excluded.intersection(batch.manifest.item_ids)]
     partition_by_item: dict[str, int] = {}
     for position, partition in enumerate(partitions):
         for item_id in partition:
@@ -417,22 +679,27 @@ def _pending_batches(
     fresh = selected is None and all(
         records[item].status == ItemStatus.PENDING and not _translation_epoch(records[item])
         for batch in initial
+        if not excluded.intersection(batch.manifest.item_ids)
         for item in batch.manifest.item_ids
     )
     sparse_counts = Counter(
         (batch.items[0].document_id, batch.items[0].channel)
         for batch in initial
+        if not excluded.intersection(batch.manifest.item_ids)
         if batch.items[0].channel in {"attribute", "metadata", "navigation"}
     )
     started_sparse = {
         (batch.items[0].document_id, batch.items[0].channel)
         for batch in initial
+        if not excluded.intersection(batch.manifest.item_ids)
         if ambiguous_items.intersection(batch.manifest.item_ids)
     }
     merge_sparse = {lane for lane, count in sparse_counts.items() if count > 1 and lane not in started_sparse}
     untouched_batches: set[str] = set()
     if reuse_intact:
         for batch in initial:
+            if excluded.intersection(batch.manifest.item_ids):
+                continue
             if batch.items[0].channel != "body":
                 continue
             if all(
@@ -447,6 +714,7 @@ def _pending_batches(
     reusable_batches = [
         batch
         for batch in initial
+        if not excluded.intersection(batch.manifest.item_ids)
         if (batch.manifest.context_unlimited or output_unlimited)
         and not any(item_id in partition_by_item for item_id in batch.manifest.item_ids)
         and not ambiguous_items.intersection(batch.manifest.item_ids)
@@ -471,7 +739,7 @@ def _pending_batches(
     batches = reusable_batches
     lanes = {}
     for member in session.index.members:
-        if member.item_id in reusable:
+        if member.item_id in reusable or member.item_id in excluded:
             continue
         record = records[member.item_id]
         if (
@@ -523,7 +791,11 @@ def _pending_batches(
                 sparse=True,
             )
             if not review.blocked:
-                groups = [batch.items for batch in review.batches]
+                groups = [
+                    tuple(batch.items[start : start + recovery.STRUCTURAL_RETRY_MAX_ITEMS])
+                    for batch in review.batches
+                    for start in range(0, len(batch.items), recovery.STRUCTURAL_RETRY_MAX_ITEMS)
+                ]
         for group in groups:
             versions = {}
             for member in group:
@@ -675,6 +947,7 @@ def _ambiguous_ownership(journal, selected: set[str] | None) -> tuple[set[str], 
         if (
             selected is not None
             and not selected.intersection(request.item_ids)
+            or not owns_request(journal, request)
             or not bool(ambiguous(request) if callable(ambiguous) else request.attempts)
         ):
             continue
@@ -707,87 +980,3 @@ def _estimated_review_fits(batch: MemberBatch, limits, model: str) -> bool:
         review_targets="estimated",
         tokenizer_model=model,
     ).fits
-
-
-def _structural_failure(record) -> bool:
-    message = _retry_message(record)
-    if not isinstance(message, str):
-        return False
-    if message.endswith(("translation response was truncated", "review response was truncated")):
-        return True
-    detail = _failure_detail(message)
-    return detail.startswith(
-        (
-            "text moved across",
-            "reference moved across",
-            "locked reference order changed",
-            "plain text and metadata units",
-            "marker inventory mismatch",
-            "crossed or unmatched",
-            "unclosed target",
-            "duplicate target",
-            "unknown projection marker",
-            "unclosed projection marker",
-            "literal closing delimiter",
-            "unsupported projection escape",
-            "dangling projection escape",
-            "target must be",
-            "target decoding failed:",
-            "target contains invalid XML",
-            "translation item missing",
-            "review item missing",
-            "duplicate item_id",
-            "response root must",
-        )
-    )
-
-
-def _retry_partitions(
-    journal, selected: Collection[str], *, output_unlimited: bool = False
-) -> tuple[tuple[str, ...], ...]:
-    """Keep failed request ownership while shrinking retries that cannot succeed unchanged."""
-    wanted = set(selected)
-    records = journal.records(tuple(wanted))
-    truncated: dict[str, list[str]] = {}
-    for item_id, record in records.items():
-        message = _retry_message(record)
-        if not isinstance(message, str) or not message.endswith("response was truncated"):
-            continue
-        match = re.match(r"^(?:translate|review):(tx-[^:]+):", message)
-        if match and match.group(1) in journal._requests:
-            truncated.setdefault(match.group(1), []).append(item_id)
-
-    partitions: list[tuple[str, ...]] = []
-    for request_id in truncated:
-        request = journal._requests[request_id]
-        if output_unlimited and not any(
-            attempt.metadata.get("output_unlimited") == "true" for attempt in request.attempts
-        ):
-            continue
-        members = tuple(item_id for item_id in request.item_ids if item_id in wanted)
-        if not members:
-            continue
-        middle = max(1, len(members) // 2)
-        partitions.append(members[:middle])
-        if members[middle:]:
-            partitions.append(members[middle:])
-    return tuple(partitions)
-
-
-def _retry_message(record) -> str | None:
-    message = (record.failure or {}).get("message")
-    if isinstance(message, str):
-        return message
-    feedback = record.checks.get("retry_feedback")
-    return feedback if isinstance(feedback, str) else None
-
-
-def _failure_detail(message: str) -> str:
-    return re.sub(r"^(?:translate|review):tx-[^:]+:\s*", "", message)
-
-
-def _selected_partitions(
-    partitions: Sequence[Collection[str]], selected: Collection[str]
-) -> tuple[tuple[str, ...], ...]:
-    wanted = set(selected)
-    return tuple(values for partition in partitions if (values := tuple(item for item in partition if item in wanted)))

@@ -446,14 +446,14 @@ workflow 使用这份结果继续 translate → 保存当前稿 → 基于真实
 
 现有测试参考：
 
-- [preparation.py](../tests/engine/services/preparation.py)
-- [preparing.py](../tests/engine/services/preparing.py)
-- [workflow.py](../tests/engine/agents/workflow.py)
-- [inputs.py](../tests/engine/services/terms/inputs.py)
-- [planning.py](../tests/engine/services/terms/planning.py)
-- [runner.py](../tests/engine/services/terms/runner.py)
-- [candidates.py](../tests/engine/services/terms/candidates.py)
-- [resolution.py](../tests/engine/services/terms/resolution.py)
-- [freeze.py](../tests/engine/services/terms/freeze.py)
+- [preparation.py](../tests/engine/services/test_preparation.py)
+- [preparing.py](../tests/engine/services/test_preparing.py)
+- [workflow.py](../tests/engine/agents/test_workflow.py)
+- [inputs.py](../tests/engine/services/terms/test_inputs.py)
+- [planning.py](../tests/engine/services/terms/test_planning.py)
+- [runner.py](../tests/engine/services/terms/test_runner.py)
+- [candidates.py](../tests/engine/services/terms/test_candidates.py)
+- [resolution.py](../tests/engine/services/terms/test_resolution.py)
+- [freeze.py](../tests/engine/services/terms/test_freeze.py)
 
 本文同时保留最初盘点和当前迁移边界。T08/T11/T12 的已实现合同见 [terminology.md](terminology.md)，T13/T14 的正文请求合同见 [packing.md](packing.md)，T15/T16 的原子准备与三步接口见 [workflow.md](workflow.md)。T17—T19 的逐阶段持久化、最终 EPUB 和 CLI 贯通已完成，交接见 [publication.md](publication.md)；整本书真实验收继续由 T20 完成。

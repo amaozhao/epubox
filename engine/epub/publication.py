@@ -9,6 +9,7 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name, serialize_xml
 from engine.epub.assembly import assemble_document, derive_navigation_projection
 from engine.epub.replace import replace_resources
+from engine.epub.styles import use_reader_fonts
 from engine.epub.upgrade import upgrade_package
 from engine.epub.validation import (
     EpubValidationError,
@@ -231,6 +232,7 @@ def publish_book(
     media_types = {item.path: item.media_type for item in inventory.manifest}
     media_types[inventory.opf_path] = "application/oebps-package+xml"
     replacements = replace_resources(replacements, media_types=media_types, source=snapshot)
+    replacements, removed_paths = use_reader_fonts(snapshot, inventory, replacements)
     for path in replacements:
         accepted_by_resource.setdefault(path, {})
     staged_path = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
@@ -240,6 +242,7 @@ def publish_book(
         replacements,
         source_directory=store.root / "source" if state.compact(store.root) else None,
         allow_additions=True,
+        removed_paths=removed_paths,
     )
     verification = verify_staged_epub(
         snapshot,
@@ -250,6 +253,8 @@ def publish_book(
         checker=checker,
         expected_language=None if identity else "zh-Hans",
         upgraded=True,
+        removed_paths=removed_paths,
+        reader_fonts=True,
     )
     if not identity:
         current_records = {unit_id: store.read_unit(unit_id) for unit_id in plan.unit_ids}

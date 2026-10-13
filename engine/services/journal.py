@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
@@ -30,14 +32,14 @@ from engine.schemas.members import MemberBatch
 from engine.services import frames, state
 from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, safe_id
 from engine.services.coherence import load_budget_overrides
+from engine.services.context import clear_proof_caches, memory_fingerprint, proof_cache, proof_fingerprint
 from engine.services.custody import bounded as _bounded
 from engine.services.custody import epoch as _saved_epoch
 from engine.services.custody import manifest as _manifest
-from engine.services.custody import number as _number
 from engine.services.custody import optional as _optional
 from engine.services.custody import persisted_response as _persisted_response
 from engine.services.custody import positive as _positive
-from engine.services.custody import review_draft, review_feedback
+from engine.services.custody import review_draft
 from engine.services.custody import text as _text
 from engine.services.ready import ReadySession
 from engine.services.store import ModelResponseStage, RunStore
@@ -48,6 +50,8 @@ _FROZEN_RESULT_FIELDS = tuple(
 
 
 class BodyJournal:
+    _proof_memory_fingerprint: str
+
     def __init__(
         self,
         store: RunStore,
@@ -56,15 +60,24 @@ class BodyJournal:
     ):
         self.store = store
         self.session = session or ReadySession(store)
+        self._active: ContextVar[BodyJournal] = ContextVar("body_journal", default=self)
         if self.session.store.root != store.root:
             raise IdentityMismatch("body journal and ready session use different runs")
         self._requests = self._load_requests()
+        self._requests_by_item: dict[str, tuple[RequestManifest, ...]] = {}
+        request_items: defaultdict[str, list[RequestManifest]] = defaultdict(list)
+        for request in self._requests.values():
+            for item_id in request.item_ids:
+                request_items[item_id].append(request)
+        self._requests_by_item = {item_id: tuple(values) for item_id, values in request_items.items()}
         self._records = self._load_records()
-        self._responses: dict[tuple[str, str], Any] = {}
-        self._translations: dict[str, Mapping[str, Any]] = {}
-        self._reviews: dict[str, Mapping[str, Any]] = {}
-        self._translation_batches: dict[str, tuple[RequestManifest, MemberBatch]] = {}
-        self._review_batches: dict[str, tuple[RequestManifest, MemberBatch]] = {}
+        self._responses: MutableMapping[tuple[str, str], Any] = proof_cache()
+        self._translations: MutableMapping[str, Mapping[str, Any]] = proof_cache()
+        self._reviews: MutableMapping[str, Mapping[str, Any]] = proof_cache()
+        self._translation_batches: MutableMapping[str, tuple[RequestManifest, MemberBatch]] = proof_cache()
+        self._review_batches: MutableMapping[str, tuple[RequestManifest, MemberBatch]] = proof_cache()
+        self._review_records: MutableMapping[str, Mapping[str, ItemRecord]] = proof_cache()
+        self._proof_metrics: defaultdict[str, int] = defaultdict(int)
         self._pending_frames: dict[str, frames.Frame] = {}
         self._initial_records: dict[str, ItemRecord] | None = None
         self._ambiguous_cache: dict[str, tuple[tuple[Any, ...], bool]] = {}
@@ -74,23 +87,13 @@ class BodyJournal:
             raise CorruptRecord("body run limit addition must be a non-negative integer")
         self._run_limit = frozen_limit + addition if frozen_limit else 0
         frames.warm(self, progress)
-        total = len(self._records)
-        for position, record in enumerate(self._records.values(), 1):
-            _validate_saved_record(self.session, record)
-            if record.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
-                self._translation_proof(record)
-            if record.status == ItemStatus.REVIEWED:
-                self._require_review_proof(record)
-            if progress is not None and (position % 250 == 0 or position == total):
-                progress(
-                    {
-                        "phase": "recovery",
-                        "notice": f"恢复：已校验 {position}/{total} 条正文断点。",
-                        "completed_items": position,
-                        "required_items": total,
-                    }
-                )
+        from engine.services.proofs import validate_records
+
+        validate_records(self, tuple(self._records.values()), progress)
         frames.flush(self, include_active=False)
+        clear_proof_caches(self)
+        self._proof_fingerprint = proof_fingerprint(self.store.root)
+        self._proof_memory_fingerprint = memory_fingerprint(self)
         self._initialize_counts()
 
     def records(self, item_ids: Sequence[str] | None = None) -> dict[str, ItemRecord]:
@@ -103,10 +106,30 @@ class BodyJournal:
                 raise CorruptRecord(f"missing body result: {item_id}")
         return {item_id: self._records[item_id] for item_id in requested}
 
+    def _register_request(self, request: RequestManifest) -> RequestManifest:
+        self._requests[request.request_id] = request
+        for item_id in request.item_ids:
+            current = tuple(
+                value for value in self._requests_by_item.get(item_id, ()) if value.request_id != request.request_id
+            )
+            self._requests_by_item[item_id] = (*current, request)
+        return request
+
+    def _scoped_requests(self) -> tuple[RequestManifest, ...]:
+        return tuple(self._requests.values())
+
+    def verify_persisted_proofs(self) -> None:
+        """Rebind a live journal to disk before a final publication decision."""
+        from engine.services.context import verify_persisted_proofs
+
+        verify_persisted_proofs(self)
+
     def save(self, record: ItemRecord) -> None:
         self.save_many((record,))
 
     def save_many(self, records: Sequence[ItemRecord]) -> None:
+        from engine.services.failures import record_content_failure
+
         self.session.verify()
         records = tuple(records)
         if len({record.item_id for record in records}) != len(records):
@@ -142,16 +165,25 @@ class BodyJournal:
             frames.flush(self)
             for _, record, path in changes:
                 self.store._base.atomic_write_bytes(path, canonical_json_bytes(record))
+            for _, record, _ in changes:
+                record_content_failure(self, record)
         for current, record, _ in changes:
             self._update_result(current, record)
 
     def recover_results(self) -> dict[str, ItemRecord]:
+        from engine.services.code import recover_preserved_code
+
+        recover_preserved_code(self)
         for request in tuple(self._requests.values()):
-            if request.stage != "translate" or not any(
-                self._records[item_id].status == ItemStatus.PENDING
-                and _saved_epoch(self._records[item_id], "translation_epoch")
-                == request.record_versions[request.item_unit_ids[item_id][0]]
-                for item_id in request.item_ids
+            if (
+                request.stage != "translate"
+                or not set(request.item_ids).issubset(self._records)
+                or not any(
+                    self._records[item_id].status == ItemStatus.PENDING
+                    and _saved_epoch(self._records[item_id], "translation_epoch")
+                    == request.record_versions[request.item_unit_ids[item_id][0]]
+                    for item_id in request.item_ids
+                )
             ):
                 continue
             response = _persisted_response(self.store, request, reconcile=True, finish=self._finish)
@@ -217,17 +249,27 @@ class BodyJournal:
                 )
             self.save_many(recovered)
         for request in tuple(self._requests.values()):
-            if request.stage != "review" or not any(
-                self._records[item_id].status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
-                and _saved_epoch(self._records[item_id], "review_epoch")
-                == request.revisions[request.item_unit_ids[item_id][0]]
-                for item_id in request.item_ids
+            if (
+                request.stage != "review"
+                or not set(request.item_ids).issubset(self._records)
+                or not any(
+                    self._records[item_id].status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
+                    and _saved_epoch(self._records[item_id], "review_epoch")
+                    == request.revisions[request.item_unit_ids[item_id][0]]
+                    for item_id in request.item_ids
+                )
             ):
                 continue
             response = _persisted_response(self.store, request, reconcile=True, finish=self._finish)
             if response is None:
                 continue
             batch = self._review_batch(request)
+            targets = self._review_records.get(request.request_id)
+            if targets is None:
+                from engine.services.proofs import rebuild_review
+
+                batch, targets = rebuild_review(self, request)
+                self._review_records[request.request_id] = targets
             expected = {
                 item.item_id: {
                     "base_revision": request.revisions[item.unit_id],
@@ -251,7 +293,7 @@ class BodyJournal:
                 prior = self._records[member.item_id]
                 if (
                     prior.status not in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
-                    or _saved_epoch(prior, "review_epoch") != request.revisions[member.unit_id]
+                    or prior != targets[member.item_id]
                 ):
                     continue
                 decision = parsed.accepted.get(member.item_id) if parsed is not None else None
@@ -265,34 +307,17 @@ class BodyJournal:
                 if decision is not None and decision["decision"] == "replace":
                     error = _target_error(member, decision["target"], wires[member.item_id])
                 if error is not None:
-                    recovered.append(
-                        prior.model_copy(
-                            update={
-                                "stage": "review",
-                                "status": ItemStatus.NEEDS_ATTENTION,
-                                "checks": dict(prior.checks) | {"accepted": False, "error": error},
-                                "failure": {"stage": "review", "code": "review_failed", "message": error},
-                                "next_action": None,
-                            }
-                        )
-                    )
+                    recovered.append(_failed(member, prior, "review", error, batch))
                     continue
                 assert decision is not None
                 if decision["decision"] == "needs_attention":
                     recovered.append(
-                        prior.model_copy(
-                            update={
-                                "stage": "review",
-                                "status": ItemStatus.NEEDS_ATTENTION,
-                                "checks": dict(prior.checks)
-                                | {"accepted": False, "error": str(decision["issues"] or "review needs attention")},
-                                "failure": {
-                                    "stage": "review",
-                                    "code": "review_failed",
-                                    "message": str(decision["issues"] or "review needs attention"),
-                                },
-                                "next_action": None,
-                            }
+                        _failed(
+                            member,
+                            prior,
+                            "review",
+                            str(decision["issues"] or "review needs attention"),
+                            batch,
                         )
                     )
                     continue
@@ -339,6 +364,9 @@ class BodyJournal:
 
         return validate_units(self, unit_ids, retry_unknown=retry_unknown)
 
+    def _unit_members(self) -> Mapping[str, tuple[str, ...]]:
+        return self.session.prepared.plan.unit_members
+
     def runtime(
         self,
         model: Any = None,
@@ -354,19 +382,18 @@ class BodyJournal:
         self._progress = progress
         self._started: dict[str, float] = {}
         runtime = ModelRuntime(
-            events=lambda event: self._emit(event) if event.get("event") == "key_state" else None,
+            events=lambda event: self._active.get()._emit(event) if event.get("event") == "key_state" else None,
             model=runtime_model,
             transport=transport,
             rpm=_optional(config, "rpm"),
             tpm=_optional(config, "tpm"),
             max_inflight=_positive(config, "concurrency", 2),
-            reserve_attempt=self._reserve,
-            finish_attempt=self._finish,
-            persist_response=self._persist,
-            prepare_request=self._prepare,
-            replay_response=self._replay,
+            reserve_attempt=lambda *args, **kwargs: self._active.get()._reserve(*args, **kwargs),
+            finish_attempt=lambda *args, **kwargs: self._active.get()._finish(*args, **kwargs),
+            persist_response=lambda *args, **kwargs: self._active.get()._persist(*args, **kwargs),
+            prepare_request=lambda *args, **kwargs: self._active.get()._prepare(*args, **kwargs),
+            replay_response=lambda *args, **kwargs: self._active.get()._replay(*args, **kwargs),
             max_transport_retries=_bounded(config, "max_transport_retries", 2, 0, 2),
-            request_timeout_seconds=_number(config, "request_timeout_seconds", 120.0),
             prior_input_limit_breach=self._prior_input_breach,
             input_budget_version=2,
             shared_service_failures=False,
@@ -375,30 +402,53 @@ class BodyJournal:
             raise IdentityMismatch("configured provider resolved to a different frozen model")
         return runtime
 
+    @contextmanager
+    def activate(self, journal: BodyJournal):
+        if getattr(journal, "root", self) is not self:
+            raise IdentityMismatch("part journal belongs to another root journal")
+        token = self._active.set(journal)
+        try:
+            yield journal
+        finally:
+            self._active.reset(token)
+
+    def parts(self, parent_id: str):
+        from engine.services.parts import PartJournal
+
+        return PartJournal(self, parent_id)
+
+    def compose_parts(self, parent_id: str) -> ItemRecord | None:
+        return self.parts(parent_id).compose()
+
     def parent_targets(self, require_complete: bool = True) -> dict[str, str]:
         self.session.verify()
         records = self._records
         members = self.session.index.members
-        parents = {item.item_id: item for inventory in self.session.index.inventories for item in inventory.items}
         grouped: dict[str, list[Any]] = defaultdict(list)
         for member in members:
             grouped[member.parent_item_id].append(member)
         targets: dict[str, str] = {}
         missing: list[str] = []
-        for parent_id, siblings in grouped.items():
-            if siblings[0].unit_id in self.session.prepared.plan.derived_sources:
-                continue
-            selected = {member.item_id: records[member.item_id] for member in siblings}
-            if any(record.status != ItemStatus.REVIEWED for record in selected.values()):
-                missing.append(parent_id)
-                continue
-            targets[parent_id] = merge_member_targets(parents[parent_id], siblings, selected)
+        derived = self.session.prepared.plan.derived_sources
+        derived_dependencies = set(derived) | set(derived.values())
         by_unit: dict[str, list[str]] = defaultdict(list)
-        for parent_id, siblings in grouped.items():
-            by_unit[siblings[0].unit_id].append(parent_id)
-        units = {
-            unit.unit_id: unit for inventory in self.session.index.inventories for unit in inventory.document.units
-        }
+        units = {}
+        for inventory in self.session.index.inventories:
+            for unit in inventory.document.units:
+                if unit.unit_id in derived:
+                    units[unit.unit_id] = unit
+            for parent in inventory.items:
+                siblings = grouped[parent.item_id]
+                unit_id = siblings[0].unit_id
+                if unit_id in derived_dependencies:
+                    by_unit[unit_id].append(parent.item_id)
+                if unit_id in derived:
+                    continue
+                selected = {member.item_id: records[member.item_id] for member in siblings}
+                if any(record.status != ItemStatus.REVIEWED for record in selected.values()):
+                    missing.append(parent.item_id)
+                    continue
+                targets[parent.item_id] = merge_member_targets(parent, siblings, selected)
         for unit_id, source_unit_id in self.session.prepared.plan.derived_sources.items():
             derived_parents, source_parents = by_unit[unit_id], by_unit[source_unit_id]
             if len(derived_parents) != 1 or len(source_parents) != 1 or source_parents[0] not in targets:
@@ -481,35 +531,10 @@ class BodyJournal:
             self._review_batches[request.request_id] = (frozen, saved)
             wire.verify(request, saved.payload, saved.budget.output_tokens)
             return saved
-        members = tuple(self.session.index.members_by_id[item_id] for item_id in request.item_ids)
-        targets = {
-            item_id: self._review_target(
-                item_id,
-                request.target_hashes[item_id],
-                request.revisions[request.item_unit_ids[item_id][0]],
-            )
-            for item_id in request.item_ids
-        }
-        targets = review_feedback(targets, request.feedback_by_item)
-        packed = pack_members(
-            "review",
-            members,
-            self.session.prepared.glossary,
-            self.session.index,
-            frames.limits(self, request),
-            targets=targets,
-            revisions=request.revisions,
-            record_versions=request.record_versions,
-            plan_epochs=request.plan_epochs,
-            feedback=request.feedback_by_item,
-            tokenizer_model=_text(self.session.prepared.plan.translation_config, "model"),
-            sparse=request.sparse,
-        )
-        if len(packed.batches) != 1 or packed.blocked:
-            raise IdentityMismatch("persisted review request is no longer a canonical fitting batch")
-        batch = packed.batches[0]
-        if frozen != batch.manifest:
-            raise IdentityMismatch("persisted review request differs from its saved target frame")
+        from engine.services.proofs import rebuild_review
+
+        batch, targets = rebuild_review(self, request)
+        self._review_records[request.request_id] = targets
         wire.verify(request, batch.payload, batch.budget.output_tokens)
         self._review_batches[request.request_id] = (frozen, batch)
         frames.remember(self, batch)
@@ -540,11 +565,12 @@ class BodyJournal:
             if response is None:
                 continue
             try:
-                if request.request_id not in self._translations:
-                    self._translations[request.request_id] = validate_translation_response(
+                accepted = self._translations.get(request.request_id)
+                if accepted is None:
+                    accepted = validate_translation_response(
                         response.raw, request.request_id, self._source_projections(request)
                     ).accepted
-                accepted = self._translations[request.request_id]
+                    self._translations[request.request_id] = accepted
             except ProtocolError:
                 if request is preferred and preferred_is_proof:
                     raise
@@ -580,7 +606,7 @@ class BodyJournal:
             if existing.model_copy(update={"attempts": ()}) != manifest:
                 raise StaleWrite("body request identity changed during resume")
         else:
-            self._requests[manifest.request_id] = self.store.write_request(manifest)
+            self._register_request(self.store.write_request(manifest))
         frames.capture(self, manifest, payload, measured)
         self._started[manifest.request_id] = monotonic()
         self._emit(
@@ -756,7 +782,7 @@ class BodyJournal:
 
     def _load_records(self) -> dict[str, ItemRecord]:
         result: dict[str, ItemRecord] = {}
-        for item_id in self.session.prepared.plan.member_hashes:
+        for item_id in (member.item_id for member in self.session.index.members):
             path = self._result_path(item_id)
             try:
                 record = ItemRecord.model_validate_json(state.read(path))
@@ -870,23 +896,18 @@ class BodyJournal:
         )
 
     def _translation_proof(self, record: ItemRecord) -> None:
-        request = self._requests.get(record.request_id or "")
-        if request is None or request.stage != "translate" or record.item_id not in request.item_ids:
-            raise IdentityMismatch("saved draft lacks its durable translation request")
-        response = self._response(request)
-        if response is None:
-            raise IdentityMismatch("saved draft lacks its persisted translation response")
-        if request.request_id not in self._translations:
-            self._translations[request.request_id] = validate_translation_response(
-                response.raw, request.request_id, self._source_projections(request)
-            ).accepted
-        result = self._translations[request.request_id].get(record.item_id)
-        if (
-            result is None
-            or record.target_projection != result["target"]
-            or record.target_hash != canonical_hash(result["target"])
-        ):
-            raise IdentityMismatch("saved draft differs from its persisted translation response")
+        from engine.services.proofs import translation_proof
+
+        translation_proof(self, record)
+
+    def _translation_target(self, record: ItemRecord) -> str:
+        from engine.services.proofs import translation_target
+
+        return translation_target(self, record)
+
+    @staticmethod
+    def _validate_translation_response(raw: str, request_id: str, sources: Mapping[str, str]):
+        return validate_translation_response(raw, request_id, sources)
 
     def _unlock_stage(self, stage: str, item_ids: Sequence[str], *, retry_unknown: bool) -> bool:
         selected = set(item_ids)
@@ -920,56 +941,9 @@ class BodyJournal:
         return unlocked
 
     def _review_proof(self, record: ItemRecord) -> None:
-        if record.stage != "reviewed" or record.failure is not None or record.next_action is not None:
-            raise IdentityMismatch("reviewed result has an invalid terminal state")
-        translation = self._requests.get(record.request_id or "")
-        review_id = record.checks.get("review_request_id")
-        review = self._requests.get(review_id) if isinstance(review_id, str) else None
-        if translation is None or translation.stage != "translate" or record.item_id not in translation.item_ids:
-            raise IdentityMismatch("reviewed result lacks its durable translation request")
-        if review is None or review.stage != "review" or record.item_id not in review.item_ids:
-            raise IdentityMismatch("reviewed result lacks its durable review request")
-        translated = self._response(translation)
-        reviewed = self._response(review)
-        if translated is None or reviewed is None:
-            raise IdentityMismatch("reviewed result lacks a succeeded persisted response")
-        if translation.request_id not in self._translations:
-            parsed_translation = validate_translation_response(
-                translated.raw, translation.request_id, self._source_projections(translation)
-            )
-            self._translations[translation.request_id] = parsed_translation.accepted
-        translation_result = self._translations[translation.request_id].get(record.item_id)
-        if translation_result is None:
-            raise IdentityMismatch("reviewed result was not accepted by its translation response")
-        draft = translation_result["target"]
-        if review.target_hashes.get(record.item_id) != canonical_hash(draft):
-            raise IdentityMismatch("review request does not prove the saved translation draft")
-        review_batch = self._review_batch(review)
-        wires = _wire_items(review_batch)
-        expected = {
-            item_id: {
-                "base_revision": review.revisions[review.item_unit_ids[item_id][0]],
-                "source_projection": self.session.index.members_by_id[item_id].source_projection,
-                **review_applicability(self.session.index.members_by_id[item_id], self.session.index, wires[item_id]),
-            }
-            for item_id in review.item_ids
-        }
-        if review.request_id not in self._reviews:
-            parsed_review = validate_review_response(reviewed.raw, review.request_id, expected)
-            if any(value.get("term_suggestions") for value in parsed_review.accepted.values()):
-                raise IdentityMismatch("review response changed its closed batch protocol")
-            self._reviews[review.request_id] = parsed_review.accepted
-        decision = self._reviews[review.request_id].get(record.item_id)
-        if (
-            decision is None
-            or record.checks.get("decision") != decision["decision"]
-            or record.checks.get("checks") != decision["checks"]
-            or record.checks.get("issues") != decision["issues"]
-        ):
-            raise IdentityMismatch("reviewed result differs from its persisted review decision")
-        expected_target = decision.get("target") if decision["decision"] == "replace" else draft
-        if record.target_projection != expected_target or record.target_hash != canonical_hash(expected_target):
-            raise IdentityMismatch("reviewed target differs from its persisted responses")
+        from engine.services.proofs import review_proof
+
+        review_proof(self, record)
 
     def _require_review_proof(self, record: ItemRecord) -> None:
         try:
@@ -990,7 +964,12 @@ class BodyJournal:
         return None
 
     def _result_path(self, item_id: str) -> Path:
-        return self.store.root / "results" / f"{safe_id(item_id)}.json"
+        result_path = getattr(self.session, "result_path", None)
+        return (
+            result_path(item_id)
+            if result_path is not None
+            else self.store.root / "results" / f"{safe_id(item_id)}.json"
+        )
 
     def _source_projections(self, request: RequestManifest) -> dict[str, str]:
         return {item_id: self.session.index.members_by_id[item_id].source_projection for item_id in request.item_ids}

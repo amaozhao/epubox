@@ -67,7 +67,7 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _json_value(value: Any) -> Any:
     if isinstance(value, BaseModel):
-        return _json_value(value.model_dump(mode="json"))
+        return value.model_dump(mode="json")
     if isinstance(value, dict):
         return {key: _json_value(child) for key, child in value.items()}
     if isinstance(value, (list, tuple)):
@@ -102,12 +102,25 @@ def canonical_json_bytes(value: Any, *, max_bytes: int | None = MAX_JSON_BYTES) 
 
 
 def canonical_hash(value: Any) -> str:
-    value = _json_value(value)
-    _validate_json(value)
     digest = hashlib.sha256()
     encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    for part in encoder.iterencode(value):
-        digest.update(part.encode("utf-8"))
+    if isinstance(value, (list, tuple)) and any(isinstance(child, BaseModel) for child in value):
+        # Whole-book identities must not materialize a second tree for every
+        # source document at once. Preserve the exact canonical array bytes.
+        digest.update(b"[")
+        for position, child in enumerate(value):
+            if position:
+                digest.update(b",")
+            converted = _json_value(child)
+            _validate_json(converted, depth=1)
+            for part in encoder.iterencode(converted):
+                digest.update(part.encode("utf-8"))
+        digest.update(b"]")
+    else:
+        value = _json_value(value)
+        _validate_json(value)
+        for part in encoder.iterencode(value):
+            digest.update(part.encode("utf-8"))
     return digest.hexdigest()
 
 

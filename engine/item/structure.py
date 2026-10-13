@@ -262,6 +262,7 @@ class _Extractor:
     _translate_state_chain = policy._translate_state_chain
     _has_translate_yes = policy._has_translate_yes
     _is_hard = policy._is_hard
+    _is_program_code = policy._is_program_code
     _is_short_inline_code = policy._is_short_inline_code
     _inside_hard = policy._inside_hard
     _is_atom = policy._is_atom

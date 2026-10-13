@@ -95,6 +95,7 @@ def upgrade_package(
 
         items = {item.get("id", ""): item for item in manifest if qname_local_name(item.tag) == "item"}
         cover_id = _cover(metadata, package)
+        _order_metadata(metadata)
         for item in items.values():
             path = _resolve(inventory.opf_path, item.get("href", ""))
             media_type = item.get("media-type", "")
@@ -224,6 +225,8 @@ def _normalize_xhtml(data: bytes) -> bytes:
                 byte_end = span.start + len(starttag[: alias_match.end()].encode(indexed.encoding))
                 patches.append((byte_start, byte_end, b""))
 
+    patches.extend(_empty_title_patches(data, indexed, root))
+    patches.extend(_legacy_img_dimension_patches(data, indexed))
     for start, end, replacement in _entity_patches(data, indexed):
         if not any(start < patch_end and end > patch_start for patch_start, patch_end, _ in patches):
             patches.append((start, end, replacement))
@@ -232,6 +235,60 @@ def _normalize_xhtml(data: bytes) -> bytes:
     for start, end, replacement in sorted(patches, reverse=True):
         result = result[:start] + replacement + result[end:]
     return result
+
+
+def _empty_title_patches(
+    data: bytes, indexed: ResourceIndex, root: etree._Element
+) -> tuple[tuple[int, int, bytes], ...]:
+    fallback = next(
+        (
+            text
+            for element in root.iter()
+            if isinstance(element.tag, str)
+            and etree.QName(element).namespace == _XHTML
+            and etree.QName(element).localname in {"h1", "h2", "h3"}
+            and (text := re.sub(r"\s+", " ", "".join(element.itertext())).strip())
+        ),
+        "Untitled",
+    )
+    escaped = html.escape(fallback, quote=False).encode(indexed.encoding)
+    patches: list[tuple[int, int, bytes]] = []
+    for node in indexed.nodes.values():
+        if node.qname != f"{{{_XHTML}}}title":
+            continue
+        content = data[node.content.start : node.content.end].decode(indexed.encoding)
+        if content.strip():
+            continue
+        if not node.self_closing:
+            patches.append((node.content.start, node.content.end, escaped))
+            continue
+        starttag = data[node.starttag.start : node.starttag.end].decode(indexed.encoding)
+        match = re.match(r"<\s*([^\s/>]+)", starttag)
+        if match is None:
+            continue
+        opening = re.sub(r"/\s*>$", ">", starttag)
+        replacement = f"{opening}{html.escape(fallback, quote=False)}</{match.group(1)}>".encode(indexed.encoding)
+        patches.append((node.full.start, node.full.end, replacement))
+    return tuple(patches)
+
+
+def _legacy_img_dimension_patches(data: bytes, indexed: ResourceIndex) -> tuple[tuple[int, int, bytes], ...]:
+    patches: list[tuple[int, int, bytes]] = []
+    pattern = re.compile(
+        r"(?P<head>\s(?:height|width)\s*=\s*(?P<quote>['\"]))(?P<value>\d+)px(?P=quote)",
+        re.IGNORECASE,
+    )
+    for node in indexed.nodes.values():
+        if node.qname != f"{{{_XHTML}}}img":
+            continue
+        span = node.starttag
+        starttag = data[span.start : span.end].decode(indexed.encoding)
+        for match in pattern.finditer(starttag):
+            byte_start = span.start + len(starttag[: match.start()].encode(indexed.encoding))
+            byte_end = span.start + len(starttag[: match.end()].encode(indexed.encoding))
+            replacement = f"{match.group('head')}{match.group('value')}{match.group('quote')}".encode(indexed.encoding)
+            patches.append((byte_start, byte_end, replacement))
+    return tuple(patches)
 
 
 def _entity_patches(data: bytes, indexed: ResourceIndex) -> tuple[tuple[int, int, bytes], ...]:
@@ -352,7 +409,8 @@ def _metadata(
         meta.set("property", "identifier-type")
         meta.text = next(scheme for scheme in schemes if scheme)
 
-    for value in [item for item in metadata if etree.QName(item).namespace == _DC]:
+    for value in [item for item in metadata if isinstance(item.tag, str) and etree.QName(item).namespace == _DC]:
+        local_name = etree.QName(value).localname
         for attribute in list(value.attrib):
             name = etree.QName(attribute)
             if name.namespace != _OPF:
@@ -369,6 +427,9 @@ def _metadata(
             meta.set("property", f"epubox:{name.localname}")
             meta.text = content
             _declare_epubox(package)
+        if local_name == "date":
+            value.tag = f"{{{_OPF}}}meta"
+            value.set("property", "dcterms:date")
 
 
 def _valid_utc(value: str) -> bool:
@@ -410,6 +471,17 @@ def _cover(metadata: etree._Element, package: etree._Element) -> str | None:
                 _declare_epubox(package)
             item.text = value
     return cover_id
+
+
+def _order_metadata(metadata: etree._Element) -> None:
+    children = list(metadata)
+    dc = [item for item in children if isinstance(item.tag, str) and etree.QName(item).namespace == _DC]
+    remaining = [item for item in children if item not in dc]
+    ordered = [*dc, *remaining]
+    if children == ordered:
+        return
+    for item in ordered:
+        metadata.append(item)
 
 
 def _cover_item(

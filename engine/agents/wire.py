@@ -8,7 +8,10 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
+from itertools import pairwise
 from typing import Any
+
+import regex
 
 VERSION = "epubox-wire-7"
 VERSIONS = (
@@ -235,6 +238,7 @@ def decode(
     *,
     version: str = "epubox-wire-3",
     sources: Mapping[str, str] | None = None,
+    hints: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> str:
     """Return a canonical response view while leaving persisted raw bytes alone."""
     if kind not in _PROTOCOLS:
@@ -274,6 +278,9 @@ def decode(
                         item["target"],
                         preserve_whitespace=version in {"epubox-wire-6", VERSION, "epubox-wire-8"},
                         diagnostics=version in {VERSION, "epubox-wire-8"},
+                        fragment_hints=(hints or {}).get(canonical_id)
+                        if version in {VERSION, "epubox-wire-8"}
+                        else None,
                     )
                 else:
                     item["target"] = decode_projection(item["target"])
@@ -436,7 +443,14 @@ def _target_slots(projection: str) -> dict[str, str]:
     return {str(index): value for index, value in enumerate(texts, 1)}
 
 
-def _decode_slots(source: str, target: Any, *, preserve_whitespace: bool = False, diagnostics: bool = False) -> str:
+def _decode_slots(
+    source: str,
+    target: Any,
+    *,
+    preserve_whitespace: bool = False,
+    diagnostics: bool = False,
+    fragment_hints: Mapping[str, Any] | None = None,
+) -> str:
     from engine.item.inline import events_to_projection, parse_projection
 
     events = parse_projection(source)
@@ -447,13 +461,19 @@ def _decode_slots(source: str, target: Any, *, preserve_whitespace: bool = False
         raise ValueError(
             f"target slots do not match source: missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
         )
-    empty = [key for key, value in target.items() if not isinstance(value, str) or not value.strip()]
-    if empty:
-        raise ValueError("target slots require nonempty strings" + (f": invalid={empty}" if diagnostics else ""))
+    invalid = [key for key, value in target.items() if not isinstance(value, str)]
+    if invalid:
+        raise ValueError("target slots require nonempty strings" + (f": invalid={invalid}" if diagnostics else ""))
     for index, source_text in enumerate(source_slots, 1):
         value = target[str(index)]
         if any(value.count(marker) > source_text.count(marker) for marker in set(_RAW_MARKER.findall(value))):
             raise ValueError("target slot introduced a raw marker")
+    allowed_empty: set[str] = set()
+    if fragment_hints is not None:
+        target, allowed_empty = _normalize_fragments(events, target, fragment_hints)
+    empty = [key for key, value in target.items() if not value.strip() and key not in allowed_empty]
+    if empty:
+        raise ValueError("target slots require nonempty strings" + (f": invalid={empty}" if diagnostics else ""))
     slot = 0
     rebuilt = []
     for event in events:
@@ -468,6 +488,78 @@ def _decode_slots(source: str, target: Any, *, preserve_whitespace: bool = False
         else:
             rebuilt.append(event)
     return events_to_projection(rebuilt)
+
+
+def _normalize_fragments(
+    events: Sequence[Any], target: Mapping[str, str], hints: Mapping[str, Any]
+) -> tuple[dict[str, str], set[str]]:
+    """Redistribute translated text across pathologically split decorative words."""
+    normalized = dict(target)
+    allowed_empty: set[str] = set()
+    groups: list[list[tuple[str, str, tuple[str, ...]]]] = []
+    group: list[tuple[str, str, tuple[str, ...]]] = []
+    stack: list[str] = []
+    boundary_depth = 0
+    slot = 0
+
+    def flush() -> None:
+        if group:
+            groups.append(group.copy())
+            group.clear()
+
+    for event in events:
+        if event.kind == "text" and event.value.strip():
+            slot += 1
+            if not boundary_depth:
+                group.append((str(slot), event.value, tuple(stack)))
+        elif event.kind == "marker" and event.value.startswith("+g"):
+            stack.append(event.value[1:])
+        elif event.kind == "marker" and event.value.startswith("-g"):
+            stack.pop()
+        elif event.kind == "marker" and event.value.startswith("+b"):
+            flush()
+            boundary_depth += 1
+        elif event.kind == "marker" and event.value.startswith("-b"):
+            flush()
+            boundary_depth -= 1
+        elif event.kind == "marker":
+            flush()
+    flush()
+
+    for slots in groups:
+        if all(normalized[key].strip() for key, _, _ in slots):
+            continue
+        refs = {ref for _, _, domain in slots for ref in domain}
+        if not refs or any(
+            not isinstance(hints.get(ref), Mapping) or hints[ref].get("element") != "span" for ref in refs
+        ):
+            continue
+        split_words = sum(
+            bool(re.search(r"[A-Za-z]\Z", left) and re.match(r"[A-Za-z]", right))
+            for (_, left, _), (_, right, _) in pairwise(slots)
+        )
+        if split_words < 2 or split_words * 2 < len(slots):
+            continue
+        source_text = "".join(text for _, text, _ in slots)
+        target_text = "".join(normalized[key].strip() for key, _, _ in slots)
+        if _RAW_MARKER.search(source_text) or _RAW_MARKER.search(target_text):
+            continue
+        domains = list(dict.fromkeys(domain for _, _, domain in slots))
+        clusters = regex.findall(r"\X", target_text)
+        if len(clusters) < len(domains):
+            continue
+        keep: dict[tuple[str, ...], str] = {}
+        for key, _, domain in slots:
+            keep.setdefault(domain, key)
+        for key, _, _ in slots:
+            normalized[key] = ""
+        offset = 0
+        for index, domain in enumerate(domains):
+            end = offset + 1 if index < len(domains) - 1 else len(clusters)
+            normalized[keep[domain]] = "".join(clusters[offset:end])
+            offset = end
+        allowed_empty.update(key for key, _, _ in slots if not normalized[key])
+    return normalized, allowed_empty
 
 
 def _default_constraints(source: Any, constraints: Mapping[str, Any]) -> bool:

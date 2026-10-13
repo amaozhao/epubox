@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
@@ -152,14 +152,7 @@ def preflight_atomic_resources(
 
     map_hashes = {inventory.document.document_id: canonical_hash(inventory.source_map) for inventory in ordered}
     atoms_hash = canonical_hash(ordered)
-    budget_payload = {
-        "version": BUDGET_VERSION,
-        "preflight_version": PREFLIGHT_VERSION,
-        "model": model,
-        "limits": limits.to_dict(),
-        "pieces": tuple(piece.model_dump(mode="json") for piece in pieces),
-    }
-    budget_hash = canonical_hash(budget_payload)
+    budget_hash = preflight_budget_hash(model, limits.to_dict(), pieces)
     blocked = any(diagnostic.status == "blocked" for diagnostic in diagnostics)
     check = None
     if not blocked:
@@ -351,6 +344,27 @@ def load_preflight(
     model: str,
 ) -> tuple[PreflightReport, tuple[AtomicDocument, ...]]:
     """Load one passed receipt without repeating extraction or token measurement."""
+    inventories: dict[str, AtomicDocument] = {}
+
+    def collect(_report: PreflightReport, document_id: str, _raw: bytes, inventory: AtomicDocument) -> None:
+        inventories[document_id] = inventory
+
+    report, ordered_ids = verify_preflight_window(store, limits, model, collect)
+    return report, tuple(inventories[document_id] for document_id in ordered_ids)
+
+
+def verify_preflight_window(
+    store: AtomicStore | RunStore,
+    limits: BudgetLimits,
+    model: str,
+    visitor: Callable[[PreflightReport, str, bytes, AtomicDocument], None] | None = None,
+) -> tuple[PreflightReport, tuple[str, ...]]:
+    """Verify immutable preflight inputs while retaining at most one inventory model.
+
+    ``visitor`` may derive bounded per-document state. It must not mutate the
+    frozen inventory. The legacy :func:`load_preflight` API collects these same
+    verified windows for callers that still require the complete tuple.
+    """
     before = preflight_fingerprint(store)
     base = _store(store)
     effective_limits = _receipt_limits(base, limits)
@@ -372,41 +386,33 @@ def load_preflight(
     disk_ids = {path.stem for path in state.glob(base.root / "inventories", "*.json")}
     if inventory_ids != document_ids or disk_ids != inventory_ids:
         raise IdentityMismatch("preflight inventory does not cover every prepared document")
-    inventory_raw: dict[str, bytes] = {}
-    by_id: dict[str, AtomicDocument] = {}
-    for document_id in inventory_ids:
+    atoms_digest = hashlib.sha256(b"[")
+    map_hashes: dict[str, str] = {}
+    resource_hashes: dict[str, str] = {}
+    for position, document_id in enumerate(sorted(inventory_ids)):
         path = base.path("inventories", document_id)
         raw = state.read(path)
         try:
             inventory = parse_contract(raw, AtomicDocument, "epubox-atoms-1")
         except Exception as error:
             raise CorruptRecord(f"invalid {path}: {error}") from error
-        inventory_raw[document_id] = raw
-        by_id[document_id] = inventory
-    if any(
-        by_id[document_id].document.document_id != document_id
-        or by_id[document_id].document.source_hash != preparation.source_hash
-        or hashlib.sha256(canonical_json_bytes(by_id[document_id].document)).hexdigest()
-        != preparation.document_hashes[document_id]
-        for document_id in inventory_ids
-    ):
-        raise IdentityMismatch("preflight inventory documents differ from preparation")
-
-    map_hashes = {document_id: canonical_hash(by_id[document_id].source_map) for document_id in inventory_ids}
-    ordered_atoms = tuple(by_id[document_id] for document_id in sorted(inventory_ids))
-    atoms_hash = _sequence_hash(tuple(inventory_raw[document_id] for document_id in sorted(inventory_ids)))
-    resource_hashes = {
-        inventory.document.resource.path: inventory.document.resource.source_sha256 for inventory in ordered_atoms
-    }
-    budget_hash = canonical_hash(
-        {
-            "version": BUDGET_VERSION,
-            "preflight_version": PREFLIGHT_VERSION,
-            "model": model,
-            "limits": effective_limits.to_dict(),
-            "pieces": tuple(piece.model_dump(mode="json") for piece in report.pieces),
-        }
-    )
+        if position:
+            atoms_digest.update(b",")
+        atoms_digest.update(raw)
+        document = inventory.document
+        if (
+            document.document_id != document_id
+            or document.source_hash != preparation.source_hash
+            or hashlib.sha256(canonical_json_bytes(document)).hexdigest() != preparation.document_hashes[document_id]
+        ):
+            raise IdentityMismatch("preflight inventory documents differ from preparation")
+        map_hashes[document_id] = canonical_hash(inventory.source_map)
+        resource_hashes[document.resource.path] = document.resource.source_sha256
+        if visitor is not None:
+            visitor(report, document_id, raw, inventory)
+    atoms_digest.update(b"]")
+    atoms_hash = atoms_digest.hexdigest()
+    budget_hash = preflight_budget_hash(model, effective_limits.to_dict(), report.pieces)
     expected = PreflightCheck(
         source_hash=preparation.source_hash,
         map_hashes=map_hashes,
@@ -430,7 +436,7 @@ def load_preflight(
     if after != before:
         raise IdentityMismatch("preflight dependencies changed during verification")
     _proofs[store] = after
-    return report, tuple(by_id[document_id] for document_id in ordered_ids)
+    return report, ordered_ids
 
 
 def _saved_preflight(
@@ -455,6 +461,26 @@ def _saved_preflight(
     if report.source_hash != preparation.source_hash:
         raise IdentityMismatch("preflight source identity changed")
     return preparation, report
+
+
+def preflight_budget_hash(model: str, limits: Mapping[str, object], pieces: Sequence[object]) -> str:
+    """Hash the historical budget payload without materializing its pieces array."""
+    digest = hashlib.sha256()
+    digest.update(b'{"limits":')
+    digest.update(canonical_json_bytes(dict(limits), max_bytes=None))
+    digest.update(b',"model":')
+    digest.update(canonical_json_bytes(model, max_bytes=None))
+    digest.update(b',"pieces":[')
+    for position, piece in enumerate(pieces):
+        if position:
+            digest.update(b",")
+        digest.update(canonical_json_bytes(piece, max_bytes=None))
+    digest.update(b'],"preflight_version":')
+    digest.update(str(PREFLIGHT_VERSION).encode())
+    digest.update(b',"version":')
+    digest.update(str(BUDGET_VERSION).encode())
+    digest.update(b"}")
+    return digest.hexdigest()
 
 
 def require_preflight(store: AtomicStore | RunStore, limits: BudgetLimits, model: str) -> PreflightReport:
@@ -936,11 +962,13 @@ __all__ = [
     "PreflightReport",
     "load_preflight",
     "preflight_atomic_resources",
+    "preflight_budget_hash",
     "preflight_fingerprint",
     "preflight_verified",
     "prepare_preflight",
     "read_preflight",
     "receipt_path",
     "require_preflight",
+    "verify_preflight_window",
     "write_preflight",
 ]

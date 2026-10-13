@@ -336,3 +336,37 @@ def _validate_items(items: Sequence[Mapping[str, Any]]) -> None:
 
 
 __all__ = ["BUDGET_VERSION", "BudgetLimits", "BudgetResult", "measure_budget", "request_source_tokens"]
+
+
+def budget_limits_match(budget: BudgetResult, limits: Mapping[str, int | float | None]) -> bool:
+    identity = budget.identity
+    expected = dict(limits)
+    if identity.version != expected.pop("output_version", 2):
+        return False
+    expected.pop("minimum_source_tokens", None)
+    expected.setdefault("context_unlimited", False)
+    source_tokens, tolerance, hard_limit = (
+        expected["source_tokens"],
+        expected.pop("source_tolerance_tokens", 0),
+        expected.pop("source_hard_limit", None),
+    )
+    if type(source_tokens) is not int or type(tolerance) is not int:
+        return False
+    if (hard_limit is not None and type(hard_limit) is not int) or identity.source_hard_limit != hard_limit:
+        return False
+    expected["source_tokens"] = (
+        min(source_tokens + tolerance, hard_limit) if hard_limit is not None else source_tokens + tolerance
+    )
+    configured_input = expected.get("input_tokens")
+    if type(configured_input) is not int:
+        return False
+    expected["input_tokens"] = min(configured_input, MAX_MODEL_INPUT_TOKENS)
+    return {
+        "source_tokens": identity.source_limit,
+        "input_tokens": identity.input_limit,
+        "output_tokens": identity.output_limit,
+        "context_tokens": identity.context_limit,
+        "context_unlimited": identity.context_unlimited,
+        "safety_tokens": identity.safety_tokens,
+        "target_ratio": identity.target_ratio,
+    } == expected

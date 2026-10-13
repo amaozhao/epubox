@@ -30,13 +30,17 @@ from engine.schemas.contracts import Unit
 from engine.schemas.internal import DocumentPlan as StructuralDocument
 from engine.schemas.internal import RegistryEntry, ResourceRecord, SlotRange
 
-EXTRACTOR_VERSION = "epubox-atomic-3"
+EXTRACTOR_VERSION = "epubox-atomic-4"
 ADAPTER_VERSION = "epubox-bytes-1"
 DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
 EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
 _LEGACY_EXTRACTOR_VERSION = "epubox-atomic-2"
-_SUPPORTED_EXTRACTOR_VERSIONS = frozenset({"epubox-atomic-1", _LEGACY_EXTRACTOR_VERSION, EXTRACTOR_VERSION})
-_NAVIGATION_EXTRACTOR_VERSIONS = frozenset({_LEGACY_EXTRACTOR_VERSION, EXTRACTOR_VERSION})
+_V3_EXTRACTOR_VERSION = "epubox-atomic-3"
+_SUPPORTED_EXTRACTOR_VERSIONS = frozenset(
+    {"epubox-atomic-1", _LEGACY_EXTRACTOR_VERSION, _V3_EXTRACTOR_VERSION, EXTRACTOR_VERSION}
+)
+_NAVIGATION_EXTRACTOR_VERSIONS = frozenset({_LEGACY_EXTRACTOR_VERSION, _V3_EXTRACTOR_VERSION, EXTRACTOR_VERSION})
+_STEM_TITLE_FILTER_EXTRACTOR_VERSIONS = frozenset({_V3_EXTRACTOR_VERSION, EXTRACTOR_VERSION})
 _NAVIGATION_TYPES = frozenset({"toc", "page-list", "landmarks"})
 
 
@@ -96,7 +100,7 @@ class _AtomicExtractor(_Extractor):
             for head in root.findall(f"{{{XHTML_NAMESPACE}}}head"):
                 for title in head.findall(f"{{{XHTML_NAMESPACE}}}title"):
                     if (
-                        self.extractor_version == EXTRACTOR_VERSION
+                        self.extractor_version in _STEM_TITLE_FILTER_EXTRACTOR_VERSIONS
                         and "".join(title.itertext()).strip() == PurePosixPath(self.resource_path).stem
                     ):
                         continue
@@ -337,6 +341,13 @@ class _AtomicExtractor(_Extractor):
         if not isinstance(node.tag, str):
             return False
         if self.parsed.kind == "xhtml" and (_namespace(node) != XHTML_NAMESPACE or _name(node) != _name(node).lower()):
+            return True
+        if (
+            self.extractor_version == EXTRACTOR_VERSION
+            and self.parsed.kind == "xhtml"
+            and _namespace(node) == XHTML_NAMESPACE
+            and self._is_program_code(node)
+        ):
             return True
         return super()._is_hard(node)
 

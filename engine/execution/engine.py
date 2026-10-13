@@ -18,8 +18,11 @@ class TranslationEngine(Request):
     """Run only persisted BookPlan-3 work; every network result is saved item by item."""
 
     async def run(self) -> TranslationRunResult:
-        with self.store.lock(blocking=False):
-            return await self._run_locked()
+        try:
+            with self.store.lock(blocking=False):
+                return await self._run_locked()
+        finally:
+            await self.runtime.aclose()
 
     async def _run_locked(self) -> TranslationRunResult:
         paused_reason: str | None = None

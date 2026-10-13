@@ -70,6 +70,39 @@ def _looks_like_technical_ascii_noop(text: str) -> bool:
     return score >= 2
 
 
+def _looks_like_organisation_author(segment: str) -> bool:
+    """Match a corporate author such as "Centers for Disease Control." or "WHO"."""
+    stripped = re.sub(r"\s+", " ", segment).strip()
+    if not stripped.endswith(".") or len(stripped) < 4:
+        return False
+    # Two or more capitalised tokens, optionally joined by lowercase connectors.
+    tokens = re.findall(r"[A-Za-z][A-Za-z'’.-]*", stripped)
+    if len(tokens) < 2 or len(tokens) > 12:
+        return False
+    capitalised = sum(1 for token in tokens if token[:1].isupper())
+    if capitalised < 2:
+        return False
+    return not (re.search(r"[,;:]", stripped) or re.search(r"\bet\s+al\.", stripped, re.IGNORECASE))
+
+
+def _looks_like_reference_tail(tail: str) -> bool:
+    """Require the post-year remainder to read like a reference rather than prose."""
+    value = re.sub(r"\s+", " ", tail).strip()
+    if not value:
+        return False
+    if re.search(r"https?://|www\.", value) or re.search(r"\bdoi\b", value, re.IGNORECASE):
+        return True
+    words = re.findall(r"[A-Za-z][A-Za-z'’.-]*", value)
+    # A sentence-verb run in the first words means ordinary prose, not a citation.
+    if re.match(
+        r"^\s*(?:is|are|was|were|will|can|should|must|does|do|did|has|have|had|may|might)\b",
+        value,
+        re.IGNORECASE,
+    ):
+        return False
+    return len(words) >= 5 and value.rstrip().endswith((".", "/", ")"))
+
+
 def _looks_like_bibliographic_reference(text: str) -> bool:
     stripped = re.sub(r"\s+", " ", text).strip()
     if len(stripped) < 40:
@@ -87,7 +120,12 @@ def _looks_like_bibliographic_reference(text: str) -> bool:
     def english_word_count(value: str) -> int:
         return len(re.findall(r"[A-Za-z][A-Za-z'’.-]*", value))
 
-    year_match = re.search(r"(?:\((?:18|19|20)\d{2}[a-z]?\)|\b(?:18|19|20)\d{2}[a-z]?\.)", stripped)
+    # A reference year also appears as "(2022, 3月22–25日)" once the model localises the
+    # date range inside the same parenthesis, so allow trailing date text before ")".
+    year_match = re.search(
+        r"(?:\((?:18|19|20)\d{2}[a-z]?(?:[,;][^)]{0,40})?\)|\b(?:18|19|20)\d{2}[a-z]?\.)",
+        stripped,
+    )
     if year_match and year_match.start() <= 220:
         author_segment = stripped[: year_match.start()]
         if not author_segment:
@@ -96,6 +134,11 @@ def _looks_like_bibliographic_reference(text: str) -> bool:
         has_author_joiner = bool(re.search(r"(?:&|\band\b|\bet\s+al\.)", author_segment, re.IGNORECASE))
         has_surname_initial = bool(re.search(r"(?<!\w)[^\W\d_][\w'’.-]*,\s+[A-Z]\.", author_segment))
         if has_surname_initial and (initials or has_author_joiner or author_segment.count(",") >= 2):
+            return True
+        # Corporate authors ("Centers for Disease Control.") carry no surname-initial pair.
+        if _looks_like_organisation_author(author_segment) and _looks_like_reference_tail(
+            stripped[year_match.end() :]
+        ):
             return True
 
     author_title_match = re.match(
@@ -424,7 +467,11 @@ def _analyze_untranslated_english_text(text: str, *, has_cjk_context: bool = Fal
         sentence_like = (
             (max_run_word_count >= 6 and max_run_stopword_count >= 2)
             or (max_run_word_count >= 6 and max_run_stopword_count >= 1 and has_sentence_verb)
-            or (len(words) >= 6 and stopword_count >= 3)
+            # Separate citations and technical names can each contain English
+            # connectors (for example several "Trail of Bits" references).
+            # Pooling those stopwords across an otherwise Chinese paragraph
+            # must not turn the whole paragraph into an English sentence.
+            or (len(words) >= 6 and stopword_count >= 3 and has_sentence_verb)
         )
         if effective_cjk_count == 0 and any(word.lower().strip("'") in UNTRANSLATED_HEADING_WORDS for word in words):
             decision, reason = EnglishResidualDecision.FAIL, "english_heading"

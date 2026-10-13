@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from functools import wraps
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from engine.agents.runtime import RuntimePaused
@@ -17,14 +22,69 @@ if TYPE_CHECKING:
     from engine.services.journal import BodyJournal
 
 
+@dataclass
+class _RestartSession:
+    allow_grants: bool = True
+    granted: set[tuple[Path, str]] = field(default_factory=set)
+    isolated: dict[Path, set[str]] = field(default_factory=dict)
+
+
+_restart_runs: ContextVar[_RestartSession | None] = ContextVar("epubox_restart_runs", default=None)
+
+
+@contextmanager
+def restart_scope(*, explicit_targets: bool = False) -> Iterator[None]:
+    """Share one explicit restart grant across a command's automatic rounds."""
+    if not explicit_targets and _restart_runs.get() is not None:
+        yield
+        return
+    token = _restart_runs.set(_RestartSession(allow_grants=not explicit_targets))
+    try:
+        yield
+    finally:
+        _restart_runs.reset(token)
+
+
+def restart_command[**P, T](function: Callable[P, T]) -> Callable[P, T]:
+    @wraps(function)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
+        # Explicit repair/retry selections must not reopen unrelated failures.
+        selected = any(kwargs.get(name) for name in ("retry_units", "retry_checks", "repair_file"))
+        with restart_scope(explicit_targets=selected):
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+def claim_restart(root: Path, scope: str = "root") -> bool:
+    session = _restart_runs.get()
+    identity = (root.resolve(), scope)
+    if session is None or not session.allow_grants or identity in session.granted:
+        return False
+    session.granted.add(identity)
+    return True
+
+
+def isolate_restart_items(root: Path, item_ids: Collection[str]) -> None:
+    session = _restart_runs.get()
+    if session is not None:
+        session.isolated.setdefault(root.resolve(), set()).update(item_ids)
+
+
+def restart_partitions(root: Path, item_ids: Collection[str]) -> tuple[tuple[str, ...], ...]:
+    session = _restart_runs.get()
+    selected = session.isolated.get(root.resolve(), set()).intersection(item_ids) if session is not None else set()
+    return tuple((item_id,) for item_id in sorted(selected))
+
+
 def validate_units(journal: BodyJournal, unit_ids: Sequence[str], *, retry_unknown: bool = True) -> tuple[str, ...]:
     selected = tuple(unit_ids)
     if not selected or len(selected) != len(set(selected)):
         raise ValueError("explicit atomic retry requires unique Unit IDs")
-    plan = journal.session.prepared.plan
-    if not set(selected).issubset(plan.unit_members):
+    unit_members = journal._unit_members()
+    if not set(selected).issubset(unit_members):
         raise IdentityMismatch("explicit atomic retry names an unknown Unit")
-    authorized = {item for unit in selected for item in plan.unit_members[unit]}
+    authorized = {item for unit in selected for item in unit_members[unit]}
     ambiguous = tuple(
         request
         for request in journal._requests.values()
@@ -36,7 +96,7 @@ def validate_units(journal: BodyJournal, unit_ids: Sequence[str], *, retry_unkno
     unknown_items = {item for request in ambiguous for item in request.item_ids}
     retryable: list[str] = []
     for unit_id in selected:
-        item_ids = plan.unit_members[unit_id]
+        item_ids = unit_members[unit_id]
         unknown = bool(set(item_ids).intersection(unknown_items))
         if unknown and not retry_unknown:
             raise RuntimePaused("explicit retry must authorize an unknown review outcome")
@@ -58,12 +118,13 @@ def validate_units(journal: BodyJournal, unit_ids: Sequence[str], *, retry_unkno
 def retry_units(journal: BodyJournal, unit_ids: Sequence[str], *, retry_unknown: bool = True) -> tuple[str, ...]:
     selected = tuple(unit_ids)
     permitted = set(validate_units(journal, selected, retry_unknown=retry_unknown))
+    unit_members = journal._unit_members()
     changes: list[tuple[ItemRecord, ItemRecord]] = []
     rollback = _snapshot(journal)
     try:
         with journal.store.lock(), state.batch(journal.store.root):
             for unit_id in selected:
-                item_ids = journal.session.prepared.plan.unit_members[unit_id]
+                item_ids = unit_members[unit_id]
                 candidates = tuple(journal._records[item] for item in item_ids if item in permitted)
                 if not candidates:
                     continue
@@ -116,7 +177,7 @@ def retry_units(journal: BodyJournal, unit_ids: Sequence[str], *, retry_unknown:
 def _initial(journal: BodyJournal, item_id: str) -> ItemRecord:
     if journal._initial_records is None:
         records: dict[str, ItemRecord] = {}
-        for request_id in journal.session.prepared.plan.batch_hashes:
+        for request_id in journal.session._prepared_batches:
             batch = journal.session._prepared_batches[request_id]
             items = batch.payload.get("items")
             if not isinstance(items, list):

@@ -55,7 +55,6 @@ from engine.schemas.contracts import (
     validate_cut_plan_coverage,
     validate_term_scopes,
 )
-from engine.schemas.members import RequestMember
 from engine.services import state
 from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite, safe_id
 
@@ -710,29 +709,9 @@ class RunStore:
                 ):
                     raise IdentityMismatch(f"initial UnitRecord already contains item results: {unit_id}")
 
-            requests = tuple(
-                self.read_request(request_path.stem)
-                for request_path in sorted(state.glob(self.root / "requests", "*.json"))
-            )
-            term_requests = tuple(request for request in requests if request.stage in {"terms", "resolution"})
-            succeeded_owners = {
-                (request.stage, request.owner_kind, request.owner_id)
-                for request in term_requests
-                if any(attempt.state == "succeeded" for attempt in request.attempts)
-            }
-            for request in term_requests:
-                if (request.stage, request.owner_kind, request.owner_id) not in succeeded_owners and any(
-                    attempt.state in {"sent", "unknown"}
-                    or (
-                        attempt.state == "reserved"
-                        and any(
-                            value is not None
-                            for value in (attempt.sent_at, attempt.finished_at, attempt.usage, attempt.error)
-                        )
-                    )
-                    for attempt in request.attempts
-                ):
-                    raise IdentityMismatch(f"term request is not terminal: {request.request_id}")
+            from engine.services.terms.recovery import require_terminal_requests
+
+            require_terminal_requests(self)
             return self._atomic_write(path, plan)
 
     def read_bookplan(self) -> BookPlan:
@@ -897,19 +876,21 @@ class RunStore:
                         manifest.item_ids,
                         version=version,
                         sources=self.read_response_sources(manifest) if version in wire.SLOT_VERSIONS else None,
+                        hints=self.read_response_hints(manifest) if version in wire.SLOT_VERSIONS else None,
                     )
                 }
             )
         return record.response
 
     def read_response_sources(self, manifest: RequestManifest) -> dict[str, str]:
-        sources: dict[str, str] = {}
-        for item_id in manifest.item_ids:
-            member = RequestMember.model_validate_json(state.read(self._path("members", item_id)))
-            if member.item_id != item_id:
-                raise IdentityMismatch("response source member identity changed")
-            sources[item_id] = member.source_projection
-        return sources
+        from engine.services.partition import response_sources
+
+        return response_sources(self, manifest)
+
+    def read_response_hints(self, manifest: RequestManifest) -> dict[str, dict[str, dict[str, object]]]:
+        from engine.services.partition import response_hints
+
+        return response_hints(self, manifest)
 
     def save_term_response(self, request_id: str, attempt_id: str, envelope: Mapping[str, object]) -> None:
         self.save_model_response("terms", request_id, attempt_id, envelope)

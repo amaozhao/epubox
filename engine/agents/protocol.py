@@ -83,7 +83,7 @@ def strict_loads(raw: str | bytes) -> Any:
     return value
 
 
-def _validate_root(value: Any, protocol: str, request_id: str) -> list[Any]:
+def _validate_root(value: Any, protocol: str, request_id: str, *, max_items: int = MAX_ITEMS) -> list[Any]:
     if not isinstance(value, dict):
         raise ProtocolError("response root must be an object")
     if set(value) != {"protocol", "request_id", "items"}:
@@ -95,8 +95,8 @@ def _validate_root(value: Any, protocol: str, request_id: str) -> list[Any]:
     items = value.get("items")
     if not isinstance(items, list):
         raise ProtocolError("items must be an array")
-    if len(items) > MAX_ITEMS:
-        raise ProtocolError(f"items exceeds {MAX_ITEMS}")
+    if len(items) > max_items:
+        raise ProtocolError(f"items exceeds {max_items}")
     return items
 
 
@@ -148,7 +148,12 @@ def validate_translation_response(
 ) -> BatchValidation:
     sources = expected_item_ids if isinstance(expected_item_ids, Mapping) else {}
     expected_item_ids = set(expected_item_ids)
-    items = _validate_root(strict_loads(raw), "epubox-text-1", request_id)
+    # Token-budgeted body batches can contain hundreds of short index entries.
+    # Bound the response by the trusted request, retaining the legacy allowance
+    # for small batches whose unknown IDs are isolated by _collect_items.
+    items = _validate_root(
+        strict_loads(raw), "epubox-text-1", request_id, max_items=max(MAX_ITEMS, len(expected_item_ids))
+    )
     candidates, errors, unknown, _ = _collect_items(items, expected_item_ids)
     accepted: dict[str, dict[str, Any]] = {}
     for item_id, item in candidates.items():
@@ -234,7 +239,13 @@ def review_applicability(member: Any, index: Any, wire: Mapping[str, Any]) -> di
     if supplied != expected:
         raise ProtocolError("review applicability differs from the trusted member")
     source, target = wire.get("source"), wire.get("target")
-    resource = index.documents[member.document_id].resource.path
+    # Most reviews never inspect the filename; avoid loading a source document
+    # merely to decide an inapplicable metadata exception.
+    resource = (
+        index.documents[member.document_id].resource.path
+        if member.kind == "head_title" and member.channel == "metadata" and not member.registry
+        else ""
+    )
     filename = (
         member.kind == "head_title"
         and member.channel == "metadata"

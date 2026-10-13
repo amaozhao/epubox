@@ -156,7 +156,13 @@ def serialize_xml(tree: etree._ElementTree, *, source_markup: str = "") -> str:
     ).decode("utf-8")
 
 
-def qname_local_name(value: str) -> str:
+def qname_local_name(value: object) -> str:
+    # lxml includes comments and processing instructions in child iteration;
+    # their callable tags have no element name and must not match selectors.
+    if value is etree.Comment or value is etree.ProcessingInstruction:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError("an XML element name must be a string")
     return etree.QName(value).localname.lower()
 
 

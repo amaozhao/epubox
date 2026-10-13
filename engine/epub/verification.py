@@ -20,6 +20,8 @@ from engine.core.markup import parse_xml_bytes, qname_local_name
 from engine.epub.diagnostics import compare, references, same_messages
 from engine.epub.replace import replacement_fingerprint
 from engine.epub.validation import (
+    FONT_MEDIA_PREFIXES,
+    FONT_SUFFIXES,
     EpubCheckResult,
     EpubValidationError,
     PackageInventory,
@@ -40,6 +42,7 @@ class PackageVerification:
     warnings: tuple[ValidationIssue, ...] = ()
     baseline: dict[str, object] | None = None
     epub_version: str | None = None
+    font_policy: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -52,6 +55,8 @@ class PackageVerification:
             value["baseline"] = self.baseline
         if self.epub_version is not None:
             value["epub_version"] = self.epub_version
+        if self.font_policy is not None:
+            value["font_policy"] = self.font_policy
         return value
 
 
@@ -62,11 +67,14 @@ def stage_epub(
     *,
     source_directory: Path | None = None,
     allow_additions: bool = False,
+    removed_paths: frozenset[str] = frozenset(),
 ) -> str:
     """Create a candidate EPUB while preserving every untouched ZIP member."""
     staged_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(source_snapshot) as source:
         names = set(source.namelist())
+        if not removed_paths <= names or removed_paths & (set(replacements) | {"mimetype"}):
+            raise EpubValidationError("invalid_removal", "Removed resources must exist and cannot be replaced")
         unknown = set(replacements) - names
         if unknown and not allow_additions:
             raise EpubValidationError("unknown_replacement", f"Replacement is not in source EPUB: {min(unknown)}")
@@ -85,7 +93,7 @@ def stage_epub(
                 raise EpubValidationError("invalid_mimetype", "mimetype cannot be changed")
             target.writestr("mimetype", mimetype, compress_type=zipfile.ZIP_STORED)
             for info in source.infolist():
-                if info.filename == "mimetype":
+                if info.filename == "mimetype" or info.filename in removed_paths:
                     continue
                 data = (
                     replacements[info.filename]
@@ -140,6 +148,8 @@ def verify_staged_epub(
     checker: object,
     expected_language: str | None = None,
     upgraded: bool = False,
+    removed_paths: frozenset[str] = frozenset(),
+    reader_fonts: bool = False,
 ) -> PackageVerification:
     output_hash = file_hash(staged_path)
     output_inventory = inspect_epub(staged_path, output_hash, checker=checker, for_output=True)
@@ -147,8 +157,15 @@ def verify_staged_epub(
         raise EpubValidationError("epub_version_changed", "Upgraded output must be EPUB 3.0")
     if not upgraded and output_inventory.epub_version != source_inventory.epub_version:
         raise EpubValidationError("epub_version_changed", "Output EPUB version differs from source")
+    fonts = {
+        item.path for item in source_inventory.manifest if item.media_type.lower().startswith(FONT_MEDIA_PREFIXES)
+    } | {path for path in source_inventory.entries if PurePosixPath(path).suffix.lower() in FONT_SUFFIXES}
+    if not removed_paths <= fonts | {"META-INF/encryption.xml"}:
+        raise EpubValidationError(
+            "invalid_font_removal", "Only font resources and their encryption metadata may be removed"
+        )
     added = set(output_inventory.entries) - set(source_inventory.entries)
-    if (set(source_inventory.entries) - set(output_inventory.entries)) or (
+    if (set(source_inventory.entries) - set(output_inventory.entries)) != set(removed_paths) or (
         added and (not upgraded or added != {output_inventory.nav_path} or not added <= set(expected_documents))
     ):
         raise EpubValidationError("resource_inventory_changed", "Output resource inventory differs from source")
@@ -159,7 +176,12 @@ def verify_staged_epub(
     if output_inventory.spine_linear != source_inventory.spine_linear:
         raise EpubValidationError("spine_changed", "Output linear reading order differs from source")
     output_items = {item.item_id: item for item in output_inventory.manifest}
+    stylesheets = {item.path for item in output_inventory.manifest if item.media_type == "text/css"}
     for item in source_inventory.manifest:
+        if item.path in removed_paths:
+            if item.item_id in output_items:
+                raise EpubValidationError("resource_inventory_changed", "Removed font remains in manifest")
+            continue
         current = output_items.get(item.item_id)
         if (
             current is None
@@ -170,17 +192,23 @@ def verify_staged_epub(
             raise EpubValidationError(
                 "resource_inventory_changed", "Original manifest resource changed during upgrade"
             )
-    if output_inventory.obfuscated_fonts != source_inventory.obfuscated_fonts:
+    if output_inventory.obfuscated_fonts != tuple(
+        path for path in source_inventory.obfuscated_fonts if path not in removed_paths
+    ):
         raise EpubValidationError("font_obfuscation_changed", "Font obfuscation resources changed")
 
     warnings = list(output_inventory.warnings)
     with zipfile.ZipFile(source_snapshot) as source, zipfile.ZipFile(staged_path) as output:
         for name in source.namelist():
-            if name not in expected_documents and source.read(name) != output.read(name):
+            if name not in expected_documents and name not in removed_paths and source.read(name) != output.read(name):
                 raise EpubValidationError("unexpected_resource_change", f"Unexpected resource change: {name}")
         for path, expected in expected_documents.items():
             actual = output.read(path)
-            _compare_document(path, expected, actual)
+            if path in stylesheets:
+                if actual != expected:
+                    raise EpubValidationError("document_mismatch", f"Stylesheet differs from verified plan: {path}")
+            else:
+                _compare_document(path, expected, actual)
             if path not in accepted_targets:
                 raise EpubValidationError("missing_target_evidence", f"No target evidence supplied for {path}")
         source_issues = validate_internal_references(source, source_inventory)
@@ -206,8 +234,22 @@ def verify_staged_epub(
         if not upgraded and (not source_result.passed or not result.passed)
         else None
     )
+    font_policy = None
+    if reader_fonts:
+        from engine.epub.styles import FONT_POLICY, use_reader_fonts
+
+        pending, remaining = use_reader_fonts(staged_path, output_inventory, {})
+        if pending or remaining:
+            raise EpubValidationError("font_policy_failed", "Output still contains publisher fonts")
+        font_policy = FONT_POLICY
     return PackageVerification(
-        output_hash, result, tuple(sorted(expected_documents)), tuple(warnings), baseline, "3.0" if upgraded else None
+        output_hash,
+        result,
+        tuple(sorted(expected_documents)),
+        tuple(warnings),
+        baseline,
+        "3.0" if upgraded else None,
+        font_policy,
     )
 
 

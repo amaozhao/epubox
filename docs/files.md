@@ -2,7 +2,7 @@
 
 基线：main@61ebb35；范围为版本管理文件及本轮需求文档。表中行数为实施前快照；本轮与后续任务均需核对实际行数。
 
-用户已授权固定工具名称例外：__init__.py、pyproject.toml、.gitignore、.env.example；uv.lock 使用依赖工具生成的既有名称。pytest 默认 test_ 前缀不作为例外，已配置 python_files = ["*.py"]。
+用户已授权固定工具名称例外：__init__.py、pyproject.toml、.gitignore、.env.example；uv.lock 使用依赖工具生成的既有名称。测试文件统一使用 `test_<单词>.py`，其中 `test_` 是 pytest 工具前缀，主体仍必须是一个英文单词；已配置 `python_files = ["test_*.py"]`。
 
 “待实施”行必须由责任任务完成；T00 验收检查全部违规均有归属，T20 验收时待实施项必须为零。仅为改名同步 import 的文件不提前转移业务归属。
 
@@ -83,58 +83,58 @@
 | tests/chapter1.xhtml | tests/chapter.xhtml | 277 | T20 | 待实施 |
 | tests/engine/__init__.py | tests/engine/__init__.py | 0 | T00 | 工具固定名称 |
 | tests/engine/agents/__init__.py | tests/engine/agents/__init__.py | 0 | T00 | 工具固定名称 |
-| tests/engine/agents/test_models.py | tests/engine/agents/models.py | 79 | T16 | 完成 |
-| tests/engine/agents/test_protocol.py | tests/engine/agents/protocol.py | 110 | T16 | 完成 |
-| tests/engine/agents/test_provider.py | tests/engine/agents/provider.py | 20 | T16 | 完成 |
-| tests/engine/agents/test_runtime_protocol.py | tests/engine/agents/runtime.py | 980 | T16 | 完成 |
+| tests/engine/agents/test_models.py | tests/engine/agents/test_models.py | 79 | T16 | 完成 |
+| tests/engine/agents/test_protocol.py | tests/engine/agents/test_protocol.py | 110 | T16 | 完成 |
+| tests/engine/agents/test_provider.py | tests/engine/agents/test_provider.py | 20 | T16 | 完成 |
+| tests/engine/agents/test_runtime_protocol.py | tests/engine/agents/test_runtime.py | 980 | T16 | 完成 |
 | tests/engine/core/__init__.py | tests/engine/core/__init__.py | 0 | T00 | 工具固定名称 |
-| tests/engine/core/test_quality.py | tests/engine/core/quality.py | 27 | T06 | 完成 |
-| tests/engine/core/test_tokens.py | tests/engine/core/tokens.py | 13 | T01 | 完成 |
+| tests/engine/core/test_quality.py | tests/engine/core/test_quality.py | 27 | T06 | 完成 |
+| tests/engine/core/test_tokens.py | tests/engine/core/test_tokens.py | 13 | T01 | 完成 |
 | tests/engine/epub/__init__.py | tests/engine/epub/__init__.py | 0 | T00 | 工具固定名称 |
-| tests/engine/epub/book_factory.py | tests/engine/epub/factory.py | 65 | T02 | 完成 |
-| tests/engine/epub/test_assembly.py | tests/engine/epub/assembly.py | 8 | T07 | 完成 |
-| tests/engine/epub/test_checker.py | tests/engine/epub/checker.py | 31 | T18 | 已完成 |
-| tests/engine/epub/test_derived_bindings.py | tests/engine/epub/bindings.py | 86 | T18 | 已完成 |
-| tests/engine/epub/test_preparation.py | tests/engine/epub/preparation.py | 210 | T02 | 完成 |
-| tests/engine/epub/test_publication.py | tests/engine/epub/publication.py | 537 | T18 | 已完成 |
+| tests/engine/epub/book_factory.py | tests/engine/epub/test_factory.py | 65 | T02 | 完成 |
+| tests/engine/epub/test_assembly.py | tests/engine/epub/test_assembly.py | 8 | T07 | 完成 |
+| tests/engine/epub/test_checker.py | tests/engine/epub/test_checker.py | 31 | T18 | 已完成 |
+| tests/engine/epub/test_derived_bindings.py | tests/engine/epub/test_bindings.py | 86 | T18 | 已完成 |
+| tests/engine/epub/test_preparation.py | tests/engine/epub/test_preparation.py | 210 | T02 | 完成 |
+| tests/engine/epub/test_publication.py | tests/engine/epub/test_publication.py | 537 | T18 | 已完成 |
 | tests/engine/item/__init__.py | tests/engine/item/__init__.py | 0 | T00 | 工具固定名称 |
-| tests/engine/item/test_extractor.py | tests/engine/item/extractor.py | 338 | T05 | 完成 |
-| tests/engine/item/test_inline_planner.py | tests/engine/item/inline.py | 715 | T06 | 完成 |
-| tests/engine/item/test_planner.py | tests/engine/item/planner.py | 357 | T14 | 完成 |
-| tests/engine/item/test_source_token_cap.py | tests/engine/item/limits.py | 49 | T20 | 待实施 |
-| tests/engine/item/test_source_views.py | tests/engine/item/views.py | 185 | T05 | 完成 |
+| tests/engine/item/test_extractor.py | tests/engine/item/test_extractor.py | 338 | T05 | 完成 |
+| tests/engine/item/test_inline_planner.py | tests/engine/item/test_inline.py | 715 | T06 | 完成 |
+| tests/engine/item/test_planner.py | tests/engine/item/test_planner.py | 357 | T14 | 完成 |
+| tests/engine/item/test_limit.py | tests/engine/item/test_limit.py | 49 | T20 | 完成 |
+| tests/engine/item/test_source_views.py | tests/engine/item/test_views.py | 185 | T05 | 完成 |
 | tests/engine/schemas/__init__.py | tests/engine/schemas/__init__.py | 0 | T00 | 工具固定名称 |
-| tests/engine/schemas/test_contracts.py | tests/engine/schemas/contracts.py | 803 | T00 | 完成 |
+| tests/engine/schemas/test_contracts.py | tests/engine/schemas/test_contracts.py | 803 | T00 | 完成 |
 | tests/engine/services/__init__.py | tests/engine/services/__init__.py | 0 | T00 | 工具固定名称 |
-| tests/engine/services/test_coherence.py | tests/engine/services/coherence.py | 106 | T16 | 完成 |
-| tests/engine/services/test_preparation_pipeline.py | tests/engine/services/preparation.py；新原子准备验收见 preparing.py/ready.py | 433 | T15 | 完成 |
-| tests/engine/services/test_report.py | tests/engine/services/report.py | 113 | T19 | 已完成 |
-| tests/engine/services/test_response_journal.py | tests/engine/services/response.py | 141 | T20 | 待实施 |
-| tests/engine/services/test_resume_plan.py | tests/engine/services/resume.py | 69 | T17 | 已完成 |
-| tests/engine/services/test_store.py | tests/engine/services/store.py | 522 | T17 | 已完成 |
-| tests/engine/services/test_store_contracts.py | tests/engine/services/contracts.py | 255 | T17 | 已完成 |
-| tests/engine/services/test_term_candidates.py | tests/engine/services/terms/candidates.py | 322 | T12 | 完成 |
-| tests/engine/services/test_term_freeze.py | tests/engine/services/terms/freeze.py | 358 | T12 | 完成 |
-| tests/engine/services/test_term_inputs.py | tests/engine/services/terms/inputs.py | 118 | T09 | 完成 |
-| tests/engine/services/test_term_planning.py | tests/engine/services/terms/planning.py | 561 | T10 | 完成 |
-| tests/engine/services/test_term_rejection_audit.py | tests/engine/services/terms/audit.py | 139 | T12 | 完成 |
-| tests/engine/services/test_term_resolution.py | tests/engine/services/terms/resolution.py | 489 | T12 | 完成 |
-| tests/engine/services/test_term_response_journal.py | tests/engine/services/terms/response.py | 184 | T11 | 完成 |
-| tests/engine/services/test_term_runner.py | tests/engine/services/terms/runner.py；并发与存储边界测试拆入 execution.py、storage.py | 653 | T11 | 完成 |
-| tests/engine/test_cli.py | tests/engine/cli.py | 563 | T02 | 完成 |
-| tests/engine/test_orchestrator.py | tests/engine/execution/translation.py；其余执行职责测试位于 execution/ 下单词文件 | 2095 | T16 | 完成 |
-| tests/engine/test_single_command_e2e.py | tests/engine/integration.py | 221 | T20 | 完成 |
-| tests/engine/test_structural_adversarial.py | tests/engine/adversarial.py | 208 | T20 | 待实施 |
+| tests/engine/services/test_coherence.py | tests/engine/services/test_coherence.py | 106 | T16 | 完成 |
+| tests/engine/services/test_preparation_pipeline.py | tests/engine/services/test_preparation.py；新原子准备验收见 test_preparing.py/test_ready.py | 433 | T15 | 完成 |
+| tests/engine/services/test_report.py | tests/engine/services/test_report.py | 113 | T19 | 已完成 |
+| tests/engine/services/test_response.py | tests/engine/services/test_response.py | 141 | T20 | 完成 |
+| tests/engine/services/test_resume_plan.py | tests/engine/services/test_resume.py | 69 | T17 | 已完成 |
+| tests/engine/services/test_store.py | tests/engine/services/test_store.py | 522 | T17 | 已完成 |
+| tests/engine/services/test_store_contracts.py | tests/engine/services/test_contracts.py | 255 | T17 | 已完成 |
+| tests/engine/services/test_term_candidates.py | tests/engine/services/terms/test_candidates.py | 322 | T12 | 完成 |
+| tests/engine/services/test_term_freeze.py | tests/engine/services/terms/test_freeze.py | 358 | T12 | 完成 |
+| tests/engine/services/test_term_inputs.py | tests/engine/services/terms/test_inputs.py | 118 | T09 | 完成 |
+| tests/engine/services/test_term_planning.py | tests/engine/services/terms/test_planning.py | 561 | T10 | 完成 |
+| tests/engine/services/test_term_rejection_audit.py | tests/engine/services/terms/test_audit.py | 139 | T12 | 完成 |
+| tests/engine/services/test_term_resolution.py | tests/engine/services/terms/test_resolution.py | 489 | T12 | 完成 |
+| tests/engine/services/test_term_response_journal.py | tests/engine/services/terms/test_response.py | 184 | T11 | 完成 |
+| tests/engine/services/test_term_runner.py | tests/engine/services/terms/test_runner.py；并发与存储边界测试拆入 test_execution.py、test_storage.py | 653 | T11 | 完成 |
+| tests/engine/test_cli.py | tests/engine/test_cli.py | 563 | T02 | 完成 |
+| tests/engine/test_orchestrator.py | tests/engine/execution/test_translation.py；其余执行职责测试位于 execution/ 下单词文件 | 2095 | T16 | 完成 |
+| tests/engine/test_single_command_e2e.py | tests/engine/test_integration.py | 221 | T20 | 完成 |
+| tests/engine/test_adversary.py | tests/engine/test_adversary.py | 208 | T20 | 完成 |
 | tests/test_image.jpg | tests/image.jpg | 94 | T20 | 待实施 |
-| tests/test_main.py | tests/main.py | 106 | T02 | 完成 |
+| tests/test_main.py | tests/test_main.py | 106 | T02 | 完成 |
 | tests/toc.ncx | tests/toc.ncx；以必要导航边界重建小夹具，不机械截断XML | 6139 | T20 | 待实施 |
 
 ## 本轮新增文件
 
 | 路径 | 责任 | 约束 |
 |---|---|---|
-| engine/schemas/bridge.py、engine/schemas/budget.py、tests/engine/schemas/bridge.py、tests/engine/schemas/files.py | T00 | 交接契约/测试，单词且≤1000行 |
-| engine/item/budget.py、tests/engine/item/budget.py、tests/engine/core/config.py | T01 | 纯预算/配置测试，单词且≤1000行 |
+| engine/schemas/bridge.py、engine/schemas/budget.py、tests/engine/schemas/test_bridge.py、tests/engine/schemas/test_files.py | T00 | 交接契约/测试，单词且≤1000行 |
+| engine/item/budget.py、tests/engine/item/test_budget.py、tests/engine/core/test_config.py | T01 | 纯预算/配置测试，单词且≤1000行 |
 | docs/baseline.md、docs/files.md、docs/tasks.md、docs/chunking.md、docs/migration.md、docs/review.md、docs/extraction.md | T00 | 基线/清单/需求/计划，单词且≤1000行 |
 
 ## 引用同步与兼容验证
@@ -148,9 +148,9 @@
 
 | 路径 | 责任 | 约束 |
 |---|---|---|
-| engine/epub/parsing.py、tests/engine/epub/parsing.py | T03 | 严格资源解析/反例，单词且≤1000行 |
-| engine/epub/ranges.py、tests/engine/epub/ranges.py | T04 | 原字节区间映射/反例，单词且≤1000行 |
-| engine/item/atoms.py、tests/engine/item/atoms.py | T05 | 原子提取/覆盖/反例，单词且≤1000行 |
+| engine/epub/parsing.py、tests/engine/epub/test_parsing.py | T03 | 严格资源解析/反例，单词且≤1000行 |
+| engine/epub/ranges.py、tests/engine/epub/test_ranges.py | T04 | 原字节区间映射/反例，单词且≤1000行 |
+| engine/item/atoms.py、tests/engine/item/test_atoms.py | T05 | 原子提取/覆盖/反例，单词且≤1000行 |
 | engine/item/metadata.py、engine/item/projection.py、engine/item/policy.py | T05 | 原有职责拆分，单词且≤1000行 |
 | docs/extraction.md | T05 | 本阶段交接合同与验收记录，单词且≤1000行 |
 
@@ -158,8 +158,8 @@
 
 | 路径 | 责任 | 约束 |
 |---|---|---|
-| engine/epub/fill.py、tests/engine/epub/fill.py | T07 | 原字节局部回填/反例，单词且≤1000行 |
-| tests/engine/item/markers.py | T06 | 目标标记与字面标记反例，单词且≤1000行 |
+| engine/epub/fill.py、tests/engine/epub/test_fill.py | T07 | 原字节局部回填/反例，单词且≤1000行 |
+| tests/engine/item/test_markers.py | T06 | 目标标记与字面标记反例，单词且≤1000行 |
 | engine/services/terms/__init__.py、tests/engine/services/terms/__init__.py | T09/T10 | 明确的Python包固定名称例外 |
 | docs/translation.md | T06/T07/T09/T10 | 本批次交接与验收，单词且≤1000行 |
 
@@ -167,31 +167,31 @@
 
 | 路径 | 责任 | 约束 |
 |---|---|---|
-| engine/services/preflight.py、tests/engine/services/preflight.py | T08 | 零模型原子预检、凭据校验及反例，单词且≤1000行 |
+| engine/services/preflight.py、tests/engine/services/test_preflight.py | T08 | 零模型原子预检、凭据校验及反例，单词且≤1000行 |
 | engine/agents/terms.py、engine/services/terms/runner.py、engine/services/terms/storage.py | T11 | 术语协议、批量调度和日志存储，单词且≤1000行 |
-| tests/engine/services/terms/runner.py、tests/engine/services/terms/execution.py、tests/engine/services/terms/response.py、tests/engine/services/terms/storage.py | T11 | 计量、并发、恢复和派发门禁测试，单词且≤1000行 |
+| tests/engine/services/terms/test_runner.py、tests/engine/services/terms/test_execution.py、tests/engine/services/terms/test_response.py、tests/engine/services/terms/test_storage.py | T11 | 计量、并发、恢复和派发门禁测试，单词且≤1000行 |
 | engine/services/terms/candidates.py、engine/services/terms/freeze.py、engine/services/terms/resolution.py | T12 | 候选、冻结和冲突核对，单词且≤1000行 |
-| tests/engine/services/terms/candidates.py、tests/engine/services/terms/freeze.py、tests/engine/services/terms/resolution.py、tests/engine/services/terms/audit.py | T12 | 证据、终态和冻结测试，单词且≤1000行 |
-| tests/engine/agents/budget.py | T11 | 完整模型消息 token 预算测试，单词且≤1000行 |
+| tests/engine/services/terms/test_candidates.py、tests/engine/services/terms/test_freeze.py、tests/engine/services/terms/test_resolution.py、tests/engine/services/terms/test_audit.py | T12 | 证据、终态和冻结测试，单词且≤1000行 |
+| tests/engine/agents/test_budget.py | T11 | 完整模型消息 token 预算测试，单词且≤1000行 |
 | docs/terminology.md | T08/T11/T12 | 本批次交接与验收，单词且≤1000行 |
 
 ## 第五阶段新增文件
 
 | 路径 | 责任 | 约束 |
 |---|---|---|
-| engine/item/context.py、tests/engine/item/planner.py | T13 | 原正文术语与上下文规划模块改名及兼容测试，单词且≤1000行 |
-| engine/item/request.py、tests/engine/item/request.py | T13 | 原子正文的最小模型请求投影及反例，单词且≤1000行 |
-| engine/item/packing.py、tests/engine/item/packing.py | T14 | 完整原子项的顺序预算合批及反例，单词且≤1000行 |
+| engine/item/context.py、tests/engine/item/test_planner.py | T13 | 原正文术语与上下文规划模块改名及兼容测试，单词且≤1000行 |
+| engine/item/request.py、tests/engine/item/test_request.py | T13 | 原子正文的最小模型请求投影及反例，单词且≤1000行 |
+| engine/item/packing.py、tests/engine/item/test_packing.py | T14 | 完整原子项的顺序预算合批及反例，单词且≤1000行 |
 | docs/packing.md | T13/T14 | 本批次接口、边界与后续接线说明，单词且≤1000行 |
 
 ## 第六阶段新增文件
 
 | 路径 | 责任 | 约束 |
 |---|---|---|
-| engine/schemas/members.py、engine/schemas/ready.py、tests/engine/item/members.py、tests/engine/services/ready.py | T15 | 请求成员、ready 身份与物理回读验证，单词且≤1000行 |
+| engine/schemas/members.py、engine/schemas/ready.py、tests/engine/item/test_members.py、tests/engine/services/test_ready.py | T15 | 请求成员、ready 身份与物理回读验证，单词且≤1000行 |
 | engine/item/members.py | T15 | 预检 piece 实体化、局部 registry、合并与完整预算合批，单词且≤1000行 |
-| engine/services/ready.py、tests/engine/services/preparing.py | T15 | 准备依赖提交、恢复和 prepared.json 最后写入验收，单词且≤1000行 |
-| engine/agents/workflow.py、tests/engine/agents/workflow.py | T16 | 原子初译、真实译文校对及修订应用，单词且≤1000行 |
+| engine/services/ready.py、tests/engine/services/test_preparing.py | T15 | 准备依赖提交、恢复和 prepared.json 最后写入验收，单词且≤1000行 |
+| engine/agents/workflow.py、tests/engine/agents/test_workflow.py | T16 | 原子初译、真实译文校对及修订应用，单词且≤1000行 |
 | engine/execution/*.py、tests/engine/execution/*.py | T16 | 旧执行器按原职责拆分的单词模块，每个文件≤1000行；__init__.py 为固定包名例外 |
 | docs/workflow.md | T15/T16 | 准备、ready 和三步 workflow 交接边界，单词且≤1000行 |
 
@@ -199,23 +199,23 @@
 
 | 路径 | 责任 | 约束 |
 |---|---|---|
-| engine/services/journal.py、engine/services/custody.py、tests/engine/services/journal.py | T17 | 正文结果、证据校验、请求、响应、用量和回放，单词且≤1000行 |
-| engine/services/resume.py、tests/engine/services/resume.py | T17 | 只读恢复计划及原复合文件改名，单词且≤1000行 |
-| tests/engine/services/store.py、tests/engine/services/contracts.py | T17 | 原存储测试改名，单词且≤1000行 |
-| engine/epub/publish.py、engine/epub/verification.py、tests/engine/epub/publish.py | T18 | 原字节回填后的候选校验和事务发布，单词且≤1000行 |
-| engine/epub/bindings.py、tests/engine/epub/bindings.py、tests/engine/epub/checker.py、tests/engine/epub/publication.py | T18 | 原出版模块拆分及测试改名，单词且≤1000行 |
-| engine/execution/atomic.py、tests/engine/execution/atomic.py | T19 | 原子 workflow 调度与每批进度接线，单词且≤1000行 |
-| tests/engine/command.py、tests/engine/services/report.py | T19 | CLI 参数/进度及报告回归，单词且≤1000行 |
+| engine/services/journal.py、engine/services/custody.py、tests/engine/services/test_journal.py | T17 | 正文结果、证据校验、请求、响应、用量和回放，单词且≤1000行 |
+| engine/services/resume.py、tests/engine/services/test_resume.py | T17 | 只读恢复计划及原复合文件改名，单词且≤1000行 |
+| tests/engine/services/test_store.py、tests/engine/services/test_contracts.py | T17 | 原存储测试改名，单词且≤1000行 |
+| engine/epub/publish.py、engine/epub/verification.py、tests/engine/epub/test_publish.py | T18 | 原字节回填后的候选校验和事务发布，单词且≤1000行 |
+| engine/epub/bindings.py、tests/engine/epub/test_bindings.py、tests/engine/epub/test_checker.py、tests/engine/epub/test_publication.py | T18 | 原出版模块拆分及测试改名，单词且≤1000行 |
+| engine/execution/atomic.py、tests/engine/execution/test_atomic.py | T19 | 原子 workflow 调度与每批进度接线，单词且≤1000行 |
+| tests/engine/test_command.py、tests/engine/services/test_report.py | T19 | CLI 参数/进度及报告回归，单词且≤1000行 |
 | docs/publication.md | T17/T18/T19 | 正文恢复、出版、CLI 和验收边界，单词且≤1000行 |
 
 ## 真实书籍测试记录
 
 `docs/validation.md` 由 T20 记录已授权测试的原书诊断、测试副本、代码修复、实际请求和恢复证据。提供的小书已完成真实全书出版；大书预检及最终全仓约束验收仍待完成；文档名称为单个单词且≤1000行。
 
-2026-10-07 新增 `engine/services/session.py`、`tests/engine/services/session.py`，负责原书任务定位、身份验证和无参数续传；单词命名且≤1000行。
+2026-10-07 新增 `engine/services/session.py`、`tests/engine/services/test_session.py`，负责原书任务定位、身份验证和无参数续传；单词命名且≤1000行。
 
-2026-10-07 新增 `engine/epub/diagnostics.py`、`tests/engine/epub/diagnostics.py`，负责源书及成品规范诊断的稳定位置比较；单词命名且≤1000行。
+2026-10-07 新增 `engine/epub/diagnostics.py`、`tests/engine/epub/test_diagnostics.py`，负责源书及成品规范诊断的稳定位置比较；单词命名且≤1000行。
 
-2026-10-07 单 JSON 及预检修复新增 `engine/services/state.py`、`engine/services/legacy.py`、`tests/engine/compact.py`、`tests/engine/services/compact.py`、`tests/engine/services/state.py`；分别负责统一持久化、历史任务发现及紧凑目录回归。源码、测试及维护文档均为单词命名且≤1000行。
+2026-10-07 单 JSON 及预检修复新增 `engine/services/state.py`、`engine/services/legacy.py`、`tests/engine/test_compact.py`、`tests/engine/services/test_compact.py`、`tests/engine/services/test_state.py`；分别负责统一持久化、历史任务发现及紧凑目录回归。源码、测试及维护文档均为单词命名且≤1000行。
 
-`tests/engine/services/replay.py` 验证缓存响应分批回放、提交失败回滚和零重复HTTP；文件为单词命名且≤1000行。
+`tests/engine/services/test_replay.py` 验证缓存响应分批回放、提交失败回滚和零重复HTTP；文件为单词命名且≤1000行。

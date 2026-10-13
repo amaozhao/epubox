@@ -231,6 +231,19 @@ def _is_hard(self: _Extractor, node: etree._Element) -> bool:
     return isinstance(node.tag, str) and (qname_local_name(node.tag) in _HARD_TAGS or self._is_short_inline_code(node))
 
 
+def _is_program_code(self: _Extractor, node: etree._Element) -> bool:
+    if qname_local_name(node.tag) != "div":
+        return False
+    classes = (node.get("class") or "").split()
+    if not {"LineGroup", "FixedLine"}.intersection(classes):
+        return False
+    return any(
+        qname_local_name(ancestor.tag) == "div" and "ProgramCode" in (ancestor.get("class") or "").split()
+        for ancestor in node.iterancestors()
+        if isinstance(ancestor.tag, str)
+    )
+
+
 def _is_short_inline_code(self: _Extractor, node: etree._Element) -> bool:
     if qname_local_name(node.tag) != "span" or len(node):
         return False
@@ -284,7 +297,11 @@ def _is_empty_anchor(self: _Extractor, node: etree._Element) -> bool:
 
 def _boundary_type(self: _Extractor, node: etree._Element) -> str:
     name = qname_local_name(node.tag)
-    if name in {"code", "pre", "kbd", "samp", "var", "tt"} or self._is_short_inline_code(node):
+    if (
+        name in {"code", "pre", "kbd", "samp", "var", "tt"}
+        or (self._is_program_code(node) and self._is_hard(node))
+        or self._is_short_inline_code(node)
+    ):
         return "code"
     if name in {"math", "svg"}:
         return "math"

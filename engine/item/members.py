@@ -7,24 +7,25 @@ from itertools import pairwise
 from types import MappingProxyType
 from typing import Any, Literal, cast
 
-from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS
+from engine.item.budget import budget_limits_match as _budget_limits_match
 from engine.item.budget import measure_budget
-from engine.item.inline import plain_text, projection_identities, validate_projection
+from engine.item.inline import plain_text, validate_projection
 from engine.item.packing import BatchBoundary, BlockedItem
 from engine.item.request import context_suffix, marker_fields, select_terms, target_bindings
+from engine.item.validation import local_registry as _local_registry
+from engine.item.validation import validate_coverage as _validate_coverage
 from engine.item.views import validate_source_views
 from engine.schemas.bridge import AtomicDocument, AtomicItem, validate_batch_identity
-from engine.schemas.budget import BUDGET_VERSION, BudgetLimits, BudgetResult, BudgetStage
+from engine.schemas.budget import BudgetLimits, BudgetResult, BudgetStage
 from engine.schemas.contracts import (
     FrozenModel,
     GlossarySnapshot,
     ItemRecord,
-    RegistryEntry,
     RequestManifest,
     canonical_hash,
 )
 from engine.schemas.members import MemberBatch, RequestMember, member_input_hash
-from engine.services.preflight import PREFLIGHT_VERSION, PreflightReport, validate_list_pieces
+from engine.services.preflight import PreflightReport, preflight_budget_hash
 
 PACKING_VERSION = 2
 type BoundaryReason = Literal[
@@ -73,171 +74,93 @@ def materialize_members(inventories: Sequence[AtomicDocument], report: Preflight
         raise ValueError("preflight resource identities differ from the atomic inventories")
     if report.check.atoms_hash != canonical_hash(hashed) or report.atoms_hash != report.check.atoms_hash:
         raise ValueError("preflight atom identity differs from the atomic inventories")
-    expected_budget = canonical_hash(
-        {
-            "version": BUDGET_VERSION,
-            "preflight_version": PREFLIGHT_VERSION,
-            "model": report.model,
-            "limits": report.limits,
-            "pieces": tuple(piece.model_dump(mode="json") for piece in report.pieces),
-        }
-    )
+    expected_budget = preflight_budget_hash(report.model, report.limits, report.pieces)
     if report.check.budget_hash != report.budget_hash or report.budget_hash != expected_budget:
         raise ValueError("preflight budget identity is incomplete")
 
-    parents = {item.item_id: item for inventory in ordered for item in inventory.items}
+    preflight_hash = canonical_hash(report)
+    return tuple(
+        member
+        for inventory in ordered
+        for member in materialize_document_members(inventory, report, preflight_hash=preflight_hash)
+    )
+
+
+def materialize_document_members(
+    inventory: AtomicDocument,
+    report: PreflightReport,
+    *,
+    preflight_hash: str | None = None,
+) -> tuple[RequestMember, ...]:
+    """Materialize one verified document without retaining the rest of the book."""
+    if report.check is None or inventory.document.source_hash != report.source_hash:
+        raise ValueError("request members require a matching accepted preflight report")
+    document_id = inventory.document.document_id
+    resource_path = inventory.document.resource.path
+    map_hash = canonical_hash(inventory.source_map)
+    if report.map_hashes.get(document_id) != map_hash or report.check.map_hashes.get(document_id) != map_hash:
+        raise ValueError("preflight map identity differs from the atomic inventory")
+    if report.resource_hashes.get(resource_path) != inventory.document.resource.source_sha256:
+        raise ValueError("preflight resource identity differs from the atomic inventory")
+
+    parents = {item.item_id: item for item in inventory.items}
     pieces_by_parent: dict[str, list[Any]] = {}
     for piece in report.pieces:
-        if piece.item_id not in parents:
-            raise ValueError(f"preflight piece references an unknown atom: {piece.item_id}")
-        pieces_by_parent.setdefault(piece.item_id, []).append(piece)
-    diagnostics = {diagnostic.item_id: diagnostic for diagnostic in report.diagnostics}
-    if len(diagnostics) != len(report.diagnostics):
+        if piece.document_id == document_id:
+            pieces_by_parent.setdefault(piece.item_id, []).append(piece)
+    diagnostics = {
+        diagnostic.item_id: diagnostic for diagnostic in report.diagnostics if diagnostic.document_id == document_id
+    }
+    if len(diagnostics) != sum(diagnostic.document_id == document_id for diagnostic in report.diagnostics):
         raise ValueError("preflight diagnostics cannot repeat an atomic item")
     if set(diagnostics) != set(parents) or set(pieces_by_parent) != set(parents):
         raise ValueError("preflight pieces must cover every atomic item exactly once")
 
-    preflight_hash = canonical_hash(report)
+    identity = preflight_hash or canonical_hash(report)
     result: list[RequestMember] = []
-    for inventory in ordered:
-        for parent in inventory.items:
-            pieces = sorted(pieces_by_parent[parent.item_id], key=lambda value: value.source_span.byte_start)
-            diagnostic = diagnostics[parent.item_id]
-            if diagnostic.status == "blocked" or tuple(piece.piece_id for piece in pieces) != diagnostic.piece_ids:
-                raise ValueError("preflight diagnostics differ from accepted piece coverage")
-            _validate_coverage(parent, pieces)
-            if any(
-                piece.item_id != parent.item_id
-                or piece.document_id != parent.document_id
-                or piece.resource_path != inventory.document.resource.path
-                or piece.translate.identity.tokenizer_model != report.model
-                or piece.review.identity.tokenizer_model != report.model
-                or not _budget_limits_match(piece.translate, report.limits)
-                or not _budget_limits_match(piece.review, report.limits)
-                for piece in pieces
-            ):
-                raise ValueError("preflight piece ownership or model identity differs from its parent")
-            count = len(pieces)
-            if parent.atomic_tag not in {None, "ul", "ol"} and (count != 1 or pieces[0].piece_id != parent.item_id):
-                raise ValueError("hard atomic items cannot be split")
-            for index, piece in enumerate(pieces):
-                registry = parent.registry if count == 1 else _local_registry(parent, piece.source_projection)
-                result.append(
-                    RequestMember(
-                        item_id=piece.piece_id,
-                        parent_item_id=parent.item_id,
-                        parent_hash=canonical_hash(parent),
-                        preflight_hash=preflight_hash,
-                        unit_id=parent.unit_id,
-                        document_id=parent.document_id,
-                        kind=parent.kind,
-                        channel=parent.channel,
-                        ordinal=parent.ordinal,
-                        piece_index=index,
-                        piece_count=count,
-                        root_node_key=parent.node_key,
-                        source_span=piece.source_span,
-                        source_projection=piece.source_projection,
-                        registry=registry,
-                        atomic_tag=parent.atomic_tag,
-                    )
+    for parent in inventory.items:
+        pieces = sorted(pieces_by_parent[parent.item_id], key=lambda value: value.source_span.byte_start)
+        diagnostic = diagnostics[parent.item_id]
+        if diagnostic.status == "blocked" or tuple(piece.piece_id for piece in pieces) != diagnostic.piece_ids:
+            raise ValueError("preflight diagnostics differ from accepted piece coverage")
+        _validate_coverage(parent, pieces)
+        if any(
+            piece.item_id != parent.item_id
+            or piece.document_id != parent.document_id
+            or piece.resource_path != resource_path
+            or piece.translate.identity.tokenizer_model != report.model
+            or piece.review.identity.tokenizer_model != report.model
+            or not _budget_limits_match(piece.translate, report.limits)
+            or not _budget_limits_match(piece.review, report.limits)
+            for piece in pieces
+        ):
+            raise ValueError("preflight piece ownership or model identity differs from its parent")
+        count = len(pieces)
+        if parent.atomic_tag not in {None, "ul", "ol"} and (count != 1 or pieces[0].piece_id != parent.item_id):
+            raise ValueError("hard atomic items cannot be split")
+        for index, piece in enumerate(pieces):
+            registry = parent.registry if count == 1 else _local_registry(parent, piece.source_projection)
+            result.append(
+                RequestMember(
+                    item_id=piece.piece_id,
+                    parent_item_id=parent.item_id,
+                    parent_hash=canonical_hash(parent),
+                    preflight_hash=identity,
+                    unit_id=parent.unit_id,
+                    document_id=parent.document_id,
+                    kind=parent.kind,
+                    channel=parent.channel,
+                    ordinal=parent.ordinal,
+                    piece_index=index,
+                    piece_count=count,
+                    root_node_key=parent.node_key,
+                    source_span=piece.source_span,
+                    source_projection=piece.source_projection,
+                    registry=registry,
+                    atomic_tag=parent.atomic_tag,
                 )
+            )
     return tuple(result)
-
-
-def _budget_limits_match(budget: BudgetResult, limits: Mapping[str, int | float | None]) -> bool:
-    identity = budget.identity
-    expected = dict(limits)
-    if identity.version != expected.pop("output_version", 2):
-        return False
-    expected.pop("minimum_source_tokens", None)
-    expected.setdefault("context_unlimited", False)
-    source_tokens, tolerance, hard_limit = expected["source_tokens"], expected.pop("source_tolerance_tokens", 0), expected.pop("source_hard_limit", None)
-    if type(source_tokens) is not int or type(tolerance) is not int:
-        return False
-    if (hard_limit is not None and type(hard_limit) is not int) or identity.source_hard_limit != hard_limit:
-        return False
-    expected["source_tokens"] = min(source_tokens + tolerance, hard_limit) if hard_limit is not None else source_tokens + tolerance
-    configured_input = expected.get("input_tokens")
-    if type(configured_input) is not int:
-        return False
-    expected["input_tokens"] = min(configured_input, MAX_MODEL_INPUT_TOKENS)
-    return {
-        "source_tokens": identity.source_limit,
-        "input_tokens": identity.input_limit,
-        "output_tokens": identity.output_limit,
-        "context_tokens": identity.context_limit,
-        "context_unlimited": identity.context_unlimited,
-        "safety_tokens": identity.safety_tokens,
-        "target_ratio": identity.target_ratio,
-    } == expected
-
-
-def _validate_coverage(parent: AtomicItem, pieces: Sequence[Any]) -> None:
-    if not pieces or pieces[0].source_span.byte_start != parent.source_span.byte_start:
-        raise ValueError("preflight pieces must start at the parent source span")
-    if pieces[-1].source_span.byte_end != parent.source_span.byte_end:
-        raise ValueError("preflight pieces must end at the parent source span")
-    if any(left.source_span.byte_end != right.source_span.byte_start for left, right in pairwise(pieces)):
-        raise ValueError("preflight piece spans must be contiguous")
-    if "".join(piece.source_projection for piece in pieces) != parent.source_projection:
-        raise ValueError("preflight piece projections must exactly reconstruct their parent")
-    if any(not piece.translate.fits or not piece.review.fits for piece in pieces):
-        raise ValueError("request members require passing translate and review budgets")
-    if len(pieces) == 1:
-        if pieces[0].piece_id != parent.item_id:
-            raise ValueError("a whole member must retain its parent item ID")
-        return
-    boundaries = parent.region.get("safe_boundaries")
-    safe_offsets = (
-        {
-            offset
-            for value in boundaries
-            if isinstance(value, dict)
-            for offset in (value.get("byte_offset"),)
-            if type(offset) is int
-        }
-        if isinstance(boundaries, list)
-        else set()
-    )
-    if parent.atomic_tag in {"ul", "ol"}:
-        validate_list_pieces(parent, pieces)
-    elif any(piece.source_span.byte_end not in safe_offsets for piece in pieces[:-1]):
-        raise ValueError("split member seams must use frozen safe source boundaries")
-    for piece in pieces:
-        expected = (
-            "pc-"
-            + canonical_hash(
-                {
-                    "item_id": parent.item_id,
-                    "bytes": (piece.source_span.byte_start, piece.source_span.byte_end),
-                    "source": canonical_hash(piece.source_projection),
-                }
-            )[:32]
-        )
-        if piece.piece_id != expected:
-            raise ValueError("split member ID differs from its stable source-range identity")
-
-
-def _local_registry(parent: AtomicItem, projection: str) -> dict[str, RegistryEntry]:
-    identities = set(projection_identities(projection))
-    if not identities.issubset(parent.registry):
-        raise ValueError("piece projection references a marker outside its parent")
-    by_node = {entry.source_node_key: ref_id for ref_id, entry in parent.registry.items() if ref_id in identities}
-    result: dict[str, RegistryEntry] = {}
-    for ref_id in identities:
-        entry = parent.registry[ref_id]
-        parent_ref = entry.parent_ref
-        if parent_ref != parent.node_key and parent_ref not in identities and parent_ref not in by_node:
-            parent_ref = parent.node_key
-        result[ref_id] = entry.model_copy(
-            update={
-                "parent_ref": parent_ref,
-                "fixed_order": tuple(value for value in entry.fixed_order if value in identities),
-            }
-        )
-    validate_projection(projection, projection, result)
-    return result
 
 
 def merge_member_targets(
@@ -280,13 +203,19 @@ def merge_member_targets(
 class MemberIndex:
     """Verified member lookup, text and bounded preceding context."""
 
+    _texts: Mapping[str, str]
+
     def __init__(
         self,
         inventories: Sequence[AtomicDocument],
         report: PreflightReport,
         members: Sequence[RequestMember] | None = None,
+        *,
+        copy_inventories: bool = True,
     ) -> None:
-        saved = tuple(AtomicDocument.model_validate(value.model_dump(mode="python")) for value in inventories)
+        saved = tuple(inventories)  # Ready loaders already own validated snapshots.
+        if copy_inventories:
+            saved = tuple(AtomicDocument.model_validate(value.model_dump(mode="python")) for value in saved)
         expected = materialize_members(saved, report)
         supplied = expected if members is None else tuple(members)
         if supplied != expected:
@@ -294,8 +223,84 @@ class MemberIndex:
         documents = {inventory.document.document_id: inventory.document for inventory in saved}
         for document in documents.values():
             validate_source_views(document)
-        self.inventories = saved
-        self.documents = MappingProxyType(documents)
+        self.inventories: Sequence[AtomicDocument] = saved
+        self.inventories_by_id: Mapping[str, AtomicDocument] = {value.document.document_id: value for value in saved}
+        self.documents: Mapping[str, Any] = MappingProxyType(documents)
+        resource_paths = {key: document.resource.path for key, document in documents.items()}
+        parents = {item.item_id: item for inventory in saved for item in inventory.items}
+        texts = {
+            member.item_id: (
+                "\n".join(
+                    documents[member.document_id].source_views[view_id].text
+                    for view_id in parents[member.parent_item_id].source_view_ids
+                )
+                if member.piece_count == 1
+                else plain_text(member.source_projection)
+            )
+            for member in supplied
+        }
+        self._initialize(
+            supplied,
+            report,
+            document_order=tuple(inventory.document.document_id for inventory in saved),
+            resource_paths=resource_paths,
+            texts=MappingProxyType(texts),
+        )
+
+    @classmethod
+    def from_verified_catalog(
+        cls,
+        report: PreflightReport,
+        member_ids: Sequence[str],
+        *,
+        members: Mapping[str, RequestMember],
+        member_sequence: Sequence[RequestMember],
+        metadata: Mapping[str, tuple[str, str, str]],
+        document_order: Sequence[str],
+        resource_paths: Mapping[str, str],
+        inventories: Mapping[str, AtomicDocument],
+        documents: Mapping[str, Any],
+        texts: Mapping[str, str],
+        has_text: Mapping[str, bool],
+    ) -> MemberIndex:
+        """Build a cold-recovery index without retaining every member model."""
+        from engine.item.validation import initialize_verified_catalog
+
+        self = cls.__new__(cls)
+        initialize_verified_catalog(
+            self,
+            report,
+            member_ids,
+            members=members,
+            member_sequence=member_sequence,
+            metadata=metadata,
+            document_order=document_order,
+            resource_paths=resource_paths,
+            inventories=inventories,
+            documents=documents,
+            texts=texts,
+            has_text=has_text,
+        )
+        return self
+
+    def _initialize(
+        self,
+        members: Sequence[RequestMember],
+        report: PreflightReport,
+        *,
+        document_order: tuple[str, ...],
+        resource_paths: Mapping[str, str],
+        texts: Mapping[str, str] | None = None,
+        has_text: Mapping[str, bool] | None = None,
+    ) -> None:
+        supplied = tuple(members)
+        if not supplied or len({member.item_id for member in supplied}) != len(supplied):
+            raise ValueError("member index requires unique verified members")
+        if set(resource_paths) != set(document_order) or any(
+            member.document_id not in resource_paths for member in supplied
+        ):
+            raise ValueError("member index document catalog is incomplete")
+        self.resource_paths = dict(resource_paths)
         self.members = supplied
         self.members_by_id = MappingProxyType({member.item_id: member for member in supplied})
         self._glossary_digest: tuple[GlossarySnapshot, str] | None = None
@@ -310,6 +315,8 @@ class MemberIndex:
         self.source_tokens = MappingProxyType(
             {piece.piece_id: piece.translate.source_tokens for piece in report.pieces}
         )
+        if set(self.source_tokens) != set(self.members_by_id):
+            raise ValueError("member index token catalog differs from verified members")
         body_tokens: dict[str, int] = {}
         for member in supplied:
             if member.channel == "body":
@@ -317,29 +324,22 @@ class MemberIndex:
                     body_tokens.get(member.document_id, 0) + self.source_tokens[member.item_id]
                 )
         self.body_tokens = MappingProxyType(body_tokens)
-        self.document_order = tuple(inventory.document.document_id for inventory in saved)
-        parents = {item.item_id: item for inventory in saved for item in inventory.items}
-        self._texts = MappingProxyType(
-            {
-                member.item_id: (
-                    "\n".join(
-                        documents[member.document_id].source_views[view_id].text
-                        for view_id in parents[member.parent_item_id].source_view_ids
-                    )
-                    if member.piece_count == 1
-                    else plain_text(member.source_projection)
-                )
-                for member in supplied
-            }
-        )
-        self._previous: dict[str, tuple[tuple[RequestMember, str], ...]] = {}
-        channels: dict[tuple[str, str], tuple[tuple[RequestMember, str], ...]] = {}
+        self.document_order = document_order
+        if texts is not None:
+            if set(texts) != set(self.members_by_id):
+                raise ValueError("member text catalog differs from verified members")
+            self._texts = texts
+            has_text = {item_id: bool(text) for item_id, text in texts.items()}
+        if has_text is None or set(has_text) != set(self.members_by_id):
+            raise ValueError("member text-presence catalog differs from verified members")
+        self._previous_ids: dict[str, tuple[str, ...]] = {}
+        channels: dict[tuple[str, str], tuple[str, ...]] = {}
         for member in supplied:
             key = (member.document_id, member.channel)
             prior = channels.get(key, ())
-            self._previous[member.item_id] = prior
-            if text := self._texts[member.item_id]:
-                channels[key] = (*prior, (member, text))[-2:]
+            self._previous_ids[member.item_id] = prior
+            if has_text[member.item_id]:
+                channels[key] = (*prior, member.item_id)[-2:]
 
     def validate_items(
         self,
@@ -387,7 +387,12 @@ class MemberIndex:
         self.validate_items(items, relaxed_adjacency=relaxed_adjacency, sparse=sparse)
         if type(count) is not int or not 0 <= count <= 2:
             raise ValueError("context_count must be 0, 1, or 2")
-        return self._previous[items[0].item_id][-count:] if count else ()
+        if not count:
+            return ()
+        return tuple(
+            (self.members_by_id[item_id], self.text(self.members_by_id[item_id]))
+            for item_id in self._previous_ids[items[0].item_id][-count:]
+        )
 
 
 def build_member_payload(
@@ -717,7 +722,7 @@ def pack_members(
                     BlockedItem(
                         item_id=blocked_item.item_id,
                         document_id=blocked_item.document_id,
-                        resource_path=index.documents[blocked_item.document_id].resource.path,
+                        resource_path=index.resource_paths[blocked_item.document_id],
                         source_span=blocked_item.source_span,
                         atomic_tag=blocked_item.atomic_tag,
                         budget=budget,
@@ -867,7 +872,7 @@ def pack_members(
                         and any(
                             budget in failure
                             for failure in boundary.failures
-                            for budget in ("output budget", "input budget", "context budget")
+                            for budget in ("source budget", "output budget", "input budget", "context budget")
                         )
                     )
                     and not any(
@@ -884,7 +889,7 @@ def pack_members(
                         BlockedItem(
                             item_id=item.item_id,
                             document_id=item.document_id,
-                            resource_path=index.documents[item.document_id].resource.path,
+                            resource_path=index.resource_paths[item.document_id],
                             source_span=item.source_span,
                             atomic_tag=item.atomic_tag,
                             budget=value.budget,
@@ -984,14 +989,3 @@ def _batch(
         manifest=manifest, items=items, context=tuple(payload["context"]), payload=payload, budget=budget
     )
     return validate_batch_identity(batch, allow_pieces=True)
-
-
-__all__ = [
-    "MemberIndex",
-    "MemberPackingResult",
-    "build_member_payload",
-    "materialize_members",
-    "merge_member_targets",
-    "pack_members",
-    "validate_member_target",
-]

@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     MINIMAX_MODEL: str = "MiniMax-M2.7"
     MINIMAX_BASE_URL: str = "https://api.minimax.com/v1"
 
-    # CR proxy OpenAI-compatible 配置（要求 stream=true）
+    # CR proxy OpenAI-compatible 配置；当前运行时统一发送非流式请求。
     CR_PROXY_API_KEY: str = "sk-"
     CR_PROXY_MODEL: str = "gpt-5.3-codex-spark"
     CR_PROXY_BASE_URL: str = "http://3.93.42.33:3000/api/v1"

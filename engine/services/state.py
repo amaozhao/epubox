@@ -9,18 +9,23 @@ import stat as statmod
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from engine.services import shards
+from engine.services.stream import StaleRecordIndex
 
 FORMAT = "epubox-state-1"
 _STATE = "state.json"
 _SOURCE = "source"
 _cache: dict[Path, tuple[tuple[tuple[str, int, int, int, int], ...], dict[str, Any]]] = {}
+_fingerprints: dict[
+    Path,
+    dict[tuple[frozenset[str], tuple[str, ...]], tuple[tuple[str, int, str], ...]],
+] = {}
 _owners: dict[Path, dict[str, str]] = {}
 _versions: dict[Path, bool] = {}
 _cache_lock = threading.RLock()
@@ -54,6 +59,81 @@ class _Batch:
     dirty: bool = False
     depth: int = 1
     aborted: bool = False
+    changed: set[str] = field(default_factory=set)
+
+
+class _RecordOverlay(MutableMapping[str, dict[str, Any]]):
+    """Copy-on-write record view used by a compact-state transaction."""
+
+    def __init__(self, base: Mapping[str, dict[str, Any]]) -> None:
+        self.base = base
+        self.changes: dict[str, dict[str, Any]] = {}
+        self.deleted: set[str] = set()
+
+    def __getitem__(self, key: str) -> dict[str, Any]:
+        if key in self.deleted:
+            raise KeyError(key)
+        if key in self.changes:
+            return self.changes[key]
+        return self.base[key]
+
+    def __setitem__(self, key: str, value: dict[str, Any]) -> None:
+        self.deleted.discard(key)
+        self.changes[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        if key not in self:
+            raise KeyError(key)
+        self.changes.pop(key, None)
+        self.deleted.add(key)
+
+    def __iter__(self) -> Iterator[str]:
+        yield from (key for key in self.base if key not in self.deleted)
+        yield from (key for key in self.changes if key not in self.base)
+
+    def __len__(self) -> int:
+        return (
+            len(self.base)
+            - sum(key in self.base for key in self.deleted)
+            + sum(key not in self.base for key in self.changes)
+        )
+
+    def changed_keys(self) -> set[str]:
+        return set(self.changes) | self.deleted
+
+    def raw(self, key: str):
+        if key in self.deleted or key in self.changes:
+            return None
+        raw = getattr(self.base, "raw", None)
+        return raw(key) if raw is not None else None
+
+    def fingerprint(self, key: str) -> tuple[int, str]:
+        if key in self.changes:
+            record = self.changes[key]
+            return record["stamp"], hashlib.sha256(record["data"].encode()).hexdigest()
+        fingerprint = getattr(self.base, "fingerprint", None)
+        if fingerprint is not None:
+            return fingerprint(key)
+        record = self.base[key]
+        return record["stamp"], hashlib.sha256(record["data"].encode()).hexdigest()
+
+    def fingerprints(self, keys: Iterator[str]) -> dict[str, tuple[int, str]]:
+        selected = tuple(keys)
+        base_keys = (key for key in selected if key not in self.changes)
+        many = getattr(self.base, "fingerprints", None)
+        values = many(base_keys) if many is not None else {key: self.fingerprint(key) for key in base_keys}
+        values.update({key: self.fingerprint(key) for key in selected if key in self.changes})
+        return values
+
+    def metadata(self, key: str) -> tuple[int, int]:
+        if key in self.changes:
+            record = self.changes[key]
+            return record["stamp"], len(record["data"].encode())
+        metadata = getattr(self.base, "metadata", None)
+        if metadata is not None:
+            return metadata(key)
+        record = self.base[key]
+        return record["stamp"], len(record["data"].encode())
 
 
 def initialize(
@@ -128,6 +208,7 @@ def initialize(
             if imported:
                 current_data = {key: record["data"] for key, record in current["records"].items()}
                 if not current_data:
+                    _invalidate_fingerprints(root)
                     _commit(root, value)
                 elif current_data != imported:
                     raise StateError("existing compact records differ from the legacy checkpoint")
@@ -156,18 +237,23 @@ def batch(root: Path | str) -> Iterator[None]:
     from engine.services.atomic import AtomicStore
 
     with AtomicStore(root).lock():
-        committed = _load(root)
-        pending = dict(committed)
-        pending["records"] = dict(committed["records"])
+        saved = _load(root)
+        pending = dict(saved)
+        pending["records"] = _RecordOverlay(saved["records"])
         current = _Batch(pending)
         _batches()[root] = current
+        committed = False
         try:
             yield
             if current.aborted:
                 raise StateError("nested compact batch aborted")
             if current.dirty:
                 _commit(root, current.state)
+            committed = True
         finally:
+            if not committed:
+                for key in current.changed:
+                    _invalidate_fingerprints(root, key)
             del _batches()[root]
 
 
@@ -190,7 +276,7 @@ def read(path: Path | str) -> bytes:
     if located is None:
         return path.read_bytes()
     root, key = located
-    record = _record(_view(root), key)
+    record = _read_record(root, key)
     return record["data"].encode("utf-8")
 
 
@@ -200,7 +286,18 @@ def text(path: Path | str) -> str:
     if located is None:
         return path.read_text(encoding="utf-8")
     root, key = located
-    return _record(_view(root), key)["data"]
+    return _read_record(root, key)["data"]
+
+
+def _read_record(root: Path, key: str) -> dict[str, Any]:
+    for attempt in range(3):
+        try:
+            return _record(_view(root), key)
+        except StaleRecordIndex:
+            _discard_cache(root)
+            if _active(root) is not None or attempt == 2:
+                raise
+    raise AssertionError("unreachable")
 
 
 def write(path: Path | str, data: bytes) -> str:
@@ -215,15 +312,20 @@ def write(path: Path | str, data: bytes) -> str:
         raise StateError(f"compact record is not UTF-8: {key}") from error
     active = _active(root)
     if active is not None:
-        active.dirty = _write_record(active.state, key, value) or active.dirty
+        changed = _write_record(active.state, key, value)
+        active.dirty = changed or active.dirty
+        if changed:
+            active.changed.add(key)
+            _invalidate_fingerprints(root, key)
         return hashlib.sha256(data).hexdigest()
     from engine.services.atomic import AtomicStore
 
     with AtomicStore(root).lock():
         state = dict(_load(root))
-        state["records"] = dict(state["records"])
+        state["records"] = _RecordOverlay(state["records"])
         if not _write_record(state, key, value):
             return hashlib.sha256(data).hexdigest()
+        _invalidate_fingerprints(root, key)
         _commit(root, state)
     return hashlib.sha256(data).hexdigest()
 
@@ -287,9 +389,17 @@ def stat(path: Path | str) -> os.stat_result | RecordStat:
     if located is None:
         return path.stat()
     root, key = located
-    record = _record(_view(root), key)
-    stamp = record["stamp"]
-    size = len(record["data"].encode("utf-8"))
+    records = _view(root)["records"]
+    metadata = getattr(records, "metadata", None)
+    if metadata is None:
+        record = _record(_view(root), key)
+        stamp = record["stamp"]
+        size = len(record["data"].encode("utf-8"))
+    else:
+        try:
+            stamp, size = metadata(key)
+        except KeyError as error:
+            raise FileNotFoundError(key) from error
     identifier = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big")
     device = int.from_bytes(hashlib.sha256(str(root).encode()).digest()[:8], "big")
     seconds = stamp / 1_000_000_000
@@ -325,17 +435,20 @@ def unlink(path: Path | str, *, missing_ok: bool = False) -> None:
             raise FileNotFoundError(path)
         del active.state["records"][key]
         active.dirty = True
+        active.changed.add(key)
+        _invalidate_fingerprints(root, key)
         return
     from engine.services.atomic import AtomicStore
 
     with AtomicStore(root).lock():
         state = dict(_load(root))
-        state["records"] = dict(state["records"])
+        state["records"] = _RecordOverlay(state["records"])
         if key not in state["records"]:
             if missing_ok:
                 return
             raise FileNotFoundError(path)
         del state["records"][key]
+        _invalidate_fingerprints(root, key)
         _commit(root, state)
 
 
@@ -395,17 +508,28 @@ def dependency_fingerprint(
 ) -> tuple[tuple[str, int, str], ...]:
     """Bind selected record contents without treating runtime reloads as source changes."""
     root = Path(root).resolve()
-    selected = set(exact)
-    prefix_values = tuple(prefixes)
+    selector = frozenset(exact), tuple(dict.fromkeys(prefixes))
+    selected, prefix_values = selector
     with _cache_lock:
         records = _view(root)["records"]
-        return tuple(
-            sorted(
-                (key, record["stamp"], record["data"])
-                for key, record in records.items()
-                if key in selected or key.startswith(prefix_values)
+        cached = _fingerprints.get(root, {}).get(selector)
+        if cached is not None:
+            return cached
+        record_fingerprints = getattr(records, "fingerprints", None)
+        if record_fingerprints is None:
+            fingerprint = tuple(
+                sorted(
+                    (key, record["stamp"], hashlib.sha256(record["data"].encode()).hexdigest())
+                    for key, record in records.items()
+                    if key in selected or key.startswith(prefix_values)
+                )
             )
-        )
+        else:
+            keys = tuple(key for key in records if key in selected or key.startswith(prefix_values))
+            values = record_fingerprints(iter(keys))
+            fingerprint = tuple(sorted((key, *values[key]) for key in keys))
+        _fingerprints.setdefault(root, {})[selector] = fingerprint
+        return fingerprint
 
 
 def import_records(root: Path | str, legacy_workdir: Path | str) -> None:
@@ -417,7 +541,7 @@ def import_records(root: Path | str, legacy_workdir: Path | str) -> None:
 
     with AtomicStore(root).lock():
         state = dict(_load(root))
-        state["records"] = dict(state["records"])
+        state["records"] = _RecordOverlay(state["records"])
         records = state["records"]
         stamp = time.time_ns()
         for offset, (key, value) in enumerate(imported.items()):
@@ -426,6 +550,7 @@ def import_records(root: Path | str, legacy_workdir: Path | str) -> None:
                 continue
             prior_stamp = previous.get("stamp", 0) if isinstance(previous, dict) else 0
             records[key] = {"data": value, "stamp": max(stamp + offset, prior_stamp + 1)}
+        _invalidate_fingerprints(root)
         _commit(root, state)
 
 
@@ -438,6 +563,7 @@ def reset_records(root: Path | str) -> None:
     with AtomicStore(root).lock():
         state = dict(_load(root))
         state["records"] = {}
+        _invalidate_fingerprints(root)
         _commit(root, state)
 
 
@@ -529,6 +655,17 @@ def _legacy_records(legacy_workdir: Path) -> dict[str, str]:
 
 
 def _load(root: Path) -> dict[str, Any]:
+    for attempt in range(3):
+        try:
+            return _load_once(root)
+        except StaleRecordIndex:
+            _discard_cache(root)
+            if attempt == 2:
+                raise
+    raise AssertionError("unreachable")
+
+
+def _load_once(root: Path) -> dict[str, Any]:
     with _cache_lock:
         try:
             cached = _cache.get(root)
@@ -540,6 +677,7 @@ def _load(root: Path) -> dict[str, Any]:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, shards.ShardError) as error:
             raise StateError(f"invalid state.json: {error}") from error
         _validate(value)
+        _fingerprints.pop(root, None)
         _cache[root] = (signature, value)
         _owners[root] = owners
         _versions[root] = len(signature) == len(shards.FILES)
@@ -547,11 +685,30 @@ def _load(root: Path) -> dict[str, Any]:
 
 
 def _refresh(root: Path) -> dict[str, Any]:
+    _discard_cache(root)
+    return _load(root)
+
+
+def _discard_cache(root: Path) -> None:
     with _cache_lock:
         _cache.pop(root, None)
+        _fingerprints.pop(root, None)
         _owners.pop(root, None)
         _versions.pop(root, None)
-    return _load(root)
+
+
+def _invalidate_fingerprints(root: Path, key: str | None = None) -> None:
+    with _cache_lock:
+        cached = _fingerprints.get(root)
+        if cached is None or key is None:
+            _fingerprints.pop(root, None)
+            return
+        for selector in tuple(cached):
+            exact, prefixes = selector
+            if key in exact or key.startswith(prefixes):
+                del cached[selector]
+        if not cached:
+            _fingerprints.pop(root, None)
 
 
 def _sharded(root: Path) -> bool:
@@ -588,10 +745,21 @@ def _validate(value: Any) -> None:
     if any(type(source[name]) is not int or source[name] < 0 for name in ("st_dev", "st_ino")):
         raise StateError("state source inode identity is invalid")
     records = value["records"]
-    if not isinstance(records, dict):
+    if not isinstance(records, Mapping):
         raise StateError("state records must be an object")
-    for key, record in records.items():
-        if not _valid_key(key) or not isinstance(record, dict) or set(record) != {"data", "stamp"}:
+    for key in records:
+        if not _valid_key(key):
+            raise StateError(f"invalid compact record: {key!r}")
+    # Indexed records were structurally scanned without materializing their
+    # payload strings. New or modified records still receive full validation.
+    changed = records.changed_keys() if isinstance(records, _RecordOverlay) else set()
+    if isinstance(records, dict):
+        changed = set(records)
+    for key in changed:
+        if key not in records:
+            continue
+        record = records[key]
+        if not isinstance(record, dict) or set(record) != {"data", "stamp"}:
             raise StateError(f"invalid compact record: {key!r}")
         if not isinstance(record["data"], str) or type(record["stamp"]) is not int or record["stamp"] < 0:
             raise StateError(f"invalid compact record payload: {key!r}")
@@ -599,6 +767,10 @@ def _validate(value: Any) -> None:
 
 def _valid_key(key: Any) -> bool:
     if not isinstance(key, str) or not key or "\\" in key:
+        return False
+    try:
+        key.encode("utf-8")
+    except UnicodeEncodeError:
         return False
     path = Path(key)
     return (
@@ -635,13 +807,36 @@ def _commit(root: Path, value: dict[str, Any]) -> None:
     with _cache_lock:
         cached = _cache.get(root)
         before = cached[1] if cached is not None else None
+        previous_signature = cached[0] if cached is not None else ()
+        previous_owners = dict(_owners.get(root, {}))
     try:
-        owners = shards.commit(root, value, _owners.get(root), before)
+        records = value["records"]
+        changed = records.changed_keys() if isinstance(records, _RecordOverlay) else None
+        owners = shards.commit(root, value, previous_owners, before, changed=changed)
+        if before is not None and changed is not None:
+            refreshed, signature = shards.reload_after_commit(
+                root,
+                _object,
+                before["records"],
+                previous_owners,
+                owners,
+                changed,
+                previous_signature,
+            )
+            _validate(refreshed)
+        else:
+            refreshed, owners, signature = shards.load(root, _object)
+            _validate(refreshed)
     except shards.ShardError as error:
+        _discard_cache(root)
         raise StateError(str(error)) from error
-    signature = shards.signatures(root)
+    except BaseException:
+        # A commit may already have replaced files before index refresh fails.
+        # Never reuse its pre-commit offsets on the next command round.
+        _discard_cache(root)
+        raise
     with _cache_lock:
-        _cache[root] = (signature, value)
+        _cache[root] = (signature, refreshed)
         _owners[root] = owners
         _versions[root] = True
 

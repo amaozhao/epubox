@@ -31,15 +31,18 @@ from engine.schemas.contracts import (
     strict_json_loads,
 )
 from engine.schemas.members import MemberBatch, RequestMember
+from engine.schemas.parts import PartPlan
 from engine.schemas.ready import AtomicPlan, AtomicPreparedInput
 from engine.services import state
-from engine.services.atomic import CorruptRecord, safe_id
+from engine.services.atomic import CorruptRecord, IdentityMismatch, safe_id
 from engine.services.coherence import _read as read_coherence_record
-from engine.services.custody import review_draft, review_feedback
+from engine.services.custody import epoch, review_draft, review_feedback
+from engine.services.partition import PartSession, plan_path, split_target
 from engine.services.preflight import PreflightReport
 from engine.services.preflight import receipt_path as preflight_receipt
-from engine.services.ready import derived_record, limits_from_config
+from engine.services.ready import ReadySession, derived_record, limits_from_config
 from engine.services.store import RunStore
+from engine.services.working import BudgetCache
 
 type ResumePhase = Literal["preparation", "terms", "freeze", "translation", "coherence", "publication"]
 
@@ -52,6 +55,27 @@ class ResumePlan:
     reasons: tuple[str, ...]
     pending_unit_ids: tuple[str, ...] = ()
     pending_term_item_ids: tuple[str, ...] = ()
+
+
+class _PreviewSession(ReadySession):
+    """The read-only subset of ReadySession needed to verify persisted part plans."""
+
+    def __init__(
+        self,
+        root: Path,
+        prepared: AtomicPreparedInput,
+        index: MemberIndex,
+        batches: dict[str, MemberBatch],
+    ):
+        self.store = RunStore(root)
+        self.prepared = prepared
+        self.index = index
+        self._prepared_batches = batches
+        self._saved_batches = BudgetCache(16 * 1024 * 1024)
+        self._frame_requests = BudgetCache(16 * 1024 * 1024)
+
+    def verify(self) -> AtomicPreparedInput:
+        return self.prepared
 
 
 def plan_resume(work_dir: Path | str) -> ResumePlan:
@@ -239,10 +263,12 @@ def _atomic_resume(root: Path) -> ResumePlan:
             members[item_id] for unit_id in plan.unit_ids for item_id in plan.unit_members[unit_id]
         )
         index = MemberIndex(inventories, report, ordered_members)
+        batches: dict[str, MemberBatch] = {}
         for identifier, digest in plan.batch_hashes.items():
             batch = MemberBatch.model_validate_json(state.read(root / "batches" / f"{safe_id(identifier)}.json"))
             if batch.manifest.request_id != identifier or canonical_hash(batch) != digest:
                 raise ValueError(f"batches/{identifier}.json")
+            batches[identifier] = batch
         expected = set(plan.member_hashes)
         if {path.stem for path in state.glob(root / "results", "*.json")} != expected:
             raise ValueError("results inventory")
@@ -254,24 +280,188 @@ def _atomic_resume(root: Path) -> ResumePlan:
             record.item_id != identifier or record.segment_id != identifier for identifier, record in records.items()
         ):
             raise ValueError("result ownership")
+        preview = _PreviewSession(root, ready, index, batches)
+        parts: dict[str, tuple[PartSession, PartPlan, dict[str, ItemRecord]]] = {}
+        part_bases: dict[str, str | None] = {}
+        child_owners: dict[str, str] = {}
+        pending_parts: dict[str, tuple[Path, PartPlan]] = {}
+        for path in state.glob(root / "parts", "*/plan.json"):
+            part_plan = parse_contract(state.read(path), PartPlan, "epubox-parts-1")
+            if path != plan_path(root, part_plan.parent_id) or part_plan.parent_id in pending_parts:
+                raise ValueError("part plan filename or parent inventory changed")
+            pending_parts[part_plan.parent_id] = path, part_plan
+        while pending_parts:
+            progressed = False
+            for parent_id, (_path, part_plan) in tuple(pending_parts.items()):
+                base_owner = child_owners.get(parent_id)
+                if parent_id in records:
+                    base_session, base_owner = preview, None
+                elif base_owner is not None and parent_id in parts[base_owner][2]:
+                    base_session = parts[base_owner][0]
+                else:
+                    continue
+                part_session = PartSession(base_session, part_plan)
+                child_ids = {child.item_id for child in part_plan.children}
+                if child_ids & child_owners.keys():
+                    raise ValueError("part child is owned by more than one plan")
+                result_root = root / "parts" / safe_id(parent_id) / "results"
+                saved_child_ids = {saved.stem for saved in state.glob(result_root, "*.json")}
+                if saved_child_ids and saved_child_ids != child_ids:
+                    raise ValueError("part results inventory")
+                child_records = {
+                    child_id: ItemRecord.model_validate_json(state.read(part_session.result_path(child_id)))
+                    for child_id in saved_child_ids
+                }
+                if any(
+                    record.item_id != child_id or record.segment_id != child_id
+                    for child_id, record in child_records.items()
+                ):
+                    raise ValueError("part result ownership")
+                parts[parent_id] = (part_session, part_plan, child_records)
+                part_bases[parent_id] = base_owner
+                child_owners.update(dict.fromkeys(child_ids, parent_id))
+                del pending_parts[parent_id]
+                progressed = True
+            if not progressed:
+                raise ValueError("part plan references an unknown or cyclic parent")
         requests: dict[str, RequestManifest] = {}
         for path in state.glob(root / "requests", "*.json"):
             request = parse_contract(state.read(path), RequestManifest, REQUEST_FORMAT)
             if request.request_id != path.stem or request.request_id in requests:
                 raise ValueError("request filename or request ID inventory changed")
             requests[request.request_id] = request
-        _compact_request_proofs(root, ready, members, records, index, requests)
+        scoped_requests: dict[str | None, dict[str, RequestManifest]] = {None: {}}
+        for request_id, request in requests.items():
+            if request.stage not in {"translate", "review"}:
+                scoped_requests[None][request_id] = request
+                continue
+            owners = {child_owners.get(item_id) for item_id in request.item_ids if item_id not in members}
+            if any(item_id not in members and item_id not in child_owners for item_id in request.item_ids):
+                raise ValueError("request references an unknown root or part member")
+            if any(item_id in members for item_id in request.item_ids):
+                owners.add(None)
+            if len(owners) != 1:
+                raise ValueError("request crosses root or part ownership scopes")
+            scoped_requests.setdefault(next(iter(owners)), {})[request_id] = request
+
+        scope_records: dict[str | None, dict[str, ItemRecord]] = {None: dict(records)}
+        for parent_id, (_session, _part_plan, child_records) in parts.items():
+            scope_records[parent_id] = dict(child_records)
+        proof_records = {scope: dict(values) for scope, values in scope_records.items()}
+        for parent_id, (_session, part_plan, _child_records) in parts.items():
+            if part_plan.seed is not None:
+                proof_records[part_bases[parent_id]][parent_id] = part_plan.seed
+        _compact_request_proofs(root, ready, members, proof_records[None], index, scoped_requests[None])
+        for parent_id, (part_session, part_plan, child_records) in parts.items():
+            base_owner = part_bases[parent_id]
+            base_session = preview if base_owner is None else parts[base_owner][0]
+            base_members = dict(base_session.index.members_by_id)
+            base_records = scope_records[base_owner]
+            base_requests = scoped_requests.get(base_owner, {})
+            targets: dict[str, str] = {}
+            if part_plan.seed is not None and part_plan.seed.target_projection is not None:
+                if "manual" in part_plan.seed.checks:
+                    from engine.services.manual import manual_proof
+
+                    manual_proof(base_session, part_plan.seed)
+                else:
+                    _atomic_record_frame(
+                        root,
+                        ready,
+                        part_plan.seed,
+                        base_members,
+                        base_session.index,
+                        base_requests,
+                    )
+                if part_plan.seed.status == ItemStatus.REVIEWED and "manual" not in part_plan.seed.checks:
+                    _atomic_review_proof(
+                        root,
+                        ready,
+                        part_plan.seed,
+                        base_members,
+                        proof_records[base_owner],
+                        base_session.index,
+                        base_requests,
+                    )
+                targets = split_target(
+                    base_members[parent_id],
+                    part_plan.children,
+                    part_plan.seed.target_projection,
+                    plan=part_plan,
+                )
+            child_members = dict(part_session.index.members_by_id)
+            child_requests = scoped_requests.get(parent_id, {})
+            if not child_records and child_requests:
+                raise ValueError("uninitialized part plan has persisted child requests")
+            _compact_request_proofs(
+                root,
+                ready,
+                child_members,
+                proof_records[parent_id],
+                part_session.index,
+                child_requests,
+                seeded=targets,
+            )
+            for child_record in child_records.values():
+                if isinstance(child_record.checks.get("parts"), dict):
+                    if child_record.item_id not in parts:
+                        raise ValueError("nested part composite has no persisted part plan")
+                    continue
+                if "manual" in child_record.checks:
+                    from engine.services.manual import manual_proof
+
+                    manual_proof(part_session, child_record)
+                elif child_record.status != ItemStatus.PENDING:
+                    _atomic_record_frame(
+                        root,
+                        ready,
+                        child_record,
+                        child_members,
+                        part_session.index,
+                        child_requests,
+                        seeded=targets,
+                    )
+                if child_record.status == ItemStatus.REVIEWED and "manual" not in child_record.checks:
+                    _atomic_review_proof(
+                        root,
+                        ready,
+                        child_record,
+                        child_members,
+                        child_records,
+                        part_session.index,
+                        child_requests,
+                        seeded=targets,
+                    )
+            composite = base_records[parent_id]
+            if isinstance(composite.checks.get("parts"), dict):
+                if not child_records:
+                    raise ValueError("part composite has no persisted child results")
+                from engine.services.parts import composite_parts
+
+                verified_plan, verified_records = composite_parts(base_session, composite)
+                if verified_plan != part_plan or verified_records != child_records:
+                    raise ValueError("part composite differs from its persisted plan or children")
         for record in records.values():
             source_id = plan.derived_sources.get(members[record.item_id].unit_id)
             if source_id is not None:
                 if record != derived_record(record.item_id, source_id):
                     raise ValueError("saved derived result differs from its canonical dependency record")
                 continue
-            if record.status != ItemStatus.PENDING:
+            if record.item_id in parts:
+                if record.status == ItemStatus.REVIEWED and not isinstance(record.checks.get("parts"), dict):
+                    raise ValueError("part parent review lacks a composite proof")
+                continue
+            if isinstance(record.checks.get("parts"), dict):
+                raise TypeError("part composite has no persisted part plan")
+            if "manual" in record.checks:
+                from engine.services.manual import manual_proof
+
+                manual_proof(preview, record)
+            elif record.status != ItemStatus.PENDING:
                 _atomic_record_frame(root, ready, record, members, index, requests)
-            if record.status == ItemStatus.REVIEWED:
+            if record.status == ItemStatus.REVIEWED and "manual" not in record.checks:
                 _atomic_review_proof(root, ready, record, members, records, index, requests)
-    except (CorruptRecord, OSError, TypeError, ValueError) as error:
+    except (CorruptRecord, IdentityMismatch, OSError, TypeError, ValueError) as error:
         return ResumePlan("preparation", "needs_attention", ("repair_shared_identity",), (str(error),))
 
     accepted: set[str] = set()
@@ -281,12 +471,30 @@ def _atomic_resume(root: Path) -> ResumePlan:
     for unit_id in plan.unit_ids:
         if unit_id in plan.derived_sources:
             continue
-        values = tuple(records[item_id] for item_id in plan.unit_members[unit_id])
-        if all(record.status == ItemStatus.REVIEWED for record in values):
+        values: list[tuple[ItemStatus, bool]] = []
+        for item_id in plan.unit_members[unit_id]:
+            record = records[item_id]
+            part = parts.get(item_id)
+            if part is None or isinstance(record.checks.get("parts"), dict):
+                values.append((record.status, record.target_projection is not None))
+                continue
+            children = tuple(part[2].values())
+            if not children:
+                seed = part[1].seed
+                values.append((ItemStatus.PENDING, seed is not None and seed.target_projection is not None))
+            elif any(child.status == ItemStatus.NEEDS_ATTENTION for child in children):
+                values.append((ItemStatus.NEEDS_ATTENTION, False))
+            elif all(child.status == ItemStatus.REVIEWED for child in children) or any(
+                child.target_projection is not None for child in children
+            ):
+                values.append((ItemStatus.LOCAL_VALID, True))
+            else:
+                values.append((ItemStatus.PENDING, False))
+        if all(status == ItemStatus.REVIEWED for status, _has_target in values):
             accepted.add(unit_id)
-        elif any(record.status == ItemStatus.NEEDS_ATTENTION for record in values):
+        elif any(status == ItemStatus.NEEDS_ATTENTION for status, _has_target in values):
             attention.append(unit_id)
-        elif any(record.target_projection is not None for record in values):
+        elif any(has_target for _status, has_target in values):
             review.append(unit_id)
         else:
             translate.append(unit_id)
@@ -326,58 +534,77 @@ def _atomic_preflight(root: Path, ready: AtomicPreparedInput) -> PreflightReport
     return PreflightReport.model_validate(value["report"])
 
 
-def _compact_request_proofs(root, ready, members, records, index, requests) -> None:
+def _compact_request_proofs(root, ready, members, records, index, requests, *, seeded=None) -> None:
+    seeded = seeded or {}
     for stage in ("translate", "review"):
         for request in requests.values():
-            if request.stage != stage or not any(
-                "wire_version" in attempt.metadata or "wire_hash" in attempt.metadata for attempt in request.attempts
-            ):
+            if request.stage != stage:
                 continue
-            targets = None
+            drafts = None
             if stage == "review":
-                targets = {}
+                drafts = {}
                 for item_id in request.item_ids:
                     saved = records[item_id]
-                    _atomic_record_frame(root, ready, saved, members, index, requests)
+                    _atomic_record_frame(root, ready, saved, members, index, requests, seeded=seeded)
                     original = requests.get(saved.request_id or "")
                     if original is None:
                         raise ValueError("review member lacks translation request proof")
-                    raw = _atomic_response(root, original)
-                    result = validate_translation_response(
-                        raw["raw"],
-                        original.request_id,
-                        {key: members[key].source_projection for key in original.item_ids},
-                    ).accepted.get(item_id)
-                    if result is None or canonical_hash(result["target"]) != request.target_hashes[item_id]:
+                    target = _atomic_translation_target(root, original, item_id, members, seeded)
+                    if canonical_hash(target) != request.target_hashes[item_id]:
                         raise ValueError("review member target differs from its translation proof")
-                    targets[item_id] = review_draft(
-                        saved, result["target"], request.revisions[members[item_id].unit_id]
-                    )
-                targets = review_feedback(targets, request.feedback_by_item)
-            packed = pack_members(
-                stage,
-                tuple(members[key] for key in request.item_ids),
-                ready.glossary,
-                index,
-                limits_from_config(
-                    ready.plan.translation_config,
-                    context_unlimited=request.context_unlimited,
-                    output_unlimited=request.output_unlimited,
-                    source_hard_limit=request.source_hard_limit,
-                ),
-                targets=targets,
-                revisions=request.revisions if stage == "review" else None,
-                record_versions=request.record_versions,
-                plan_epochs=request.plan_epochs,
-                feedback=request.feedback_by_item,
-                tokenizer_model=str(ready.plan.translation_config["model"]),
-                sparse=request.sparse,
-            )
+                    drafts[item_id] = review_draft(saved, target, request.revisions[members[item_id].unit_id])
+            targets = review_feedback(drafts, request.feedback_by_item) if drafts is not None else None
+
+            def repack(values, *, request=request, stage=stage):
+                return pack_members(
+                    cast(Literal["translate", "review"], stage),
+                    tuple(members[key] for key in request.item_ids),
+                    ready.glossary,
+                    index,
+                    limits_from_config(
+                        ready.plan.translation_config,
+                        context_unlimited=request.context_unlimited,
+                        output_unlimited=request.output_unlimited,
+                        source_hard_limit=request.source_hard_limit,
+                    ),
+                    targets=values,
+                    revisions=request.revisions if stage == "review" else None,
+                    record_versions=request.record_versions,
+                    plan_epochs=request.plan_epochs,
+                    feedback=request.feedback_by_item,
+                    tokenizer_model=str(ready.plan.translation_config["model"]),
+                    sparse=request.sparse,
+                )
+
+            packed = repack(targets)
+            frozen = request.model_copy(update={"attempts": ()})
             if (
-                len(packed.batches) != 1
-                or packed.blocked
-                or packed.batches[0].manifest != request.model_copy(update={"attempts": ()})
+                drafts is not None
+                and len(packed.batches) == 1
+                and not packed.blocked
+                and packed.batches[0].manifest != frozen
             ):
+                drafts = {
+                    item_id: current
+                    if current.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
+                    and current.target_hash == request.target_hashes[item_id]
+                    and epoch(current, "review_epoch") < request.revisions[request.item_unit_ids[item_id][0]]
+                    else review_draft(
+                        current,
+                        drafts[item_id].target_projection,
+                        epoch(current, "review_epoch"),
+                    )
+                    if current.status == ItemStatus.REVIEWED
+                    and current.checks.get("review_request_id") == request.request_id
+                    and drafts[item_id].target_projection is not None
+                    and epoch(current, "review_epoch") < request.revisions[request.item_unit_ids[item_id][0]]
+                    else drafts[item_id]
+                    for item_id in request.item_ids
+                    for current in (records[item_id],)
+                }
+                targets = review_feedback(drafts, request.feedback_by_item)
+                packed = repack(targets)
+            if len(packed.batches) != 1 or packed.blocked or packed.batches[0].manifest != frozen:
                 raise ValueError("compact request differs from its canonical source and targets")
             batch = packed.batches[0]
             physical.verify(request, batch.payload, batch.budget.output_tokens)
@@ -390,7 +617,10 @@ def _atomic_record_frame(
     members: dict[str, RequestMember],
     index: MemberIndex,
     requests: dict[str, RequestManifest],
+    *,
+    seeded=None,
 ) -> None:
+    seeded = seeded or {}
     frame = record.checks.get("translation_frame")
     if not isinstance(frame, dict) or set(frame) != {"request_id", "member_ids", "batch_hash"}:
         raise ValueError("saved result lacks its canonical translation frame")
@@ -456,19 +686,9 @@ def _atomic_record_frame(
         or record.context_hash != batch.manifest.context_hashes[record.item_id]
     ):
         raise ValueError("saved result terminology or context identity changed")
-    if record.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
-        response = _atomic_response(root, request)
-        parsed = validate_translation_response(
-            response["raw"],
-            request.request_id,
-            {item_id: members[item_id].source_projection for item_id in request.item_ids},
-        )
-        translated = parsed.accepted.get(record.item_id)
-        if (
-            translated is None
-            or record.target_projection != translated["target"]
-            or record.target_hash != canonical_hash(translated["target"])
-        ):
+    if record.target_projection is not None and record.status != ItemStatus.REVIEWED:
+        target = _atomic_translation_target(root, request, record.item_id, members, seeded)
+        if record.target_projection != target or record.target_hash != canonical_hash(target):
             raise ValueError("saved draft differs from its persisted translation response")
 
 
@@ -480,7 +700,10 @@ def _atomic_review_proof(
     records: dict[str, ItemRecord],
     index: MemberIndex,
     requests: dict[str, RequestManifest],
+    *,
+    seeded=None,
 ) -> None:
+    seeded = seeded or {}
     if record.stage != "reviewed" or record.failure is not None or record.next_action is not None:
         raise ValueError("reviewed result has an invalid terminal state")
     translation = requests.get(record.request_id or "")
@@ -490,15 +713,9 @@ def _atomic_review_proof(
         raise ValueError("reviewed result lacks translation request proof")
     if review is None or review.stage != "review" or record.item_id not in review.item_ids:
         raise ValueError("reviewed result lacks review request proof")
-    translated = _atomic_response(root, translation)
     reviewed = _atomic_response(root, review)
-    translated_result = validate_translation_response(
-        translated["raw"],
-        translation.request_id,
-        {item_id: members[item_id].source_projection for item_id in translation.item_ids},
-    )
-    initial = translated_result.accepted.get(record.item_id)
-    if initial is None or review.target_hashes.get(record.item_id) != canonical_hash(initial["target"]):
+    initial = _atomic_translation_target(root, translation, record.item_id, members, seeded)
+    if review.target_hashes.get(record.item_id) != canonical_hash(initial):
         raise ValueError("reviewed result lacks translation target proof")
     expected = {
         item_id: {
@@ -535,9 +752,33 @@ def _atomic_review_proof(
         or record.checks.get("issues") != decision["issues"]
     ):
         raise ValueError("reviewed result differs from review response")
-    target = decision.get("target") if decision["decision"] == "replace" else initial["target"]
+    target = decision.get("target") if decision["decision"] == "replace" else initial
     if record.target_projection != target or record.target_hash != canonical_hash(target):
         raise ValueError("reviewed result target lacks response proof")
+
+
+def _atomic_translation_target(
+    root: Path,
+    request: RequestManifest,
+    item_id: str,
+    members: dict[str, RequestMember],
+    seeded: dict[str, str],
+) -> str:
+    if not request.attempts:
+        target = seeded.get(item_id)
+        if target is None:
+            raise ValueError("saved draft lacks a persisted translation response")
+        return target
+    response = _atomic_response(root, request)
+    parsed = validate_translation_response(
+        response["raw"],
+        request.request_id,
+        {key: members[key].source_projection for key in request.item_ids},
+    )
+    result = parsed.accepted.get(item_id)
+    if result is None:
+        raise ValueError("saved draft was not accepted by its translation response")
+    return result["target"]
 
 
 def _atomic_response(root: Path, request: RequestManifest) -> dict:
@@ -558,13 +799,15 @@ def _atomic_response(root: Path, request: RequestManifest) -> dict:
             continue
         response = saved.response.model_dump(mode="python")
         if version is not None:
+            store = RunStore(root)
             response["raw"] = physical.decode(
                 request.stage,
                 saved.response.raw,
                 request.request_id,
                 request.item_ids,
                 version=version,
-                sources=RunStore(root).read_response_sources(request) if version in physical.SLOT_VERSIONS else None,
+                sources=store.read_response_sources(request) if version in physical.SLOT_VERSIONS else None,
+                hints=store.read_response_hints(request) if version in physical.SLOT_VERSIONS else None,
             )
         return response
     raise ValueError("reviewed result lacks succeeded response file")

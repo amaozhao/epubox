@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from engine.agents.protocol import (
+    MAX_ITEMS,
     ProtocolError,
     _collect_items,
     _review_error,
@@ -54,14 +55,14 @@ class ResolutionValidation:
     unknown: tuple[str, ...]
 
 
-def _root(raw: str | bytes, protocol: str, request_id: str) -> list[Any]:
+def _root(raw: str | bytes, protocol: str, request_id: str, *, max_items: int = MAX_ITEMS) -> list[Any]:
     value = strict_loads(raw)
     if not isinstance(value, dict) or set(value) != {"protocol", "request_id", "items"}:
         raise ProtocolError("response root must contain exactly protocol, request_id, and items")
     if value["protocol"] != protocol or value["request_id"] != request_id:
         raise ProtocolError("response protocol or request_id mismatch")
-    if not isinstance(value["items"], list) or len(value["items"]) > 256:
-        raise ProtocolError("items must be an array of at most 256 entries")
+    if not isinstance(value["items"], list) or len(value["items"]) > max_items:
+        raise ProtocolError(f"items must be an array of at most {max_items} entries")
     return value["items"]
 
 
@@ -265,7 +266,7 @@ def validate_review_response(
     expected_items: Mapping[str, Mapping[str, Any]],
 ) -> ReviewValidation:
     """Keep quality issues even if a non-binding term suggestion is malformed."""
-    items = _root(raw, "epubox-review-2", request_id)
+    items = _root(raw, "epubox-review-2", request_id, max_items=max(MAX_ITEMS, len(expected_items)))
     candidates, errors, unknown, _ = _collect_items(items, set(expected_items))
     accepted: dict[str, dict[str, Any]] = {}
     rejected: dict[str, tuple[str, ...]] = {}

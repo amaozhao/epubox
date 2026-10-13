@@ -27,6 +27,7 @@ from engine.services import state
 from engine.services.coherence import (
     load_budget_overrides,
 )
+from engine.services.retry import claim_restart, isolate_restart_items
 from engine.services.store import RunStore
 
 
@@ -50,7 +51,26 @@ async def run_translation(
             reopen_attention=reopen_attention,
             ready_session=ready_session,
         )
-    return await TranslationEngine(RunStore(work_dir), model=model, transport=transport, progress=progress).run()
+    store = RunStore(work_dir)
+    with store.lock(blocking=False):
+        if claim_restart(store.root):
+            failed = tuple(
+                unit_id
+                for unit_id in store.read_bookplan().unit_ids
+                if any(item.status == ItemStatus.NEEDS_ATTENTION for item in store.read_unit(unit_id).items.values())
+            )
+            if failed:
+                isolate_restart_items(
+                    store.root,
+                    {
+                        item.item_id
+                        for unit_id in failed
+                        for item in store.read_unit(unit_id).items.values()
+                        if item.status == ItemStatus.NEEDS_ATTENTION
+                    },
+                )
+                retry_failed_units(store, failed)
+        return await TranslationEngine(store, model=model, transport=transport, progress=progress).run()
 
 
 def retry_failed_units(store: RunStore, unit_ids: Sequence[str]) -> tuple[UnitRecord, ...]:
@@ -60,6 +80,10 @@ def retry_failed_units(store: RunStore, unit_ids: Sequence[str]) -> tuple[UnitRe
         updated: list[UnitRecord] = []
         for unit_id in dict.fromkeys(unit_ids):
             record = store.read_unit(unit_id)
+            isolate_restart_items(
+                store.root,
+                {item_id for item_id, item in record.items.items() if item.status == ItemStatus.NEEDS_ATTENTION},
+            )
             counters = dict(record.counters)
             items = {
                 item_id: item.model_copy(

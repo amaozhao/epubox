@@ -37,6 +37,7 @@ from engine.services.terms.planning import (
     _term_occurs,
     _unit_lanes,
 )
+from engine.services.terms.recovery import reconcile_term_attempts
 
 
 class TermBudgetPaused(RuntimeError):
@@ -97,9 +98,6 @@ class TermRunner:
         )
         self._rebuild_journal()
         self.prior_input_limit_breach = self._prior_input_limit_breach()
-        timeout = config.get("request_timeout_seconds", 120.0)
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise ValueError("request timeout must be positive seconds")
         self.runtime = ModelRuntime(
             model=model,
             transport=transport,
@@ -112,7 +110,6 @@ class TermRunner:
             persist_response=self.store.save_model_response,
             prior_input_limit_breach=self.prior_input_limit_breach,
             input_budget_version=2,
-            request_timeout_seconds=float(timeout),
         )
         self.max_concurrency = self.runtime.workflow_capacity
 
@@ -703,6 +700,14 @@ class TermRunner:
         return None
 
     async def run(self) -> TermRunResult:
+        try:
+            for request in reconcile_term_attempts(self.store):
+                self._cache_request(request)
+            return await self._run()
+        finally:
+            await self.runtime.aclose()
+
+    async def _run(self) -> TermRunResult:
         if not self.plan.auto_extract:
             return TermRunResult("disabled", 0, 0, 0, self._spent(actual=True))
         if not self.plan.items:

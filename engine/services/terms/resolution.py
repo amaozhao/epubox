@@ -21,6 +21,7 @@ from engine.core.tokens import count_tokens
 from engine.schemas.contracts import JsonValue, RequestManifest, Usage
 from engine.services.store import RunStore
 from engine.services.terms.freeze import ResolutionDecision, prepare_candidate_pool
+from engine.services.terms.recovery import reconcile_term_attempts
 from engine.services.terms.runner import TermBudgetPaused, TermRunner, _response_truncated
 
 
@@ -221,6 +222,14 @@ class TermResolutionRunner:
         }
 
     async def run(self) -> ResolutionResult:
+        try:
+            for request in reconcile_term_attempts(self.store):
+                self.term_runner._cache_request(request)
+            return await self._run()
+        finally:
+            await self.term_runner.runtime.aclose()
+
+    async def _run(self) -> ResolutionResult:
         protocol = self.preparation.extraction_config.get("resolution_protocol_version", "epubox-term-resolution-1")
         if protocol == "epubox-term-resolution-1":
             return await self._run_v1()

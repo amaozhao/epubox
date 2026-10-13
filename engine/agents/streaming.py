@@ -9,7 +9,9 @@ from pydantic import BaseModel
 @dataclass
 class StreamingOpenAILike(OpenAILike):
     """
-    针对“必须 stream=true”的 OpenAI 兼容代理做适配。
+    历史流式适配器，仅保留旧调用兼容及回归测试。
+
+    当前生产模型工厂不再构建此类，ModelRuntime 即使收到此类也强制非流式请求。
 
     - 对外仍暴露 invoke/ainvoke 的完整响应语义
     - 对内强制走 streaming 接口并聚合 delta

@@ -25,6 +25,7 @@ from engine.schemas.contracts import (
     canonical_hash,
 )
 from engine.services.atomic import IdentityMismatch
+from engine.services.retry import restart_partitions
 
 
 class Workflow(Coherence):
@@ -327,7 +328,7 @@ class Workflow(Coherence):
         return jobs
 
     def _logical_limit(self, record: UnitRecord, item_id: str, stage: str) -> int:
-        base = 3 if stage == "translate" else 2
+        base = 3
         return (
             base
             + int(self._automatic_recovery_active(record, item_id, stage))
@@ -495,6 +496,9 @@ class Workflow(Coherence):
 
     def _pack_jobs(self, jobs: Sequence[_Job]) -> list[tuple[_Job, ...]]:
         result: list[tuple[_Job, ...]] = []
+        isolated = {
+            item for group in restart_partitions(self.store.root, [job.item_id for job in jobs]) for item in group
+        }
         for stage in ("translate", "review"):
             staged = [job for job in jobs if job.stage == stage]
             forced: dict[str, list[_Job]] = {}
@@ -503,7 +507,7 @@ class Workflow(Coherence):
             for job in staged:
                 record = self.records[job.unit_id]
                 failure = record.items[job.item_id].failure or {}
-                if self._automatic_recovery_active(record, job.item_id, job.stage):
+                if job.item_id in isolated or self._automatic_recovery_active(record, job.item_id, job.stage):
                     singletons.append(job)
                     continue
                 split_id = failure.get("split_id") if failure.get("code") == "truncated_batch" else None

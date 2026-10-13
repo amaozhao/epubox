@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from engine.agents.protocol import ProtocolError
@@ -54,6 +54,7 @@ class TranslationRunResult:
     http_attempts: int
     predicted_http_requests: int
     reason: str | None = None
+    journal: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

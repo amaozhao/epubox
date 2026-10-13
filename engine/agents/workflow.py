@@ -62,7 +62,7 @@ async def _run_workflow(
     if session.verify() != prepared or session.index is not index:
         raise ValueError("workflow requires the physically verified ready session values")
     session.verify_batch(batch, initial=not batch.manifest.sparse)
-    _guard_ready(prepared, batch, index, runtime)
+    _guard_ready(prepared, batch, index, runtime, session)
     if records is not None and not set(records).issubset(batch.manifest.item_ids):
         raise ValueError("saved results contain members outside the supplied translation batch")
     current = dict(records or {})
@@ -94,7 +94,7 @@ async def _run_workflow(
             raise ValueError("saved translation checkpoint cannot replan the remaining ready members")
         translation_batches = tuple((value, False) for value in replanned.batches)
     for translation_batch, initial in translation_batches:
-        _guard_common(prepared, translation_batch, index, runtime)
+        _guard_common(prepared, translation_batch, index, runtime, session)
         current, translated_issues = await _translate_step(
             translation_batch,
             runtime,
@@ -147,7 +147,7 @@ async def _translate_step(
 ) -> tuple[dict[str, ItemRecord], list[str]]:
     """Translate only members without an identity-valid saved candidate."""
     prepared = session.verify()
-    _guard_common(prepared, batch, session.index, runtime)
+    _guard_common(prepared, batch, session.index, runtime, session)
     session.verify_batch(batch, initial=initial)
     current = dict(records or {})
     issues: list[str] = []
@@ -277,7 +277,7 @@ async def _proofread_step(
     await _save_group(save, blocked_records)
     for review_batch in result.batches:
         session.verify_batch(review_batch)
-        _guard_review(prepared, review_batch, index, runtime)
+        _guard_review(prepared, review_batch, index, runtime, session)
         try:
             response = await runtime.invoke(
                 "review",
@@ -338,7 +338,8 @@ async def _apply_corrections_step(
         error = batch_error
         if result is None and error is None:
             assert parsed is not None
-            error = parsed.errors.get(member.item_id, "review item missing")
+            detail = parsed.errors.get(member.item_id, "review item missing")
+            error = f"review:{batch.manifest.request_id}: {detail}"
         if result is not None and result["decision"] == "needs_attention":
             error = str(result["issues"] or "review needs attention")
         if result is not None and result["decision"] == "replace":
@@ -346,7 +347,7 @@ async def _apply_corrections_step(
         if error is not None:
             if batch_error is None:
                 issues.append(f"review:{member.item_id}: {error}")
-            current[member.item_id] = _failed(member, prior, "review", error, None)
+            current[member.item_id] = _failed(member, prior, "review", error, batch)
         else:
             assert result is not None
             target = result["target"] if result["decision"] == "replace" else prior.target_projection
@@ -383,10 +384,16 @@ async def _apply_corrections_step(
     return current, issues
 
 
-def _guard_ready(prepared: AtomicPreparedInput, batch: MemberBatch, index: MemberIndex, runtime: ModelRuntime) -> None:
+def _guard_ready(
+    prepared: AtomicPreparedInput,
+    batch: MemberBatch,
+    index: MemberIndex,
+    runtime: ModelRuntime,
+    session: ReadySession,
+) -> None:
     if batch.manifest.stage != "translate":
         raise ValueError("workflow entry requires a translation batch")
-    _guard_common(prepared, batch, index, runtime)
+    _guard_common(prepared, batch, index, runtime, session)
     if not batch.manifest.sparse and prepared.plan.batch_hashes.get(batch.manifest.request_id) != canonical_hash(
         batch
     ):
@@ -394,15 +401,23 @@ def _guard_ready(prepared: AtomicPreparedInput, batch: MemberBatch, index: Membe
 
 
 def _guard_review(
-    prepared: AtomicPreparedInput, batch: MemberBatch, index: MemberIndex, runtime: ModelRuntime
+    prepared: AtomicPreparedInput,
+    batch: MemberBatch,
+    index: MemberIndex,
+    runtime: ModelRuntime,
+    session: ReadySession,
 ) -> None:
     if batch.manifest.stage != "review":
         raise ValueError("proofread requires a review batch")
-    _guard_common(prepared, batch, index, runtime)
+    _guard_common(prepared, batch, index, runtime, session)
 
 
 def _guard_common(
-    prepared: AtomicPreparedInput, batch: MemberBatch, index: MemberIndex, runtime: ModelRuntime
+    prepared: AtomicPreparedInput,
+    batch: MemberBatch,
+    index: MemberIndex,
+    runtime: ModelRuntime,
+    session: ReadySession,
 ) -> None:
     plan = prepared.plan
     config = plan.translation_config
@@ -444,12 +459,8 @@ def _guard_common(
     ):
         raise ValueError("request budget differs from the frozen ready plan")
     for member in batch.items:
-        if index.members_by_id.get(member.item_id) != member:
-            raise ValueError("request member is not owned by the verified member index")
-        if plan.member_hashes.get(member.item_id) != canonical_hash(member):
-            raise ValueError("request member differs from the committed ready plan")
-        if member.item_id not in plan.unit_members.get(member.unit_id, ()):
-            raise ValueError("request member owner differs from the committed ready plan")
+        if not session.owns(member):
+            raise ValueError("request member is not owned by the verified ready session")
 
 
 def _limits(
@@ -524,9 +535,10 @@ def _valid_saved(
         raise ValueError("saved result identity differs from its request member")
     if record.status == ItemStatus.PENDING and record.target_projection is None:
         if pending_batch.manifest.sparse:
-            pending_batch = next(
-                value for value in session._prepared_batches.values() if member.item_id in value.manifest.item_ids
-            )
+            initial = session.initial_batch(member.item_id)
+            if initial is None:
+                raise ValueError("pending member has no canonical initial batch")
+            pending_batch = initial
         _validate_record_frame(member, record, pending_batch)
         return False
     if record.status == ItemStatus.NEEDS_ATTENTION:
@@ -608,7 +620,7 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
         saved = (
             record
             if value == record.item_id
-            else ItemRecord.model_validate_json(state.read(session.store.root / "results" / f"{value}.json"))
+            else ItemRecord.model_validate_json(state.read(session.result_path(value)))
         )
         versions[saved_member.unit_id] = max(versions.get(saved_member.unit_id, 0), _translation_epoch(saved))
     initial = session._prepared_batches.get(request_id)
@@ -817,11 +829,14 @@ def _failed(
             request_id=batch.manifest.request_id,
         )
     base = prior
+    checks = dict(base.checks) | {"accepted": False, "error": error}
+    if stage == "review" and batch is not None:
+        checks["review_request_id"] = batch.manifest.request_id
     return base.model_copy(
         update={
             "stage": stage,
             "status": ItemStatus.NEEDS_ATTENTION,
-            "checks": dict(base.checks) | {"accepted": False, "error": error},
+            "checks": checks,
             "failure": {"stage": stage, "code": f"{stage}_failed", "message": error},
             "next_action": None,
         }
@@ -858,6 +873,21 @@ def _validate_saved_record(session: ReadySession, record: ItemRecord) -> None:
         expected = derived_record(member.item_id, source_id)
         if record != expected:
             raise ValueError("saved derived result differs from its canonical dependency record")
+        return
+    if isinstance(record.checks.get("parts"), Mapping):
+        from engine.services.parts import validate_summary
+
+        validate_summary(session, record)
+        return
+    if "preserved_code" in record.checks:
+        from engine.services.code import preserved_code_proof
+
+        preserved_code_proof(session, record)
+        return
+    if "manual" in record.checks:
+        from engine.services.manual import manual_proof
+
+        manual_proof(session, record)
         return
     if record.status != ItemStatus.PENDING:
         _saved_batch(session, member, record)

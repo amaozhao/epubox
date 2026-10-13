@@ -6,6 +6,7 @@ import uuid
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -13,6 +14,7 @@ from engine.epub.fill import fill_resource
 from engine.epub.parsing import OPF_NAMESPACE, XHTML_NAMESPACE, parse_resource
 from engine.epub.ranges import RawSpan, SlotSpan, index_resource
 from engine.epub.replace import replace_resources
+from engine.epub.styles import FONT_POLICY, use_reader_fonts
 from engine.epub.upgrade import upgrade_package
 from engine.epub.validation import EpubValidationError, inspect_epub
 from engine.epub.verification import (
@@ -29,6 +31,9 @@ from engine.services.atomic import safe_id
 from engine.services.ready import ReadySession
 from engine.services.store import RunStore
 
+if TYPE_CHECKING:
+    from engine.services.journal import BodyJournal
+
 _DC = "http://purl.org/dc/elements/1.1/"
 _XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 _LANGUAGE = "zh-Hans"
@@ -41,6 +46,7 @@ def publish_atomic(
     *,
     overwrite: bool = False,
     session: ReadySession | None = None,
+    journal: BodyJournal | None = None,
 ) -> dict[str, object]:
     """Render only complete reviewed parents, verify, then atomically publish."""
     if not isinstance(store, RunStore):
@@ -48,11 +54,15 @@ def publish_atomic(
     output_path = Path(output_path)
     with store.lock():
         validate_atomic_output(store, output_path)
-        session, targets = _targets(store, session=session)
+        session, targets = _targets(store, session=session, journal=journal)
         recovered = _recover(store, output_path, session.prepared.plan, targets, checker=checker)
         if recovered is not None:
             proof = recovered.get("verification")
-            if isinstance(proof, dict) and proof.get("epub_version") == "3.0":
+            if (
+                isinstance(proof, dict)
+                and proof.get("epub_version") == "3.0"
+                and proof.get("font_policy") == FONT_POLICY
+            ):
                 return recovered
             overwrite = True
         result_fingerprint = _result_fingerprint(store, session)
@@ -76,6 +86,7 @@ def publish_atomic(
         media_types = {item.path: item.media_type for item in inventory.manifest}
         media_types[inventory.opf_path] = "application/oebps-package+xml"
         replacements = replace_resources(replacements, media_types=media_types, source=snapshot)
+        replacements, removed_paths = use_reader_fonts(snapshot, inventory, replacements)
         for path in replacements:
             accepted.setdefault(path, {})
         staged = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
@@ -86,6 +97,7 @@ def publish_atomic(
                 replacements,
                 source_directory=store.root / "source" if state.compact(store.root) else None,
                 allow_additions=True,
+                removed_paths=removed_paths,
             )
             verification = verify_staged_epub(
                 snapshot,
@@ -96,6 +108,8 @@ def publish_atomic(
                 checker=checker,
                 expected_language=_LANGUAGE,
                 upgraded=True,
+                removed_paths=removed_paths,
+                reader_fonts=True,
             )
             session.verify()
             if _result_fingerprint(store, session) != result_fingerprint:
@@ -166,12 +180,22 @@ def _recover(store, output_path, plan, targets, *, checker: object | None = None
     return {"path": str(output_path), "sha256": target_hash, "verification": verification, "publish": intent}
 
 
-def _targets(store: RunStore, *, session: ReadySession | None = None):
+def _targets(
+    store: RunStore,
+    *,
+    session: ReadySession | None = None,
+    journal: BodyJournal | None = None,
+):
     from engine.services.journal import BodyJournal
 
+    if journal is not None:
+        if journal.store.root != store.root or (session is not None and session.prepared != journal.session.prepared):
+            raise EpubValidationError("invalid_verified_context", "Publication journal belongs to another run")
+        journal.verify_persisted_proofs()
+        session = journal.session
     session = session or ReadySession(store)
-    targets = BodyJournal(store, session=session).parent_targets(require_complete=True)
-    expected = {item.item_id for inventory in session.index.inventories for item in inventory.items}
+    targets = (journal or BodyJournal(store, session=session)).parent_targets(require_complete=True)
+    expected = {member.parent_item_id for member in session.index.members}
     if set(targets) != expected:
         raise EpubValidationError("incomplete_atomic_results", "Reviewed parents do not cover the source inventory")
     return session, targets

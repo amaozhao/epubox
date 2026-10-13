@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from engine.epub.preparation import PreparationConfig, _frozen_extraction_config, _frozen_translation_config
-from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
+from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS
 from engine.schemas.contracts import ItemStatus, canonical_json_bytes, strict_json_loads
 from engine.services import state
 from engine.services.atomic import AtomicStore, IdentityMismatch
@@ -292,7 +292,8 @@ def validate_options(work_dir: Path, config: PreparationConfig, explicit: frozen
             if preparation.translation_config.get(field) != expected_translation.get(field):
                 raise ValueError(f"active session conflicts with explicit --{option.replace('_', '-')}")
     if "glossary" in explicit:
-        atomic = {document.extractor_version for document in documents.values()} == {ATOMIC_EXTRACTOR_VERSION}
+        versions = {document.extractor_version for document in documents.values()}
+        atomic = len(versions) == 1 and versions <= _SUPPORTED_EXTRACTOR_VERSIONS
         if atomic:
             terms, digest = load_atomic_terms(config.user_terms_path, tuple(documents.values()))
         else:

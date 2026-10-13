@@ -38,6 +38,7 @@ from engine.services.store import RunStore
 from engine.services.terms.freeze import ResolutionDecision, freeze_terminology, prepare_candidate_pool
 from engine.services.terms.inputs import load_atomic_terms, load_user_terms
 from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION, TERM_PLANNER_VERSION, plan_term_extraction
+from engine.services.terms.recovery import reconcile_term_attempts
 from engine.services.terms.resolution import TermResolutionRunner
 from engine.services.terms.runner import TermRunner
 
@@ -159,6 +160,20 @@ async def _advance(
     output_policy_hash: str,
     progress: ProgressCallback | None,
 ) -> PreparationPipelineResult:
+    recovered = reconcile_term_attempts(store)
+    if recovered:
+        _emit(
+            progress,
+            PreparationProgress(
+                "terms",
+                0,
+                0,
+                0,
+                0,
+                _http_attempts(store),
+                f"恢复：已核对 {len(recovered)} 条中断的术语请求，保留原有词表和请求计数。",
+            ),
+        )
     if preparation.extraction_config.get("strategy") == ATOMIC_TERM_PLANNER_VERSION:
         return await _advance_atomic(
             store,

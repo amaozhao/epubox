@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Literal
 
 from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS
 from engine.schemas.contracts import (
+    ItemRecord,
+    ItemStatus,
     JsonValue,
     UnitRecord,
     Usage,
@@ -14,11 +17,15 @@ from engine.schemas.contracts import (
     canonical_json_bytes,
     strict_json_loads,
 )
+from engine.schemas.ready import AtomicPreparedInput
 from engine.services import state
+from engine.services.atomic import CorruptRecord, IdentityMismatch, safe_id
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.store import RunStore
+from engine.services.working import BudgetCache
 
 type Outcome = Literal["completed", "paused", "needs_attention", "failed"]
+_progress_cache: BudgetCache[Path, tuple[tuple, dict[str, JsonValue], list[JsonValue]]] = BudgetCache(16 * 1024 * 1024)
 
 
 def write_report(
@@ -43,14 +50,10 @@ def write_report(
     records = {unit_id: store.read_unit(unit_id) for unit_id in book.unit_ids} if book is not None else {}
     atomic = None
     atomic_required = None
-    atomic_records = {}
+    atomic_unresolved: list[JsonValue] = []
     if state.is_file(store.root / "prepared.json"):
-        from engine.services.journal import BodyJournal
-
-        journal = BodyJournal(store)
-        atomic = journal.progress_snapshot()
-        atomic_required = journal.session.prepared.plan.required_unit_count
-        atomic_records = journal.records()
+        atomic, atomic_unresolved = _atomic_progress(store)
+        atomic_required = atomic["required_units"]
     requests = tuple(store.read_request(path.stem) for path in sorted(state.glob(store.root / "requests", "*.json")))
     attempts = tuple(attempt for request in requests for attempt in request.attempts)
     actual = tuple(attempt for attempt in attempts if attempt.state != "reserved")
@@ -91,15 +94,28 @@ def write_report(
             "max_items_per_request": max((len(request.item_ids) for request in stage_requests), default=0),
             "max_known_input_tokens": max((usage.input_tokens for usage in stage_usages), default=0),
         }
+    if atomic is not None:
+        body_requests = tuple(request for request in requests if request.stage in {"translate", "review"})
+        body_actual = tuple(
+            attempt for request in body_requests for attempt in request.attempts if attempt.state != "reserved"
+        )
+        body_usages = tuple(
+            usage_by_attempt[(request.request_id, attempt.attempt_id)]
+            for request in body_requests
+            for attempt in request.attempts
+            if (request.request_id, attempt.attempt_id) in usage_by_attempt
+        )
+        atomic.update(
+            http_attempts=len(actual),
+            body_http_attempts=len(body_actual),
+            input_tokens=sum(usage.input_tokens for usage in body_usages),
+            output_tokens=sum(usage.output_tokens for usage in body_usages),
+        )
     extraction_records = (
         tuple(store.read_extraction(item.item_id) for item in term_plan.items) if term_plan is not None else ()
     )
     unresolved: list[JsonValue] = (
-        [
-            {"item_id": item_id, "issues": [record.failure]}
-            for item_id, record in atomic_records.items()
-            if record.failure is not None
-        ]
+        atomic_unresolved
         if atomic is not None
         else [
             {"unit_id": unit_id, "issues": list(record.unresolved_issues)}
@@ -231,6 +247,85 @@ def write_report(
 
 
 __all__ = ["write_report"]
+
+
+def _atomic_progress(store: RunStore) -> tuple[dict[str, JsonValue], list[JsonValue]]:
+    if not state.compact(store.root):
+        return _read_atomic_progress(store)
+    signature = state.dependency_fingerprint(store.root, exact=("prepared.json",), prefixes=("results/",))
+    cached = _progress_cache.get(store.root)
+    if cached is not None and cached[0] == signature:
+        return deepcopy((cached[1], cached[2]))
+    progress, unresolved = _read_atomic_progress(store)
+    if signature != state.dependency_fingerprint(store.root, exact=("prepared.json",), prefixes=("results/",)):
+        raise IdentityMismatch("body results changed while reading progress")
+    _progress_cache[store.root] = signature, progress, unresolved
+    return deepcopy((progress, unresolved))
+
+
+def _read_atomic_progress(store: RunStore) -> tuple[dict[str, JsonValue], list[JsonValue]]:
+    """Read display-only body counters without rebuilding verified workflow state."""
+    path = store.root / "prepared.json"
+    try:
+        prepared = AtomicPreparedInput.model_validate_json(state.read(path))
+    except Exception as error:
+        raise CorruptRecord(f"invalid atomic progress dependency {path}: {error}") from error
+    plan = prepared.plan
+    translated = 0
+    reviewed = 0
+    attention_units: set[str] = set()
+    accepted_units: set[str] = set()
+    unresolved: list[JsonValue] = []
+    for unit_id, item_ids in plan.unit_members.items():
+        has_attention = False
+        all_reviewed = True
+        for item_id in item_ids:
+            result_path = store.root / "results" / f"{safe_id(item_id)}.json"
+            try:
+                record = ItemRecord.model_validate_json(state.read(result_path))
+            except Exception as error:
+                raise CorruptRecord(f"invalid body result {result_path}: {error}") from error
+            if record.item_id != item_id or record.segment_id != item_id:
+                raise IdentityMismatch(f"body result ownership changed: {item_id}")
+            has_attention |= record.status == ItemStatus.NEEDS_ATTENTION
+            all_reviewed &= record.status == ItemStatus.REVIEWED
+            translated += record.target_projection is not None
+            reviewed += record.status == ItemStatus.REVIEWED
+            if record.failure is not None:
+                unresolved.append({"item_id": item_id, "issues": [record.failure]})
+        if has_attention:
+            attention_units.add(unit_id)
+        if unit_id not in plan.derived_sources and all_reviewed:
+            accepted_units.add(unit_id)
+    remaining = dict(plan.derived_sources)
+    while remaining:
+        ready = {unit_id for unit_id, source_id in remaining.items() if source_id in accepted_units}
+        if not ready:
+            break
+        accepted_units.update(ready)
+        for unit_id in ready:
+            del remaining[unit_id]
+    pending = sum(
+        len(item_ids)
+        for unit_id, item_ids in plan.unit_members.items()
+        if unit_id not in accepted_units and unit_id not in attention_units
+    )
+    return (
+        {
+            "required_items": len(plan.member_hashes),
+            "required_units": plan.required_unit_count,
+            "translated_items": translated,
+            "reviewed_items": reviewed,
+            "accepted_units": len(accepted_units),
+            "needs_attention_units": len(attention_units),
+            "pending_items": pending,
+            "http_attempts": 0,
+            "body_http_attempts": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        },
+        unresolved,
+    )
 
 
 def _current_derived(record: UnitRecord, records: dict[str, UnitRecord]) -> bool:

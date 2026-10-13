@@ -55,7 +55,7 @@ def restore(journal: BodyJournal, request: RequestManifest) -> MemberBatch | Non
         )
         if canonical_hash(batch) != frame.batch_hash:
             raise IdentityMismatch("saved request frame changed")
-        journal.session.verify_batch(batch)
+        journal.session.verify_batch(batch, sent_request=request)
         return batch
     except (IdentityMismatch, KeyError):
         raise
@@ -96,6 +96,10 @@ def warm(journal: BodyJournal, progress: Callable[[dict[str, Any]], None] | None
     seen: set[str] = set()
     rebuilt = 0
     for record in journal._records.values():
+        if record.status == ItemStatus.REVIEWED:
+            # Terminal proofs restore and validate their exact request frames in
+            # request order. Prewarming here would build every batch twice.
+            continue
         frame = record.checks.get("translation_frame")
         if not isinstance(frame, dict):
             continue
@@ -127,7 +131,12 @@ def warm(journal: BodyJournal, progress: Callable[[dict[str, Any]], None] | None
     if progress is not None and rebuilt % 25:
         progress({"phase": "recovery", "notice": f"恢复：已迁移 {rebuilt} 个旧正文请求断点。"})
     active: set[str] = set()
-    for request in journal._requests.values():
+    for request in journal._scoped_requests():
+        if not set(request.item_ids).issubset(journal._records):
+            continue
+        if not request.attempts:
+            # No provider outcome exists; dispatch rebuilds this plan from current records.
+            continue
         if request.stage == "translate" and _active_translation(journal, request):
             journal._translation_batch(request)
             active.add(request.request_id)
@@ -172,6 +181,8 @@ def _context(payload: dict[str, JsonValue]) -> tuple[str, ...]:
 
 
 def _active_translation(journal: BodyJournal, request: RequestManifest) -> bool:
+    if not set(request.item_ids).issubset(journal._records):
+        return False
     return any(
         journal._records[item_id].status == ItemStatus.PENDING
         and journal._records[item_id].checks.get("translation_epoch", 0)
@@ -181,6 +192,8 @@ def _active_translation(journal: BodyJournal, request: RequestManifest) -> bool:
 
 
 def _active_review(journal: BodyJournal, request: RequestManifest) -> bool:
+    if not set(request.item_ids).issubset(journal._records):
+        return False
     return any(
         journal._records[item_id].status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
         and journal._records[item_id].checks.get("review_epoch", 0)
