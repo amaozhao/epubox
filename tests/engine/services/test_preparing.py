@@ -140,6 +140,7 @@ def test_blocked_hard_atom_stops_before_term_http_or_ready(tmp_path: Path) -> No
         {"chapter.xhtml": f"<p>{'word ' * 200}</p>"},
         version="2.0",
     )
+    progress: list[PreparationProgress] = []
     result = asyncio.run(
         prepare_translation(
             source,
@@ -153,6 +154,7 @@ def test_blocked_hard_atom_stops_before_term_http_or_ready(tmp_path: Path) -> No
             ),
             StubChecker(),
             term_transport=forbidden,
+            progress=progress.append,
         )
     )
 
@@ -161,3 +163,9 @@ def test_blocked_hard_atom_stops_before_term_http_or_ready(tmp_path: Path) -> No
     assert len(result.diagnostics) == 1 and result.diagnostics[0].atomic_tag == "p"
     assert not (result.work_dir / "prepared.json").exists()
     assert not list((result.work_dir / "requests").glob("*.json"))
+    blocked = next(event for event in progress if event.phase == "preflight" and event.failed)
+    assert blocked.notice is not None
+    assert "OEBPS/chapter.xhtml" in blocked.notice
+    assert result.diagnostics[0].item_id in blocked.notice
+    assert str(result.diagnostics[0].source_tokens) in blocked.notice
+    assert result.diagnostics[0].failures[0] in blocked.notice

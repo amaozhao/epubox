@@ -32,6 +32,9 @@ class RequestMember(FrozenModel):
     root_node_key: str = Field(min_length=1)
     source_span: ByteSpan
     source_projection: str = Field(min_length=1)
+    # Virtual row-group wrappers balance table requests; strip them only at parent merge.
+    source_prefix: str = Field(default="", exclude_if=lambda value: not value)
+    source_suffix: str = Field(default="", exclude_if=lambda value: not value)
     registry: dict[str, RegistryEntry] = Field(default_factory=dict)
     atomic_tag: AtomicTag | None = None
 

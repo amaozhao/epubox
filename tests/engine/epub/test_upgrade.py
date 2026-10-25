@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import codecs
 import re
+from dataclasses import replace
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
@@ -9,7 +10,13 @@ import pytest
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import parse_xml_bytes, qname_local_name
-from engine.epub.upgrade import _normalize_xhtml, _relative, _resolve, upgrade_package
+from engine.epub.upgrade import (
+    _normalize_xhtml,
+    _relative,
+    _resolve,
+    navigation_spine_additions,
+    upgrade_package,
+)
 from engine.epub.validation import ManifestItem, PackageInventory
 
 
@@ -53,6 +60,68 @@ def test_upgrade_orders_legacy_dc_metadata_before_epub3_meta(tmp_path):
     properties = {(element.get("property"), element.text) for element in _elements(result[inventory.opf_path], "meta")}
     assert ("dcterms:date", "2026-07-13") in properties
     assert ("epubox:event", "modification") in properties
+
+
+@pytest.mark.parametrize("empty_value", [b"", b"   \n  "])
+def test_upgrade_removes_unreferenced_empty_optional_dc_date(tmp_path: Path, empty_value: bytes) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "3.0", nav=True)
+    with ZipFile(source) as archive:
+        opf = archive.read(inventory.opf_path).replace(
+            b"</metadata>", b'<dc:date id="epub-date">' + empty_value + b"</dc:date></metadata>"
+        )
+
+    upgraded = upgrade_package(source, inventory, {inventory.opf_path: opf})
+
+    dated = [
+        element
+        for element in _elements(upgraded[inventory.opf_path], "meta")
+        if element.get("property") == "dcterms:date" and element.get("id") == "epub-date"
+    ]
+    assert not dated
+
+
+def test_upgrade_preserves_nonempty_optional_dc_date(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "3.0", nav=True)
+    with ZipFile(source) as archive:
+        opf = archive.read(inventory.opf_path).replace(
+            b"</metadata>", b'<dc:date id="epub-date">2026-10-24</dc:date></metadata>'
+        )
+
+    upgraded = upgrade_package(source, inventory, {inventory.opf_path: opf})
+
+    dated = [
+        element
+        for element in _elements(upgraded[inventory.opf_path], "meta")
+        if element.get("property") == "dcterms:date" and element.get("id") == "epub-date"
+    ]
+    assert len(dated) == 1 and dated[0].text == "2026-10-24"
+
+
+def test_upgrade_preserves_empty_dc_date_when_metadata_refines_its_id(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "3.0", nav=True)
+    with ZipFile(source) as archive:
+        opf = archive.read(inventory.opf_path).replace(
+            b"</metadata>",
+            b'<dc:date id="epub-date"></dc:date>'
+            b'<meta refines="#epub-date" property="date-type">publication</meta></metadata>',
+        )
+
+    upgraded = upgrade_package(source, inventory, {inventory.opf_path: opf})
+
+    dated = [
+        element
+        for element in _elements(upgraded[inventory.opf_path], "meta")
+        if element.get("property") == "dcterms:date" and element.get("id") == "epub-date"
+    ]
+    refinements = [
+        element
+        for element in _elements(upgraded[inventory.opf_path], "meta")
+        if element.get("refines") == "#epub-date"
+    ]
+    assert len(dated) == 1 and len(refinements) == 1
 
 
 def _book(
@@ -141,6 +210,45 @@ def _book(
 
 def _elements(data: bytes, name: str) -> list[etree._Element]:
     return [element for element in parse_xml_bytes(data).getroot().iter() if qname_local_name(element.tag) == name]
+
+
+def _with_auxiliary_documents(
+    source: Path, inventory: PackageInventory, replacements: dict[str, bytes]
+) -> tuple[PackageInventory, dict[str, bytes]]:
+    auxiliary = (
+        ManifestItem("aux-old", "OEBPS/aux-old.xhtml", "text/html"),
+        ManifestItem("aux-new", "OEBPS/aux-new.xhtml", "application/xhtml+xml"),
+        ManifestItem("unused", "OEBPS/unused.xhtml", "application/xhtml+xml"),
+    )
+    with ZipFile(source) as archive:
+        opf = replacements.get(inventory.opf_path, archive.read(inventory.opf_path))
+    opf = opf.replace(
+        b"</manifest>",
+        b'<item id="aux-old" href="aux-old.xhtml" media-type="text/html"/>'
+        b'<item id="aux-new" href="aux-new.xhtml" media-type="application/xhtml+xml"/>'
+        b'<item id="unused" href="unused.xhtml" media-type="application/xhtml+xml"/>'
+        b"</manifest>",
+    )
+    document = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Auxiliary</title></head>'
+        b"<body><p>Auxiliary</p></body></html>"
+    )
+    replacements.update(
+        {
+            inventory.opf_path: opf,
+            "OEBPS/aux-old.xhtml": document,
+            "OEBPS/aux-new.xhtml": document,
+            "OEBPS/unused.xhtml": document,
+        }
+    )
+    return (
+        replace(
+            inventory,
+            manifest=(*inventory.manifest, *auxiliary),
+            documents=(*inventory.documents, *(item.path for item in auxiliary)),
+        ),
+        replacements,
+    )
 
 
 @pytest.mark.parametrize("version", ["1.0", "2.0", "2.0.1", "3.3"])
@@ -244,6 +352,266 @@ def test_upgrade_detects_existing_toc_without_manifest_property(tmp_path: Path) 
     assert not any(path.endswith("nav-1.xhtml") for path in upgraded)
 
 
+@pytest.mark.parametrize("nav_property", [True, False])
+def test_upgrade_adds_existing_navigation_content_targets_as_nonlinear_spine_items(
+    tmp_path: Path, nav_property: bool
+) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "2.0", nav=True, nav_property=nav_property)
+    navigation = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+        b'<head><title>Contents</title></head><body><nav epub:type="toc"><ol>'
+        b'<li><a href="chapter.xhtml">Existing spine item</a></li>'
+        b'<li><a class="landmark" epub:type="cover" href="aux-old.xhtml#cover">Old HTML cover</a></li>'
+        b'<li><a href="https://example.com/help">Remote help</a></li>'
+        b'<li><a href="cover.jpg">Cover image</a></li>'
+        b'<li><a href="aux-new.xhtml">New XHTML notes</a></li>'
+        b'<li><a href="aux-old.xhtml#duplicate">Duplicate cover target</a></li>'
+        b"</ol></nav></body></html>"
+    )
+    inventory, replacements = _with_auxiliary_documents(source, inventory, {"OEBPS/nav.xhtml": navigation})
+    replacements[inventory.opf_path] = replacements[inventory.opf_path].replace(
+        b'<itemref idref="c1"/>', b'<itemref idref="c1" linear="yes"/>'
+    )
+
+    upgraded = upgrade_package(source, inventory, replacements)
+
+    assert upgraded["OEBPS/nav.xhtml"] == navigation
+    itemrefs = _elements(upgraded[inventory.opf_path], "itemref")
+    assert [(item.get("idref"), item.get("linear")) for item in itemrefs] == [
+        ("c1", "yes"),
+        ("aux-old", "no"),
+        ("aux-new", "no"),
+    ]
+    assert all(item.get("idref") not in {"cover", "unused"} for item in itemrefs)
+
+
+@pytest.mark.parametrize(
+    ("navigation_type", "link_type", "target", "expected_target", "expected_spine", "repair_legacy_cover"),
+    [
+        pytest.param(
+            "landmarks",
+            "cover",
+            "aux-old.xhtml#legacy",
+            "chapter.xhtml",
+            ("c1",),
+            True,
+            id="stale-cover",
+        ),
+        pytest.param(
+            "toc",
+            "cover",
+            "aux-old.xhtml#legacy",
+            "aux-old.xhtml#legacy",
+            ("c1", "aux-old"),
+            False,
+            id="toc-link",
+        ),
+        pytest.param(
+            "landmarks",
+            "bodymatter",
+            "aux-old.xhtml#legacy",
+            "aux-old.xhtml#legacy",
+            ("c1", "aux-old"),
+            False,
+            id="other-landmark",
+        ),
+        pytest.param("landmarks", "cover", "chapter.xhtml", "chapter.xhtml", ("c1",), False, id="valid-cover"),
+    ],
+)
+def test_upgrade_retargets_only_stale_landmarks_cover_to_the_valid_guide_cover(
+    tmp_path: Path,
+    navigation_type: str,
+    link_type: str,
+    target: str,
+    expected_target: str,
+    expected_spine: tuple[str, ...],
+    repair_legacy_cover: bool,
+) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "2.0", nav=True)
+    navigation = (
+        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+        "<head><title>Contents</title></head><body>"
+        f'<nav epub:type="{navigation_type}"><ol><li><a class="legacy-cover" data-source="publisher" '
+        f'epub:type="{link_type}" href="{target}"><span>Publisher cover</span></a></li></ol></nav>'
+        "</body></html>"
+    ).encode()
+    with ZipFile(source) as archive:
+        opf = archive.read(inventory.opf_path).replace(
+            b'<guide><reference type="toc" title="Contents" href="chapter.xhtml"/></guide>',
+            b'<guide><reference type="cover" title="Cover" href="chapter.xhtml"/>'
+            b'<reference type="toc" title="Contents" href="chapter.xhtml"/></guide>',
+        )
+    inventory, replacements = _with_auxiliary_documents(
+        source,
+        inventory,
+        {inventory.opf_path: opf, "OEBPS/nav.xhtml": navigation},
+    )
+    legacy_cover = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Legacy cover</title>'
+        b'<link rel="stylesheet" href="legacy/missing.css"/>'
+        b'<link rel="stylesheet" href="styles/missing.css"/>'
+        b'<link rel="stylesheet" href="https://example.com/remote.css"/></head>'
+        b'<body><img alt="Legacy cover" src="legacy/missing.png"/></body></html>'
+    )
+    replacements["OEBPS/aux-old.xhtml"] = legacy_cover
+    replacements[inventory.opf_path] = replacements[inventory.opf_path].replace(
+        b"</manifest>",
+        b'<item id="matching-css" href="styles/missing.css" media-type="text/css"/></manifest>',
+    )
+    replacements["OEBPS/styles/missing.css"] = b"body { margin: 0; }"
+    inventory = replace(
+        inventory,
+        manifest=(
+            *inventory.manifest,
+            ManifestItem("matching-css", "OEBPS/styles/missing.css", "text/css"),
+        ),
+    )
+
+    upgraded = upgrade_package(source, inventory, replacements)
+
+    expected_cover = (
+        legacy_cover.replace(b'href="legacy/missing.css"', b'href="styles/missing.css"').replace(
+            b'src="legacy/missing.png"', b'src="cover.jpg"'
+        )
+        if repair_legacy_cover
+        else legacy_cover
+    )
+    assert upgraded["OEBPS/aux-old.xhtml"] == expected_cover
+    expected_navigation = navigation.replace(f'href="{target}"'.encode(), f'href="{expected_target}"'.encode())
+    assert upgraded["OEBPS/nav.xhtml"] == expected_navigation
+    assert b'class="legacy-cover" data-source="publisher"' in upgraded["OEBPS/nav.xhtml"]
+    assert b"<span>Publisher cover</span>" in upgraded["OEBPS/nav.xhtml"]
+    assert tuple(item.get("idref") for item in _elements(upgraded[inventory.opf_path], "itemref")) == expected_spine
+
+
+@pytest.mark.parametrize("case", ["ambiguous-css", "multiple-images", "no-canonical-cover"])
+def test_upgrade_does_not_guess_ambiguous_legacy_cover_resources(tmp_path: Path, case: str) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "2.0", nav=True)
+    navigation = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+        b'<head><title>Contents</title></head><body><nav epub:type="landmarks"><ol><li>'
+        b'<a epub:type="cover" href="aux-old.xhtml">Legacy cover</a></li></ol></nav></body></html>'
+    )
+    with ZipFile(source) as archive:
+        opf = archive.read(inventory.opf_path).replace(
+            b'<guide><reference type="toc" title="Contents" href="chapter.xhtml"/></guide>',
+            b'<guide><reference type="cover" title="Cover" href="chapter.xhtml"/>'
+            b'<reference type="toc" title="Contents" href="chapter.xhtml"/></guide>',
+        )
+    inventory, replacements = _with_auxiliary_documents(
+        source,
+        inventory,
+        {inventory.opf_path: opf, "OEBPS/nav.xhtml": navigation},
+    )
+    css_items = [ManifestItem("css-one", "OEBPS/styles/missing.css", "text/css")]
+    if case == "ambiguous-css":
+        css_items.append(ManifestItem("css-two", "OEBPS/theme/missing.css", "text/css"))
+    manifest = b"".join(
+        f'<item id="{item.item_id}" href="{item.path.removeprefix("OEBPS/")}" media-type="text/css"/>'.encode()
+        for item in css_items
+    )
+    replacements[inventory.opf_path] = replacements[inventory.opf_path].replace(
+        b"</manifest>", manifest + b"</manifest>"
+    )
+    if case == "no-canonical-cover":
+        replacements[inventory.opf_path] = replacements[inventory.opf_path].replace(
+            b'<meta name="cover" content="cover"/>', b""
+        )
+    for item in css_items:
+        replacements[item.path] = b"body { margin: 0; }"
+    inventory = replace(inventory, manifest=(*inventory.manifest, *css_items))
+    images = (
+        '<img alt="First" src="legacy/first.png"/><img alt="Second" src="legacy/second.png"/>'
+        if case == "multiple-images"
+        else '<img alt="Legacy cover" src="legacy/missing.png"/>'
+    )
+    legacy_cover = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Legacy cover</title>'
+        '<link rel="stylesheet" href="legacy/missing.css"/></head><body>'
+        f"{images}</body></html>"
+    ).encode()
+    replacements["OEBPS/aux-old.xhtml"] = legacy_cover
+
+    upgraded = upgrade_package(source, inventory, replacements)
+
+    expected = legacy_cover
+    if case != "ambiguous-css":
+        expected = expected.replace(b'href="legacy/missing.css"', b'href="styles/missing.css"')
+    if case == "ambiguous-css":
+        expected = expected.replace(b'src="legacy/missing.png"', b'src="cover.jpg"')
+    assert upgraded["OEBPS/aux-old.xhtml"] == expected
+
+
+def test_upgrade_adds_generated_navigation_content_targets_as_nonlinear_spine_items(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "2.0")
+    ncx = (
+        b'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>'
+        b'<navPoint id="aux-old"><navLabel><text>Old HTML cover</text></navLabel>'
+        b'<content src="aux-old.xhtml#cover"/></navPoint>'
+        b'<navPoint id="aux-old-again"><navLabel><text>Duplicate cover target</text></navLabel>'
+        b'<content src="aux-old.xhtml#duplicate"/></navPoint>'
+        b'<navPoint id="chapter"><navLabel><text>Chapter</text></navLabel>'
+        b'<content src="chapter.xhtml"/></navPoint></navMap></ncx>'
+    )
+    with ZipFile(source) as archive:
+        opf = archive.read(inventory.opf_path).replace(
+            b'<guide><reference type="toc" title="Contents" href="chapter.xhtml"/></guide>',
+            b'<guide><reference type="title-page" title="New XHTML notes" href="aux-new.xhtml"/>'
+            b'<reference type="toc" title="Contents" href="chapter.xhtml"/></guide>',
+        )
+    inventory, replacements = _with_auxiliary_documents(
+        source,
+        inventory,
+        {inventory.opf_path: opf, "OEBPS/toc.ncx": ncx},
+    )
+
+    upgraded = upgrade_package(source, inventory, replacements)
+
+    itemrefs = _elements(upgraded[inventory.opf_path], "itemref")
+    assert [(item.get("idref"), item.get("linear")) for item in itemrefs] == [
+        ("c1", None),
+        ("aux-old", "no"),
+        ("aux-new", "no"),
+    ]
+    assert all(item.get("idref") not in {"cover", "unused"} for item in itemrefs)
+    nav_path = next(path for path in upgraded if path.endswith("nav.xhtml"))
+    navigation = upgraded[nav_path]
+    assert b'href="aux-old.xhtml#cover"' in navigation
+    assert b'href="aux-old.xhtml#duplicate"' in navigation
+    assert b'href="aux-new.xhtml"' in navigation
+
+
+def test_navigation_spine_additions_resolve_self_unicode_and_svg_targets_once(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "2.0", nav=True)
+    inventory = replace(
+        inventory,
+        manifest=(
+            *inventory.manifest,
+            ManifestItem("unicode", "OEBPS/附录 one.xhtml", "application/xhtml+xml"),
+            ManifestItem("diagram", "OEBPS/diagram.svg", "image/svg+xml"),
+        ),
+    )
+    navigation = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<a href="#toc">Self</a><a href="%E9%99%84%E5%BD%95%20one.xhtml#one">Unicode</a>'
+        b'<a href="diagram.svg#first">Diagram</a><area href="diagram.svg#second"/>'
+        b'<a href="%E9%99%84%E5%BD%95%20one.xhtml#two">Duplicate Unicode</a>'
+        b'<a href="cover.jpg">Image</a><a href="https://example.com/help">Remote</a>'
+        b"</body></html>"
+    )
+
+    additions = navigation_spine_additions(inventory, navigation, "OEBPS/nav.xhtml")
+
+    assert additions == ("nav", "unicode", "diagram")
+
+
 def test_upgrade_builds_navigation_from_translated_spine_without_ncx(tmp_path: Path) -> None:
     source = tmp_path / "book.epub"
     inventory = _book(source, "2.0", ncx=False)
@@ -338,6 +706,54 @@ def test_upgrade_replaces_obsolete_epub2_manifest_requirements_with_properties(t
     assert not ({"required-namespace", "required-modules", "fallback-style"} & set(item.attrib))
     assert item.get("fallback") == "cover"
     assert "svg" in item.get("properties", "").split()
+
+
+@pytest.mark.parametrize(
+    ("document", "present", "absent"),
+    [
+        (
+            (
+                b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head>'
+                b'<body><svg xmlns="http://www.w3.org/2000/svg"/></body></html>'
+            ),
+            "svg",
+            "mathml",
+        ),
+        (
+            (
+                b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head>'
+                b'<body><math xmlns="http://www.w3.org/1998/Math/MathML"><mi>x</mi></math></body></html>'
+            ),
+            "mathml",
+            "svg",
+        ),
+    ],
+    ids=("stale-mathml", "stale-svg"),
+)
+def test_upgrade_reconciles_only_mathml_and_svg_manifest_properties_with_actual_content(
+    tmp_path: Path, document: bytes, present: str, absent: str
+) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "3.0", nav=True)
+    with ZipFile(source) as archive:
+        opf = archive.read(inventory.opf_path).replace(
+            b'<item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml" properties="svg"/>',
+            b'<item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml" '
+            b'properties="mathml svg scripted remote-resources custom"/>',
+        )
+
+    upgraded = upgrade_package(
+        source,
+        inventory,
+        {inventory.opf_path: opf, "OEBPS/chapter.xhtml": document},
+    )
+
+    items = {item.get("id"): item for item in _elements(upgraded[inventory.opf_path], "item")}
+    properties = set(items["c1"].get("properties", "").split())
+    assert present in properties and absent not in properties
+    assert {"scripted", "remote-resources", "custom"} <= properties
+    assert "nav" in items["nav"].get("properties", "").split()
+    assert "cover-image" in items["cover"].get("properties", "").split()
 
 
 @pytest.mark.parametrize(

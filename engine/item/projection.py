@@ -293,10 +293,21 @@ def _emit_slot(
     protected = [(start, end, "literal_marker", "protected") for start, end in literal_marker_spans(value)] + [
         (match.start(), match.end(), "existing_chinese", "out_of_scope") for match in _CJK_RE.finditer(value)
     ]
+
+    def emit_gap(start: int, end: int) -> None:
+        # A whitespace-owned range cannot also be editable projection text.
+        # This occurs between protected runs such as the name "中田 秀基".
+        if value[start:end].strip():
+            self._emit_text_range(slot, start, end, unit_id, events)
+        else:
+            self._emit_protected_text(
+                slot, start, end, events, registry, counter, parent_ref, "whitespace", "whitespace"
+            )
+
     cursor = 0
     for start, end, boundary_type, owner_kind in sorted(protected):
         if start > cursor:
-            self._emit_text_range(slot, cursor, start, unit_id, events)
+            emit_gap(cursor, start)
         self._emit_protected_text(
             slot,
             start,
@@ -310,7 +321,7 @@ def _emit_slot(
         )
         cursor = end
     if cursor < len(value):
-        self._emit_text_range(slot, cursor, len(value), unit_id, events)
+        emit_gap(cursor, len(value))
     if any(item.owner_unit_id == unit_id for item in slot.ranges):
         slot_ids.append(slot.slot_id)
 

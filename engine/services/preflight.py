@@ -55,6 +55,8 @@ class PreflightPiece(FrozenModel):
     resource_path: str = Field(min_length=1)
     source_span: ByteSpan
     source_projection: str = Field(min_length=1)
+    source_prefix: str = Field(default="", exclude_if=lambda value: not value)
+    source_suffix: str = Field(default="", exclude_if=lambda value: not value)
     translate: BudgetResult
     review: BudgetResult
 
@@ -113,6 +115,7 @@ class _ExtractInput:
     document: DocumentPlan
     raw: bytes
     source_hash: str
+    styles: Mapping[str, str] | None = None
 
 
 def preflight_atomic_resources(
@@ -195,7 +198,10 @@ def write_preflight(
         report=report,
     )
     target = _write_receipt_path(base, limits)
+    from engine.services.tables import upgrade_receipt
+
     with base.lock(), state.batch(base.root):
+        target = upgrade_receipt(base, target, record)
         for inventory in inventories:
             _write_immutable(
                 base.path("inventories", inventory.document.document_id),
@@ -224,6 +230,9 @@ def prepare_preflight(
     try:
         with zipfile.ZipFile(state.snapshot(base.root)) as archive:
             raw = {document.resource.path: archive.read(document.resource.path) for document in documents}
+            from engine.epub.styles import source_stylesheets
+
+            styles = source_stylesheets(archive)
     except (OSError, KeyError, zipfile.BadZipFile) as error:
         raise CorruptRecord(f"cannot read prepared resources: {error}") from error
     inventories = _upgrade_inventories(base, preparation, preparation_hash, limits)
@@ -231,7 +240,10 @@ def prepare_preflight(
         process = len(documents) > 1 and sum(map(len, raw.values())) >= PROCESS_MIN_BYTES
         inventories = ordered_map(
             _extract_inventory,
-            (_ExtractInput(document, raw[document.resource.path], preparation.source_hash) for document in documents),
+            (
+                _ExtractInput(document, raw[document.resource.path], preparation.source_hash, styles)
+                for document in documents
+            ),
             workers=None if process else 1,
             process=process,
         )
@@ -240,6 +252,10 @@ def prepare_preflight(
 
 def receipt_path(root: Path) -> Path:
     """Return the active logical preflight receipt without changing old records."""
+    from engine.services.tables import row_receipt
+
+    if state.is_file(rows := row_receipt(root)):
+        return rows
     overlay = root / _OUTPUT_RECEIPT
     return overlay if state.is_file(overlay) else root / _PRIMARY_RECEIPT
 
@@ -529,6 +545,10 @@ def _preflight_item(
             selected = _split_virtual(inventory, raw, item, limits, model)
         elif item.atomic_tag in {"ul", "ol"}:
             selected = _split_list(inventory, raw, item, limits, model)
+        elif item.atomic_tag == "table":
+            from engine.services.tables import split_table
+
+            selected = split_table(inventory, raw, item, limits, model)
         if selected and all(piece.translate.fits and piece.review.fits for piece in selected):
             status = "split"
         else:
@@ -573,6 +593,7 @@ def _extract_inventory(work: _ExtractInput) -> AtomicDocument:
         work.source_hash,
         document.resource.media_type,
         extractor_version=_extractor_version(document),
+        styles=work.styles,
     )
 
 
@@ -869,9 +890,13 @@ def _verify_snapshot(
         ):
             raise IdentityMismatch("preflight resource bytes changed")
     process = len(by_path) > 1 and sum(map(len, raw.values())) >= PROCESS_MIN_BYTES
+    from engine.epub.styles import source_stylesheets
+
+    with zipfile.ZipFile(snapshot) as archive:
+        styles = source_stylesheets(archive)
     canonicals = ordered_map(
         _extract_inventory,
-        (_ExtractInput(expected_documents[path], raw[path], preparation.source_hash) for path in by_path),
+        (_ExtractInput(expected_documents[path], raw[path], preparation.source_hash, styles) for path in by_path),
         workers=None if process else 1,
         process=process,
     )

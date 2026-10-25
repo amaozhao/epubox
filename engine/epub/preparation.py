@@ -16,10 +16,11 @@ from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, T
 from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
 from engine.epub.bindings import resolve_derived_navigation
+from engine.epub.styles import source_stylesheets
 from engine.epub.validation import EpubChecker, PackageInventory, ZipLimits, inspect_epub
+from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS, extract_resource
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
-from engine.item.atoms import extract_resource
 from engine.item.extractor import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_document
 from engine.item.structure import select_primary_title
 from engine.schemas.contracts import DocumentPlan, JsonValue, PreparationPlan, canonical_json_bytes
@@ -64,6 +65,7 @@ class _ResourceInput:
     book_title: str
     atomic: bool
     styles: Mapping[str, str]
+    extractor_version: str = ATOMIC_EXTRACTOR_VERSION
 
 
 def prepare_book(
@@ -135,11 +137,7 @@ def prepare_book(
         atomic = _atomic_config(config)
         with zipfile.ZipFile(snapshot) as archive:
             manifest = {item.path: item for item in inventory.manifest}
-            styles = {
-                item.path: archive.read(item.path).decode("utf-8")
-                for item in inventory.manifest
-                if item.media_type == "text/css"
-            }
+            styles = source_stylesheets(archive)
             book_title = _book_title(archive.read(inventory.opf_path).decode("utf-8"))
             paths = tuple(dict.fromkeys((*inventory.documents, inventory.ncx_path, inventory.opf_path)))
             resource_paths = tuple(path for path in paths if path)
@@ -161,6 +159,7 @@ def prepare_book(
                     book_title=book_title,
                     atomic=atomic,
                     styles=styles,
+                    extractor_version=config.extractor_version,
                 )
                 for resource_path in resource_paths
             )
@@ -244,6 +243,8 @@ def _extract_document(resource: _ResourceInput) -> DocumentPlan:
             resource.source_hash,
             media_type=resource.media_type,
             config={"book_title": resource.book_title},
+            extractor_version=resource.extractor_version,
+            styles=resource.styles,
         ).document
     return extract_document(
         resource.raw.decode("utf-8"),
@@ -457,7 +458,7 @@ def _frozen_translation_config(config: PreparationConfig) -> dict[str, JsonValue
 
 def _atomic_config(config: PreparationConfig) -> bool:
     atomic_adapter = config.adapter_version == ATOMIC_ADAPTER_VERSION
-    atomic_extractor = config.extractor_version == ATOMIC_EXTRACTOR_VERSION
+    atomic_extractor = config.extractor_version in _SUPPORTED_EXTRACTOR_VERSIONS
     if atomic_adapter != atomic_extractor:
         raise ValueError("atomic adapter and extractor versions must be selected together")
     return atomic_adapter

@@ -81,6 +81,24 @@ def test_three_nested_containers_keep_paragraphs_whole_and_inline_ranges_inside_
     validate_source_views(result.document)
 
 
+@pytest.mark.parametrize("version", [f"epubox-atomic-{number}" for number in range(1, 7)])
+@pytest.mark.parametrize("separator", [" ", "&#9;", "&#10;", "&#160;"])
+def test_protected_text_gaps_round_trip_with_translation(version: str, separator: str) -> None:
+    raw = source(f"<p>Reviewers (中田{separator}秀基) (Japanese). Use <code>fn main() {{}}</code> safely.</p>")
+    result = extract_resource(raw, "OPS/chapter.xhtml", "source", extractor_version=version)
+    validate_source_views(result.document)
+    assert fill_resource(raw, result, {item.item_id: item.source_projection for item in result.items}) == raw
+    targets = {
+        item.item_id: item.source_projection.replace("Reviewers", "审阅者").replace("Use", "使用")
+        for item in result.items
+    }
+    rendered = fill_resource(raw, result, targets)
+    assert f"中田{separator}秀基".encode() in rendered
+    assert b"<code>fn main() {}</code>" in rendered
+    assert "审阅者".encode() in rendered
+    assert all("fn main" not in view.text for view in result.document.source_views.values())
+
+
 def test_entire_tables_and_nested_lists_have_one_outer_owner() -> None:
     raw = source(
         '<table><caption>Results</caption><tr><th scope="col">Name</th><th>Count</th></tr>'
@@ -307,8 +325,22 @@ def test_program_code_div_is_protected_only_by_the_current_extractor() -> None:
         "source",
         extractor_version="epubox-atomic-3",
     )
+    version_four = extract_resource(
+        raw,
+        "OPS/chapter.xhtml",
+        "source",
+        extractor_version="epubox-atomic-4",
+    )
+    version_five = extract_resource(
+        raw,
+        "OPS/chapter.xhtml",
+        "source",
+        extractor_version="epubox-atomic-5",
+    )
 
     assert texts(current) == ["Listing caption.", "Translate prose."]
+    assert texts(version_four) == texts(current)
+    assert texts(version_five) == texts(current)
     assert texts(version_three) == [
         'const index = pc.index("document-search");',
         "Listing caption.",
@@ -319,6 +351,324 @@ def test_program_code_div_is_protected_only_by_the_current_extractor() -> None:
     assert any(
         span.byte_start <= code_start and code_end <= span.byte_end for span in current.source_map.protected_spans
     )
+
+
+def test_styled_preformatted_monospace_paragraph_is_protected_only_by_atomic_five() -> None:
+    style = (
+        "margin:0;white-space:pre-wrap;text-align:left;font-family:Menlo,Consolas,monospace;"
+        "font-size:0.75em;line-height:1.4;"
+    )
+    code = (
+        f'<p style="{style}" title="Rust listing"><span class="pub">pub</span> '
+        '<span class="fn">fn</span> main() {\n    <span class="if">if</span> count '
+        '<span class="op">/=</span> <span class="number">2</span>;\n}</p>'
+    )
+    raw = source(code + "<p>Translate nearby prose.</p>")
+
+    current = extract_resource(raw, "OPS/rust.xhtml", "source")
+    version_four = extract_resource(
+        raw,
+        "OPS/rust.xhtml",
+        "source",
+        extractor_version="epubox-atomic-4",
+    )
+    version_five = extract_resource(
+        raw,
+        "OPS/rust.xhtml",
+        "source",
+        extractor_version="epubox-atomic-5",
+    )
+
+    assert texts(current) == ["Translate nearby prose."]
+    assert current.document.extractor_version == EXTRACTOR_VERSION
+    assert texts(version_five) == texts(current)
+    assert version_five.document.extractor_version == "epubox-atomic-5"
+    assert texts(version_four) == [
+        "pub fn main() {\n    if count /= 2;\n}",
+        "Rust listing",
+        "Translate nearby prose.",
+    ]
+    assert version_four.document.extractor_version == "epubox-atomic-4"
+    code_bytes = code.encode()
+    code_start = raw.index(code_bytes)
+    code_end = code_start + len(code_bytes)
+    assert any(
+        span.byte_start <= code_start and code_end <= span.byte_end for span in current.source_map.protected_spans
+    )
+    prose = current.items[0]
+    filled = fill_resource(
+        raw,
+        current,
+        {prose.item_id: prose.source_projection.replace("Translate nearby prose.", "翻译相邻正文。")},
+    )
+    assert code_bytes in filled
+    assert "翻译相邻正文。" in filled.decode()
+
+
+def test_partial_code_styling_does_not_hide_natural_language_paragraphs() -> None:
+    raw = source(
+        '<p style="font-family:Menlo,Consolas,monospace">Natural monospace paragraph.</p>'
+        '<p style="white-space:pre-wrap">Natural pre-wrapped paragraph.</p>'
+        '<p>Natural sentence with <span style="font-family:monospace">inline code font words</span> inside.</p>'
+    )
+
+    result = extract_resource(raw, "OPS/prose.xhtml", "source", extractor_version="epubox-atomic-5")
+
+    assert texts(result) == [
+        "Natural monospace paragraph.",
+        "Natural pre-wrapped paragraph.",
+        "Natural sentence with inline code font words inside.",
+    ]
+    assert [item.atomic_tag for item in result.items] == ["p", "p", "p"]
+
+
+def test_atomic_six_protects_plain_preformatted_code_and_preserves_raw_bytes() -> None:
+    code = (
+        '<p id="logs" title="Runtime output" '
+        'style="margin:0;white-space:pre-wrap;font-family:Menlo,Consolas,monospace">'
+        "INFO ready\r\n\r\nWARN retry<!-- keep log comment -->\r\n</p>"
+    )
+    raw = source(code + "<p>Translate nearby prose.</p>")
+
+    current = extract_resource(raw, "OPS/logs.xhtml", "source")
+    version_five = extract_resource(
+        raw,
+        "OPS/logs.xhtml",
+        "source",
+        extractor_version="epubox-atomic-5",
+    )
+
+    assert EXTRACTOR_VERSION == "epubox-atomic-6"
+    assert texts(current) == ["Translate nearby prose."]
+    assert texts(version_five) == ["INFO ready\n\nWARN retry\n", "Runtime output", "Translate nearby prose."]
+    assert not any(item.kind == "attribute" for item in current.items)
+    code_bytes = code.encode()
+    code_start = raw.index(code_bytes)
+    code_end = code_start + len(code_bytes)
+    assert any(
+        span.byte_start <= code_start and code_end <= span.byte_end for span in current.source_map.protected_spans
+    )
+    prose = current.items[0]
+    filled = fill_resource(
+        raw,
+        current,
+        {prose.item_id: prose.source_projection.replace("Translate nearby prose.", "翻译相邻正文。")},
+    )
+    assert code_bytes in filled and "翻译相邻正文。" in filled.decode()
+
+
+def test_atomic_six_uses_an_opaque_atom_for_complex_inline_code() -> None:
+    code = (
+        '<span id="identifier" title="Code tooltip" style="font-family:monospace">'
+        'OutPoint::<span style="color:#795da3">new</span>("quoted\tvalue")'
+        "\r\n<!-- exact inline comment --></span>"
+    )
+    raw = source(f"<p>Explain {code} clearly.</p>")
+
+    current = extract_resource(raw, "OPS/inline.xhtml", "source")
+    version_five = extract_resource(
+        raw,
+        "OPS/inline.xhtml",
+        "source",
+        extractor_version="epubox-atomic-5",
+    )
+
+    assert len(current.items) == 1 and "⟦=x" in current.items[0].source_projection
+    assert "OutPoint" not in current.items[0].source_projection
+    assert texts(current) == ["Explain  clearly."]
+    assert texts(version_five) == ['Explain OutPoint::new("quoted\tvalue")\n clearly.', "Code tooltip"]
+    assert not any(item.kind == "attribute" for item in current.items)
+    item = current.items[0]
+    target = item.source_projection.replace("Explain ", "说明").replace(" clearly.", "。")
+    filled = fill_resource(raw, current, {item.item_id: target})
+    assert code.encode() in filled and "说明".encode() in filled
+
+
+def test_atomic_six_protects_semantic_code_program_code_and_code_classes() -> None:
+    raw = source(
+        '<pre id="semantic">fn semantic() {}</pre>'
+        '<div class="ProgramCode"><div class="FixedLine">fn program() {}</div></div>'
+        '<p class="language-rust">fn classified() {}</p>'
+        '<link rel="stylesheet" href="code.css"/>'
+        '<p class="external-code">fn external() {}</p>'
+        "<style>.embedded-code { white-space: pre-wrap; font-family: monospace; }</style>"
+        '<p class="embedded-code">fn embedded() {}</p>'
+        "<p>Translate prose.</p>"
+    )
+    styles = {"OPS/code.css": ".external-code { white-space: pre-wrap; font-family: monospace; }"}
+
+    current = extract_resource(raw, "OPS/code.xhtml", "source", styles=styles)
+    version_five = extract_resource(
+        raw,
+        "OPS/code.xhtml",
+        "source",
+        extractor_version="epubox-atomic-5",
+    )
+
+    assert texts(current) == ["Translate prose."]
+    assert texts(version_five) == [
+        "fn classified() {}",
+        "fn external() {}",
+        "fn embedded() {}",
+        "Translate prose.",
+    ]
+
+
+def test_atomic_six_resolves_namespaced_external_css_code_blocks_without_exposing_source() -> None:
+    code = '<p class="listing" title="Rust listing">pub fn external() {\r\n    ready();\r\n}</p>'
+    raw = source('<link rel="stylesheet" href="code.css"/>' + code + "<p>Translate prose.</p>")
+    styles = {
+        "OPS/code.css": (
+            '@namespace h "http://www.w3.org/1999/xhtml"; '
+            "h|p.listing { white-space: pre-wrap; font-family: monospace; }"
+        )
+    }
+
+    result = extract_resource(raw, "OPS/chapter.xhtml", "source", styles=styles)
+
+    assert texts(result) == ["Translate prose."]
+    assert not any(item.kind == "attribute" for item in result.items)
+    code_bytes = code.encode()
+    start = raw.index(code_bytes)
+    end = start + len(code_bytes)
+    assert any(span.byte_start <= start and end <= span.byte_end for span in result.source_map.protected_spans)
+    prose = result.items[0]
+    filled = fill_resource(
+        raw,
+        result,
+        {prose.item_id: prose.source_projection.replace("Translate prose.", "翻译正文。")},
+    )
+    assert code_bytes in filled and "翻译正文。".encode() in filled
+
+
+def test_atomic_six_protects_line_numbered_code_lists_and_tables_as_complete_containers() -> None:
+    listing = (
+        '<ol class="code" id="listing"><li><span class="line-number">1</span>'
+        '<span>pub fn list() {}</span></li><li><span class="line-number">2</span>'
+        '<span>println!("ready");</span></li></ol>'
+    )
+    table = (
+        '<table class="code" id="table-code"><tr><td>1</td><td>pub fn table() {}</td></tr>'
+        "<tr><td>2</td><td>return;</td></tr></table>"
+    )
+    raw = source(listing + table + "<p>Translate prose.</p>")
+
+    result = extract_resource(raw, "OPS/numbered.xhtml", "source")
+
+    assert texts(result) == ["Translate prose."]
+    for code in (listing, table):
+        data = code.encode()
+        start = raw.index(data)
+        end = start + len(data)
+        assert any(span.byte_start <= start and end <= span.byte_end for span in result.source_map.protected_spans)
+
+
+def test_atomic_six_keeps_figure_caption_editable_while_protecting_its_code() -> None:
+    code = '<pre id="figure-code"><code>pub fn figure() {\r\n    return;\r\n}</code></pre>'
+    raw = source(
+        '<figure class="code" id="example">'
+        + code
+        + "<figcaption>Translate this listing caption.</figcaption></figure>"
+        + "<p>Translate prose.</p>"
+    )
+
+    result = extract_resource(raw, "OPS/figure.xhtml", "source")
+
+    assert texts(result) == ["Translate this listing caption.", "Translate prose."]
+    data = code.encode()
+    start = raw.index(data)
+    end = start + len(data)
+    assert any(span.byte_start <= start and end <= span.byte_end for span in result.source_map.protected_spans)
+    targets = {item.item_id: item.source_projection.replace("Translate", "翻译") for item in result.items}
+    filled = fill_resource(raw, result, targets)
+    assert data in filled
+    assert "翻译 this listing caption.".encode() in filled and "翻译 prose.".encode() in filled
+
+
+@pytest.mark.parametrize(
+    ("style", "body", "protected"),
+    [
+        (
+            "white-space:pre-wrap;white-space:normal;font-family:monospace",
+            "Natural sentence after the final whitespace declaration.",
+            False,
+        ),
+        (
+            "white-space:pre-wrap!important;white-space:normal;font-family:monospace",
+            '<span style="color:#a71d5d">let</span> value = 1;',
+            True,
+        ),
+        (
+            "white-space:pre-wrap;font:12px monospace;font-family:monospace",
+            "Natural sentence with a font shorthand.",
+            False,
+        ),
+        (
+            "all:initial;white-space:pre-wrap;font-family:monospace",
+            "Natural sentence with an all declaration.",
+            False,
+        ),
+        (
+            "white-space:pre-wrap;font-family:'monospace'",
+            "Natural sentence using a font whose quoted name is monospace.",
+            False,
+        ),
+        (
+            "white-space:pre-wrap;font-family:monospace",
+            "Natural sentence with <em>non-span markup</em> inside.",
+            False,
+        ),
+        (
+            "white-space:pre-wrap;font-family:monospace",
+            "This is an ordinary English paragraph without any syntax highlighting spans.",
+            False,
+        ),
+        (
+            "white-space:pre-wrap;font-family:var(--body-font),monospace",
+            '<span style="color:#a71d5d">Dynamic font fallback is not proven code.</span>',
+            False,
+        ),
+        (
+            "white-space:pre-wrap;font-family:monospace serif",
+            '<span style="color:#a71d5d">Invalid font family syntax is not proven code.</span>',
+            False,
+        ),
+    ],
+    ids=(
+        "last-declaration-wins",
+        "important-declaration-wins",
+        "font-shorthand-is-ambiguous",
+        "all-declaration-is-ambiguous",
+        "quoted-monospace-is-a-family-name",
+        "non-span-descendant",
+        "ordinary-prose-without-syntax-spans",
+        "dynamic-font-family",
+        "invalid-generic-family-sequence",
+    ),
+)
+def test_styled_code_detection_requires_unambiguous_css_and_span_structure(
+    style: str, body: str, protected: bool
+) -> None:
+    raw = source(f'<p style="{style}">{body}</p>')
+
+    result = extract_resource(
+        raw,
+        "OPS/styled.xhtml",
+        "source",
+        extractor_version="epubox-atomic-5",
+    )
+    assert result.document.extractor_version == "epubox-atomic-5"
+
+    if protected:
+        assert not result.items
+        block_start = raw.index(b"<p ")
+        block_end = raw.index(b"</p>") + len(b"</p>")
+        assert any(
+            span.byte_start <= block_start and block_end <= span.byte_end for span in result.source_map.protected_spans
+        )
+    else:
+        assert len(result.items) == 1
+        assert result.items[0].atomic_tag == "p"
 
 
 def test_atomic_inventory_rejects_partial_and_changed_source_items_and_refuses_unproven_html() -> None:

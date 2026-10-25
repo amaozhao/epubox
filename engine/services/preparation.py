@@ -15,6 +15,7 @@ from engine.epub.preparation import (
     _frozen_translation_config,
     prepare_book,
 )
+from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.context import build_context_index, initial_derived_navigation, plan_unit
@@ -484,7 +485,8 @@ async def _advance_atomic(
         inventories = () if report.check is None else load_preflight(store, capacity, tokenizer)[1]
     del receipt, saved_report
     if report.check is None:
-        failed = sum(diagnostic.status == "blocked" for diagnostic in report.diagnostics)
+        blocked = tuple(diagnostic for diagnostic in report.diagnostics if diagnostic.status == "blocked")
+        failed = len(blocked)
         _emit(
             progress,
             PreparationProgress(
@@ -494,6 +496,12 @@ async def _advance_atomic(
                 failed,
                 0,
                 _http_attempts(store),
+                "\n".join(
+                    f"预检阻塞：{diagnostic.resource_path}，单元 {diagnostic.item_id}，"
+                    f"标签 {diagnostic.atomic_tag or 'text'}，正文 {diagnostic.source_tokens} tokens；"
+                    f"原因：{'; '.join(diagnostic.failures)}"
+                    for diagnostic in blocked
+                ),
             ),
         )
         return PreparationPipelineResult(
@@ -503,7 +511,7 @@ async def _advance_atomic(
             preparation.run_id,
             "preflight_blocked",
             reason=f"atomic preflight blocked {failed} item(s)",
-            diagnostics=tuple(diagnostic for diagnostic in report.diagnostics if diagnostic.status == "blocked"),
+            diagnostics=blocked,
         )
 
     documents = tuple(inventory.document for inventory in inventories)
@@ -741,7 +749,11 @@ def _pipeline_config(config: PreparationConfig) -> PreparationConfig:
         config,
         extraction_config=extraction,
         adapter_version=ATOMIC_ADAPTER_VERSION,
-        extractor_version=ATOMIC_EXTRACTOR_VERSION,
+        extractor_version=(
+            config.extractor_version
+            if config.extractor_version in _SUPPORTED_EXTRACTOR_VERSIONS
+            else ATOMIC_EXTRACTOR_VERSION
+        ),
     )
 
 

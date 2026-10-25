@@ -6,7 +6,7 @@ from typing import Literal
 import pytest
 
 import engine.item.members as members_module
-from engine.item.atoms import extract_resource
+from engine.item.atoms import EXTRACTOR_VERSION, extract_resource
 from engine.item.budget import measure_budget
 from engine.item.inline import projection_identities
 from engine.item.members import (
@@ -48,9 +48,16 @@ def glossary(source_hash: str = "book") -> GlossarySnapshot:
     )
 
 
-def prepared(body: str, *, path: str = "OPS/chapter.xhtml", source_hash: str = "book", cap: int = 5000):
+def prepared(
+    body: str,
+    *,
+    path: str = "OPS/chapter.xhtml",
+    source_hash: str = "book",
+    cap: int = 5000,
+    extractor_version: str = EXTRACTOR_VERSION,
+):
     raw = source(body)
-    inventory = extract_resource(raw, path, source_hash)
+    inventory = extract_resource(raw, path, source_hash, extractor_version=extractor_version)
     report = preflight_atomic_resources((inventory,), {path: raw}, limits(cap), "gpt-3.5-turbo")
     assert report.check is not None
     return inventory, report
@@ -190,7 +197,9 @@ def test_member_payload_and_packing_use_piece_identity_and_shared_context() -> N
     ),
 )
 def test_packing_preserves_budget_version_identities(version: Literal[2, 3, 4], expected: str) -> None:
-    inventory, report = prepared("<h2>Previous</h2><h2>Current</h2><h2>Following</h2>")
+    inventory, report = prepared(
+        "<h2>Previous</h2><h2>Current</h2><h2>Following</h2>", extractor_version="epubox-atomic-4"
+    )
     members = materialize_members((inventory,), report)
     index = MemberIndex((inventory,), report, members)
     configured = replace(limits(), output_version=version)
@@ -198,8 +207,24 @@ def test_packing_preserves_budget_version_identities(version: Literal[2, 3, 4], 
     assert canonical_hash(pack_members("translate", members, glossary(), index, configured)) == expected
 
 
+def test_new_extractor_identity_does_not_reinterpret_frozen_old_batches() -> None:
+    fingerprints = {}
+    for version in ("epubox-atomic-4", "epubox-atomic-5", "epubox-atomic-6"):
+        inventory, report = prepared("<p>Ordinary body text.</p>", extractor_version=version)
+        assert inventory.document.extractor_version == version
+        members = materialize_members((inventory,), report)
+        index = MemberIndex((inventory,), report, members)
+        first = pack_members("translate", members, glossary(), index, limits())
+        second = pack_members("translate", members, glossary(), index, limits())
+        assert canonical_hash(first) == canonical_hash(second)
+        fingerprints[version] = canonical_hash(first)
+    assert len(set(fingerprints.values())) == 3
+
+
 def test_packing_hashes_stable_identity_components_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    inventory, report = prepared("<h2>Previous</h2><h2>Current</h2><h2>Following</h2>")
+    inventory, report = prepared(
+        "<h2>Previous</h2><h2>Current</h2><h2>Following</h2>", extractor_version="epubox-atomic-4"
+    )
     members = materialize_members((inventory,), report)
     index = MemberIndex((inventory,), report, members)
     frozen = glossary()
@@ -353,7 +378,7 @@ def test_review_payload_binds_each_piece_target_and_parent_revision() -> None:
 
 def test_heading_priority_and_saved_versions_affect_member_request_identity() -> None:
     body = f"<p>{'word ' * 90}</p><h2>New section</h2><p>{'word ' * 90}</p>"
-    inventory, report = prepared(body)
+    inventory, report = prepared(body, extractor_version="epubox-atomic-4")
     members = materialize_members((inventory,), report)
     previous, heading, following = members
     index = MemberIndex((inventory,), report, members)

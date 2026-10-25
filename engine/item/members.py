@@ -26,6 +26,7 @@ from engine.schemas.contracts import (
 )
 from engine.schemas.members import MemberBatch, RequestMember, member_input_hash
 from engine.services.preflight import PreflightReport, preflight_budget_hash
+from engine.services.tables import unpad
 
 PACKING_VERSION = 2
 type BoundaryReason = Literal[
@@ -136,7 +137,9 @@ def materialize_document_members(
         ):
             raise ValueError("preflight piece ownership or model identity differs from its parent")
         count = len(pieces)
-        if parent.atomic_tag not in {None, "ul", "ol"} and (count != 1 or pieces[0].piece_id != parent.item_id):
+        if parent.atomic_tag not in {None, "ul", "ol", "table"} and (
+            count != 1 or pieces[0].piece_id != parent.item_id
+        ):
             raise ValueError("hard atomic items cannot be split")
         for index, piece in enumerate(pieces):
             registry = parent.registry if count == 1 else _local_registry(parent, piece.source_projection)
@@ -156,6 +159,8 @@ def materialize_document_members(
                     root_node_key=parent.node_key,
                     source_span=piece.source_span,
                     source_projection=piece.source_projection,
+                    source_prefix=piece.source_prefix,
+                    source_suffix=piece.source_suffix,
                     registry=registry,
                     atomic_tag=parent.atomic_tag,
                 )
@@ -194,7 +199,7 @@ def merge_member_targets(
         if target is None or record.target_hash != canonical_hash(target):
             raise ValueError("member merge requires a hash-bound target")
         validate_member_target(member, target)
-        targets.append(target)
+        targets.append(unpad(member, target))
     merged = "".join(targets)
     validate_projection(parent, merged, parent.registry)
     return merged

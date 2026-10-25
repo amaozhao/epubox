@@ -104,6 +104,49 @@ def test_hard_protection_splits_views_and_never_exposes_code() -> None:
     assert all("foo()" not in view.text for view in views)
 
 
+@pytest.mark.parametrize("separator", [" ", "  ", "\t", "\n", "\u00a0"])
+@pytest.mark.parametrize("body", ["Reviewers (中田{separator}秀基) (Japanese).", "Hello 中{separator}文"])
+def test_whitespace_between_protected_text_is_not_editable(separator: str, body: str) -> None:
+    from engine.epub.assembly import assemble_document
+    from engine.item.extractor import extract_document as extract_plan
+
+    source = (
+        f'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>{body.format(separator=separator)}</p></body></html>'
+    )
+    document = extract_plan(source, "OPS/chapter.xhtml", "source-hash")
+    validate_source_views(document)
+    for view in document.source_views.values():
+        assert "中" not in view.text and "秀" not in view.text
+        assert all(
+            any(
+                part.owner_unit_id == view.unit_id and part.start <= ref.start < ref.end <= part.end
+                for part in document.source_slots[ref.slot_id].ranges
+            )
+            for ref in view.source_refs
+        )
+    paragraph = document.units[0]
+    whitespace = [entry for entry in paragraph.registry.values() if entry.boundary_type == "whitespace"]
+    assert any(entry.source_text == separator for entry in whitespace)
+    targets = {
+        unit.unit_id: unit.source_projection.replace("Reviewers", "审阅者").replace("Hello", "你好")
+        for unit in document.units
+    }
+    rendered = assemble_document(document, targets).markup
+    assert f"中田{separator}秀基" in rendered or f"中{separator}文" in rendered
+
+
+def test_whitespace_around_literal_markers_is_protected_without_hiding_english_spaces() -> None:
+    document = _plan("<p> ⟦=x9⟧ \t⟦+g2⟧ English words ⟦-g2⟧ </p>")
+    unit, views = _paragraph_views(document)
+
+    assert [view.text for view in views] == [" English words "]
+    assert [entry.source_text for entry in unit.registry.values() if entry.boundary_type == "whitespace"] == [
+        " ",
+        " \t",
+        " ",
+    ]
+
+
 def test_comment_tail_uses_recorded_non_element_parent() -> None:
     document = _plan("<p>Before<!--keep-->after</p>")
     _, views = _paragraph_views(document)

@@ -167,15 +167,22 @@ def find(source: Path, source_hash: str | None = None) -> Path | None:
             raise IdentityMismatch("original source changed while locating its active session")
         identity = state.header(root)
         original = identity.get("source")
-        if (
-            not isinstance(original, dict)
-            or original.get("path") != str(source.resolve(strict=True))
-            or original.get("hash") != current_hash
-            or original.get("st_dev") != current_stat.st_dev
-            or original.get("st_ino") != current_stat.st_ino
-            or not isinstance(identity.get("run_id"), str)
-        ):
-            raise IdentityMismatch("compact book session does not match the original source")
+        expected = {
+            "path": str(source.resolve(strict=True)),
+            "hash": current_hash,
+            "st_dev": current_stat.st_dev,
+            "st_ino": current_stat.st_ino,
+        }
+        changed = [
+            name for name, value in expected.items() if not isinstance(original, dict) or original.get(name) != value
+        ]
+        if not isinstance(identity.get("run_id"), str):
+            changed.append("run_id")
+        if changed:
+            raise IdentityMismatch(
+                "compact book session does not match the original source "
+                f"(changed: {', '.join(changed)}; work_dir: {root})"
+            )
         if state.exists(root / "preparation.json"):
             preparation = RunStore(root).read_preparation()
             if (preparation.source_hash, preparation.run_id) != (current_hash, identity["run_id"]):

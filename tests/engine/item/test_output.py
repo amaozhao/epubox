@@ -138,7 +138,9 @@ def test_v2_through_v6_packing_hashes_remain_frozen() -> None:
         5: "95ac4da2d3334d6a6ef39c5bc44bce603411b56775340d57dac4b17f61ae8a7b",
         6: "d40423925617527e8761faf26637a1dfefb8ff09166899a5f301fb4a532b72be",
     }
-    inventory, report = prepared_members("<h2>Previous</h2><h2>Current</h2><h2>Following</h2>")
+    inventory, report = prepared_members(
+        "<h2>Previous</h2><h2>Current</h2><h2>Following</h2>", extractor_version="epubox-atomic-4"
+    )
     members = materialize_members((inventory,), report)
     index = MemberIndex((inventory,), report, members)
 

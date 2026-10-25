@@ -11,6 +11,14 @@ from engine.schemas.members import RequestMember
 
 TITLE = "ReAct: Synergizing Reasoning and Acting in Language Models"
 ENGLISH_SENTENCE = "This replacement remains entirely untranslated and contains a complete English sentence."
+TOKENIZER_SENTENCE = (
+    "Take this 22-word sentence that I am writing right now, containing common words, selcouth ones, "
+    "and ones that I have missspleelled."
+)
+OVERLONG_TOKENIZER_SENTENCE = (
+    "We can see how each word is split as it goes from text to token parts in this long line and we must not keep "
+    "all of this plain English when the test has more than forty words in it right now"
+)
 
 
 def member(*, lead: str = "This comes from the paper ", title: str = TITLE, element: str = "em") -> RequestMember:
@@ -134,6 +142,12 @@ def linked_member(source: str) -> RequestMember:
     return member().model_copy(update={"source_projection": source, "registry": refs})
 
 
+def attribute_member(source: str) -> RequestMember:
+    return member().model_copy(
+        update={"source_projection": source, "registry": {}, "kind": "attribute", "channel": "attribute"}
+    )
+
+
 @pytest.mark.parametrize("element", ("em", "i", "cite"))
 def test_exact_cited_paper_title_may_remain_english(element: str) -> None:
     target = f"这一方法源自论文⟦+g1⟧{TITLE}⟦-g1⟧（Yao 等，2022）。"
@@ -230,6 +244,88 @@ def test_source_grounded_example_sentence_may_remain_english(source: str, target
     value = member(title="blue").model_copy(update={"source_projection": source})
 
     assert error(value, target) is None
+
+
+def test_tokenizer_diagram_attribute_may_retain_one_bounded_long_example_sentence() -> None:
+    source = (
+        f"Diagram of the sentence “{TOKENIZER_SENTENCE}” with each token highlighted in alternating light and dark "
+        "gray rectangles around individual words, spaces, and subword segments, illustrating how a tokenizer is "
+        "breaking the sentence into thirty-three tokens."
+    )
+    target = (
+        f"句子“{TOKENIZER_SENTENCE}”的示意图，其中每个词元以交替的浅灰色和深灰色矩形突出显示，"
+        "矩形分别框住单个单词、空格和子词片段，说明分词器如何将该句子拆分成三十三个词元。"
+    )
+
+    assert error(attribute_member(source), target) is None
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    (
+        (
+            f"The quotation “{TOKENIZER_SENTENCE}” is presented on a slide.",
+            f"幻灯片上展示了引文“{TOKENIZER_SENTENCE}”。",
+        ),
+        (
+            f"Tokenizer diagram of the example sentence “{TOKENIZER_SENTENCE}” split into subword tokens.",
+            f"分词器示意图展示了被拆成子词词元的示例句子“{TOKENIZER_SENTENCE.replace('right now', 'today')}”。",
+        ),
+        (
+            f"Tokenization diagram of the sentence “{TOKENIZER_SENTENCE}” split into word and subword tokens.",
+            (
+                f"分词示意图展示了被拆成单词和子词词元的句子“{TOKENIZER_SENTENCE}”。"
+                f"图下注释再次写道：“{TOKENIZER_SENTENCE}”"
+            ),
+        ),
+        (
+            f"Tokenization diagram of the sentence “{TOKENIZER_SENTENCE}” split into word and subword tokens.",
+            (
+                f"分词示意图展示了被拆成单词和子词词元的句子“{TOKENIZER_SENTENCE}”。"
+                "This new tail remains entirely untranslated and is not part of the quoted example."
+            ),
+        ),
+        (
+            (
+                "Illustration of the sentence “This tokenizer diagram shows each token and subword as a word unit "
+                "while another tokenization example remains ordinary English prose for readers today.” in boxes."
+            ),
+            (
+                "方框中的句子示意图：“This tokenizer diagram shows each token and subword as a word unit while "
+                "another tokenization example remains ordinary English prose for readers today.”"
+            ),
+        ),
+        (
+            f"Tokenizer diagram of the sentence “{OVERLONG_TOKENIZER_SENTENCE}” split into subword tokens.",
+            f"分词器示意图展示了被拆成子词词元的句子“{OVERLONG_TOKENIZER_SENTENCE}”。",
+        ),
+        (
+            f"Tokenizer diagram of the sentence “{TOKENIZER_SENTENCE}” split into subword tokens.",
+            f"“{TOKENIZER_SENTENCE}”",
+        ),
+        (
+            (
+                f"Diagram of the sentence “{TOKENIZER_SENTENCE}”. "
+                "A tokenizer is discussed in a later, unrelated source sentence."
+            ),
+            f"句子“{TOKENIZER_SENTENCE}”的示意图。后文另一句讨论了分词器。",
+        ),
+    ),
+    ids=(
+        "ordinary-long-quote",
+        "rewritten-quote",
+        "duplicated-quote",
+        "new-untranslated-tail",
+        "tokenizer-terms-only-inside-quote",
+        "over-forty-words",
+        "target-has-no-chinese-context",
+        "tokenizer-cue-in-later-source-sentence",
+    ),
+)
+def test_tokenizer_long_quote_exemption_does_not_hide_other_english(source: str, target: str) -> None:
+    result = error(attribute_member(source), target)
+
+    assert result is not None and result.startswith("untranslated English remains:")
 
 
 def test_source_grounded_example_does_not_hide_unquoted_english_prose() -> None:

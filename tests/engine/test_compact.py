@@ -157,11 +157,14 @@ def test_plain_command_rebuilds_only_unsent_blocked_local_budget_plan(tmp_path, 
     )
     root = source.with_suffix("")
     prepared = prepare_book(source, root, config, StubChecker())
-    old = prepare_preflight(
-        RunStore(prepared.work_dir),
-        limits_from_config(prepared.preparation.translation_config),
-        cli.settings.AGNES_MODEL,
-    )
+    # Reproduce the historical checkpoint from before table-row splitting was supported.
+    with monkeypatch.context() as historical:
+        historical.setattr("engine.services.tables.split_table", lambda *_args: ())
+        old = prepare_preflight(
+            RunStore(prepared.work_dir),
+            limits_from_config(prepared.preparation.translation_config),
+            cli.settings.AGNES_MODEL,
+        )
     assert not old.passed
     upgraded = replace(
         config,

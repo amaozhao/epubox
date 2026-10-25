@@ -10,12 +10,13 @@ from typing import Any, cast
 import regex
 from lxml import etree  # type: ignore[attr-defined]
 
+from engine.core.code import CODE_CLASSIFICATION_VERSION, CodeContext
 from engine.epub.parsing import NCX_NAMESPACE, OPF_NAMESPACE, XHTML_NAMESPACE, ParsedResource, parse_resource
 from engine.epub.ranges import RangeError, ResourceIndex, index_resource
 from engine.item.extractor import _to_document_plan
 from engine.item.inline import Event, events_to_projection, literal_marker_spans
 from engine.item.planner import _false_sentence_boundary
-from engine.item.policy import _BLOCK_TAGS, _SEMANTIC_TAGS, _effective_language
+from engine.item.policy import _BLOCK_TAGS, _SEMANTIC_TAGS, _effective_language, is_styled_code_block
 from engine.item.structure import OwnerKind, SlotField, _Extractor, _Slot
 from engine.schemas.bridge import (
     ATOMIC_TAGS,
@@ -30,17 +31,30 @@ from engine.schemas.contracts import Unit
 from engine.schemas.internal import DocumentPlan as StructuralDocument
 from engine.schemas.internal import RegistryEntry, ResourceRecord, SlotRange
 
-EXTRACTOR_VERSION = "epubox-atomic-4"
+EXTRACTOR_VERSION = "epubox-atomic-6"
 ADAPTER_VERSION = "epubox-bytes-1"
 DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
 EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
 _LEGACY_EXTRACTOR_VERSION = "epubox-atomic-2"
 _V3_EXTRACTOR_VERSION = "epubox-atomic-3"
+_V4_EXTRACTOR_VERSION = "epubox-atomic-4"
+_V5_EXTRACTOR_VERSION = "epubox-atomic-5"
 _SUPPORTED_EXTRACTOR_VERSIONS = frozenset(
-    {"epubox-atomic-1", _LEGACY_EXTRACTOR_VERSION, _V3_EXTRACTOR_VERSION, EXTRACTOR_VERSION}
+    {
+        "epubox-atomic-1",
+        _LEGACY_EXTRACTOR_VERSION,
+        _V3_EXTRACTOR_VERSION,
+        _V4_EXTRACTOR_VERSION,
+        _V5_EXTRACTOR_VERSION,
+        EXTRACTOR_VERSION,
+    }
 )
-_NAVIGATION_EXTRACTOR_VERSIONS = frozenset({_LEGACY_EXTRACTOR_VERSION, _V3_EXTRACTOR_VERSION, EXTRACTOR_VERSION})
-_STEM_TITLE_FILTER_EXTRACTOR_VERSIONS = frozenset({_V3_EXTRACTOR_VERSION, EXTRACTOR_VERSION})
+_NAVIGATION_EXTRACTOR_VERSIONS = frozenset(
+    {_LEGACY_EXTRACTOR_VERSION, _V3_EXTRACTOR_VERSION, _V4_EXTRACTOR_VERSION, _V5_EXTRACTOR_VERSION, EXTRACTOR_VERSION}
+)
+_STEM_TITLE_FILTER_EXTRACTOR_VERSIONS = frozenset(
+    {_V3_EXTRACTOR_VERSION, _V4_EXTRACTOR_VERSION, _V5_EXTRACTOR_VERSION, EXTRACTOR_VERSION}
+)
 _NAVIGATION_TYPES = frozenset({"toc", "page-list", "landmarks"})
 
 
@@ -66,12 +80,26 @@ class _AtomicExtractor(_Extractor):
         media_type: str,
         config: Mapping[str, Any],
         extractor_version: str,
+        styles: Mapping[str, str] | None = None,
     ):
         self.parsed = parsed
         self.extractor_version = extractor_version
         if parsed.tree is None:
             raise RangeError("genuine HTML has no proven source mapping")
+        self._code_context = (
+            CodeContext(parsed.tree, path, styles)
+            if extractor_version == EXTRACTOR_VERSION and parsed.kind == "xhtml"
+            else None
+        )
         super().__init__(parsed.text, path, source_hash, media_type, config, None, tree=parsed.tree)
+        if self._code_context is not None:
+            self.boundaries.append(
+                {
+                    "kind": "code_style_context",
+                    "policy": CODE_CLASSIFICATION_VERSION,
+                    "styles": dict(sorted(self._code_context.stylesheet_hashes.items())),
+                }
+            )
         self._elements_by_key = {key: node for node, key in self.node_keys.items()}
         special = {slot.slot_id for slot in self.non_element_tail_slots.values()}
         self._slots_by_node: dict[str, list[_Slot]] = {}
@@ -342,14 +370,32 @@ class _AtomicExtractor(_Extractor):
             return False
         if self.parsed.kind == "xhtml" and (_namespace(node) != XHTML_NAMESPACE or _name(node) != _name(node).lower()):
             return True
+        if self._code_context is not None and self._code_context.is_code(node):
+            return True
         if (
-            self.extractor_version == EXTRACTOR_VERSION
+            self.extractor_version in {_V4_EXTRACTOR_VERSION, _V5_EXTRACTOR_VERSION}
             and self.parsed.kind == "xhtml"
             and _namespace(node) == XHTML_NAMESPACE
-            and self._is_program_code(node)
+            and (
+                self._is_program_code(node)
+                or self.extractor_version == _V5_EXTRACTOR_VERSION
+                and is_styled_code_block(node)
+            )
         ):
             return True
         return super()._is_hard(node)
+
+    def _boundary_type(self, node):
+        if self._code_context is not None and self._code_context.is_code(node):
+            return "code"
+        return super()._boundary_type(node)
+
+    def _add_atom(self, node, boundary_type, parent_ref, events, registry, counter):
+        super()._add_atom(node, boundary_type, parent_ref, events, registry, counter)
+        if self._code_context is not None and boundary_type == "code":
+            ref = f"x{counter['x']}"
+            entry = registry[ref]
+            registry[ref] = entry.model_copy(update={"hints": entry.hints | {"immutable_code": "v6"}})
 
     def _slot_for(self, node_key: str, field_name: SlotField) -> _Slot | None:
         return self._ordinary_slots.get((node_key, field_name))
@@ -445,6 +491,7 @@ def extract_resource(
     config: Mapping[str, Any] | None = None,
     *,
     extractor_version: str = EXTRACTOR_VERSION,
+    styles: Mapping[str, str] | None = None,
 ) -> AtomicDocument:
     """Prepare raw-byte atom inventory; T15 owns production pipeline integration."""
     parsed = parse_resource(data, media_type)
@@ -454,7 +501,7 @@ def extract_resource(
     index = index_resource(parsed)
     if extractor_version not in _SUPPORTED_EXTRACTOR_VERSIONS:
         raise ValueError(f"unsupported atomic extractor version: {extractor_version}")
-    draft = _AtomicExtractor(parsed, resource_path, source_hash, media_type, config or {}, extractor_version)
+    draft = _AtomicExtractor(parsed, resource_path, source_hash, media_type, config or {}, extractor_version, styles)
     document = _to_document_plan(draft.extract())
     lexical = {(slot.path, slot.field, slot.attribute_name, slot.special_index): slot for slot in index.slots}
     spans = {unit.unit_id: _span(unit, document, index, lexical) for unit in document.units}

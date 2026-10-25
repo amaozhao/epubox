@@ -3,6 +3,7 @@
 import hashlib
 import re
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -20,7 +21,14 @@ def validate(source: Path, result: EpubCheckResult) -> None:
         _keys(source, result)
 
 
-def compare(source: Path, output: Path, baseline: EpubCheckResult, result: EpubCheckResult) -> dict[str, object]:
+def compare(
+    source: Path,
+    output: Path,
+    baseline: EpubCheckResult,
+    result: EpubCheckResult,
+    *,
+    node_maps: Mapping[str, Mapping[tuple[int, ...], tuple[int, ...]]] | None = None,
+) -> dict[str, object]:
     """Allow only defects proven to belong to the same original element."""
     if baseline.command != result.command:
         raise EpubValidationError("checker_changed", "Source and output EPUBCheck commands differ")
@@ -28,7 +36,13 @@ def compare(source: Path, output: Path, baseline: EpubCheckResult, result: EpubC
         if checked.returncode not in (0, 1) or (not checked.passed and not (checked.errors or checked.fatals)):
             raise EpubValidationError("epubcheck_failed", "EPUBCheck did not return a usable conformance report")
     original = _keys(source, baseline)
-    current = _keys(output, result)
+    reverse = {
+        resource: {target: original for original, target in paths.items()}
+        for resource, paths in (node_maps or {}).items()
+    }
+    if any(len(reverse[resource]) != len(paths) for resource, paths in (node_maps or {}).items()):
+        raise EpubValidationError("invalid_cleanup_mapping", "Cleanup element mapping must be one-to-one")
+    current = _keys(output, result, source_paths=reverse)
     added = current - original
     if added:
         severity, code, resource, node, message = next(iter(added))
@@ -82,7 +96,12 @@ def same_messages(path: Path, saved: tuple[str, ...], actual: tuple[str, ...]) -
     return normalized(saved) == normalized(actual)
 
 
-def _keys(path: Path, result: EpubCheckResult) -> Counter:
+def _keys(
+    path: Path,
+    result: EpubCheckResult,
+    *,
+    source_paths: Mapping[str, Mapping[tuple[int, ...], tuple[int, ...]]] | None = None,
+) -> Counter:
     keys = Counter()
     indices: dict[str, ResourceIndex | None] = {}
     with ZipFile(path) as archive:
@@ -109,12 +128,21 @@ def _keys(path: Path, result: EpubCheckResult) -> Counter:
                 if index is None or row is None or int(row) < 1 or column is None or int(column) < 1:
                     anchor = ("bytes", hashlib.sha256(raw).hexdigest())
                 else:
-                    anchor = _node(index, int(row), int(column))
+                    attribute = re.search(r'attribute "([A-Za-z_][\w.-]*)" not allowed', message)
+                    anchor = _node(index, int(row), int(column), attribute=attribute.group(1) if attribute else None)
+                    mapping = (source_paths or {}).get(resource)
+                    if mapping is not None:
+                        original = mapping.get(tuple(anchor[1:-1]))
+                        if original is None:
+                            raise EpubValidationError(
+                                "invalid_cleanup_mapping", "Diagnostic has no retained source element"
+                            )
+                        anchor = ("element", *original, anchor[-1])
             keys[(severity, code, resource, anchor, message)] += 1
     return keys
 
 
-def _node(index: ResourceIndex, row: int, column: int) -> tuple:
+def _node(index: ResourceIndex, row: int, column: int, *, attribute: str | None = None) -> tuple:
     lines = index.text.splitlines(keepends=True)
     if row > len(lines):
         raise EpubValidationError("unmatched_diagnostic", "EPUBCheck line lies outside its resource")
@@ -128,6 +156,17 @@ def _node(index: ResourceIndex, row: int, column: int) -> tuple:
     bom = len(index.raw) - len(index.text.encode(index.encoding))
     position = bom + len(prefix.encode(index.encoding))
     nodes = [node for node in index.nodes.values() if node.full.start <= position < node.full.end]
+    if attribute is not None:
+        owners = {slot.path for slot in index.slots if slot.field == "attribute" and slot.attribute_name == attribute}
+        # SAX diagnostics can point just after the offending start tag, at a
+        # following child's '<'. Bind the attribute owner, never that child.
+        attributed = [
+            node
+            for node in index.nodes.values()
+            if node.path in owners and node.full.start < position <= node.full.end
+        ]
+        if attributed:
+            nodes = attributed
     if not nodes:
         raise EpubValidationError("unmatched_diagnostic", "EPUBCheck position cannot be bound to an element")
     node = max(nodes, key=lambda value: len(value.path))

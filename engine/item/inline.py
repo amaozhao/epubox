@@ -174,7 +174,28 @@ def validate_projection(
     elif set(source_shape["text_domains"]) != set(target_shape["text_domains"]):
         raise ProjectionError("text moved across a protected range")
     _validate_locked_order(source_shape, target_shape, refs)
+    _validate_code_immutability(source_events, target_events, refs)
     return target_events
+
+
+def _validate_code_immutability(source: Sequence[Event], target: Sequence[Event], registry: Mapping[str, Any]) -> None:
+    """V6 code atoms cannot be copied out into model-editable prose."""
+    source_text = "".join(event.value for event in source if event.kind == "text")
+    target_text = "".join(event.value for event in target if event.kind == "text")
+    for ref, entry in registry.items():
+        guard = _field(entry, "hints", default={}).get("immutable_code")
+        if guard is None:
+            continue
+        if guard != "v6" or not ref.startswith("x") or _field(entry, "boundary_type") != "code":
+            raise ProjectionError("invalid immutable code marker")
+        literal = (_field(entry, "source_text", default="") or "").strip()
+        if len(literal) < 3 or sum(character.isalnum() for character in literal) < 2:
+            continue
+        left = r"(?<!\w)" if literal[0].isalnum() or literal[0] == "_" else ""
+        right = r"(?!\w)" if literal[-1].isalnum() or literal[-1] == "_" else ""
+        pattern = re.compile(left + re.escape(literal) + right)
+        if len(pattern.findall(target_text)) > len(pattern.findall(source_text)):
+            raise ProjectionError(f"protected code {ref} must remain in its opaque marker")
 
 
 def normalize_empty_closes(source_projection: str, target_projection: str) -> str:

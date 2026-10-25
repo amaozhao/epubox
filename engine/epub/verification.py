@@ -17,8 +17,17 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from engine.core.markup import parse_xml_bytes, qname_local_name
+from engine.epub.cleanup import CLEANUP_POLICY, cleanup_resources
 from engine.epub.diagnostics import compare, references, same_messages
+from engine.epub.preservation import (
+    CODE_POLICY,
+    decode_code_maps,
+    effective_code_plan,
+    encode_code_maps,
+    verify_code_plan,
+)
 from engine.epub.replace import replacement_fingerprint
+from engine.epub.upgrade import navigation_spine_additions
 from engine.epub.validation import (
     FONT_MEDIA_PREFIXES,
     FONT_SUFFIXES,
@@ -43,6 +52,13 @@ class PackageVerification:
     baseline: dict[str, object] | None = None
     epub_version: str | None = None
     font_policy: str | None = None
+    cleanup_policy: str | None = None
+    cleanup_stats: dict[str, int] | None = None
+    cleanup_only: bool = False
+    code_policy: str | None = None
+    code_plan_hash: str | None = None
+    code_stats: dict[str, int] | None = None
+    code_node_maps: dict[str, list[list[list[int]]]] | None = None
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -57,6 +73,17 @@ class PackageVerification:
             value["epub_version"] = self.epub_version
         if self.font_policy is not None:
             value["font_policy"] = self.font_policy
+        if self.cleanup_policy is not None:
+            value["cleanup_policy"] = self.cleanup_policy
+            value["cleanup_stats"] = self.cleanup_stats
+        if self.cleanup_only:
+            value["cleanup_only"] = True
+        if self.code_policy is not None:
+            value["code_policy"] = self.code_policy
+            value["code_plan_hash"] = self.code_plan_hash
+            value["code_stats"] = self.code_stats
+            if self.code_node_maps is not None:
+                value["code_node_maps"] = self.code_node_maps
         return value
 
 
@@ -150,6 +177,11 @@ def verify_staged_epub(
     upgraded: bool = False,
     removed_paths: frozenset[str] = frozenset(),
     reader_fonts: bool = False,
+    cleanup: Mapping[str, int] | None = None,
+    cleanup_only: bool = False,
+    code_plan: Mapping[str, object] | None = None,
+    code_node_maps: Mapping[str, Mapping[tuple[int, ...], tuple[int, ...]]] | None = None,
+    source_code: bool = False,
 ) -> PackageVerification:
     output_hash = file_hash(staged_path)
     output_inventory = inspect_epub(staged_path, output_hash, checker=checker, for_output=True)
@@ -171,9 +203,16 @@ def verify_staged_epub(
         raise EpubValidationError("resource_inventory_changed", "Output resource inventory differs from source")
     if output_inventory.opf_path != source_inventory.opf_path:
         raise EpubValidationError("opf_changed", "Output package document path differs from source")
-    if output_inventory.spine != source_inventory.spine:
+    additions: tuple[str, ...] = ()
+    if upgraded and not cleanup_only and output_inventory.nav_path is not None:
+        nav_path = output_inventory.nav_path
+        with zipfile.ZipFile(source_snapshot) as archive:
+            nav_data = expected_documents[nav_path] if nav_path in expected_documents else archive.read(nav_path)
+        additions = navigation_spine_additions(source_inventory, nav_data, nav_path)
+    if output_inventory.spine != (*source_inventory.spine, *additions):
         raise EpubValidationError("spine_changed", "Output reading order differs from source")
-    if output_inventory.spine_linear != source_inventory.spine_linear:
+    expected_linear = {**source_inventory.spine_linear, **dict.fromkeys(additions, False)}
+    if output_inventory.spine_linear != expected_linear:
         raise EpubValidationError("spine_changed", "Output linear reading order differs from source")
     output_items = {item.item_id: item for item in output_inventory.manifest}
     stylesheets = {item.path for item in output_inventory.manifest if item.media_type == "text/css"}
@@ -229,8 +268,13 @@ def verify_staged_epub(
             "Upgraded EPUB 3.0 still has EPUBCheck ERROR/FATAL: "
             + next(iter((*result.fatals, *result.errors)), "checker failed"),
         )
+    node_maps: dict[str, dict[tuple[int, ...], tuple[int, ...]]] = {}
+    if cleanup_only and cleanup is not None and not upgraded and (not source_result.passed or not result.passed):
+        node_maps = _cleanup_node_maps(
+            source_snapshot, staged_path, {item.path: item.media_type for item in source_inventory.manifest}
+        )
     baseline = (
-        compare(source_snapshot, staged_path, source_result, result)
+        compare(source_snapshot, staged_path, source_result, result, node_maps=node_maps)
         if not upgraded and (not source_result.passed or not result.passed)
         else None
     )
@@ -242,6 +286,28 @@ def verify_staged_epub(
         if pending or remaining:
             raise EpubValidationError("font_policy_failed", "Output still contains publisher fonts")
         font_policy = FONT_POLICY
+    cleanup_policy = None
+    if cleanup is not None:
+        pending, _stats = cleanup_resources(
+            {}, media_types={item.path: item.media_type for item in output_inventory.manifest}, source=staged_path
+        )
+        if pending:
+            raise EpubValidationError(
+                "cleanup_policy_failed", "Output does not satisfy the publication cleanup policy"
+            )
+        cleanup_policy = CLEANUP_POLICY
+    if source_code:
+        code_plan = effective_code_plan(source_snapshot, code_plan)
+    code_stats = (
+        verify_code_plan(source_snapshot, staged_path, code_plan, node_maps=code_node_maps)
+        if code_plan is not None
+        else ({"checked_resources": 0, "selected_regions": 0, "selected_bytes": 0} if source_code else None)
+    )
+    from engine.schemas.contracts import canonical_hash
+
+    code_resources = code_plan.get("resources", {}) if code_plan is not None else {}
+    if not isinstance(code_resources, Mapping):
+        raise EpubValidationError("invalid_code_plan", "Source code resource inventory must be a mapping")
     return PackageVerification(
         output_hash,
         result,
@@ -250,6 +316,15 @@ def verify_staged_epub(
         baseline,
         "3.0" if upgraded else None,
         font_policy,
+        cleanup_policy,
+        dict(cleanup) if cleanup is not None else None,
+        cleanup_only,
+        CODE_POLICY if source_code or code_plan is not None else None,
+        canonical_hash(code_plan) if source_code or code_plan is not None else None,
+        code_stats,
+        encode_code_maps({path: paths for path, paths in (code_node_maps or {}).items() if path in code_resources})
+        if code_node_maps
+        else None,
     )
 
 
@@ -313,6 +388,8 @@ def verify_baseline(
     output_path: Path,
     verification: Mapping[str, object],
     checker: object | None = None,
+    *,
+    code_plan: Mapping[str, object] | None = None,
 ) -> None:
     """Recheck inherited EPUBCheck failures without trusting a persisted command."""
     epubcheck = verification.get("epubcheck")
@@ -335,6 +412,25 @@ def verify_baseline(
                 raise EpubValidationError("invalid_publish_intent", "Published package is not EPUB 3.0")
     baseline = verification.get("baseline")
     if baseline is None and epubcheck["passed"] is True:
+        if verification.get("code_policy") == CODE_POLICY:
+            from engine.schemas.contracts import canonical_hash
+
+            code_plan = effective_code_plan(source_path, code_plan)
+            if verification.get("code_plan_hash") != canonical_hash(code_plan):
+                raise EpubValidationError("invalid_publish_intent", "Source code policy differs from published plan")
+            raw_maps = verification.get("code_node_maps")
+            maps = decode_code_maps(raw_maps) if raw_maps is not None and raw_maps != {} else None
+            stats = (
+                verify_code_plan(source_path, output_path, code_plan, node_maps=maps)
+                if code_plan is not None
+                else {
+                    "checked_resources": 0,
+                    "selected_regions": 0,
+                    "selected_bytes": 0,
+                }
+            )
+            if verification.get("code_stats") != stats:
+                raise EpubValidationError("invalid_publish_intent", "Published source code counts changed")
         return
     output_hash = file_hash(output_path)
     source_hash = file_hash(source_path)
@@ -383,7 +479,16 @@ def verify_baseline(
     if not isinstance(source_result, EpubCheckResult) or not isinstance(output_result, EpubCheckResult):
         raise TypeError("checker.check() must return EpubCheckResult")
     if (
-        compare(source_path, output_path, source_result, output_result) != baseline
+        compare(
+            source_path,
+            output_path,
+            source_result,
+            output_result,
+            node_maps=_cleanup_node_maps(source_path, output_path)
+            if verification.get("cleanup_only") is True
+            else None,
+        )
+        != baseline
         or command != list(output_result.command)
         or returncode != output_result.returncode
         or not same_messages(output_path, tuple(errors), output_result.errors)
@@ -392,20 +497,42 @@ def verify_baseline(
         raise EpubValidationError("invalid_publish_intent", "Inherited EPUBCheck evidence changed")
 
 
+def _cleanup_node_maps(
+    source_path: Path, output_path: Path, media_types: Mapping[str, str] | None = None
+) -> dict[str, dict[tuple[int, ...], tuple[int, ...]]]:
+    """Bind inherited diagnostics only after proving an exclusively approved cleanup."""
+    maps: dict[str, dict[tuple[int, ...], tuple[int, ...]]] = {}
+    cleaned, _stats = cleanup_resources({}, media_types=media_types, source=source_path, node_maps=maps)
+    with zipfile.ZipFile(source_path) as source, zipfile.ZipFile(output_path) as output:
+        for path in maps:
+            if output.read(path) != cleaned.get(path, source.read(path)):
+                raise EpubValidationError(
+                    "invalid_cleanup_mapping", "Cleanup baseline differs from the approved byte patches"
+                )
+    return maps
+
+
 def recover_publication(
     publish_path: Path,
     *,
     plan_fingerprint: str,
     version_vector: Mapping[str, int | str],
+    allow_policy_upgrade: bool = False,
 ) -> dict[str, object] | None:
     if not state.is_file(publish_path):
         return None
     data = json.loads(state.text(publish_path))
     if data.get("format") != "epubox-publish-1":
         raise EpubValidationError("invalid_publish_intent", "Unknown publish intent format")
-    if data.get("plan_fingerprint") != _publication_fingerprint(plan_fingerprint) or data.get(
-        "version_vector"
-    ) != dict(sorted(version_vector.items())):
+    fingerprints = {_publication_fingerprint(plan_fingerprint)}
+    if allow_policy_upgrade:
+        verification = data.get("verification")
+        previous_policy = verification.get("cleanup_policy") if isinstance(verification, dict) else None
+        if previous_policy is None or isinstance(previous_policy, str):
+            fingerprints.add(_policy_fingerprint(plan_fingerprint, previous_policy))
+    if data.get("plan_fingerprint") not in fingerprints or data.get("version_vector") != dict(
+        sorted(version_vector.items())
+    ):
         return None
     target = Path(str(data.get("target_path", "")))
     target_hash = data.get("target_hash")
@@ -419,8 +546,14 @@ def recover_publication(
 
 
 def _publication_fingerprint(plan_fingerprint: str) -> str:
+    return _policy_fingerprint(plan_fingerprint, CLEANUP_POLICY)
+
+
+def _policy_fingerprint(plan_fingerprint: str, cleanup_policy: str | None) -> str:
     value = f"{plan_fingerprint}:{replacement_fingerprint()}"
-    return hashlib.sha256(value.encode("ascii")).hexdigest()
+    if cleanup_policy is not None:
+        value += f":{cleanup_policy}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _validate_metadata(

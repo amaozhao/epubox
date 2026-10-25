@@ -19,6 +19,27 @@ from tests.engine.epub.test_preparation import StubChecker
 from tests.engine.execution.test_support import ready_store
 
 
+def test_oversized_table_resume_reports_the_block_without_claiming_body_recovery(tmp_path, monkeypatch) -> None:
+    source = make_epub(
+        tmp_path / "source.epub",
+        {"chapter.xhtml": f"<table><tr><td><p>{'word ' * 1600}</p></td></tr></table>"},
+    )
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: SimpleNamespace(id=cli.settings.AGNES_MODEL))
+    monkeypatch.setattr(cli, "checker_for_source", lambda *_args: StubChecker())
+    monkeypatch.setattr(cli, "run_translation", lambda *_args, **_kwargs: pytest.fail("must not translate"))
+
+    for _ in range(2):
+        progress = []
+        result = cli.translate_book(source, auto_extract=False, progress=progress.append)
+        assert result.status == "needs_attention" and result.phase == "preflight"
+        assert result.http_attempts == 0
+        assert result.reason is not None
+        assert "OEBPS/chapter.xhtml" in result.reason and "table" in result.reason
+        assert "source budget" in result.reason and "exceeds 1500" in result.reason
+        assert any(event.get("failed") == 1 and "OEBPS/chapter.xhtml" in event.get("notice", "") for event in progress)
+        assert not any("开始核对正文断点" in event.get("notice", "") for event in progress)
+
+
 @pytest.mark.asyncio
 async def test_internal_translation_error_keeps_a_failed_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

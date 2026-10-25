@@ -10,6 +10,7 @@ from engine.schemas.bridge import AtomicItem
 from engine.schemas.contracts import RegistryEntry, canonical_hash
 from engine.schemas.members import RequestMember
 from engine.services.preflight import validate_list_pieces
+from engine.services.tables import unpad, validate_table_pieces
 
 
 def initialize_verified_catalog(
@@ -77,11 +78,15 @@ def validate_coverage(parent: AtomicItem, pieces: Sequence[Any]) -> None:
         raise ValueError("preflight pieces must end at the parent source span")
     if any(left.source_span.byte_end != right.source_span.byte_start for left, right in pairwise(pieces)):
         raise ValueError("preflight piece spans must be contiguous")
-    if "".join(piece.source_projection for piece in pieces) != parent.source_projection:
+    if parent.atomic_tag != "table" and any(piece.source_prefix or piece.source_suffix for piece in pieces):
+        raise ValueError("only split tables may carry virtual row-group wrappers")
+    if "".join(unpad(piece, piece.source_projection) for piece in pieces) != parent.source_projection:
         raise ValueError("preflight piece projections must exactly reconstruct their parent")
     if any(not piece.translate.fits or not piece.review.fits for piece in pieces):
         raise ValueError("request members require passing translate and review budgets")
     if len(pieces) == 1:
+        if pieces[0].source_prefix or pieces[0].source_suffix:
+            raise ValueError("whole items cannot carry virtual row-group wrappers")
         if pieces[0].piece_id != parent.item_id:
             raise ValueError("a whole member must retain its parent item ID")
         return
@@ -99,6 +104,8 @@ def validate_coverage(parent: AtomicItem, pieces: Sequence[Any]) -> None:
     )
     if parent.atomic_tag in {"ul", "ol"}:
         validate_list_pieces(parent, pieces)
+    elif parent.atomic_tag == "table":
+        validate_table_pieces(parent, pieces)
     elif any(piece.source_span.byte_end not in safe_offsets for piece in pieces[:-1]):
         raise ValueError("split member seams must use frozen safe source boundaries")
     for piece in pieces:

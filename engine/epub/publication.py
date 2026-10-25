@@ -8,6 +8,8 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name, serialize_xml
 from engine.epub.assembly import assemble_document, derive_navigation_projection
+from engine.epub.cleanup import cleanup_resources
+from engine.epub.preservation import apply_code_plan, effective_code_plan
 from engine.epub.replace import replace_resources
 from engine.epub.styles import use_reader_fonts
 from engine.epub.upgrade import upgrade_package
@@ -233,6 +235,13 @@ def publish_book(
     media_types[inventory.opf_path] = "application/oebps-package+xml"
     replacements = replace_resources(replacements, media_types=media_types, source=snapshot)
     replacements, removed_paths = use_reader_fonts(snapshot, inventory, replacements)
+    code_plan = effective_code_plan(snapshot)
+    if code_plan is not None:
+        replacements, _code_stats = apply_code_plan(snapshot, replacements, code_plan)
+    code_node_maps: dict[str, dict[tuple[int, ...], tuple[int, ...]]] = {}
+    replacements, cleanup = cleanup_resources(
+        replacements, media_types=media_types, source=snapshot, node_maps=code_node_maps
+    )
     for path in replacements:
         accepted_by_resource.setdefault(path, {})
     staged_path = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
@@ -255,6 +264,10 @@ def publish_book(
         upgraded=True,
         removed_paths=removed_paths,
         reader_fonts=True,
+        cleanup=cleanup,
+        code_plan=code_plan,
+        code_node_maps=code_node_maps,
+        source_code=True,
     )
     if not identity:
         current_records = {unit_id: store.read_unit(unit_id) for unit_id in plan.unit_ids}

@@ -10,8 +10,10 @@ from typing import Any, cast
 import typer
 
 from engine.cli import RunOutcome, resume_book, translate_book
+from engine.epub.validation import EpubValidationError
+from engine.item.views import SourceViewError
 from engine.services import state
-from engine.services.atomic import StoreLocked
+from engine.services.atomic import IdentityMismatch, StoreLocked
 from engine.services.resume import plan_resume
 from engine.services.retry import restart_command
 
@@ -80,7 +82,24 @@ def translate(
         except StoreLocked as error:
             typer.echo("同一本书已有翻译进程在运行；请等它退出后，用相同命令继续。", err=True)
             raise typer.Exit(1) from error
+        except IdentityMismatch as error:
+            typer.echo(f"翻译未完成：断点身份校验失败，已停止自动续跑。\n原因：{error}", err=True)
+            typer.echo("请核对原书和工作目录；若已替换原书，请保留旧断点并使用新的 --work-root。", err=True)
+            raise typer.Exit(1) from error
+        except SourceViewError as error:
+            typer.echo(f"翻译未完成：原文投影校验失败，已停止自动续跑。\n原因：{error}", err=True)
+            typer.echo("这是本地结构校验错误；原书和现有断点均已保留，修复程序后可用相同命令继续。", err=True)
+            raise typer.Exit(1) from error
         except Exception as error:
+            if isinstance(error, EpubValidationError) and error.code == "unsupported_source":
+                typer.echo("翻译未完成：原书包含当前不支持的内容，已停止自动续跑。", err=True)
+                details = tuple(
+                    dict.fromkeys(f"{issue.resource or '原书'}：{issue.message}" for issue in error.issues)
+                ) or (str(error),)
+                for detail in details:
+                    typer.echo(f"- {detail}", err=True)
+                typer.echo("这是本地兼容性检查，重复重试不会解决；原书和现有断点均已保留。", err=True)
+                raise typer.Exit(1) from error
             previous_attention = None
             if attempt == 5:
                 typer.echo(f"翻译未完成：{error}", err=True)
@@ -89,6 +108,9 @@ def translate(
         else:
             explicit = frozenset()  # Later rounds resume the configuration validated by the first result.
             if result.status == "completed":
+                _print_result(result)
+                return
+            if result.status == "needs_attention" and result.phase == "preflight":
                 _print_result(result)
                 return
             if result.status == "needs_attention" and result.phase == "translation":

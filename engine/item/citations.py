@@ -39,6 +39,8 @@ _TARGET_QUOTED_TEXT = re.compile(r"\"([^\"]{2,200})\"|“([^”]{2,200})”|‘(
 _FOCUSED_QUOTED_CUE = re.compile(
     r"^(?:example|phrase|quotation|quote|sentence|term|word|(?:example|sample)\s+)", re.IGNORECASE
 )
+_TOKENIZATION_CUE = re.compile(r"\btokeni[sz](?:er|ation|e[ds]?|ing)\b", re.IGNORECASE)
+_EXAMPLE_SENTENCE_CUE = re.compile(r"^(?:(?:example|sample)\s+)?sentence$", re.IGNORECASE)
 
 
 def script_paragraphs_without_retained_titles(
@@ -52,7 +54,11 @@ def script_paragraphs_without_retained_titles(
     source_ranges = _range_texts(source_events)
     target_ranges = _range_texts(target_events)
     source_text = _unmarked_text(source_events, registry)
-    grounded_quotes = _source_grounded_quoted_phrases(source_text, tuple(source_ranges.values()))
+    grounded_quotes = _source_grounded_quoted_phrases(
+        source_text,
+        tuple(source_ranges.values()),
+        tokenization_examples=any("\u4e00" <= char <= "\u9fff" for char in _unmarked_text(target_events, registry)),
+    )
     retained: set[str] = set()
 
     for index, event in enumerate(source_events):
@@ -116,19 +122,36 @@ def _without_source_names(source: str, target: str) -> str:
     return _SOURCE_NAME.sub(lambda match: "" if _has_name_context(source, match.group(0)) else match.group(0), target)
 
 
-def _source_grounded_quoted_phrases(source: str, focused: Sequence[str]) -> Counter[str]:
+def _source_grounded_quoted_phrases(
+    source: str, focused: Sequence[str], *, tokenization_examples: bool = False
+) -> Counter[str]:
     result: Counter[str] = Counter()
     terms = tuple(term for value in focused if (term := _focused_term_key(value)) is not None)
     for match in _SOURCE_QUOTED_CUE.finditer(source):
         value = next(match.group(name) for name in ("straight", "curly", "single") if match.group(name) is not None)
-        key = _quoted_phrase_key(value)
+        tokenization = tokenization_examples and _tokenization_example(source, match)
+        key = _quoted_phrase_key(value, max_words=40 if tokenization else 20)
         if key is None:
             continue
         cue = match.group("cue")
-        if _FOCUSED_QUOTED_CUE.match(cue) and not any(_contains_focused_term(key, term) for term in terms):
+        if (
+            not tokenization
+            and _FOCUSED_QUOTED_CUE.match(cue)
+            and not any(_contains_focused_term(key, term) for term in terms)
+        ):
             continue
         result[key] += 1
     return result
+
+
+def _tokenization_example(source: str, match: re.Match[str]) -> bool:
+    if not _EXAMPLE_SENTENCE_CUE.fullmatch(match.group("cue")):
+        return False
+    # The technical cue must be outside the quote, in its surrounding sentence.
+    # A quoted paragraph about tokenizers is still ordinary translatable prose.
+    before = re.split(r"[.!?。！？\n]", source[: match.start()])[-1][-120:]
+    after = re.split(r"[.!?。！？\n]", source[match.end() :], maxsplit=1)[0][:400]
+    return _TOKENIZATION_CUE.search(before + " " + after) is not None
 
 
 def _without_source_quoted_phrases(grounded: Counter[str], target: str) -> str:
@@ -137,7 +160,8 @@ def _without_source_quoted_phrases(grounded: Counter[str], target: str) -> str:
 
     def remove(match: re.Match[str]) -> str:
         value = next(value for value in match.groups() if value is not None)
-        key = _quoted_phrase_key(value)
+        # Longer keys can only enter the counter through source-proven examples.
+        key = _quoted_phrase_key(value, max_words=40)
         if key is None or grounded[key] <= 0:
             return match.group(0)
         grounded[key] -= 1
@@ -146,10 +170,10 @@ def _without_source_quoted_phrases(grounded: Counter[str], target: str) -> str:
     return _TARGET_QUOTED_TEXT.sub(remove, target)
 
 
-def _quoted_phrase_key(value: str) -> str | None:
+def _quoted_phrase_key(value: str, *, max_words: int = 20) -> str | None:
     normalized = re.sub(r"\s+", " ", value).strip(" \t,.;:!?，。；：！？、")
     words = re.findall(r"[A-Za-z][A-Za-z’'-]*", normalized)
-    if not 2 <= len(words) <= 20 or any("\u4e00" <= char <= "\u9fff" for char in normalized):
+    if not 2 <= len(words) <= max_words or any("\u4e00" <= char <= "\u9fff" for char in normalized):
         return None
     return normalized.casefold()
 

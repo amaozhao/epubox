@@ -5,7 +5,9 @@ from typer.testing import CliRunner
 
 import main
 from engine.cli import RunOutcome
-from engine.services.atomic import StoreLocked
+from engine.epub.validation import EpubValidationError, ValidationIssue
+from engine.item.views import SourceViewError
+from engine.services.atomic import IdentityMismatch, StoreLocked
 
 
 def test_translate_cli_uses_one_pipeline_and_defaults_to_auto_terms(tmp_path: Path, monkeypatch) -> None:
@@ -44,6 +46,155 @@ def test_translate_cli_explains_active_same_book_run(tmp_path: Path, monkeypatch
     assert result.exit_code == 1
     assert "已有翻译进程在运行" in result.output
     assert len(calls) == 1 and "自动续跑" not in result.output
+
+
+def test_translate_cli_stops_on_checkpoint_identity_errors(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def mismatched(*_args, **_kwargs):
+        calls.append(True)
+        raise IdentityMismatch("compact book session does not match the original source")
+
+    monkeypatch.setattr(main, "translate_book", mismatched)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    assert "断点身份校验失败" in result.output
+    assert "compact book session does not match the original source" in result.output
+    assert "自动续跑：" not in result.output
+    assert "本轮翻译中断" not in result.output
+
+
+def test_translate_cli_stops_on_source_projection_errors_without_retrying(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def invalid_projection(*_args, **_kwargs):
+        calls.append(True)
+        raise SourceViewError("u-source: projection/source mismatch at s-source[3:4]")
+
+    monkeypatch.setattr(main, "translate_book", invalid_projection)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    assert "原文投影校验失败，已停止自动续跑" in result.output
+    assert "projection/source mismatch at s-source[3:4]" in result.output
+    assert "这是本地结构校验错误" in result.output
+    assert "原书和现有断点均已保留" in result.output
+    assert "自动续跑：" not in result.output
+    assert "本轮翻译中断" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("issues", "resources"),
+    [
+        (
+            (ValidationIssue("scripted_content", "Script in reading-order document", resource="OPS/a.xhtml"),),
+            ("OPS/a.xhtml",),
+        ),
+        (
+            (
+                ValidationIssue("scripted_content", "Script in reading-order document", resource="OPS/a.xhtml"),
+                ValidationIssue("scripted_content", "Script in reading-order document", resource="OPS/a.xhtml"),
+                ValidationIssue("scripted_content", "Script in reading-order document", resource="OPS/b.xhtml"),
+            ),
+            ("OPS/a.xhtml", "OPS/b.xhtml"),
+        ),
+    ],
+)
+def test_translate_cli_stops_on_unsupported_source_and_lists_each_resource_once(
+    tmp_path: Path, monkeypatch, issues: tuple[ValidationIssue, ...], resources: tuple[str, ...]
+) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def unsupported(*_args, **_kwargs):
+        calls.append(True)
+        raise EpubValidationError("unsupported_source", issues[0].message, issues=issues)
+
+    monkeypatch.setattr(main, "translate_book", unsupported)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    assert "原书包含当前不支持的内容，已停止自动续跑" in result.output
+    assert "原书和现有断点均已保留" in result.output
+    assert "自动续跑：" not in result.output
+    for resource in resources:
+        assert result.output.count(resource) == 1
+
+
+def test_translate_cli_retries_epubcheck_timeout_five_times(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def timeout(*_args, **_kwargs):
+        calls.append(True)
+        raise EpubValidationError("epubcheck_timeout", "EPUBCheck timed out")
+
+    monkeypatch.setattr(main, "translate_book", timeout)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert len(calls) == 5
+    assert result.output.count("自动续跑：") == 4
+    assert result.output.count("EPUBCheck timed out") == 5
+
+
+def test_translate_cli_preserves_checkpoint_when_source_is_replaced(tmp_path: Path, monkeypatch) -> None:
+    import hashlib
+
+    from engine import cli
+    from engine.services import state
+    from tests.engine.epub.test_factory import make_epub
+
+    source = make_epub(tmp_path / "book.epub", {"chapter.xhtml": "<p>Original.</p>"})
+    root = source.with_suffix("")
+    state.initialize(root, source, hashlib.sha256(source.read_bytes()).hexdigest(), "old-run")
+    before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+    make_epub(source, {"chapter.xhtml": "<p>Replacement.</p>"})
+    replacement = source.read_bytes()
+    monkeypatch.setattr(cli, "build_run_model", lambda *_args, **_kwargs: pytest.fail("must not build a model"))
+
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert result.output.count("startup:") == 1
+    assert "断点身份校验失败" in result.output
+    assert "hash" in result.output and str(root) in result.output
+    assert "自动续跑：" not in result.output
+    assert source.read_bytes() == replacement
+    assert {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()} == before
+
+
+def test_translate_cli_stops_on_preflight_attention_without_retrying(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def blocked(*_args, **_kwargs):
+        calls.append(True)
+        return RunOutcome(
+            "needs_attention",
+            tmp_path / "work",
+            "preflight",
+            reason="不可拆分表格超过单次请求上限",
+        )
+
+    monkeypatch.setattr(main, "translate_book", blocked)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    assert "不可拆分表格超过单次请求上限" in result.output
+    assert "自动续跑：" not in result.output
 
 
 @pytest.mark.parametrize("status", ("paused", "failed", "exception"))

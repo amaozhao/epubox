@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -8,8 +11,9 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import tinycss2
 
@@ -30,6 +34,13 @@ FONT_OBFUSCATION_ALGORITHMS = {
     "http://www.idpf.org/2008/embedding",
     "http://ns.adobe.com/pdf/enc#RC",
 }
+
+
+@lru_cache(maxsize=1)
+def _mathjax_distributions() -> dict[str, dict[str, str]]:
+    """Offline hashes of upstream packed JS, including dynamically loaded assets."""
+    versions = json.loads(Path(__file__).with_name("mathjax.json").read_text())
+    return {record["loader_sha256"]: record["assets"] for record in versions.values()}
 
 
 @dataclass(frozen=True)
@@ -470,7 +481,6 @@ def _support_blockers(
     for_output: bool = False,
 ) -> tuple[ValidationIssue, ...]:
     issues: list[ValidationIssue] = []
-    manifest_by_id = {item.item_id: item for item in manifest}
     for element in opf.iter():
         name = _local_name(element.tag)
         value = (element.text or element.attrib.get("content", "")).strip().lower()
@@ -486,16 +496,21 @@ def _support_blockers(
         issues.append(ValidationIssue("signature", "Signed EPUB relationships are not supported"))
     if any(item.media_overlay and item.item_id in spine for item in manifest):
         issues.append(ValidationIssue("media_overlay", "Synchronized media overlays are not supported"))
-    if not for_output and any("scripted" in item.properties for item in manifest):
-        issues.append(ValidationIssue("scripted_content", "Script-generated reading content is not supported"))
-
-    for item_id in spine:
-        item = manifest_by_id[item_id]
+    for item in manifest:
         if item.media_type not in XHTML_MEDIA_TYPES:
+            if not for_output and "scripted" in item.properties:
+                issues.append(
+                    ValidationIssue(
+                        "scripted_content", "Scripted non-XHTML content is not supported", resource=item.path
+                    )
+                )
             continue
         root = _parse_xml_bytes(_read_bytes(archive, item.path), item.path)
-        if any(_local_name(element.tag) == "script" for element in root.iter()):
-            issues.append(ValidationIssue("scripted_content", "Script in reading-order document", resource=item.path))
+        reason = _script_blocker(
+            archive, root, item.path, manifest, declared=not for_output and "scripted" in item.properties
+        )
+        if reason:
+            issues.append(ValidationIssue("scripted_content", reason, resource=item.path))
 
     encryption_path = "META-INF/encryption.xml"
     if encryption_path in entries:
@@ -534,6 +549,209 @@ def _support_blockers(
                     ValidationIssue("encrypted_content", "Encrypted body/resource is not supported", resource=resource)
                 )
     return tuple(issues)
+
+
+def _script_blocker(
+    archive: zipfile.ZipFile, root: ET.Element, resource: str, manifest: tuple[ManifestItem, ...], *, declared: bool
+) -> str | None:
+    """Accept static documents with local MathJax rendering, without running JS."""
+    head = next((node for node in root if _local_name(node.tag) == "head"), None)
+    head_scripts = set(head) if head is not None else set()
+    local_scripts = {
+        item.path for item in manifest if item.media_type in {"text/javascript", "application/javascript"}
+    }
+    configs: list[dict[str, object]] = []
+    loaders: list[tuple[str, str, str]] = []
+    has_scripts = any(_local_name(node.tag) == "script" for node in root.iter())
+    for node in root.iter():
+        if has_scripts and (
+            (_local_name(node.tag) == "base" and node.get("href"))
+            or node.get("{http://www.w3.org/XML/1998/namespace}base")
+        ):
+            return "Base URLs can redirect MathJax resources outside the verified package"
+        if declared and _local_name(node.tag) in {
+            "form",
+            "input",
+            "select",
+            "textarea",
+            "button",
+            "object",
+            "fieldset",
+            "output",
+        }:
+            return "Script-generated interactive reading content is not supported"
+        if any(_local_name(name).lower().startswith("on") for name in node.attrib):
+            return "Executable event handlers may generate reading content and are not supported"
+        if any(urlsplit(value.strip()).scheme.lower() == "javascript" for value in node.attrib.values()):
+            return "JavaScript URLs may generate reading content and are not supported"
+        if _local_name(node.tag) != "script":
+            continue
+        script_type = node.get("type", "").strip().lower()
+        if script_type in {"application/json", "application/ld+json"} and not node.get("src"):
+            continue
+        if node not in head_scripts:
+            return "Executable script in reading content is not supported"
+        if script_type == "text/x-mathjax-config" and not node.get("src"):
+            config = _declarative_mathjax_config(node.text or "")
+            if config is not None:
+                configs.append(config)
+                continue
+            return "MathJax configuration contains unsupported executable code"
+        src = urlsplit(node.get("src", "").strip())
+        if (
+            script_type not in {"", "text/javascript", "application/javascript"}
+            or src.scheme
+            or src.netloc
+            or src.fragment
+            or not src.path
+            or PurePosixPath(unquote(src.path)).name != "MathJax.js"
+            or (node.text or "").strip()
+        ):
+            return "Unknown executable script; only local MathJax rendering is supported"
+        path = _resolve_package_path(resource, src.path)
+        if path not in local_scripts:
+            return "MathJax loader is missing from the local JavaScript manifest"
+        loader = _read_bytes(archive, path)
+        digest = hashlib.sha256(loader).hexdigest()
+        if digest not in _mathjax_distributions():
+            return "Unrecognized MathJax loader; generated reading content cannot be verified"
+        loaders.append((path, digest, src.query))
+    if (declared or configs or loaders) and not (configs and loaders):
+        return "Scripted content requires a verified local MathJax loader and declarative configuration"
+    for path, digest, query in loaders:
+        reason = _mathjax_dependencies(archive, path, _mathjax_distributions()[digest], configs, query, local_scripts)
+        if reason:
+            return reason
+    return None
+
+
+def _declarative_mathjax_config(source: str) -> dict[str, object] | None:
+    """Recognize a literal Hub.Config object; never evaluate configuration code."""
+    call = re.fullmatch(r"\s*MathJax\s*\.\s*Hub\s*\.\s*Config\s*\(\s*(\{.*\})\s*\)\s*;?\s*", source, re.DOTALL)
+    if call is None:
+        return None
+    value = call[1]
+    token = re.compile(
+        r""""(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[A-Za-z_$][\w$]*|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}\[\],:]"""
+    )
+    tokens: list[str] = []
+    position = 0
+    while position < len(value):
+        if value[position].isspace():
+            position += 1
+            continue
+        match = token.match(value, position)
+        if match is None:
+            return None
+        tokens.append(match[0])
+        position = match.end()
+    index = 0
+
+    def literal(depth: int = 0) -> bool:
+        nonlocal index
+        if depth > 32 or index >= len(tokens):
+            return False
+        current = tokens[index]
+        index += 1
+        if current not in {"{", "["}:
+            return (
+                current[:1] in {"'", '"'}
+                or current in {"true", "false", "null"}
+                or bool(re.fullmatch(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", current))
+            )
+        closing = "}" if current == "{" else "]"
+        while index < len(tokens) and tokens[index] != closing:
+            if current == "{":
+                if not (tokens[index][:1] in {"'", '"'} or re.fullmatch(r"[A-Za-z_$][\w$]*", tokens[index])):
+                    return False
+                index += 1
+                if index >= len(tokens) or tokens[index] != ":":
+                    return False
+                index += 1
+            if not literal(depth + 1) or index >= len(tokens):
+                return False
+            if tokens[index] == closing:
+                break
+            if tokens[index] != ",":
+                return False
+            index += 1
+        if index >= len(tokens) or tokens[index] != closing:
+            return False
+        index += 1
+        return True
+
+    if not literal() or index != len(tokens):
+        return None
+    normalized: list[str] = []
+    for position, value in enumerate(tokens):
+        following = tokens[position + 1] if position + 1 < len(tokens) else ""
+        if value[:1] in {"'", '"'}:
+            try:
+                value = json.dumps(ast.literal_eval(value))
+            except (ValueError, SyntaxError):
+                return None
+        elif following == ":":
+            value = json.dumps(value)
+        elif value == "," and following in {"}", "]"}:
+            continue
+        normalized.append(value)
+    try:
+        return json.loads("".join(normalized))
+    except ValueError:
+        return None
+
+
+def _mathjax_dependencies(
+    archive: zipfile.ZipFile,
+    loader: str,
+    assets: Mapping[str, str],
+    configs: Sequence[Mapping[str, object]],
+    query: str,
+    scripts: set[str],
+) -> str | None:
+    parent = str(PurePosixPath(loader).parent)
+    prefix = "" if parent == "." else parent + "/"
+    for name in archive.namelist():
+        if name.startswith(prefix) and (name.endswith(".js") or name in scripts):
+            expected = assets.get(name[len(prefix) :])
+            if expected is None or hashlib.sha256(_read_bytes(archive, name)).hexdigest() != expected:
+                return f"Unrecognized or modified MathJax dependency: {name}"
+    required: set[str] = set()
+
+    def references(config: Mapping[str, object], scope: str = "") -> None:
+        for key, value in config.items():
+            if key in {"root", "AuthorInit", "AuthorReady", "Augment"}:
+                raise ValueError("MathJax configuration overrides runtime code or root")
+            if key in {"jax", "extensions", "config"}:
+                if not isinstance(value, list) or any(not isinstance(name, str) for name in value):
+                    raise ValueError("MathJax dependency list must contain literal local paths")
+                for name in value:
+                    _validate_package_path(name)
+                    if urlsplit(name).scheme or "?" in name or "#" in name:
+                        raise ValueError("MathJax dependency must be a local package path")
+                    if key == "jax":
+                        required.add(f"jax/{name}/config.js")
+                        required.add(f"jax/{name}/jax.js")
+                    else:
+                        base = "config" if key == "config" else "extensions" + (f"/{scope}" if scope else "")
+                        required.add(f"{base}/{name}" + ("" if name.endswith(".js") else ".js"))
+            elif isinstance(value, dict):
+                references(value, key)
+
+    try:
+        for config in configs:
+            references(config)
+        parameters = parse_qs(query, keep_blank_values=True)
+        if set(parameters) - {"config"}:
+            raise ValueError("Unsupported MathJax loader parameters")
+        for selection in parameters.get("config", []):
+            references({"config": selection.split(",")})
+    except ValueError as error:
+        return str(error)
+    for name in sorted(required):
+        if name not in assets or prefix + name not in archive.namelist():
+            return f"Missing or unrecognized MathJax dependency: {prefix}{name}"
+    return None
 
 
 def _obfuscated_fonts(

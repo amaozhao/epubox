@@ -110,6 +110,9 @@ def canonical_documents(
     """Re-extract committed atomic documents from source bytes without a paid-work receipt."""
     try:
         with zipfile.ZipFile(state.snapshot(store.root)) as archive:
+            from engine.epub.styles import source_stylesheets
+
+            styles = source_stylesheets(archive)
             by_id = {
                 document_id: extract_resource(
                     archive.read(document.resource.path),
@@ -117,6 +120,7 @@ def canonical_documents(
                     preparation.source_hash,
                     document.resource.media_type,
                     extractor_version=document.extractor_version,
+                    styles=styles,
                 )
                 for document_id, document in documents.items()
             }

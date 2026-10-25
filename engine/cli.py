@@ -24,11 +24,13 @@ from engine.agents.runtime import (
 )
 from engine.core.config import resolve_chunk_limit, settings
 from engine.epub.checker import checker_for_source
+from engine.epub.cleanup import CLEANUP_POLICY
 from engine.epub.preparation import (
     PreparationConfig,
     _frozen_translation_config,
     _sha256_file,
 )
+from engine.epub.preservation import CODE_POLICY
 from engine.epub.publication import publish_book, recover_publication
 from engine.epub.styles import FONT_POLICY
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
@@ -430,7 +432,7 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
         return None
     store = RunStore(work_dir)
     if state.is_file(work_dir / "prepared.json"):
-        from engine.epub.publish import recover_atomic
+        from engine.epub.publish import code_policy_current, recover_atomic
         from engine.services.ready import read_ready
 
         published = recover_atomic(store, output, checker=checker_for_source(state.snapshot(work_dir), epubcheck))
@@ -441,6 +443,8 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
             not isinstance(proof, dict)
             or proof.get("epub_version") != "3.0"
             or proof.get("font_policy") != FONT_POLICY
+            or proof.get("cleanup_policy") != CLEANUP_POLICY
+            or not code_policy_current(store, proof)
         ):
             from engine.epub.publish import publish_atomic
 
@@ -455,6 +459,7 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
         publish_path,
         plan_fingerprint=canonical_hash(plan),
         version_vector=versions,
+        allow_policy_upgrade=True,
     )
     if published is None or Path(str(published["target_path"])).resolve() != output.resolve():
         return None
@@ -467,7 +472,12 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
         verify_baseline(
             state.snapshot(work_dir), output, verification, checker_for_source(state.snapshot(work_dir), epubcheck)
         )
-        if verification.get("epub_version") != "3.0" or verification.get("font_policy") != FONT_POLICY:
+        if (
+            verification.get("epub_version") != "3.0"
+            or verification.get("font_policy") != FONT_POLICY
+            or verification.get("cleanup_policy") != CLEANUP_POLICY
+            or verification.get("code_policy") != CODE_POLICY
+        ):
             converted = publish_book(
                 store, output, checker_for_source(state.snapshot(work_dir), epubcheck), overwrite=True
             )
@@ -744,7 +754,7 @@ async def _advance_work_dir(
         if progress:
             progress({"phase": "recovery", "notice": "恢复：读取已保存的准备状态，保留词表和累计请求。"})
         prepared = await resume_preparation(work_dir, checker, model=model, progress=_preparation_progress(progress))
-        if progress:
+        if progress and prepared.status == "ready":
             progress({"phase": "recovery", "notice": "准备状态已恢复，开始核对正文断点。"})
     except StoreLocked:
         raise
@@ -956,7 +966,11 @@ def _write_source_hint(work_dir: Path, source: Path, source_hash: str, run_id: s
 
 
 def _preparation_reason(prepared: Any) -> str | None:
-    details = [str(failure) for diagnostic in prepared.diagnostics for failure in diagnostic.failures]
+    details = [
+        f"{diagnostic.resource_path} [{diagnostic.item_id}, {diagnostic.atomic_tag or 'text'}, "
+        f"{diagnostic.source_tokens} tokens]: {', '.join(diagnostic.failures)}"
+        for diagnostic in prepared.diagnostics
+    ]
     return "；".join(filter(None, (prepared.reason, *details))) or None
 
 

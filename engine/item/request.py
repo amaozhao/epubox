@@ -17,7 +17,17 @@ from engine.schemas.budget import BudgetStage
 from engine.schemas.contracts import DocumentPlan, FrozenTerm, GlossarySnapshot, ItemRecord, canonical_hash
 
 _HINTS = frozenset(
-    {"element", "source_view_boundary", "readonly", "node_kind", "slot_id", "start", "end", "child_index"}
+    {
+        "element",
+        "source_view_boundary",
+        "readonly",
+        "node_kind",
+        "slot_id",
+        "start",
+        "end",
+        "child_index",
+        "immutable_code",
+    }
 )
 _CHECKS = frozenset({"format_binding", "plain_text", "projection", "source_target"})
 _REGISTRY_FIELDS = frozenset(

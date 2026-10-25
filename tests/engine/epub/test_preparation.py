@@ -312,6 +312,32 @@ def test_atomic_p1_uses_raw_resources_and_freezes_member_budget(tmp_path: Path) 
     )
 
 
+def test_explicit_atomic_four_config_survives_pipeline_and_epub_preparation(tmp_path: Path) -> None:
+    source = make_epub(
+        tmp_path / "book.epub",
+        {
+            "chapter.xhtml": (
+                '<p style="white-space:pre-wrap;font-family:monospace">'
+                '<span class="kw">pub</span> fn main() {}</p><p>Translate prose.</p>'
+            )
+        },
+    )
+    explicit = PreparationConfig(run_id="atomic-four", extractor_version="epubox-atomic-4")
+
+    config = pipeline_module._pipeline_config(explicit)
+    prepared = prepare_book(source, tmp_path / "work", config, StubChecker())
+    documents = [
+        RunStore(prepared.work_dir).read_document(document_id) for document_id in prepared.preparation.document_hashes
+    ]
+    chapter = next(document for document in documents if document.resource.path.endswith("chapter.xhtml"))
+
+    assert config.adapter_version == ATOMIC_ADAPTER_VERSION
+    assert config.extractor_version == "epubox-atomic-4"
+    assert {document.extractor_version for document in documents} == {"epubox-atomic-4"}
+    assert any("pub" in unit.source_projection for unit in chapter.units)
+    assert prepared.preparation.extraction_config["strategy"] == ATOMIC_TERM_PLANNER_VERSION
+
+
 def test_p1_reuse_rejects_changed_user_terms(tmp_path: Path) -> None:
     source = make_epub(tmp_path / "book.epub")
     terms = tmp_path / "terms.json"

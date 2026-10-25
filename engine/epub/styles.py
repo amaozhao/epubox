@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlsplit
 import tinycss2
 from lxml import etree  # type: ignore[attr-defined]
 
+from engine.core.code import CodeContext, monospace_family
 from engine.epub.parsing import ParsedResource, parse_resource
 from engine.epub.ranges import RawSpan, ResourceIndex, SlotSpan, index_resource
 from engine.epub.validation import (
@@ -24,7 +25,7 @@ from engine.epub.validation import (
     _encryption_resource_path,
 )
 
-FONT_POLICY = "reader-fonts-v1"
+FONT_POLICY = "reader-fonts-v3"
 
 _MARKUP_TYPES = {
     "application/xhtml+xml",
@@ -46,6 +47,42 @@ _FONT_SIZE_KEYWORDS = {
 }
 _CSS_WIDE = {"inherit", "initial", "revert", "revert-layer", "unset"}
 _SYSTEM_FONTS = {"caption", "icon", "menu", "message-box", "small-caption", "status-bar"}
+_GENERIC_FAMILIES = {
+    "serif",
+    "sans-serif",
+    "monospace",
+    "cursive",
+    "fantasy",
+    "system-ui",
+    "ui-serif",
+    "ui-sans-serif",
+    "ui-monospace",
+    "ui-rounded",
+    "math",
+    "fangsong",
+}
+
+
+def source_stylesheets(archive: zipfile.ZipFile) -> dict[str, str]:
+    """Load local CSS once, including manifest stylesheets without a .css suffix."""
+    from engine.epub.validation import _container_rootfiles, _manifest_items, _read_xml
+
+    entries = {item.filename: item.file_size for item in archive.infolist()}
+    paths = {name for name in entries if PurePosixPath(name).suffix.lower() == ".css"}
+    roots = _container_rootfiles(_read_xml(archive, "META-INF/container.xml"))
+    if len(roots) != 1:
+        raise ValueError("code styles require exactly one EPUB package")
+    paths.update(
+        item.path
+        for item in _manifest_items(_read_xml(archive, roots[0]), roots[0], entries)
+        if item.media_type == "text/css"
+    )
+    result: dict[str, str] = {}
+    for path in sorted(paths):
+        raw = archive.read(path)
+        _rules, encoding = tinycss2.parse_stylesheet_bytes(raw)
+        result[path] = raw.decode(encoding.codec_info.name).removeprefix("\ufeff")
+    return result
 
 
 def use_reader_fonts(
@@ -82,6 +119,15 @@ def use_reader_fonts(
             else:
                 result[path] = data
 
+        style_paths = {item.path for item in inventory.manifest if item.media_type == "text/css"} | {
+            path for path in names | set(replacements) if PurePosixPath(path).suffix.lower() == ".css"
+        }
+        styles = {
+            path: _decode_css(source_bytes(path), path)
+            for path in style_paths
+            if path in names or path in replacements
+        }
+
         for item in inventory.manifest:
             if item.path in removed or item.path not in names and item.path not in replacements:
                 continue
@@ -94,7 +140,7 @@ def use_reader_fonts(
             elif item.media_type in _MARKUP_TYPES:
                 current = source_bytes(item.path)
                 _assert_no_private_use_markup(current, item.media_type, item.path, removed)
-                changed = _clean_markup(current, item.media_type, item.path, removed)
+                changed = _clean_markup(current, item.media_type, item.path, removed, styles)
                 _assert_no_markup_font_references(changed, item.media_type, item.path, removed)
                 record(item.path, changed)
 
@@ -201,9 +247,7 @@ def _clean_declarations(nodes: list[Any], resource: str) -> bool:
                 f"CSS declaration parse failed for {resource}: {getattr(declaration, 'message', 'invalid declaration')}"
             )
         if kind == "at-rule" and getattr(declaration, "content", None) is not None:
-            nested = tinycss2.parse_declaration_list(
-                declaration.content, skip_comments=False, skip_whitespace=False
-            )
+            nested = tinycss2.parse_declaration_list(declaration.content, skip_comments=False, skip_whitespace=False)
             if _clean_declarations(nested, resource):
                 declaration.content = tinycss2.parse_component_value_list(tinycss2.serialize(nested))
                 changed = True
@@ -219,9 +263,7 @@ def _clean_declarations(nodes: list[Any], resource: str) -> bool:
         elif name == "font":
             replacement = _font_shorthand(declaration.value, bool(declaration.important))
             if replacement is not None:
-                expanded = tinycss2.parse_declaration_list(
-                    replacement, skip_comments=False, skip_whitespace=False
-                )
+                expanded = tinycss2.parse_declaration_list(replacement, skip_comments=False, skip_whitespace=False)
                 if any(getattr(item, "type", None) == "error" for item in expanded):
                     raise ValueError(f"cannot safely expand CSS font shorthand in {resource}")
                 nodes[index : index + 1] = expanded
@@ -233,8 +275,41 @@ def _clean_declarations(nodes: list[Any], resource: str) -> bool:
 
 
 def _reader_family(tokens: Iterable[Any]) -> bool:
+    tokens = tuple(tokens)
     value = tinycss2.serialize(tokens).strip().lower()
-    return value in _CSS_WIDE or value == "monospace"
+    if value in _CSS_WIDE:
+        return True
+    if monospace_family(tinycss2.serialize(tokens)):
+        return True
+    families: list[list[Any]] = [[]]
+    for token in tokens:
+        kind = getattr(token, "type", "")
+        if kind in {"whitespace", "comment"}:
+            continue
+        if kind == "literal" and getattr(token, "value", None) == ",":
+            if not families[-1]:
+                return False
+            families.append([])
+            continue
+        if kind not in {"ident", "string"}:
+            return False
+        if kind == "ident" and getattr(token, "lower_value", "") in _CSS_WIDE:
+            return False
+        families[-1].append(token)
+    if not families[-1]:
+        return False
+    for group in families:
+        if not group or any(getattr(token, "type", "") not in {"ident", "string"} for token in group):
+            return False
+        generics = [
+            token
+            for token in group
+            if token.type == "ident" and getattr(token, "lower_value", "") in _GENERIC_FAMILIES
+        ]
+        if generics and (len(group) != 1 or group is not families[-1]):
+            return False
+    final = families[-1]
+    return len(final) == 1 and final[0].type == "ident" and final[0].lower_value == "monospace"
 
 
 def _font_shorthand(tokens: list[Any], important: bool) -> str | None:
@@ -245,7 +320,9 @@ def _font_shorthand(tokens: list[Any], important: bool) -> str | None:
         suffix = " !important" if important else ""
         return f"font:inherit{suffix}"
     if "var(" in serialized:
-        raise ValueError(f"CSS variable font shorthand cannot be expanded safely: {tinycss2.serialize(tokens).strip()}")
+        raise ValueError(
+            f"CSS variable font shorthand cannot be expanded safely: {tinycss2.serialize(tokens).strip()}"
+        )
     significant = [(index, token) for index, token in enumerate(tokens) if token.type not in {"whitespace", "comment"}]
     size_position = next(
         (position for position, (_, token) in enumerate(significant) if _is_font_size(token)),
@@ -303,16 +380,25 @@ def _is_font_size(token: Any) -> bool:
     return kind == "ident" and getattr(token, "lower_value", "") in _FONT_SIZE_KEYWORDS
 
 
-def _clean_markup(raw: bytes, media_type: str, resource: str, removed: set[str]) -> bytes:
+def _clean_markup(
+    raw: bytes,
+    media_type: str,
+    resource: str,
+    removed: set[str],
+    styles: Mapping[str, str],
+) -> bytes:
     parsed = parse_resource(raw, media_type)
     if parsed.tree is None or parsed.diagnostics:
         raise ValueError(f"XML byte-safe font cleanup is unavailable for {resource}")
     index = index_resource(parsed)
     paths = _element_paths(parsed.tree)
+    code = CodeContext(parsed.tree, resource, styles)
     patches: list[tuple[RawSpan, bytes]] = []
     removed_nodes: set[tuple[int, ...]] = set()
     for element in parsed.tree.getroot().iter():
         if not isinstance(element.tag, str):
+            continue
+        if code.is_code(element):
             continue
         path = paths[element]
         local = etree.QName(element).localname.lower()
@@ -332,7 +418,7 @@ def _clean_markup(raw: bytes, media_type: str, resource: str, removed: set[str])
             if attribute == "style":
                 changed = _clean_style_attribute(value, resource)
             elif attribute == "font-family":
-                if value.strip().lower() not in _CSS_WIDE and value.strip().lower() != "monospace":
+                if not _reader_family(tinycss2.parse_component_value_list(value)):
                     changed = "inherit"
             elif local == "font" and attribute == "face":
                 patches.append((_attribute_span(parsed, index, path, name), b""))
@@ -343,6 +429,14 @@ def _clean_markup(raw: bytes, media_type: str, resource: str, removed: set[str])
                     raise ValueError(f"cannot locate XML attribute {name!r} in {resource}")
                 patches.append((_slot_span(slot), _xml_attribute(changed).encode(parsed.encoding)))
     return _apply_patches(raw, patches, removed_nodes)
+
+
+def _decode_css(raw: bytes, resource: str) -> str:
+    try:
+        _rules, encoding = tinycss2.parse_stylesheet_bytes(raw)
+        return raw.decode(encoding.codec_info.name)
+    except (UnicodeDecodeError, LookupError) as error:
+        raise ValueError(f"CSS decoding failed for {resource}: {error}") from error
 
 
 def _clean_opf(raw: bytes, resource: str, removed: set[str]) -> bytes:
@@ -484,9 +578,7 @@ def _assert_no_private_use_markup(
 
 def _contains_private_use(value: str) -> bool:
     return any(
-        0xE000 <= codepoint <= 0xF8FF
-        or 0xF0000 <= codepoint <= 0xFFFFD
-        or 0x100000 <= codepoint <= 0x10FFFD
+        0xE000 <= codepoint <= 0xF8FF or 0xF0000 <= codepoint <= 0xFFFFD or 0x100000 <= codepoint <= 0x10FFFD
         for codepoint in map(ord, value)
     )
 
@@ -512,9 +604,7 @@ def _assert_no_markup_font_references(raw: bytes, media_type: str, resource: str
                 declarations = tinycss2.parse_declaration_list(value, skip_comments=False, skip_whitespace=False)
                 for css_url in _css_urls(declarations):
                     if _resolve(resource, css_url) in removed:
-                        raise ValueError(
-                            f"font resource remains referenced by inline CSS in {resource}: {css_url}"
-                        )
+                        raise ValueError(f"font resource remains referenced by inline CSS in {resource}: {css_url}")
 
 
 def _css_urls(nodes: Iterable[Any]) -> Iterable[str]:
@@ -602,9 +692,10 @@ def _style_patch(raw: bytes, encoding: str, slot: SlotSpan, value: str) -> tuple
     span = _slot_span(slot)
     opener = "<![CDATA[".encode(encoding)
     closer = "]]>".encode(encoding)
-    cdata = raw[max(0, span.start - len(opener)) : span.start] == opener and raw[
-        span.end : span.end + len(closer)
-    ] == closer
+    cdata = (
+        raw[max(0, span.start - len(opener)) : span.start] == opener
+        and raw[span.end : span.end + len(closer)] == closer
+    )
     unique = [char.raw for index, char in enumerate(slot.chars) if not index or char.raw != slot.chars[index - 1].raw]
     if not cdata and any(left.end != right.start for left, right in pairwise(unique)):
         raise ValueError("mixed XML text/CDATA style content cannot be rewritten safely")

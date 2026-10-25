@@ -10,8 +10,14 @@ from typing import TYPE_CHECKING
 
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
+from engine.epub.cleanup import CLEANUP_POLICY, cleanup_resources
 from engine.epub.fill import fill_resource
 from engine.epub.parsing import OPF_NAMESPACE, XHTML_NAMESPACE, parse_resource
+from engine.epub.preservation import (
+    CODE_POLICY,
+    apply_code_plan,
+    effective_code_plan,
+)
 from engine.epub.ranges import RawSpan, SlotSpan, index_resource
 from engine.epub.replace import replace_resources
 from engine.epub.styles import FONT_POLICY, use_reader_fonts
@@ -39,6 +45,54 @@ _XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 _LANGUAGE = "zh-Hans"
 
 
+def repack_completed(
+    source: Path, output_path: Path, checker: object, *, overwrite: bool = False
+) -> dict[str, object]:
+    """Repackage a finished EPUB using only its bytes, without translation state or models."""
+    source, output_path = Path(source).resolve(strict=True), Path(output_path)
+    if output_path.resolve() == source or output_path.exists() and source.samefile(output_path):
+        raise EpubValidationError("unsafe_output_path", "Repack output must not overwrite its input EPUB")
+    source_hash = file_hash(source)
+    inventory = inspect_epub(source, source_hash, checker=checker)
+    media_types = {item.path: item.media_type for item in inventory.manifest}
+    replacements, cleanup = cleanup_resources({}, media_types=media_types, source=source)
+    staged = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
+    try:
+        stage_epub(source, staged, replacements)
+        verification = verify_staged_epub(
+            source,
+            staged,
+            inventory,
+            replacements,
+            accepted_targets={path: {} for path in replacements},
+            checker=checker,
+            upgraded=inventory.epub_version == "3.0",
+            cleanup=cleanup,
+            cleanup_only=True,
+        )
+        if file_hash(source) != source_hash:
+            raise EpubValidationError("source_changed", "Completed EPUB changed while it was being repackaged")
+        intent = publish_verified(
+            staged,
+            output_path,
+            output_path.with_suffix(output_path.suffix + ".publish.json"),
+            run_id="repack-" + uuid.uuid4().hex,
+            plan_fingerprint=source_hash,
+            version_vector={"source": source_hash},
+            verification=verification,
+            forbidden_paths=(source,),
+            overwrite=overwrite,
+        )
+    finally:
+        staged.unlink(missing_ok=True)
+    return {
+        "path": str(output_path),
+        "sha256": verification.output_hash,
+        "verification": verification.to_dict(),
+        "publish": intent,
+    }
+
+
 def publish_atomic(
     store: RunStore,
     output_path: Path,
@@ -54,6 +108,7 @@ def publish_atomic(
     output_path = Path(output_path)
     with store.lock():
         validate_atomic_output(store, output_path)
+        code_plan = _code_plan(store)
         session, targets = _targets(store, session=session, journal=journal)
         recovered = _recover(store, output_path, session.prepared.plan, targets, checker=checker)
         if recovered is not None:
@@ -62,6 +117,8 @@ def publish_atomic(
                 isinstance(proof, dict)
                 and proof.get("epub_version") == "3.0"
                 and proof.get("font_policy") == FONT_POLICY
+                and proof.get("cleanup_policy") == CLEANUP_POLICY
+                and code_policy_current(store, proof)
             ):
                 return recovered
             overwrite = True
@@ -87,6 +144,12 @@ def publish_atomic(
         media_types[inventory.opf_path] = "application/oebps-package+xml"
         replacements = replace_resources(replacements, media_types=media_types, source=snapshot)
         replacements, removed_paths = use_reader_fonts(snapshot, inventory, replacements)
+        if code_plan is not None:
+            replacements, _code_stats = apply_code_plan(snapshot, replacements, code_plan)
+        code_node_maps: dict[str, dict[tuple[int, ...], tuple[int, ...]]] = {}
+        replacements, cleanup = cleanup_resources(
+            replacements, media_types=media_types, source=snapshot, node_maps=code_node_maps
+        )
         for path in replacements:
             accepted.setdefault(path, {})
         staged = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
@@ -110,10 +173,18 @@ def publish_atomic(
                 upgraded=True,
                 removed_paths=removed_paths,
                 reader_fonts=True,
+                cleanup=cleanup,
+                code_plan=code_plan,
+                code_node_maps=code_node_maps,
+                source_code=True,
             )
             session.verify()
             if _result_fingerprint(store, session) != result_fingerprint:
                 raise EpubValidationError("atomic_results_changed", "Reviewed targets changed during publication")
+            if _code_plan(store) != code_plan:
+                raise EpubValidationError(
+                    "code_plan_changed", "Source code preservation plan changed during publication"
+                )
             if file_hash(snapshot) != session.prepared.plan.source_hash:
                 raise EpubValidationError("source_changed", "Source snapshot changed during publication")
             intent = publish_verified(
@@ -122,7 +193,7 @@ def publish_atomic(
                 store.root / "publish.json",
                 run_id=session.prepared.plan.run_id,
                 plan_fingerprint=canonical_hash(session.prepared.plan),
-                version_vector=_versions(targets),
+                version_vector=_versions(targets, code_plan),
                 verification=verification,
                 forbidden_paths=(snapshot, store.root / session.prepared.preparation.source_path),
                 overwrite=overwrite,
@@ -156,11 +227,22 @@ def validate_atomic_output(store: RunStore, output_path: Path) -> None:
 
 
 def _recover(store, output_path, plan, targets, *, checker: object | None = None) -> dict[str, object] | None:
+    code_plan = _code_plan(store)
     intent = recover_publication(
         store.root / "publish.json",
         plan_fingerprint=canonical_hash(plan),
-        version_vector=_versions(targets),
+        version_vector=_versions(targets, code_plan),
+        allow_policy_upgrade=True,
     )
+    if intent is None and code_plan is not None:
+        # A newly approved code plan upgrades an existing verified publication
+        # without reopening translation or discarding its accepted target proofs.
+        intent = recover_publication(
+            store.root / "publish.json",
+            plan_fingerprint=canonical_hash(plan),
+            version_vector=_versions(targets),
+            allow_policy_upgrade=True,
+        )
     if intent is None or Path(str(intent.get("target_path", ""))).resolve() != output_path.resolve():
         return None
     verification = intent.get("verification")
@@ -176,7 +258,7 @@ def _recover(store, output_path, plan, targets, *, checker: object | None = None
     snapshot = state.snapshot(store.root)
     if file_hash(snapshot) != plan.source_hash:
         raise EpubValidationError("source_changed", "Source snapshot changed after publication")
-    verify_baseline(snapshot, output_path, verification, checker)
+    verify_baseline(snapshot, output_path, verification, checker, code_plan=code_plan)
     return {"path": str(output_path), "sha256": target_hash, "verification": verification, "publish": intent}
 
 
@@ -201,8 +283,27 @@ def _targets(
     return session, targets
 
 
-def _versions(targets: Mapping[str, str]) -> dict[str, str]:
-    return {item_id: canonical_hash(target) for item_id, target in sorted(targets.items())}
+def _versions(targets: Mapping[str, str], code_plan: Mapping[str, object] | None = None) -> dict[str, str]:
+    versions = {item_id: canonical_hash(target) for item_id, target in sorted(targets.items())}
+    if code_plan is not None:
+        versions["@source-code"] = canonical_hash(code_plan)
+    return versions
+
+
+def _code_plan(store: RunStore) -> Mapping[str, object] | None:
+    path = store.root / "checks" / "code.json"
+    value = strict_json_loads(state.read(path), max_bytes=None) if state.is_file(path) else None
+    if value is not None and not isinstance(value, dict):
+        raise EpubValidationError("invalid_code_plan", "Source code preservation plan must be an object")
+    return effective_code_plan(state.snapshot(store.root), value)
+
+
+def code_policy_current(store: RunStore, verification: Mapping[str, object]) -> bool:
+    """Determine whether publication includes the currently approved source code plan."""
+    code_plan = _code_plan(store)
+    return verification.get("code_policy") == CODE_POLICY and verification.get("code_plan_hash") == canonical_hash(
+        code_plan
+    )
 
 
 def _result_fingerprint(store: RunStore, session: ReadySession) -> tuple[tuple[str, str], ...]:
@@ -373,4 +474,4 @@ def _splice(raw: bytes, patches: list[tuple[RawSpan, bytes]]) -> bytes:
     return result
 
 
-__all__ = ["publish_atomic", "recover_atomic", "validate_atomic_output"]
+__all__ = ["code_policy_current", "publish_atomic", "recover_atomic", "repack_completed", "validate_atomic_output"]

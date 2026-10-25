@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlsplit
 
 import regex
+import tinycss2
 from lxml import etree  # type: ignore[attr-defined]
 
 from engine.core.markup import qname_local_name
@@ -99,6 +100,76 @@ _RUST_COMMAND_RE = re.compile(
 _CONTEXT_LIMIT = 400
 _HINT_LIMIT = 160
 _TERM_MODES = {"preferred", "required", "keep_source"}
+
+
+def is_styled_code_block(node: etree._Element) -> bool:
+    """Recognize complete, explicitly preformatted monospace blocks with syntax spans."""
+    xhtml = "http://www.w3.org/1999/xhtml"
+    descendants = tuple(node.iterdescendants())
+    if (
+        node.tag not in {f"{{{xhtml}}}p", f"{{{xhtml}}}div"}
+        or not descendants
+        or any(child.tag != f"{{{xhtml}}}span" for child in descendants)
+    ):
+        return False
+    values = {}
+    for declaration in tinycss2.parse_declaration_list(
+        node.get("style", ""), skip_comments=True, skip_whitespace=True
+    ):
+        if declaration.type != "declaration":
+            return False
+        name = declaration.lower_name
+        if name in {"all", "font"}:
+            return False
+        prior = values.get(name)
+        if prior is None or declaration.important or not prior.important:
+            values[name] = declaration
+    whitespace, family = values.get("white-space"), values.get("font-family")
+    if whitespace is None or family is None:
+        return False
+    value = tinycss2.serialize(whitespace.value).strip().lower()
+    if value not in {"pre", "pre-wrap", "break-spaces"}:
+        return False
+    families: list[list] = [[]]
+    generic = {
+        "serif",
+        "sans-serif",
+        "monospace",
+        "cursive",
+        "fantasy",
+        "system-ui",
+        "ui-serif",
+        "ui-sans-serif",
+        "ui-monospace",
+        "ui-rounded",
+        "math",
+        "fangsong",
+    }
+    for token in family.value:
+        if token.type in {"whitespace", "comment"}:
+            continue
+        if token.type == "literal" and token.value == "," and families[-1]:
+            families.append([])
+        elif token.type in {"ident", "string"}:
+            if token.type == "ident" and token.value.lower() in {
+                "initial",
+                "inherit",
+                "unset",
+                "revert",
+                "revert-layer",
+            }:
+                return False
+            families[-1].append(token)
+        else:
+            return False
+    if not families[-1] or any(
+        len(group) != 1 and any(token.type == "ident" and token.value.lower() in generic for token in group)
+        for group in families
+    ):
+        return False
+    return any(
+        len(group) == 1 and group[0].type == "ident" and group[0].value.lower() == "monospace" for group in families
+    )
 
 
 def _effective_language(node: etree._Element) -> str:

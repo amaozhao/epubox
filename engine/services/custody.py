@@ -54,6 +54,24 @@ def epoch(record: ItemRecord, name: str) -> int:
     return value
 
 
+def translation_replayable(record: ItemRecord, request: RequestManifest) -> bool:
+    if epoch(record, "translation_epoch") != request.record_versions[request.item_unit_ids[record.item_id][0]]:
+        return False
+    if record.status == ItemStatus.PENDING:
+        return True
+    message = (record.failure or {}).get("message")
+    return (
+        record.status == ItemStatus.NEEDS_ATTENTION
+        and record.stage == "translate"
+        and record.request_id == request.request_id
+        and record.target_projection is None
+        and record.target_hash is None
+        and (record.failure or {}).get("code") == "translate_failed"
+        and isinstance(message, str)
+        and message.startswith("untranslated English remains:")
+    )
+
+
 def retry_checks(record: ItemRecord, review_epoch: int) -> dict[str, Any]:
     translation_epoch = epoch(record, "translation_epoch")
     return {
@@ -151,4 +169,5 @@ __all__ = [
     "positive",
     "retry_checks",
     "text",
+    "translation_replayable",
 ]

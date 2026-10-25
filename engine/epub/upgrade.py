@@ -11,7 +11,8 @@ from urllib.parse import quote, unquote, urlsplit
 
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
-from engine.core.markup import parse_xml_bytes, qname_local_name
+from engine.core.markup import element_path, parse_xml_bytes, qname_local_name
+from engine.epub.metadata import recover_empty_agents, required_dc, sync_ncx_uid, unique_identifier
 from engine.epub.parsing import parse_resource
 from engine.epub.ranges import ResourceIndex, index_resource
 from engine.epub.validation import PackageInventory
@@ -92,6 +93,11 @@ def upgrade_package(
         _flatten_metadata(metadata)
         manifest = _child(package, "manifest")
         _metadata(package, metadata, source, inventory, archive)
+        if inventory.ncx_path and inventory.ncx_path in names | set(replacements):
+            current_ncx = read(inventory.ncx_path)
+            synced_ncx = sync_ncx_uid(current_ncx, unique_identifier(package, metadata))
+            if synced_ncx != current_ncx:
+                result[inventory.ncx_path] = synced_ncx
 
         items = {item.get("id", ""): item for item in manifest if qname_local_name(item.tag) == "item"}
         cover_id = _cover(metadata, package)
@@ -105,7 +111,20 @@ def upgrade_package(
                 if qname_local_name(attribute) in {"fallback-style", "required-modules", "required-namespace"}:
                     item.attrib.pop(attribute)
             if path in names or path in replacements:
-                for value in _content_properties(read(path), item.get("media-type", "")):
+                actual = _content_properties(read(path), item.get("media-type", ""))
+                if item.get("media-type") == "application/xhtml+xml":
+                    # Converters may replace inline formulas/figures with images
+                    # without removing their old foreign-content declarations.
+                    properties = [
+                        value
+                        for value in item.get("properties", "").split()
+                        if value not in {"mathml", "svg"} or value in actual
+                    ]
+                    if properties:
+                        item.set("properties", " ".join(properties))
+                    else:
+                        item.attrib.pop("properties", None)
+                for value in actual:
                     _add_property(item, value)
         cover_item = _cover_item(package, items, inventory.opf_path, cover_id, read)
         if cover_item is not None:
@@ -138,6 +157,28 @@ def upgrade_package(
                     _add_property(item, "nav")
                     break
 
+        # Navigation may expose auxiliary pages omitted from an EPUB 2 spine.
+        # Register them without changing the original default reading order.
+        nav_data = result[nav_path] if nav_path in result else read(nav_path)
+        cover_path = _resolve(inventory.opf_path, cover_item.get("href", "")) if cover_item is not None else None
+        for path in _auxiliary_covers(nav_data, nav_path, inventory):
+            current = result[path] if path in result else read(path)
+            repaired_cover = _repair_cover_resources(current, path, inventory, cover_path, names | set(result))
+            if repaired_cover != current:
+                result[path] = repaired_cover
+        repaired_nav = _repair_cover_navigation(nav_data, nav_path, package, inventory)
+        if repaired_nav != nav_data:
+            result[nav_path] = repaired_nav
+            nav_data = repaired_nav
+        spine = _child(package, "spine")
+        registered = {item.get("idref") for item in spine if qname_local_name(item.tag) == "itemref"}
+        for item_id in navigation_spine_additions(inventory, nav_data, nav_path):
+            if item_id not in registered:
+                reference = etree.SubElement(spine, f"{{{_OPF}}}itemref")
+                reference.set("idref", item_id)
+                reference.set("linear", "no")
+                registered.add(item_id)
+
         if namespaces_changed:
             etree.cleanup_namespaces(package, top_nsmap={None: _OPF, "dc": _DC})
         rendered_tree = etree.tostring(tree, encoding="utf-8", pretty_print=False)
@@ -150,6 +191,150 @@ def upgrade_package(
         if rendered_tree != before:
             result[inventory.opf_path] = rendered
         return result
+
+
+def _cover_landmarks(root: etree._Element) -> list[etree._Element]:
+    return [
+        link
+        for link in root.iter(f"{{{_XHTML}}}a")
+        if "cover" in link.get(f"{{{_EPUB}}}type", "").split()
+        and any(
+            parent.tag == f"{{{_XHTML}}}nav" and "landmarks" in parent.get(f"{{{_EPUB}}}type", "").split()
+            for parent in link.iterancestors()
+        )
+    ]
+
+
+def _auxiliary_covers(data: bytes, nav_path: str, inventory: PackageInventory) -> tuple[str, ...]:
+    paths = {
+        item.path
+        for item in inventory.manifest
+        if item.item_id not in inventory.spine and item.media_type in {"application/xhtml+xml", "text/html"}
+    }
+    targets: list[str] = []
+    for link in _cover_landmarks(parse_xml_bytes(data).getroot()):
+        href = link.get("href", "").strip()
+        parsed = urlsplit(href)
+        path = _resolve(nav_path, href) if parsed.path else nav_path
+        if href and not parsed.scheme and not parsed.netloc and path in paths and path not in targets:
+            targets.append(path)
+    return tuple(targets)
+
+
+def _repair_cover_resources(
+    data: bytes, path: str, inventory: PackageInventory, cover_path: str | None, resources: set[str]
+) -> bytes:
+    """Repair dangling assets of a legacy cover only when the package identifies their replacements."""
+    parsed = parse_resource(data, "application/xhtml+xml")
+    if parsed.tree is None or parsed.diagnostics:
+        return data
+    images = list(parsed.tree.iter(f"{{{_XHTML}}}img"))
+    changes: dict[tuple[tuple[int, ...], str], str] = {}
+    for node in parsed.tree.iter(f"{{{_XHTML}}}link", f"{{{_XHTML}}}img"):
+        image = node.tag == f"{{{_XHTML}}}img"
+        attribute = "src" if image else "href"
+        href = node.get(attribute, "").strip()
+        url = urlsplit(href)
+        if not href or url.scheme or url.netloc or _resolve(path, href) in resources:
+            continue
+        target = None
+        if image and len(images) == 1 and cover_path in resources:
+            target = cover_path
+        elif not image and "stylesheet" in node.get("rel", "").lower().split():
+            matches = [
+                item.path
+                for item in inventory.manifest
+                if item.media_type == "text/css"
+                and item.path in resources
+                and PurePosixPath(item.path).name == PurePosixPath(unquote(url.path)).name
+            ]
+            if len(matches) == 1:
+                target = matches[0]
+        if target is not None:
+            changes[element_path(node), attribute] = _relative(path, target)
+    return _patch_navigation_attributes(data, index_resource(parsed), changes) if changes else data
+
+
+def _patch_navigation_attributes(
+    data: bytes, indexed: ResourceIndex, changes: Mapping[tuple[tuple[int, ...], str], str]
+) -> bytes:
+    patches = [
+        (slot.source_span(0, len(slot.text)), changes[slot.path, slot.attribute_name])
+        for slot in indexed.slots
+        if slot.field == "attribute"
+        and slot.attribute_name is not None
+        and (slot.path, slot.attribute_name) in changes
+        and slot.text
+    ]
+    for span, value in sorted(patches, key=lambda patch: patch[0].byte_start, reverse=True):
+        replacement = html.escape(value, quote=True).encode(indexed.encoding)
+        data = data[: span.byte_start] + replacement + data[span.byte_end :]
+    return data
+
+
+def _repair_cover_navigation(
+    data: bytes, nav_path: str, package: etree._Element, inventory: PackageInventory
+) -> bytes:
+    """Prefer the package's spine cover over a stale auxiliary cover landmark."""
+    spine_paths = {item.path for item in inventory.manifest if item.item_id in inventory.spine}
+    content_paths = {
+        item.path
+        for item in inventory.manifest
+        if item.media_type in {"application/xhtml+xml", "text/html", "image/svg+xml"}
+    }
+    guide = next((node for node in package if qname_local_name(node.tag) == "guide"), None)
+    if guide is None:
+        return data
+    target = None
+    for reference in guide:
+        href = reference.get("href", "").strip()
+        parsed = urlsplit(href)
+        if (
+            qname_local_name(reference.tag) == "reference"
+            and reference.get("type", "").lower() == "cover"
+            and href
+            and not parsed.scheme
+            and not parsed.netloc
+            and _resolve(inventory.opf_path, href) in spine_paths & content_paths
+        ):
+            target = _relative(nav_path, _target(inventory.opf_path, href))
+            break
+    if target is None:
+        return data
+    parsed_nav = parse_resource(data, "application/xhtml+xml")
+    if parsed_nav.tree is None or parsed_nav.diagnostics:
+        return data
+    changes: dict[tuple[tuple[int, ...], str], str] = {}
+    for link in _cover_landmarks(parsed_nav.tree.getroot()):
+        href = link.get("href", "").strip()
+        parsed = urlsplit(href)
+        path = _resolve(nav_path, href) if parsed.path else nav_path
+        if href and not parsed.scheme and not parsed.netloc and path in content_paths - spine_paths:
+            changes[element_path(link), "href"] = target
+    return _patch_navigation_attributes(data, index_resource(parsed_nav), changes) if changes else data
+
+
+def navigation_spine_additions(inventory: PackageInventory, nav_data: bytes, nav_path: str) -> tuple[str, ...]:
+    """Return source content documents exposed by navigation but absent from its spine."""
+    documents = {
+        item.path: item.item_id
+        for item in inventory.manifest
+        if item.media_type in {"application/xhtml+xml", "text/html", "image/svg+xml"}
+    }
+    registered = set(inventory.spine)
+    additions: list[str] = []
+    root = parse_xml_bytes(nav_data).getroot()
+    for link in root.iter(f"{{{_XHTML}}}a", f"{{{_XHTML}}}area"):
+        href = link.get("href", "").strip()
+        parsed = urlsplit(href)
+        if not href or parsed.scheme or parsed.netloc:
+            continue
+        path = _resolve(nav_path, href) if parsed.path else nav_path
+        item_id = documents.get(path)
+        if item_id is not None and item_id not in registered:
+            additions.append(item_id)
+            registered.add(item_id)
+    return tuple(additions)
 
 
 def _normalize_opf_namespaces(root: etree._Element) -> bool:
@@ -354,8 +539,9 @@ def _metadata(
     identifier.set("id", identifier_id)
     if package.get("unique-identifier") not in {item.get("id") for item in identifiers}:
         package.set("unique-identifier", identifier_id)
-    _required_dc(metadata, "title", source.stem)
-    _required_dc(metadata, "language", "und")
+    required_dc(metadata, "title", source.stem)
+    required_dc(metadata, "language", "und")
+    recover_empty_agents(metadata)
 
     modified = [
         item
@@ -411,6 +597,11 @@ def _metadata(
 
     for value in [item for item in metadata if isinstance(item.tag, str) and etree.QName(item).namespace == _DC]:
         local_name = etree.QName(value).localname
+        if local_name in {"date", "publisher"} and not len(value) and not (value.text or "").strip():
+            identifier = value.get("id")
+            if identifier is None or not any(node.get("refines") == f"#{identifier}" for node in package.iter()):
+                metadata.remove(value)
+                continue
         for attribute in list(value.attrib):
             name = etree.QName(attribute)
             if name.namespace != _OPF:
@@ -440,14 +631,6 @@ def _valid_utc(value: str) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _required_dc(metadata: etree._Element, name: str, fallback: str) -> None:
-    elements = [item for item in metadata if qname_local_name(item.tag) == name]
-    item = next((value for value in elements if (value.text or "").strip()), None)
-    if item is None:
-        item = elements[0] if elements else etree.SubElement(metadata, f"{{{_DC}}}{name}")
-        item.text = fallback
 
 
 def _cover(metadata: etree._Element, package: etree._Element) -> str | None:
@@ -811,4 +994,4 @@ def _zip_time(info: zipfile.ZipInfo) -> str:
     return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}Z"
 
 
-__all__ = ["upgrade_package"]
+__all__ = ["navigation_spine_additions", "upgrade_package"]

@@ -485,7 +485,7 @@ def _derive_adaptive_children(
     if parent.atomic_tag in {"ul", "ol"}:
         children = _derive_children(base, parent, limit, measure_tokens=measure_tokens)
         return "list_items", children, ("",) * (len(children) + 1)
-    if parent.atomic_tag == "table":
+    if parent.atomic_tag == "table" and (parent.piece_count == 1 or parent_id(parent.item_id) is not None):
         fragments = _table_cell_fragments(base, inventory, parent)
         if fragments is not None and len(fragments[0]) >= 2:
             strategy = "table_cells"

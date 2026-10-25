@@ -219,3 +219,13 @@
 2026-10-07 单 JSON 及预检修复新增 `engine/services/state.py`、`engine/services/legacy.py`、`tests/engine/test_compact.py`、`tests/engine/services/test_compact.py`、`tests/engine/services/test_state.py`；分别负责统一持久化、历史任务发现及紧凑目录回归。源码、测试及维护文档均为单词命名且≤1000行。
 
 `tests/engine/services/test_replay.py` 验证缓存响应分批回放、提交失败回滚和零重复HTTP；文件为单词命名且≤1000行。
+
+2026-10-21 新增 `engine/services/tables.py`、`tests/engine/item/test_tables.py`、`tests/engine/services/test_tables.py`，负责超长表格完整行请求、行组包装与父表合并校验、失败预检凭据升级及恢复回归。`tables` 已登记到单词清单；三个文件均不超过 1000 行。
+
+2026-10-22 新增 `engine/epub/cleanup.py`、`tests/engine/epub/test_cleanup.py`，负责出版候选中的空装饰标签及中文普通空白整理，并保护索引、代码、实体、链接及 CSS 布局。`cleanup` 已登记到单词清单；两个文件均不超过 1000 行。
+
+2026-10-24 新增 `engine/epub/preservation.py`、`tests/engine/epub/test_preservation.py`，负责显式授权的原文代码区域清单、源哈希绑定、出版覆盖及逐字节回读验证。`preservation` 已登记到单词清单；两个文件均不超过 1000 行。
+
+2026-10-24 新增 `engine/core/code.py`、`tests/engine/core/test_code.py`、`tests/engine/agents/test_code.py`、`tests/engine/epub/test_code.py`，负责通用代码/CSS 识别、不可改写投影、初译校对攻击回归及自动出版核验。`code` 为已登记单词；各文件均不超过 1000 行。`preservation.py` 同步改为所有书籍自动发现代码，兼容旧显式计划。
+
+2026-10-25 新增 `engine/epub/mathjax.json`，保存官方 MathJax 2.6.1、2.7.9 packed JavaScript 的离线 SHA-256 清单、来源及归档哈希，由 `validation.py` 负责核验。新增 `engine/epub/metadata.py`、`tests/engine/epub/test_metadata.py`，负责基于已有 refinement 恢复空作者、同步 NCX 标识及精确字节回归。`metadata` 为已登记单词；文件均不超过 1000 行，校验清单为生成的紧凑 JSON。

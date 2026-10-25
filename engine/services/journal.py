@@ -41,6 +41,7 @@ from engine.services.custody import persisted_response as _persisted_response
 from engine.services.custody import positive as _positive
 from engine.services.custody import review_draft
 from engine.services.custody import text as _text
+from engine.services.custody import translation_replayable as _translation_replayable
 from engine.services.ready import ReadySession
 from engine.services.store import ModelResponseStage, RunStore
 
@@ -178,12 +179,7 @@ class BodyJournal:
             if (
                 request.stage != "translate"
                 or not set(request.item_ids).issubset(self._records)
-                or not any(
-                    self._records[item_id].status == ItemStatus.PENDING
-                    and _saved_epoch(self._records[item_id], "translation_epoch")
-                    == request.record_versions[request.item_unit_ids[item_id][0]]
-                    for item_id in request.item_ids
-                )
+                or not any(_translation_replayable(self._records[item_id], request) for item_id in request.item_ids)
             ):
                 continue
             response = _persisted_response(self.store, request, reconcile=True, finish=self._finish)
@@ -201,12 +197,10 @@ class BodyJournal:
             except (KeyError, ProtocolError, TypeError, ValueError) as error:
                 parsed, batch_error = None, str(error)
             recovered: list[ItemRecord] = []
+            revalidated: list[tuple[ItemRecord, ItemRecord]] = []
             for member in batch.items:
                 prior = self._records[member.item_id]
-                if (
-                    prior.status != ItemStatus.PENDING
-                    or _saved_epoch(prior, "translation_epoch") != request.record_versions[member.unit_id]
-                ):
+                if not _translation_replayable(prior, request):
                     continue
                 accepted = parsed.accepted.get(member.item_id) if parsed is not None else None
                 error = (
@@ -219,35 +213,62 @@ class BodyJournal:
                 if accepted is not None:
                     error = _target_error(member, accepted["target"], wires[member.item_id])
                 if error is not None:
-                    recovered.append(_failed(member, prior, "translate", error, batch))
+                    if prior.status == ItemStatus.PENDING:
+                        recovered.append(_failed(member, prior, "translate", error, batch))
                     continue
                 assert accepted is not None
                 terms = tuple(term for term in wires[member.item_id]["terms"] if isinstance(term, Mapping))
-                recovered.append(
-                    ItemRecord(
-                        item_id=member.item_id,
-                        segment_id=member.item_id,
-                        selected_term_ids=batch.manifest.term_ids_by_item[member.item_id],
-                        term_applicability={str(term["term_id"]): term["role"] for term in terms},
-                        terms_hash=batch.manifest.terms_hashes[member.item_id],
-                        context_hash=batch.manifest.context_hashes[member.item_id],
-                        stage="proofread",
-                        status=ItemStatus.LOCAL_VALID,
-                        target_projection=accepted["target"],
-                        target_hash=canonical_hash(accepted["target"]),
-                        checks={
-                            "translation_frame": _frame(batch),
-                            **(
-                                {"translation_epoch": request.record_versions[member.unit_id]}
-                                if request.record_versions[member.unit_id]
-                                else {}
-                            ),
-                        },
-                        request_id=batch.manifest.request_id,
-                        next_action="review",
-                    )
+                result = ItemRecord(
+                    item_id=member.item_id,
+                    segment_id=member.item_id,
+                    selected_term_ids=batch.manifest.term_ids_by_item[member.item_id],
+                    term_applicability={str(term["term_id"]): term["role"] for term in terms},
+                    terms_hash=batch.manifest.terms_hashes[member.item_id],
+                    context_hash=batch.manifest.context_hashes[member.item_id],
+                    stage="proofread",
+                    status=ItemStatus.LOCAL_VALID,
+                    target_projection=accepted["target"],
+                    target_hash=canonical_hash(accepted["target"]),
+                    checks={
+                        "translation_frame": _frame(batch),
+                        **(
+                            {"translation_epoch": request.record_versions[member.unit_id]}
+                            if request.record_versions[member.unit_id]
+                            else {}
+                        ),
+                    },
+                    request_id=batch.manifest.request_id,
+                    next_action="review",
                 )
+                if prior.status == ItemStatus.NEEDS_ATTENTION:
+                    revalidated.append((prior, result))
+                else:
+                    recovered.append(result)
             self.save_many(recovered)
+            # Keep terminal records immutable through normal saves. This narrow
+            # recovery requires the same request/epoch, current local checks and
+            # a persisted provider proof; it only restores a draft for review.
+            for prior, result in revalidated:
+                if any(getattr(prior, key) != getattr(result, key) for key in _FROZEN_RESULT_FIELDS):
+                    raise IdentityMismatch("revalidated translation changed its frozen identity")
+                _validate_saved_record(self.session, result)
+                self._translation_proof(result)
+            if revalidated:
+                with self.store.lock(), state.batch(self.store.root):
+                    for prior, _result in revalidated:
+                        path = self._result_path(prior.item_id)
+                        if (
+                            self._records[prior.item_id] != prior
+                            or ItemRecord.model_validate_json(state.read(path)) != prior
+                        ):
+                            raise StaleWrite("English residual result changed during revalidation")
+                    frames.flush(self)
+                    for _prior, result in revalidated:
+                        self.store._base.atomic_write_bytes(
+                            self._result_path(result.item_id), canonical_json_bytes(result)
+                        )
+                for prior, result in revalidated:
+                    self._update_result(prior, result)
         for request in tuple(self._requests.values()):
             if (
                 request.stage != "review"

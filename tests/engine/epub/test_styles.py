@@ -9,7 +9,9 @@ from engine.epub.styles import FONT_POLICY, use_reader_fonts
 from engine.epub.validation import ManifestItem, PackageInventory
 
 
-def _book(tmp_path: Path, files: dict[str, bytes], manifest: tuple[ManifestItem, ...]) -> tuple[Path, PackageInventory]:
+def _book(
+    tmp_path: Path, files: dict[str, bytes], manifest: tuple[ManifestItem, ...]
+) -> tuple[Path, PackageInventory]:
     source = tmp_path / "book.epub"
     with ZipFile(source, "w", ZIP_DEFLATED) as archive:
         archive.writestr("mimetype", b"application/epub+zip", compress_type=ZIP_STORED)
@@ -32,7 +34,7 @@ def _book(tmp_path: Path, files: dict[str, bytes], manifest: tuple[ManifestItem,
 
 
 def test_reader_font_policy_cleans_css_markup_and_embedded_fonts(tmp_path: Path) -> None:
-    opf = b'''<?xml version="1.0" encoding="utf-8"?>
+    opf = b"""<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata>
 <meta refines="#font" property="display-seq">1</meta><meta property="keep">yes</meta>
 </metadata><manifest>
@@ -41,8 +43,8 @@ def test_reader_font_policy_cleans_css_markup_and_embedded_fonts(tmp_path: Path)
 <item id="font" href="fonts/cjk.woff2" media-type="font/woff2"/>
 <item id="fallback" href="image.png" media-type="image/png" fallback="font"/>
 <item id="art" href="fonts/logo.svg" media-type="image/svg+xml"/>
-</manifest><spine><itemref idref="chapter"/></spine></package>'''
-    css = b'''@charset "UTF-8";
+</manifest><spine><itemref idref="chapter"/></spine></package>"""
+    css = b"""@charset "UTF-8";
 /* untouched */
 @font-face { font-family: "Bad CJK"; src: url(../fonts/cjk.woff2) format("woff2"); }
 h1 { font-family: "Bad CJK", serif; color: red }
@@ -53,17 +55,17 @@ code { font-family: monospace }
 b { font: menu !important }
 .important { font: italic 700 16px Named !important }
 @page { @top-left { font-family: Named } }
-'''
-    chapter = b'''<html xmlns="http://www.w3.org/1999/xhtml"><head>
+"""
+    chapter = b"""<html xmlns="http://www.w3.org/1999/xhtml"><head>
 <link rel="stylesheet" href="styles/main.css"/><link rel="preload" as="font" href="fonts/cjk.woff2"/>
 <style>.escaped\\[name p &gt; em { font-family: Named; font-weight: 800 } @media print { i { font: italic 14px Named } }</style>
 <style><![CDATA[h3 { font-family: Named }]]></style>
 </head><body data-keep="A&amp;B"><h1 style="font-family: 'Bad CJK'; background:url('cover.png'); color:blue"><strong>\xe6\xa0\x87\xe9\xa2\x98</strong></h1>
 <svg xmlns="http://www.w3.org/2000/svg"><text font-family="Named" style="font: bold 10px Named">T</text></svg>
-<font face="Legacy"><em>\xe6\x96\x9c\xe4\xbd\x93</em></font></body></html>'''
-    encryption = b'''<?xml version="1.0"?><encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<font face="Legacy"><em>\xe6\x96\x9c\xe4\xbd\x93</em></font></body></html>"""
+    encryption = b"""<?xml version="1.0"?><encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
 <EncryptedData><EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/><CipherData><CipherReference URI="OEBPS/fonts/cjk.woff2"/></CipherData></EncryptedData>
-</encryption>'''
+</encryption>"""
     files = {
         "OEBPS/content.opf": opf,
         "OEBPS/chapter.xhtml": chapter,
@@ -85,10 +87,8 @@ b { font: menu !important }
 
     replacements, removed = use_reader_fonts(source, inventory, {})
 
-    assert FONT_POLICY == "reader-fonts-v1"
-    assert removed == frozenset(
-        {"OEBPS/fonts/cjk.woff2", "OEBPS/fonts/orphan.ttf", "META-INF/encryption.xml"}
-    )
+    assert FONT_POLICY == "reader-fonts-v3"
+    assert removed == frozenset({"OEBPS/fonts/cjk.woff2", "OEBPS/fonts/orphan.ttf", "META-INF/encryption.xml"})
     assert "@font-face" not in replacements["OEBPS/styles/main.css"].decode()
     rendered_css = replacements["OEBPS/styles/main.css"].decode()
     assert "h1 { font-family:inherit; color: red " in rendered_css
@@ -110,7 +110,7 @@ b { font: menu !important }
     assert b'data-keep="A&amp;B"' in rendered_chapter
     assert b"font-family:inherit" in rendered_chapter
     assert b'font-family="inherit"' in rendered_chapter
-    assert b'face=' not in rendered_chapter
+    assert b"face=" not in rendered_chapter
     assert b"cover.png" in rendered_chapter
     assert b"&apos;" in rendered_chapter or b"&quot;" in rendered_chapter
     assert b"p &gt; em" in rendered_chapter
@@ -125,6 +125,167 @@ b { font: menu !important }
     repeated, repeated_removed = use_reader_fonts(source, inventory, replacements)
     assert repeated == replacements
     assert repeated_removed == removed
+
+
+def test_reader_font_policy_preserves_explicit_generic_monospace_fallback_lists_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    opf = b"""<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest>
+<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+<item id="css" href="code.css" media-type="text/css"/>
+</manifest><spine><itemref idref="chapter"/></spine></package>"""
+    css = (
+        b".family { font-family: Menlo, Consolas, monospace }\n"
+        b".shorthand { font: italic 12px Menlo, Consolas, monospace }\n"
+    )
+    chapter = b"""<html xmlns="http://www.w3.org/1999/xhtml"><head>
+<link rel="stylesheet" href="code.css"/></head><body>
+<p style="white-space: pre-wrap; font-family: Menlo, Consolas, monospace">code</p>
+<svg xmlns="http://www.w3.org/2000/svg"><text font-family="Menlo, Consolas, monospace">code</text></svg>
+</body></html>"""
+    files = {
+        "OEBPS/content.opf": opf,
+        "OEBPS/chapter.xhtml": chapter,
+        "OEBPS/code.css": css,
+    }
+    manifest = (
+        ManifestItem("chapter", "OEBPS/chapter.xhtml", "application/xhtml+xml"),
+        ManifestItem("css", "OEBPS/code.css", "text/css"),
+    )
+    source, inventory = _book(tmp_path, files, manifest)
+
+    replacements, removed = use_reader_fonts(source, inventory, {})
+
+    assert replacements == {}
+    assert removed == frozenset()
+
+
+def test_reader_font_policy_preserves_code_markup_while_removing_global_fonts(
+    tmp_path: Path,
+) -> None:
+    opf = b"""<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest>
+<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+<item id="css" href="style.css" media-type="text/css"/>
+<item id="font" href="CustomFont.woff2" media-type="font/woff2"/>
+</manifest><spine><itemref idref="chapter"/></spine></package>"""
+    css = b"""@font-face { font-family:CustomFont; src:url(CustomFont.woff2) }
+.rust { white-space:pre-wrap; font-family:Menlo }
+p { font-family:Publisher }
+"""
+    semantic = (
+        b'<pre id="semantic" style="font-family:CustomFont;white-space:pre">'
+        b'<span style="font-family:CustomFont">let x = 1;</span></pre>'
+    )
+    styled = b'<p id="styled" class="rust" style="color:red">let y = 2;</p>'
+    prose = b'<p id="prose" style="font-family:Publisher">Ordinary prose.</p>'
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" href="style.css"/></head><body>'
+        + semantic
+        + styled
+        + prose
+        + b"</body></html>"
+    )
+    files = {
+        "OEBPS/content.opf": opf,
+        "OEBPS/chapter.xhtml": chapter,
+        "OEBPS/style.css": css,
+        "OEBPS/CustomFont.woff2": b"font",
+    }
+    manifest = (
+        ManifestItem("chapter", "OEBPS/chapter.xhtml", "application/xhtml+xml"),
+        ManifestItem("css", "OEBPS/style.css", "text/css"),
+        ManifestItem("font", "OEBPS/CustomFont.woff2", "font/woff2"),
+    )
+    source, inventory = _book(tmp_path, files, manifest)
+
+    replacements, removed = use_reader_fonts(source, inventory, {})
+
+    rendered = replacements["OEBPS/chapter.xhtml"]
+    assert semantic in rendered
+    assert styled in rendered
+    assert b'<p id="prose" style="font-family:inherit;">' in rendered
+    assert b"@font-face" not in replacements["OEBPS/style.css"]
+    assert b".rust { white-space:pre-wrap; font-family:Menlo }" in replacements["OEBPS/style.css"]
+    assert removed == frozenset({"OEBPS/CustomFont.woff2"})
+
+    repeated, repeated_removed = use_reader_fonts(source, inventory, replacements)
+    assert repeated == replacements
+    assert repeated_removed == removed
+
+
+@pytest.mark.parametrize(
+    "family",
+    (
+        "Publisher Font",
+        "Publisher, 'monospace'",
+        "var(--code-font), monospace",
+        "Menlo, monospace, serif",
+        "Menlo, monospace serif",
+    ),
+)
+def test_reader_font_policy_does_not_treat_named_dynamic_or_invalid_families_as_generic_monospace(
+    tmp_path: Path, family: str
+) -> None:
+    opf = b'<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>'
+    chapter = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body><p style="font-family:' + family + '">Text</p></body></html>'
+    ).encode()
+    files = {"OEBPS/content.opf": opf, "OEBPS/chapter.xhtml": chapter}
+    manifest = (ManifestItem("chapter", "OEBPS/chapter.xhtml", "application/xhtml+xml"),)
+    source, inventory = _book(tmp_path, files, manifest)
+
+    replacements, _removed = use_reader_fonts(source, inventory, {})
+
+    assert b"font-family:inherit" in replacements["OEBPS/chapter.xhtml"]
+
+
+@pytest.mark.parametrize(
+    "font",
+    (
+        "12px Publisher, 'monospace'",
+        "12px Menlo, monospace, serif",
+        "12px Menlo, monospace serif",
+    ),
+)
+def test_reader_font_policy_does_not_preserve_invalid_monospace_font_shorthand(tmp_path: Path, font: str) -> None:
+    opf = b'<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="css" href="style.css" media-type="text/css"/></manifest><spine><itemref idref="chapter"/></spine></package>'
+    chapter = b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Text</p></body></html>'
+    css = f"p {{ font: {font} }}".encode()
+    files = {
+        "OEBPS/content.opf": opf,
+        "OEBPS/chapter.xhtml": chapter,
+        "OEBPS/style.css": css,
+    }
+    manifest = (
+        ManifestItem("chapter", "OEBPS/chapter.xhtml", "application/xhtml+xml"),
+        ManifestItem("css", "OEBPS/style.css", "text/css"),
+    )
+    source, inventory = _book(tmp_path, files, manifest)
+
+    replacements, _removed = use_reader_fonts(source, inventory, {})
+
+    assert b"font-family:inherit" in replacements["OEBPS/style.css"]
+
+
+def test_reader_font_policy_rejects_dynamic_font_shorthand_even_with_monospace_fallback(
+    tmp_path: Path,
+) -> None:
+    opf = b'<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="css" href="style.css" media-type="text/css"/></manifest><spine><itemref idref="chapter"/></spine></package>'
+    chapter = b'<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Text</p></body></html>'
+    css = b"p { font: 12px var(--code-font), monospace }"
+    files = {
+        "OEBPS/content.opf": opf,
+        "OEBPS/chapter.xhtml": chapter,
+        "OEBPS/style.css": css,
+    }
+    manifest = (
+        ManifestItem("chapter", "OEBPS/chapter.xhtml", "application/xhtml+xml"),
+        ManifestItem("css", "OEBPS/style.css", "text/css"),
+    )
+    source, inventory = _book(tmp_path, files, manifest)
+
+    with pytest.raises(ValueError, match="variable font shorthand"):
+        use_reader_fonts(source, inventory, {})
 
 
 def test_reader_font_policy_uses_pending_replacements_and_preserves_noops(tmp_path: Path) -> None:
@@ -163,7 +324,7 @@ def test_reader_font_policy_rejects_invalid_css_without_touching_source(tmp_path
 
 def test_reader_font_policy_rejects_font_used_as_non_typographic_content(tmp_path: Path) -> None:
     opf = b'<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="font" href="icon.woff2" media-type="font/woff2"/></manifest><spine><itemref idref="chapter"/></spine></package>'
-    chapter = b'''<html xmlns="http://www.w3.org/1999/xhtml"><body><span style="font-family:Icons;background:url(icon.woff2)">icon</span></body></html>'''
+    chapter = b"""<html xmlns="http://www.w3.org/1999/xhtml"><body><span style="font-family:Icons;background:url(icon.woff2)">icon</span></body></html>"""
     files = {
         "OEBPS/content.opf": opf,
         "OEBPS/chapter.xhtml": chapter,
@@ -189,7 +350,7 @@ def test_reader_font_policy_rejects_font_used_as_non_typographic_content(tmp_pat
         ),
         (
             b'<html xmlns="http://www.w3.org/1999/xhtml"><body><span class="icon"/></body></html>',
-            br'.icon::before { content: "\e900"; font-family: Icons }',
+            rb'.icon::before { content: "\e900"; font-family: Icons }',
             "private-use generated glyph",
         ),
     ],
