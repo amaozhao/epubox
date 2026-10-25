@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import pytest
 
 from engine.core.markup import parse_xml_bytes, qname_local_name
+from engine.epub.publish import publish_atomic
 from engine.epub.upgrade import upgrade_package
+from engine.services.journal import BodyJournal
+from tests.engine.epub.test_factory import make_epub
+from tests.engine.epub.test_preparation import StubChecker
+from tests.engine.epub.test_publish import _case
 from tests.engine.epub.test_upgrade import _book, _elements
 
 
@@ -98,3 +103,60 @@ def test_upgrade_syncs_existing_ncx_uid_to_authoritative_opf_identifier(tmp_path
     identifier = next(element for element in package.iter() if qname_local_name(element.tag) == "identifier")
     assert identifier.get("id") == package.get("unique-identifier") == "uid"
     assert identifier.text == expected_uid.decode()
+
+
+def test_atomic_publication_recovers_empty_creator_and_keeps_translated_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tests.engine.agents.test_workflow as workflow_fixture
+
+    def metadata_book(path: Path, documents: dict[str, str]) -> Path:
+        source = make_epub(path, documents)
+        with ZipFile(source) as archive:
+            resources = {item.filename: archive.read(item.filename) for item in archive.infolist()}
+        resources["OEBPS/content.opf"] = resources["OEBPS/content.opf"].replace(
+            b"<dc:language>en</dc:language>",
+            (
+                b'<dc:creator id="creator1"></dc:creator>'
+                b'<meta refines="#creator1" property="file-as">Kreps, Sarah E.</meta>'
+                b'<meta refines="#creator1" property="role" scheme="marc:relators">aut</meta>'
+                b'<meta refines="#creator1" property="display-seq">1</meta>'
+                b'<dc:creator id="creator2">James Patton Rogers</dc:creator>'
+                b'<meta refines="#creator2" property="file-as">Rogers, James Patton</meta>'
+                b"<dc:language>en</dc:language>"
+            ),
+        )
+        with ZipFile(source, "w", compression=ZIP_DEFLATED) as archive:
+            for name, raw in resources.items():
+                archive.writestr(name, raw, compress_type=ZIP_STORED if name == "mimetype" else ZIP_DEFLATED)
+        return source
+
+    monkeypatch.setattr(workflow_fixture, "make_epub", metadata_book)
+    case = _case(tmp_path, "<p>English body.</p>", ("English body.",))
+    targets = {
+        item.item_id: item.source_projection.replace("English body.", "中文正文。")
+        for inventory in case.index.inventories
+        for item in inventory.items
+    }
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+    output = tmp_path / "book-cn.epub"
+
+    publish_atomic(case.session.store, output, StubChecker())
+
+    with ZipFile(output) as archive:
+        metadata = archive.read("OEBPS/content.opf")
+        chapter = archive.read("OEBPS/chapter.xhtml").decode()
+    assert [(element.get("id"), element.text) for element in _elements(metadata, "creator")] == [
+        ("creator1", "Kreps, Sarah E."),
+        ("creator2", "James Patton Rogers"),
+    ]
+    assert [
+        (element.get("property"), element.text)
+        for element in _elements(metadata, "meta")
+        if element.get("refines") == "#creator1"
+    ] == [
+        ("file-as", "Kreps, Sarah E."),
+        ("role", "aut"),
+        ("display-seq", "1"),
+    ]
+    assert "中文正文。" in chapter
