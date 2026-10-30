@@ -526,6 +526,9 @@ def fit_member_payload(
         if not budget.fits and stage == "review":
             payload["wire_version"] = "epubox-wire-8"
             budget = measure_budget(stage=stage, payload=payload, limits=limits, tokenizer_model=tokenizer_model)
+        if not budget.fits:
+            payload["wire_version"] = "epubox-wire-9"
+            budget = measure_budget(stage=stage, payload=payload, limits=limits, tokenizer_model=tokenizer_model)
     return payload, budget
 
 

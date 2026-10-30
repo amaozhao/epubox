@@ -37,9 +37,10 @@ class Model:
         return {"max_tokens": self.max_tokens}
 
 
-def test_v8_provider_hash_budget_and_saved_response_use_actual_slot_map():
+@pytest.mark.parametrize("wire_version", ("epubox-wire-8", "epubox-wire-9"))
+def test_compact_review_provider_hash_budget_and_saved_response_use_actual_slot_map(wire_version):
     book = wire_payload("review")
-    book["wire_version"] = "epubox-wire-8"
+    book["wire_version"] = wire_version
     book["items"][0]["source"] = "⟦+g1⟧Source one.⟦-g1⟧⟦=x1⟧⟦+b1⟧Source two.⟦-b1⟧"
     book["items"][0]["target"] = "⟦+g1⟧译文一。⟦-g1⟧⟦=x1⟧⟦+b1⟧译文二。⟦-b1⟧"
     persisted = []
@@ -72,10 +73,10 @@ def test_v8_provider_hash_budget_and_saved_response_use_actual_slot_map():
         persist_response=lambda *args: persisted.append(args[-1]),
     )
     result = asyncio.run(runtime.invoke("review", book, {"request_id": book["request_id"], "output_tokens": 8192}))
-    assert reserved[0].metadata["wire_version"] == "epubox-wire-8"
+    assert reserved[0].metadata["wire_version"] == wire_version
     assert reserved[0].metadata["wire_hash"] == wire.digest(sent[0]["messages"], None)
     assert reserved[0].metadata["output_unlimited"] == "true"
-    assert persisted[0]["metadata"]["wire_version"] == "epubox-wire-8"
+    assert persisted[0]["metadata"]["wire_version"] == wire_version
     assert (
         reserved[0].reservation["estimated_input_tokens"]
         == model_input_budget(

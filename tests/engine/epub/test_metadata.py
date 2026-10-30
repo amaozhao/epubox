@@ -15,6 +15,42 @@ from tests.engine.epub.test_publish import _case
 from tests.engine.epub.test_upgrade import _book, _elements
 
 
+@pytest.mark.parametrize("dependent_first", (False, True))
+def test_upgrade_removes_dangling_metadata_refinements_and_their_dependents(
+    tmp_path: Path, dependent_first: bool
+) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "3.0", nav=True)
+    orphan = b'<meta id="bad-edition" refines="#edition" property="title-type">edition</meta>'
+    dependent = b'<meta id="bad-dependent" refines="#bad-edition" property="display-seq">2</meta>'
+    valid = (
+        b'<dc:title id="subtitle">A real subtitle</dc:title>'
+        b'<meta id="good-title" refines="#subtitle" property="title-type">subtitle</meta>'
+        b'<meta refines="#good-title" property="display-seq">1</meta>'
+        b'<dc:title id="encoded-title">Encoded subtitle</dc:title>'
+        b'<meta refines="#encoded%2Dtitle" property="title-type">subtitle</meta>'
+        b'<meta refines="#c1" property="media:duration">0:10:00</meta>'
+        b'<meta refines="other.opf#edition" property="title-type">edition</meta>'
+    )
+    with ZipFile(source) as archive:
+        original = archive.read(inventory.opf_path)
+    opf = original.replace(
+        b"</metadata>", valid + (dependent + orphan if dependent_first else orphan + dependent) + b"</metadata>"
+    )
+
+    upgraded = upgrade_package(source, inventory, {inventory.opf_path: opf})
+    metas = _elements(upgraded[inventory.opf_path], "meta")
+    refinements = [element.get("refines") for element in metas]
+
+    assert "#edition" not in refinements
+    assert "#bad-edition" not in refinements
+    assert {"#subtitle", "#good-title", "#encoded%2Dtitle", "#c1", "other.opf#edition"}.issubset(refinements)
+    assert not {"bad-edition", "bad-dependent"}.intersection(element.get("id") for element in metas)
+    assert b"A real subtitle" in upgraded[inventory.opf_path]
+    with ZipFile(source) as archive:
+        assert archive.read(inventory.opf_path) == original
+
+
 @pytest.mark.parametrize("agent", ["creator", "contributor"])
 def test_upgrade_recovers_empty_agent_from_unique_file_as_refinement(tmp_path: Path, agent: str) -> None:
     source = tmp_path / "book.epub"

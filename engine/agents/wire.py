@@ -22,8 +22,9 @@ VERSIONS = (
     "epubox-wire-6",
     VERSION,
     "epubox-wire-8",
+    "epubox-wire-9",
 )
-SLOT_VERSIONS = ("epubox-wire-4", "epubox-wire-5", "epubox-wire-6", VERSION, "epubox-wire-8")
+SLOT_VERSIONS = ("epubox-wire-4", "epubox-wire-5", "epubox-wire-6", VERSION, "epubox-wire-8", "epubox-wire-9")
 
 _PROTOCOLS = {"translate": "epubox-text-1", "review": "epubox-review-2"}
 _REF = re.compile(r"[gbx][A-Za-z0-9_.:-]+\Z")
@@ -187,11 +188,31 @@ def messages(
                 if isinstance(hint, dict) and hint.get("class") == "code":
                     hint.pop("readonly", None)
                     hint.pop("excerpt", None)
+        if version == "epubox-wire-9":
+            # Slot reconstruction keeps the full canonical hints locally;
+            # omit repeated tag names and boundaries already carried by markers.
+            item["hints"] = {
+                ref: hint
+                for ref, hint in item.get("hints", {}).items()
+                if not (
+                    isinstance(hint, dict)
+                    and (
+                        set(hint) == {"element"}
+                        and isinstance(hint["element"], str)
+                        or ref.startswith("b")
+                        and hint == {"class": "hard_interval"}
+                        or ref.startswith("g")
+                        and set(hint) == {"element", "source_view_boundary"}
+                        and isinstance(hint["element"], str)
+                        and hint["source_view_boundary"] == "paragraph"
+                    )
+                )
+            }
         _compact_item(item)
         if version in SLOT_VERSIONS and isinstance(source, str):
             item["source"] = _encode_slotted_source(source)
             if (
-                version in {"epubox-wire-6", VERSION, "epubox-wire-8"}
+                version in {"epubox-wire-6", VERSION, "epubox-wire-8", "epubox-wire-9"}
                 or version == "epubox-wire-5"
                 and kind == "review"
             ):
@@ -200,7 +221,9 @@ def messages(
                 target = payload["items"][index - 1].get("target")
                 if kind == "review" and isinstance(target, str) and layout == _slot_layout(target):
                     item["target"] = (
-                        _target_slots(target) if version == "epubox-wire-8" else _encode_slotted_source(target)
+                        _target_slots(target)
+                        if version in {"epubox-wire-8", "epubox-wire-9"}
+                        else _encode_slotted_source(target)
                     )
     if not physical.get("context"):
         physical.pop("context", None)
@@ -276,10 +299,10 @@ def decode(
                     item["target"] = _decode_slots(
                         sources[canonical_id],
                         item["target"],
-                        preserve_whitespace=version in {"epubox-wire-6", VERSION, "epubox-wire-8"},
-                        diagnostics=version in {VERSION, "epubox-wire-8"},
+                        preserve_whitespace=version in {"epubox-wire-6", VERSION, "epubox-wire-8", "epubox-wire-9"},
+                        diagnostics=version in {VERSION, "epubox-wire-8", "epubox-wire-9"},
                         fragment_hints=(hints or {}).get(canonical_id)
-                        if version in {VERSION, "epubox-wire-8"}
+                        if version in {VERSION, "epubox-wire-8", "epubox-wire-9"}
                         else None,
                     )
                 else:

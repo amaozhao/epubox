@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 from collections.abc import Mapping
+from urllib.parse import unquote
 
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -39,6 +40,23 @@ def recover_empty_agents(metadata: etree._Element) -> None:
         values = refinements.get(agent.get("id", ""), set())
         if len(values) == 1:
             agent.text = next(iter(values))
+
+
+def remove_dangling_refinements(package: etree._Element, metadata: etree._Element) -> None:
+    """Drop local meta refinements without a target, including their dependents."""
+    while True:
+        identifiers = {item.get("id") for item in package.iter() if item.get("id")}
+        dangling = [
+            item
+            for item in metadata.iter()
+            if qname_local_name(item.tag) == "meta"
+            and (refines := item.get("refines", "")).startswith("#")
+            and unquote(refines[1:]) not in identifiers
+        ]
+        if not dangling:
+            return
+        for item in dangling:
+            item.getparent().remove(item)
 
 
 def unique_identifier(package: etree._Element, metadata: etree._Element) -> str | None:
@@ -91,4 +109,4 @@ def _patch_attributes(
     return data
 
 
-__all__ = ["recover_empty_agents", "required_dc", "sync_ncx_uid", "unique_identifier"]
+__all__ = ["recover_empty_agents", "remove_dangling_refinements", "required_dc", "sync_ncx_uid", "unique_identifier"]

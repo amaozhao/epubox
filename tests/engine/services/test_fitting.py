@@ -2,12 +2,14 @@ import asyncio
 import hashlib
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 import engine.services.ready as ready_module
 from engine.agents import wire
 from engine.agents.protocol import validate_translation_response
+from engine.agents.runtime import request_messages
 from engine.agents.workflow import run_workflow
 from engine.epub.preparation import PreparationConfig
 from engine.item.atoms import ADAPTER_VERSION, EXTRACTOR_VERSION, extract_resource
@@ -21,11 +23,64 @@ from engine.services.preflight import preflight_atomic_resources
 from engine.services.preparation import prepare_translation
 from engine.services.ready import ReadySession
 from engine.services.store import RunStore
+from tests.engine.agents.test_physical import Model
+from tests.engine.agents.test_runtime import FakeOpenAIClient
 from tests.engine.agents.test_workflow import review_item
 from tests.engine.epub.test_factory import make_epub
 from tests.engine.epub.test_preparation import StubChecker
 from tests.engine.item.test_members import glossary, record, source
 from tests.engine.services.test_preparing import atomic_config
+
+
+@pytest.mark.parametrize("stage", ("translate", "review"))
+def test_marker_dense_index_fits_and_preserves_local_structure(stage):
+    raw = source(
+        "<ul>"
+        + "".join(
+            "<li><span>Entry</span>" + '<span><a id="anchor"/></span>' * 8 + f" {number}</li>" for number in range(120)
+        )
+        + "</ul>"
+    )
+    inventory = extract_resource(raw, "OPS/index.xhtml", "book")
+    capacity = BudgetLimits(1500, 50000, None, 1, output_version=7, context_unlimited=True)
+    report = preflight_atomic_resources((inventory,), {"OPS/index.xhtml": raw}, capacity, "gpt-3.5-turbo")
+    index = MemberIndex((inventory,), report)
+    member = next(item for item in index.members if item.atomic_tag == "ul")
+    targets = {member.item_id: record(member.item_id, member.source_projection)} if stage == "review" else None
+    revisions = {member.unit_id: 0} if stage == "review" else None
+    packed = pack_members(stage, (member,), glossary(), index, capacity, targets=targets, revisions=revisions)
+
+    assert packed.ready, packed.blocked
+    batch = packed.batches[0]
+    assert batch.payload["wire_version"] == "epubox-wire-9"
+    assert batch.budget.input_reserve <= 50000
+    wire_items = batch.payload["items"]
+    assert isinstance(wire_items, list) and isinstance(wire_items[0], dict)
+    hints = wire_items[0]["hints"]
+    assert isinstance(hints, dict) and len(hints) == len(member.registry)
+    physical = json.loads(request_messages(stage, batch.payload, compact=True)[1]["content"])
+    assert len(physical["items"][0].get("hints", {})) < len(member.registry)
+    assert "<g" in physical["items"][0]["source"]
+    values = {slot: f"译文{slot}" for slot in physical["items"][0]["slot_ids"]}
+    response = json.dumps(
+        {
+            "protocol": batch.payload["protocol"],
+            "request_id": batch.manifest.request_id,
+            "items": [{"item_id": "1", "target": values}],
+        }
+    )
+    decoded = json.loads(
+        wire.decode(
+            stage,
+            response,
+            batch.manifest.request_id,
+            (member.item_id,),
+            version="epubox-wire-9",
+            sources={member.item_id: member.source_projection},
+            hints={member.item_id: hints},
+        )
+    )
+    validate_member_target(member, decoded["items"][0]["target"])
 
 
 def test_review_context_fallback_keeps_actual_draft_and_uses_readonly_target_slots():
@@ -89,8 +144,15 @@ def test_review_context_fallback_keeps_actual_draft_and_uses_readonly_target_slo
     assert uncapped.batches[0].budget.context_tokens > 1
 
 
-def test_compacted_member_survives_ready_dispatch_review_and_restart(tmp_path):
-    body = "<p>" + "<br/>".join(f"├── Service{number}Application.java" for number in range(38)) + "</p>"
+@pytest.mark.parametrize("dense", (False, True))
+def test_compacted_member_survives_ready_dispatch_review_and_restart(tmp_path, dense):
+    body = (
+        "<ul>"
+        + "".join("<li><span>Entry</span>" + '<span><a id="anchor"/></span>' * 8 + " item</li>" for _ in range(120))
+        + "</ul>"
+        if dense
+        else "<p>" + "<br/>".join(f"├── Service{number}Application.java" for number in range(38)) + "</p>"
+    )
     result = asyncio.run(
         prepare_translation(
             make_epub(tmp_path / "book.epub", {"chapter.xhtml": body}),
@@ -100,7 +162,11 @@ def test_compacted_member_survives_ready_dispatch_review_and_restart(tmp_path):
                 auto_extract=False,
                 adapter_version=ADAPTER_VERSION,
                 extractor_version=EXTRACTOR_VERSION,
-                translation_config={"model": "gpt-3.5-turbo", "output_budget_version": 4},
+                translation_config={
+                    "model": "gpt-3.5-turbo",
+                    "output_budget_version": 7 if dense else 4,
+                    "context_unlimited": dense,
+                },
             ),
             StubChecker(),
         )
@@ -108,10 +174,19 @@ def test_compacted_member_survives_ready_dispatch_review_and_restart(tmp_path):
     assert result.status == "ready"
     session = ReadySession(RunStore(result.work_dir))
     batch = next(
-        b for b in session._prepared_batches.values() if "Service0Application.java" in b.items[0].source_projection
+        b
+        for b in session._prepared_batches.values()
+        if (
+            b.payload.get("wire_version") == "epubox-wire-9"
+            if dense
+            else "Service0Application.java" in b.items[0].source_projection
+        )
     )
     assert len(batch.items) == 1
+    if dense:
+        assert batch.payload["wire_version"] == "epubox-wire-9"
     session.verify_batch(batch, initial=True)
+    session.verify_batch(batch)
     journal = BodyJournal(session.store, session)
     calls = []
 
@@ -127,12 +202,37 @@ def test_compacted_member_survives_ready_dispatch_review_and_restart(tmp_path):
             "raw": json.dumps({"protocol": payload["protocol"], "request_id": payload["request_id"], "items": items})
         }
 
+    class Completions:
+        async def create(self, **kwargs):
+            payload = json.loads(kwargs["messages"][1]["content"])
+            stage = "translate" if payload["protocol"] == "epubox-text-1" else "review"
+            calls.append(stage)
+            items = [
+                {"item_id": item["item_id"], "target": {slot: "译文" for slot in item["slot_ids"]}}
+                if stage == "translate"
+                else review_item(item, decision="no_change")
+                for item in payload["items"]
+            ]
+            raw = json.dumps({"protocol": payload["protocol"], "request_id": payload["request_id"], "items": items})
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=raw), finish_reason="stop")],
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+                id="dense-index-response",
+                model="gpt-3.5-turbo",
+                system_fingerprint=None,
+            )
+
+    runtime = (
+        journal.runtime(model=Model(FakeOpenAIClient(Completions())))
+        if dense
+        else journal.runtime(transport=transport)
+    )
     finished = asyncio.run(
         run_workflow(
             session.prepared,
             batch,
             session.index,
-            journal.runtime(transport=transport),
+            runtime,
             session=session,
             save=journal.save,
             records=journal.records(batch.manifest.item_ids),

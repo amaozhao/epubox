@@ -676,6 +676,9 @@ def _verify_restored_batch(session, batch, capacity, targets, sent_request) -> N
             compact_review = copy.deepcopy(cleared)
             compact_review["wire_version"] = "epubox-wire-8"
             variants.append(compact_review)
+        compact_hints = copy.deepcopy(cleared)
+        compact_hints["wire_version"] = "epubox-wire-9"
+        variants.append(compact_hints)
         for payload in variants:
             if payload == batch.payload:
                 saved_found = True

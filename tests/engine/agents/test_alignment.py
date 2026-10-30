@@ -1,3 +1,4 @@
+import copy
 import json
 
 from engine.agents.runtime import wire_hash
@@ -41,6 +42,59 @@ def test_v8_review_keeps_projection_for_legacy_target_with_different_slot_layout
     item["target"] = "⟦+g2⟧二⟦-g2⟧⟦+g1⟧一⟦-g1⟧"
     physical = json.loads(messages("review", book, "base", version="epubox-wire-8")[1]["content"])["items"][0]
     assert physical["target"] == "<g2>二</g2><g1>一</g1>"
+
+
+def test_v9_omits_only_redundant_physical_hints_without_changing_canonical_input():
+    book = payload()
+    item = book["items"][0]
+    item["hints"].update(
+        {
+            "b2": {"class": "hard_interval"},
+            "g2": {"element": "li", "source_view_boundary": "paragraph"},
+            "b3": {"class": "hard_interval", "note": "preserve"},
+            "g3": {"element": "li", "source_view_boundary": "paragraph", "role": "navigation"},
+            "x2": {"class": "unknown"},
+        }
+    )
+    item["terms"] = [
+        {
+            "term_id": "term-1",
+            "source": "API",
+            "target": "接口",
+            "aliases": [],
+            "mode": "required",
+            "match_policy": "exact",
+            "note": "",
+            "role": "target",
+        }
+    ]
+    original = copy.deepcopy(book)
+
+    physical = json.loads(messages("translate", book, "base", version="epubox-wire-9")[1]["content"])
+    sent = physical["items"][0]
+
+    assert book == original
+    assert "g1" not in sent["hints"]
+    assert "b2" not in sent["hints"]
+    assert "g2" not in sent["hints"]
+    assert sent["hints"]["x1"] == {"element": "code", "class": "code"}
+    assert sent["hints"]["b3"] == {"class": "hard_interval", "note": "preserve"}
+    assert sent["hints"]["g3"] == {
+        "element": "li",
+        "source_view_boundary": "paragraph",
+        "role": "navigation",
+    }
+    assert sent["hints"]["x2"] == {"class": "unknown"}
+    assert sent["terms"] == [
+        {
+            "term_id": "term-1",
+            "source": "API",
+            "target": "接口",
+            "mode": "required",
+            "match_policy": "exact",
+            "role": "target",
+        }
+    ]
 
 
 def test_review_labels_matching_source_and_draft_slots_without_changing_old_wire():

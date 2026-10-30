@@ -12,7 +12,13 @@ from urllib.parse import quote, unquote, urlsplit
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import element_path, parse_xml_bytes, qname_local_name
-from engine.epub.metadata import recover_empty_agents, required_dc, sync_ncx_uid, unique_identifier
+from engine.epub.metadata import (
+    recover_empty_agents,
+    remove_dangling_refinements,
+    required_dc,
+    sync_ncx_uid,
+    unique_identifier,
+)
 from engine.epub.parsing import parse_resource
 from engine.epub.ranges import ResourceIndex, index_resource
 from engine.epub.validation import PackageInventory
@@ -101,6 +107,7 @@ def upgrade_package(
 
         items = {item.get("id", ""): item for item in manifest if qname_local_name(item.tag) == "item"}
         cover_id = _cover(metadata, package)
+        remove_dangling_refinements(package, metadata)
         _order_metadata(metadata)
         for item in items.values():
             path = _resolve(inventory.opf_path, item.get("href", ""))

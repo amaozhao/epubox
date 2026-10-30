@@ -173,7 +173,11 @@ def request_messages(
         )
     if compact:
         if wire_version is None:
-            wire_version = "epubox-wire-8" if payload.get("wire_version") == "epubox-wire-8" else wire.VERSION
+            wire_version = (
+                str(payload["wire_version"])
+                if payload.get("wire_version") in {"epubox-wire-8", "epubox-wire-9"}
+                else wire.VERSION
+            )
         return wire.messages(kind, payload, prompt, version=wire_version)
     return (
         {"role": "system", "content": prompt},
@@ -720,7 +724,9 @@ class ModelRuntime:
 
         wire_metadata = (
             {
-                "wire_version": "epubox-wire-8" if payload.get("wire_version") == "epubox-wire-8" else wire.VERSION,
+                "wire_version": str(payload["wire_version"])
+                if payload.get("wire_version") in {"epubox-wire-8", "epubox-wire-9"}
+                else wire.VERSION,
                 "wire_hash": wire_hash(kind, payload, None, compact=True),
                 "output_unlimited": "true",
             }
