@@ -8,16 +8,26 @@ from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import unquote
 
 import regex
 import tinycss2
 
-from engine.core.code import CodeContext
+from engine.core.code import (
+    CodeContext,
+    _import_target,
+    _resolve,
+    _selectors,
+    _specificity,
+    _stylesheet_namespaces,
+    _Winner,
+    _without_pseudos,
+)
 from engine.core.markup import element_path
 from engine.epub.parsing import XHTML_NAMESPACE, parse_resource
 from engine.epub.ranges import CharSpan, RawSpan, index_resource
 
-CLEANUP_POLICY = "zh-inline-v2"
+CLEANUP_POLICY = "zh-inline-v3"
 _EMPTY = {"span", "em", "strong"}
 _BLOCKS = {
     "body",
@@ -35,8 +45,10 @@ _BLOCKS = {
 }
 _PROTECTED = {"pre", "code", "kbd", "samp", "var", "tt", "script", "style", "math", "svg", "textarea"}
 _BREAKS = {"br", "hr", "img", "audio", "video", "iframe", "object", "canvas", "input"}
-_SPACE = " \t\r\n"
+_SPACE = " \t\r\n\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u202f\u205f\u3000"
 _PUNCTUATION = frozenset("，。！？；：、（）【】《》〈〉「」『』“”‘’…—")
+_OPENING = frozenset("（【《〈「『“‘")
+_CLOSING = frozenset("，。！？；：、）】》〉」』”’…")
 _HAN = regex.compile(r"\p{Script=Han}\Z")
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 _NESTED = {"media", "supports", "layer", "container", "document", "scope"}
@@ -65,28 +77,13 @@ def cleanup_resources(
         if name.lower().endswith(".css") or (media_types or {}).get(name) == "text/css":
             _rules, encoding = tinycss2.parse_stylesheet_bytes(raw)
             styles[name] = raw.decode(encoding.codec_info.name)
-    safety = _Safety()
-    for name, raw in candidates.items():
-        if name.lower().endswith(".css") or (media_types or {}).get(name) == "text/css":
-            rules, _encoding = tinycss2.parse_stylesheet_bytes(raw, skip_comments=True, skip_whitespace=True)
-            safety.add(rules)
-        elif _markup(name, media_types):
-            parsed = parse_resource(raw, "application/xhtml+xml")
-            if parsed.tree is not None:
-                for node in parsed.tree.iter():
-                    if isinstance(node.tag, str) and _name(node) == "style":
-                        safety.add(
-                            tinycss2.parse_stylesheet(
-                                "".join(node.itertext()), skip_comments=True, skip_whitespace=True
-                            )
-                        )
     result = dict(resources)
     stats = {"removed_empty_tags": 0, "removed_spaces": 0, "changed_documents": 0}
     for name, raw in candidates.items():
         if not _markup(name, media_types):
             continue
         mapping: dict[tuple[int, ...], tuple[int, ...]] | None = {} if node_maps is not None else None
-        changed, removed, spaces = _clean(raw, safety, node_map=mapping, resource_path=name, styles=styles)
+        changed, removed, spaces = _clean(raw, node_map=mapping, resource_path=name, styles=styles)
         if node_maps is not None and mapping is not None:
             node_maps[name] = mapping
         if changed != raw:
@@ -111,94 +108,209 @@ def _name(node: Any) -> str:
 
 
 class _Safety:
-    def __init__(self) -> None:
-        self.empty: list[str] = []
-        self.whitespace: list[str] = []
-        self.visual: list[str] = []
+    def __init__(self, code: CodeContext, nodes: list[Any], styles: Mapping[str, str]) -> None:
+        self.code = code
+        self.styles = styles
+        self.empty: set[Any] = set()
+        self.whitespace: set[Any] = set()
+        self.visual: set[Any] = set()
+        self.hidden: set[Any] = set()
+        self.values: dict[tuple[Any, str], dict[str, _Winner]] = {}
+        self.order = 0
+        for node in nodes:
+            if _name(node) == "style":
+                self.add(
+                    tinycss2.parse_stylesheet("".join(node.itertext()), skip_comments=True, skip_whitespace=True),
+                    code.resource_path,
+                )
+            elif _name(node) == "link" and "stylesheet" in node.get("rel", "").lower().split():
+                self.load(code.resource_path, node.get("href", ""))
+        for node in nodes:
+            if node.get("style"):
+                self.declarations(
+                    {node},
+                    tinycss2.parse_declaration_list(node.get("style"), skip_comments=True, skip_whitespace=True),
+                    (1_000_000, 0, 0),
+                )
+        for (node, pseudo), values in self.values.items():
+            display = values.get("display")
+            mode = (
+                display.value
+                if display is not None
+                else "block"
+                if not pseudo and _name(node) in _BLOCKS
+                else "inline"
+            )
+            if not pseudo and mode == "none":
+                self.hidden.add(node)
+            if pseudo and (
+                "content" not in values or values["content"].value in {"none", "normal", "initial", "unset"}
+            ):
+                continue
+            for name, winner in values.items():
+                if (
+                    not pseudo
+                    and name == "white-space"
+                    and winner.value not in {"normal", "nowrap", "inherit", "unset", "initial"}
+                ):
+                    self.whitespace.add(node)
+                if _visual(name, winner.value, mode):
+                    self.visual.add(node)
 
-    def add(self, rules: Any) -> None:
+    def load(self, base: str, href: str) -> None:
+        path = _resolve(base, href)
+        if path is not None:
+            # CodeContext already validated imports and their local resource paths.
+            self.add(tinycss2.parse_stylesheet(self.styles[path], skip_comments=True, skip_whitespace=True), path)
+
+    def add(
+        self, rules: Any, path: str, namespaces: Mapping[str, str] | None = None, *, conditional: bool = False
+    ) -> None:
+        if namespaces is None:
+            namespaces = _stylesheet_namespaces(rules, path)
         for rule in rules:
-            if rule.type == "error" or rule.type == "at-rule" and rule.lower_at_keyword == "import":
-                self.empty.append("*")
-                self.whitespace.append("*")
+            if rule.type == "error":
+                raise ValueError(f"invalid CSS prevents typography cleanup in {path}")
+            elif rule.type == "at-rule" and rule.lower_at_keyword == "import":
+                href = _import_target(rule.prelude)
+                if href is not None:
+                    self.load(path, href)
             elif rule.type == "at-rule" and rule.lower_at_keyword in _NESTED and rule.content is not None:
-                self.add(tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True))
+                self.add(
+                    tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True),
+                    path,
+                    namespaces,
+                    conditional=True,
+                )
             elif rule.type == "qualified-rule":
-                selectors = tinycss2.serialize(rule.prelude).strip()
                 declarations = tinycss2.parse_declaration_list(
                     rule.content or [], skip_comments=True, skip_whitespace=True
                 )
-                if declarations:
-                    self.empty.append(selectors)
-                for declaration in declarations:
-                    if declaration.type == "error":
-                        self.whitespace.append("*")
-                    elif declaration.type == "declaration":
-                        value = tinycss2.serialize(declaration.value).strip().lower()
-                        if declaration.lower_name == "white-space" and value not in {
-                            "normal",
-                            "nowrap",
-                            "inherit",
-                            "unset",
-                        }:
-                            self.whitespace.append(selectors)
-                        if declaration.lower_name in {
-                            "content",
-                            "width",
-                            "height",
-                            "min-width",
-                            "min-height",
-                            "background",
-                            "background-image",
-                            "counter-increment",
-                        }:
-                            self.visual.append(selectors)
+                for selector in _selectors(rule.prelude):
+                    pseudo = re.search(r"::?(before|after|first-letter|first-line)\b", selector, re.IGNORECASE)
+                    subject = re.sub(
+                        r"::?(?:before|after|first-letter|first-line)\b", "", selector, flags=re.IGNORECASE
+                    )
+                    try:
+                        matches = set(self.code.select(subject, namespaces))
+                    except (ValueError, NotImplementedError):
+                        # Drop unsupported pseudo-classes to find a conservative superset of subjects.
+                        subject = _without_pseudos(subject)
+                        try:
+                            matches = set(self.code.select(subject, namespaces))
+                        except (ValueError, NotImplementedError) as error:
+                            raise ValueError(
+                                f"cannot determine typography selector safety in {path}: {selector}"
+                            ) from error
+                    self.declarations(
+                        matches,
+                        declarations,
+                        _specificity(selector),
+                        pseudo.group(1).lower() if pseudo is not None else "",
+                        conditional=conditional,
+                    )
 
-    @staticmethod
-    def matches(node: Any, selectors: list[str]) -> bool:
-        return any(_possibly_matches(node, part) for selector in selectors for part in selector.split(","))
+    def declarations(
+        self,
+        matches: set[Any],
+        declarations: Any,
+        specificity: tuple[int, int, int],
+        pseudo: str = "",
+        *,
+        conditional: bool = False,
+    ) -> None:
+        if declarations:
+            self.empty.update(matches)
+        for declaration in declarations:
+            if declaration.type == "error":
+                raise ValueError("invalid CSS declaration prevents typography cleanup")
+            elif declaration.type == "declaration":
+                name = declaration.lower_name
+                value = tinycss2.serialize(declaration.value).strip().lower()
+                self.order += 1
+                candidate = _Winner(value, bool(declaration.important), specificity, self.order)
+                if conditional:
+                    # Viewport-dependent rules may apply on a reader; keep their potential boundaries.
+                    if name == "white-space" and value not in {"normal", "nowrap", "inherit", "unset", "initial"}:
+                        self.whitespace.update(matches)
+                    if _visual(name, value, "inline-block"):
+                        self.visual.update(matches)
+                    continue
+                for node in matches:
+                    values = self.values.setdefault((node, pseudo), {})
+                    current = values.get(name)
+                    if current is None or (candidate.important, candidate.specificity, candidate.order) >= (
+                        current.important,
+                        current.specificity,
+                        current.order,
+                    ):
+                        values[name] = candidate
 
 
-def _possibly_matches(node: Any, selector: str) -> bool:
-    """Overmatch unsupported selectors; uncertainty preserves existing presentation."""
-    if any(character in selector for character in "([\\|"):
-        return True
-    compound = re.split(r"\s+|[>+~]", selector.strip())[-1]
-    compound = re.sub(r":{1,2}[a-zA-Z_-][\w-]*", "", compound)
-    if not re.fullmatch(r"(?:[a-zA-Z][\w-]*|\*)?(?:[.#][\w-]+)*", compound):
-        return True
-    tag = re.match(r"^[a-zA-Z][\w-]*", compound)
-    if tag and tag.group().lower() != _name(node):
+def _visual(name: str, value: str, display: str) -> bool:
+    if display in {"none", "contents"}:
         return False
-    if any(node.get("id") != value for value in re.findall(r"#([\w-]+)", compound)):
+    if name == "content":
+        return value not in {"none", "normal", '""', "''"}
+    if name in {"background", "background-image", "background-color"}:
+        return re.sub(r"\s+", "", value) not in {"none", "transparent", "rgba(0,0,0,0)", "#0000", "#00000000"}
+    if name == "counter-increment":
+        return value != "none"
+    if name == "display":
+        return value in {"block", "flex", "grid", "table", "list-item", "flow-root"}
+    if name in {
+        "width",
+        "height",
+        "min-width",
+        "min-height",
+        "inline-size",
+        "block-size",
+        "min-inline-size",
+        "min-block-size",
+    }:
+        if display == "inline":
+            return False
+    elif not name.startswith(("margin", "padding", "border")):
         return False
-    classes = set((node.get("class") or "").split())
-    return set(re.findall(r"\.([\w-]+)", compound)) <= classes
+    return value not in {"auto", "none", "normal", "transparent", "initial", "unset"} and not all(
+        re.fullmatch(r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[a-z]+|%)?", part) for part in value.split()
+    )
+
+
+def _url_label(node: Any) -> bool:
+    label = "".join(node.itertext()).strip()
+    href = unquote(node.get("href", ""))
+    return bool(label) and (
+        label == href
+        or label == href.removeprefix("mailto:")
+        or label == re.sub(r"^[a-z][a-z0-9+.-]*://", "", href, flags=re.IGNORECASE)
+        or bool(
+            re.fullmatch(
+                r"(?:(?:https?|ftp|file)://|//|www\.)[^\s/]+(?:/[^\r\n]*)?"
+                r"|(?:\.{1,2}/|/)[^\r\n]+|[^\s/@]+\.[a-z]{2,}(?:/[^\r\n]*)?"
+                r"|[^\s@]+@[^\s@]+\.[^\s@]+",
+                label,
+                re.IGNORECASE,
+            )
+        )
+    )
 
 
 def _protected(node: Any, safety: _Safety) -> bool:
     name = _name(node)
-    if (
+    return bool(
         not node.tag.startswith("{" + XHTML_NAMESPACE + "}")
         or name in _PROTECTED
         or name == "a"
         and node.get("href") is not None
+        and _url_label(node)
         or node.get(_XML_SPACE) == "preserve"
-        or safety.matches(node, safety.whitespace)
-    ):
-        return True
-    declarations = tinycss2.parse_declaration_list(node.get("style", ""), skip_comments=True, skip_whitespace=True)
-    return any(
-        declaration.type == "declaration"
-        and declaration.lower_name == "white-space"
-        and tinycss2.serialize(declaration.value).strip().lower() not in {"normal", "nowrap", "inherit", "unset"}
-        for declaration in declarations
+        or node in safety.whitespace
     )
 
 
 def _clean(
     raw: bytes,
-    safety: _Safety,
     *,
     node_map: dict[tuple[int, ...], tuple[int, ...]] | None = None,
     resource_path: str = "cleanup.xhtml",
@@ -218,6 +330,7 @@ def _clean(
         if node_map is not None:
             node_map.update({path: path for path in paths.values()})
         return raw, 0, 0
+    safety = _Safety(code, nodes, styles or {})
     bodies = [node for node in nodes if node.tag == "{" + XHTML_NAMESPACE + "}body"]
     if len(bodies) != 1:
         return raw, 0, 0
@@ -227,24 +340,6 @@ def _clean(
     for node in nodes:
         if node.getparent() in blocked or code.is_code(node) or _protected(node, safety):
             blocked.add(node)
-    removable: set[Any] = set()
-    patches: list[RawSpan] = []
-    for node in reversed(nodes):
-        if (
-            node not in descendants
-            or node in blocked
-            or _name(node) not in _EMPTY
-            or node.attrib
-            or node.text
-            or any(child not in removable or child.tail for child in node)
-            or safety.matches(node, safety.empty)
-        ):
-            continue
-        removable.add(node)
-        span = index.nodes[paths[node]]
-        patches.append(span.starttag)
-        if not span.self_closing:
-            patches.append(span.endtag)
     lexical = {(slot.path, slot.field, slot.special_index): slot for slot in index.slots if slot.field != "attribute"}
     flows: dict[tuple[int, ...], list[CharSpan | None]] = {}
 
@@ -259,17 +354,15 @@ def _clean(
     def walk(node: Any, block: tuple[int, ...]) -> None:
         path = paths[node]
         name = _name(node)
-        if node in blocked or name in _BREAKS:
-            barrier(block)
+        if node in safety.hidden:
             return
-        # Whitespace-only inline nodes may intentionally separate English words.
-        if name in _EMPTY and len(node) == 0 and node.text and not node.text.strip():
+        if node in blocked or name in _BREAKS:
             barrier(block)
             return
         local = path if name in _BLOCKS else block
         if local != block:
             barrier(block)
-        visual = safety.matches(node, safety.visual)
+        visual = node in safety.visual
         if visual:
             barrier(local)
         text(path, "text", local)
@@ -290,15 +383,32 @@ def _clean(
         start = 0
         for end in range(len(flow) + 1):
             if end == len(flow) or flow[end] is None:
-                _spaces([char for char in flow[start:end] if char is not None], start == 0, spaces)
+                _spaces([char for char in flow[start:end] if char is not None], start == 0, end == len(flow), spaces)
                 start = end + 1
-    literal_spaces = {
-        span
-        for span in spaces
-        if raw[span.start : span.end].decode(index.encoding)
-        and all(character in _SPACE for character in raw[span.start : span.end].decode(index.encoding))
-    }
-    patches.extend(literal_spaces)
+    # Character spans already bind decoded whitespace (including entities) to its exact original bytes.
+    patches = list(spaces)
+    removable: set[Any] = set()
+
+    def emptied(path: tuple[int, ...], field: str) -> bool:
+        slot = lexical.get((path, field, None))
+        return slot is None or all(char.raw in spaces for char in slot.chars)
+
+    for node in reversed(nodes):
+        if (
+            node not in descendants
+            or node in blocked
+            or _name(node) not in _EMPTY
+            or node.attrib
+            or not emptied(paths[node], "text")
+            or any(child not in removable or not emptied(paths[child], "tail") for child in node)
+            or node in safety.empty
+        ):
+            continue
+        removable.add(node)
+        span = index.nodes[paths[node]]
+        patches.append(span.starttag)
+        if not span.self_closing:
+            patches.append(span.endtag)
     if not patches:
         if node_map is not None:
             node_map.update({path: path for path in paths.values()})
@@ -320,10 +430,10 @@ def _clean(
             if old.tag != new.tag or dict(old.attrib) != dict(new.attrib):
                 raise ValueError("publication cleanup changed retained element order or identity")
             node_map[paths[old]] = element_path(new)
-    return changed, len(removable), len(literal_spaces)
+    return changed, len(removable), len(spaces)
 
 
-def _spaces(chars: list[CharSpan], leading: bool, removed: set[RawSpan]) -> None:
+def _spaces(chars: list[CharSpan], leading: bool, trailing: bool, removed: set[RawSpan]) -> None:
     position = 0
     while position < len(chars):
         if chars[position].text not in _SPACE:
@@ -334,7 +444,13 @@ def _spaces(chars: list[CharSpan], leading: bool, removed: set[RawSpan]) -> None
             position += 1
         left = chars[start - 1].text if start else ""
         right = chars[position].text if position < len(chars) else ""
-        if (start == 0 and leading and _chinese(right)) or (_chinese(left) and _chinese(right)):
+        if (
+            (start == 0 and leading and _chinese(right))
+            or (position == len(chars) and trailing and _chinese(left))
+            or (_chinese(left) and _chinese(right))
+            or (left in _OPENING and bool(right))
+            or (right in _CLOSING and bool(left))
+        ):
             removed.update(char.raw for char in chars[start:position])
 
 

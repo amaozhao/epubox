@@ -126,6 +126,36 @@ class CodeContext:
         """Return whether node belongs to one of the proven code regions."""
         return node in self._code_nodes
 
+    def select(self, selector: str, namespaces: Mapping[str, str] | None = None) -> tuple[etree._Element, ...]:
+        """Match CSS against the verified source selector tree without serializing it again."""
+        try:
+            matches = soupsieve.select(selector, self._soup, namespaces=dict(namespaces or {}))
+        except soupsieve.SelectorSyntaxError as error:
+            raise ValueError(
+                f"unsupported selector for code-related CSS in {self.resource_path}: {selector}"
+            ) from error
+        result = []
+        for match in matches:
+            if not isinstance(match, Tag) or id(match) not in self._soup_to_lxml:
+                raise ValueError("selector result cannot be rebound to the source XML")
+            result.append(self._soup_to_lxml[id(match)])
+        return tuple(result)
+
+    def _code_matches(self, selector: str, namespaces: Mapping[str, str], path: str) -> tuple[etree._Element, ...]:
+        _require_declared_namespaces(selector, namespaces, path)
+        try:
+            _reject_complex_selector(selector, path)
+            return self.select(selector, namespaces)
+        except ValueError as error:
+            # An unsupported rule with no possible subject cannot classify any source node as code.
+            try:
+                candidates = self.select(_without_pseudos(selector), namespaces)
+            except (ValueError, NotImplementedError):
+                raise error
+            if candidates:
+                raise
+            return ()
+
     @staticmethod
     def _normalize_styles(styles: Mapping[str, str]) -> dict[str, str]:
         normalized: dict[str, str] = {}
@@ -224,17 +254,8 @@ class CodeContext:
             if not declarations:
                 continue
             for selector in _selectors(rule.prelude):
-                _reject_complex_selector(selector, path)
-                _require_declared_namespaces(selector, namespaces, path)
-                try:
-                    matches = soupsieve.select(selector, self._soup, namespaces=dict(namespaces))
-                except soupsieve.SelectorSyntaxError as error:
-                    raise ValueError(f"unsupported selector for code-related CSS in {path}: {selector}") from error
                 specificity = _specificity(selector)
-                for match in matches:
-                    if not isinstance(match, Tag) or id(match) not in self._soup_to_lxml:
-                        raise ValueError("selector result cannot be rebound to the source XML")
-                    node = self._soup_to_lxml[id(match)]
+                for node in self._code_matches(selector, namespaces, path):
                     for name, value, important in declarations:
                         self._apply(node, name, value, important, specificity)
 
@@ -260,18 +281,8 @@ class CodeContext:
             if not declarations:
                 continue
             for selector in _selectors(rule.prelude):
-                _reject_complex_selector(selector, path)
-                _require_declared_namespaces(selector, namespaces, path)
-                try:
-                    matches = soupsieve.select(selector, self._soup, namespaces=dict(namespaces))
-                except soupsieve.SelectorSyntaxError as error:
-                    raise ValueError(
-                        f"unsupported selector for conditional code style in {path}: {selector}"
-                    ) from error
                 specificity = _specificity(selector)
-                for match in matches:
-                    if not isinstance(match, Tag) or id(match) not in self._soup_to_lxml:
-                        raise ValueError("conditional selector cannot be rebound to the source XML")
+                for node in self._code_matches(selector, namespaces, path):
                     values: dict[str, _Winner] = {}
                     for name, value, important in declarations:
                         self._order += 1
@@ -282,7 +293,7 @@ class CodeContext:
                             current.order,
                         ):
                             values[name] = candidate
-                    self._conditionals.append(_Conditional(self._soup_to_lxml[id(match)], values, path))
+                    self._conditionals.append(_Conditional(node, values, path))
 
     def _load_inline_styles(self) -> None:
         inline = (1_000_000, 0, 0)
@@ -615,6 +626,23 @@ def _selectors(tokens: list[Any]) -> tuple[str, ...]:
     if not selectors or any(not selector for selector in selectors):
         raise ValueError("empty selector in code-related CSS")
     return selectors
+
+
+def _without_pseudos(selector: str) -> str:
+    """Remove pseudo-classes to conservatively match possible subjects of an unsupported rule."""
+    tokens = tinycss2.parse_component_value_list(selector)
+    result = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.type == "literal" and getattr(token, "value", None) == ":":
+            index += 1
+            if index < len(tokens) and tokens[index].type in {"ident", "function"}:
+                index += 1
+                continue
+        result.append(token)
+        index += 1
+    return tinycss2.serialize(result).strip() or "*"
 
 
 def _specificity(selector: str) -> tuple[int, int, int]:

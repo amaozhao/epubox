@@ -224,6 +224,8 @@
 
 2026-10-22 新增 `engine/epub/cleanup.py`、`tests/engine/epub/test_cleanup.py`，负责出版候选中的空装饰标签及中文普通空白整理，并保护索引、代码、实体、链接及 CSS 布局。`cleanup` 已登记到单词清单；两个文件均不超过 1000 行。
 
+2026-11-01 新增 `tests/engine/epub/test_spacing.py`，覆盖跨索引锚点、格式与链接的中文空白清理，实体及 Unicode 空格、CSS 级联和导入、URL 保护、UTF-16 字节回填与 EPUB 重打包。保留中英文及数字边界原有空格；`spacing` 已登记到单词清单，文件不超过 1000 行。
+
 2026-10-24 新增 `engine/epub/preservation.py`、`tests/engine/epub/test_preservation.py`，负责显式授权的原文代码区域清单、源哈希绑定、出版覆盖及逐字节回读验证。`preservation` 已登记到单词清单；两个文件均不超过 1000 行。
 
 2026-10-24 新增 `engine/core/code.py`、`tests/engine/core/test_code.py`、`tests/engine/agents/test_code.py`、`tests/engine/epub/test_code.py`，负责通用代码/CSS 识别、不可改写投影、初译校对攻击回归及自动出版核验。`code` 为已登记单词；各文件均不超过 1000 行。`preservation.py` 同步改为所有书籍自动发现代码，兼容旧显式计划。

@@ -37,8 +37,8 @@ def test_removes_only_truly_empty_unattributed_formatting_tags_without_losing_ta
     assert b"<span></span>" not in changed
     assert b"<em/>" not in changed
     assert b"<strong></strong>" not in changed
-    assert "<p>前后文。<em>重要</em><span> </span>尾</p>".encode() in changed
-    assert stats["removed_empty_tags"] == 3
+    assert "<p>前后文。<em>重要</em>尾</p>".encode() in changed
+    assert stats["removed_empty_tags"] == 4
     assert stats["changed_documents"] == 1
     assert stats["removed_spaces"] >= 1
 
@@ -82,9 +82,12 @@ def test_protected_content_nbsp_urls_xml_space_and_css_white_space_remain_exact(
     preserved = (
         '<p xml:space="preserve">甲 乙</p><p class="prewrap">甲 乙</p>'
         '<p><a href="https://example.com/">https://example.com/甲 乙</a></p>'
-        "<p>甲&#160;乙</p>"
+        "<p>10&#160;kg，使用&#160;AI</p>"
     ).encode()
-    raw = document((code + math + svg + preserved).decode())
+    raw = document(
+        (code + math + svg + preserved).decode(),
+        '<title>Chapter</title><link rel="stylesheet" href="styles/book.css"/>',
+    )
     source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Source.</p>"})
     with zipfile.ZipFile(source, "a") as archive:
         archive.writestr("OEBPS/styles/book.css", ".prewrap { white-space: pre-wrap; }")
@@ -107,7 +110,10 @@ def test_protected_content_nbsp_urls_xml_space_and_css_white_space_remain_exact(
 
 
 def test_css_generated_content_background_and_layout_protect_bare_empty_tags(tmp_path: Path) -> None:
-    raw = document("<span></span><em></em><strong></strong>")
+    raw = document(
+        "<span></span><em></em><strong></strong>",
+        '<title>Chapter</title><link rel="stylesheet" href="styles/book.css"/>',
+    )
     source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": "<p>Source.</p>"})
     stylesheet = (
         'span:empty::before { content: "★"; }\n'
@@ -137,7 +143,7 @@ def test_byte_patches_preserve_declaration_entities_namespaces_and_line_endings(
         prefix
         + (
             f'<html xmlns="{XHTML}" xmlns:epub="{EPUB}"><head><title> 标题 </title></head>'
-            '<body><p epub:type="index">中文 &amp; 符号&nbsp;保留</p><span></span></body></html>'
+            '<body><p epub:type="index">中文 &amp; 符号&nbsp;AI</p><span></span></body></html>'
         ).encode()
     )
 
