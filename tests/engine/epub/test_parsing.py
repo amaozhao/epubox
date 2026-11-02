@@ -53,6 +53,46 @@ def test_standard_xhtml_entities_are_resolved_from_the_offline_dtd() -> None:
     assert paragraph is not None and paragraph.text == "\N{NO-BREAK SPACE}"
 
 
+@pytest.mark.parametrize("subset", ["", " \t\r\n"])
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le", "utf-16-be"])
+def test_empty_internal_dtd_subset_is_safe_for_bytes_and_decoded_text(subset: str, encoding: str) -> None:
+    markup = (
+        f'<?xml version="1.0" encoding="{encoding}"?><!DOCTYPE html[{subset}]>'
+        f'<html xmlns="{XHTML}"><body><p>Read &amp; translate.</p></body></html>'
+    )
+    data = markup.encode(encoding)
+
+    parsed = parse_resource(data, "application/xhtml+xml")
+
+    assert parsed.raw is data
+    assert parsed.tree is not None
+    assert parsed.tree.findtext(f".//{{{XHTML}}}p") == "Read & translate."
+    assert parse_xml_safely(markup).findtext(f".//{{{XHTML}}}p") == "Read & translate."
+
+
+@pytest.mark.parametrize(
+    "subset",
+    [
+        '<!ENTITY custom "expanded">',
+        '<!ENTITY secret SYSTEM "file:///etc/passwd">',
+        '<!ENTITY % external SYSTEM "https://example.com/a">%external;',
+        "<!ELEMENT root ANY>",
+        '<!ATTLIST root injected CDATA "default">',
+        '<!NOTATION custom SYSTEM "custom">',
+        "<!-- nonempty -->",
+        "<?custom instruction?>",
+        "%undeclared;",
+    ],
+)
+def test_nonempty_internal_dtd_subsets_remain_forbidden(subset: str) -> None:
+    markup = f"<!DOCTYPE root[{subset}]><root/>"
+
+    with pytest.raises(UnsafeMarkupError, match="internal DTD"):
+        parse_resource(markup.encode(), "application/xml")
+    with pytest.raises(UnsafeMarkupError, match="internal DTD"):
+        parse_xml_safely(markup)
+
+
 @pytest.mark.parametrize(
     ("namespace", "root", "media_type", "kind"),
     [

@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from engine.core.markup import element_path, parse_xml_bytes
+from engine.epub.cleanup import cleanup_resources
 from engine.epub.parsing import parse_resource
 from engine.epub.preservation import (
     CODE_PLAN_FORMAT,
@@ -21,9 +22,14 @@ from engine.epub.preservation import (
     encode_code_maps,
     verify_code_plan,
 )
+from engine.epub.publish import publish_atomic, recover_atomic
 from engine.epub.ranges import index_resource
 from engine.epub.upgrade import _normalize_xhtml
-from engine.schemas.contracts import canonical_hash
+from engine.schemas.contracts import canonical_hash, canonical_json_bytes
+from engine.services.atomic import AtomicStore
+from engine.services.journal import BodyJournal
+from tests.engine.epub.test_preparation import StubChecker
+from tests.engine.epub.test_publish import _case
 
 XHTML = "http://www.w3.org/1999/xhtml"
 RESOURCE = "OEBPS/chapter.xhtml"
@@ -170,6 +176,50 @@ def test_code_plan_rejects_topology_and_frozen_attribute_changes(tmp_path: Path)
             {RESOURCE: _candidate(raw).replace(b'href="chapter2.xhtml#next"', b'href="other.xhtml"')},
             plan,
         )
+
+
+@pytest.mark.parametrize("alias", ["epub", "ops"])
+@pytest.mark.parametrize("used", [False, True])
+def test_code_overlay_accepts_only_source_derived_prefix_normalization(tmp_path: Path, alias: str, used: bool) -> None:
+    declaration = f' xmlns:{alias}="http://www.idpf.org/2007/ops"'
+    prefix = f' {alias}:prefix="custom: https://example.org/vocab/"'
+    raw = _markup().replace(b"<html ", f"<html{declaration}{prefix} ".encode(), 1)
+    if used:
+        raw = raw.replace(b'id="prose"', f'id="prose" {alias}:type="custom:example"'.encode())
+    source = _archive(tmp_path / "source.epub", raw)
+    plan = build_code_plan(source, _selections(raw))
+    normalized = _normalize_xhtml(_candidate(raw))
+
+    restored, stats = apply_code_plan(source, {RESOURCE: normalized}, plan)
+
+    assert (prefix.encode() in restored[RESOURCE]) == used
+    output = _archive(tmp_path / "output.epub", restored[RESOURCE])
+    assert verify_code_plan(source, output, plan) == stats
+    for node_id in ("rust", "logs", "identifier"):
+        path = _path_by_id(raw)[node_id]
+        assert _node_bytes(restored[RESOURCE], path) == _node_bytes(raw, path)
+    # Neither arbitrary edits to a declaration nor removal of a used one is authorized.
+    corrupted = _candidate(raw).replace(b"https://example.org/vocab/", b"https://other.example/vocab/")
+    with pytest.raises(ValueError, match="attribute"):
+        apply_code_plan(source, {RESOURCE: corrupted}, plan)
+    if used:
+        with pytest.raises(ValueError, match="attribute"):
+            apply_code_plan(source, {RESOURCE: normalized.replace(prefix.encode(), b"")}, plan)
+
+
+def test_code_overlay_accepts_only_source_derived_image_dimension_normalization(tmp_path: Path) -> None:
+    raw = _markup().replace(b'<p id="prose"', b'<img src="image.png" width="20px" height="30px"/><p id="prose"')
+    source = _archive(tmp_path / "source.epub", raw)
+    plan = build_code_plan(source, _selections(raw))
+    normalized = _normalize_xhtml(_candidate(raw))
+
+    restored, stats = apply_code_plan(source, {RESOURCE: normalized}, plan)
+
+    assert b'width="20" height="30"' in restored[RESOURCE]
+    output = _archive(tmp_path / "output.epub", restored[RESOURCE])
+    assert verify_code_plan(source, output, plan) == stats
+    with pytest.raises(ValueError, match="attribute"):
+        apply_code_plan(source, {RESOURCE: normalized.replace(b'width="20"', b'width="21"')}, plan)
 
 
 def test_code_plan_rejects_unauthorized_or_overlapping_source_regions(tmp_path: Path) -> None:
@@ -331,6 +381,65 @@ def test_verification_accepts_only_approved_empty_decoration_deletions_before_co
         verify_code_plan(source, bad, plan, node_maps={RESOURCE: mapping})
 
 
+@pytest.mark.parametrize("decoration", ["", "\n    ", "<em>\n    </em>\n    "])
+def test_code_verification_accepts_cleanup_of_whitespace_decoration_after_translation(
+    tmp_path: Path, decoration: str
+) -> None:
+    raw = (
+        f'<html xmlns="{XHTML}"><head><title>Code</title></head><body>'
+        f"<p>First<span>{decoration}</span>second.</p>"
+        '<pre id="code">  let value = 1;\n</pre></body></html>'
+    ).encode()
+    source = _archive(tmp_path / "source.epub", raw)
+    plan = discover_code_plan(source)
+    assert plan is not None
+    candidate = raw.replace(b"First", "中文".encode()).replace(b"second.", "正文。".encode())
+    maps = {}
+    cleaned, cleanup = cleanup_resources({RESOURCE: candidate}, node_maps=maps)
+    assert cleanup["removed_empty_tags"] >= 1
+    assert "<p>中文正文。</p>".encode() in cleaned[RESOURCE]
+    output = _archive(tmp_path / "output.epub", cleaned[RESOURCE])
+
+    stats = verify_code_plan(source, output, plan, node_maps=maps)
+
+    assert stats["selected_regions"] == 1
+
+
+@pytest.mark.parametrize(
+    "decoration",
+    [
+        "<span>visible</span>",
+        "<span><em>visible</em></span>",
+        '<span id="anchor"> </span>',
+        "<span><!-- keep --></span>",
+        "<span><?keep yes?></span>",
+    ],
+)
+def test_code_verification_rejects_forged_deletion_of_non_decorative_nodes(tmp_path: Path, decoration: str) -> None:
+    raw = (
+        f'<html xmlns="{XHTML}"><head><title>Code</title></head><body>'
+        f"<p>First{decoration}second.</p><pre>exact code()</pre></body></html>"
+    ).encode()
+    source = _archive(tmp_path / "source.epub", raw)
+    plan = discover_code_plan(source)
+    assert plan is not None
+    candidate = raw.replace(decoration.encode(), b"")
+    output = _archive(tmp_path / "output.epub", candidate)
+    parsed = parse_xml_bytes(raw)
+    after = parse_xml_bytes(candidate)
+    removed = (1, 0, 0)
+    retained = [
+        path
+        for node in parsed.iter()
+        if isinstance(node.tag, str) and (path := element_path(node))[: len(removed)] != removed
+    ]
+    actual = [element_path(node) for node in after.iter() if isinstance(node.tag, str)]
+    mapping = dict(zip(retained, actual, strict=True))
+
+    with pytest.raises(ValueError, match="non-decorative"):
+        verify_code_plan(source, output, plan, node_maps={RESOURCE: mapping})
+
+
 def test_code_node_maps_round_trip_canonically_and_reject_swapped_siblings(tmp_path: Path) -> None:
     raw = (
         f'<html xmlns="{XHTML}"><head><title>Code</title></head><body>'
@@ -403,3 +512,49 @@ def test_code_overlay_accepts_lossless_dtd_entity_normalization(tmp_path: Path) 
 
     output = _archive(tmp_path / "output.epub", result)
     assert verify_code_plan(source, output, plan) == stats
+
+
+def test_publish_code_plan_accepts_epub_upgrade_root_normalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tests.engine.agents.test_workflow as workflow_fixture
+
+    monkeypatch.setattr(workflow_fixture, "EXTRACTOR_VERSION", "epubox-atomic-5")
+    body = (
+        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" '
+        'epub:prefix="unused: urn:unused" xml:lang="en"><head><title>Chapter</title></head><body>'
+        '<p>Explanation.</p><p id="code" style="white-space:pre-wrap;font-family:Menlo,monospace">'
+        "let amount = 1;</p></body></html>"
+    )
+    case = _case(tmp_path, body, ("Explanation.", "let amount = 1;"))
+    store = case.session.store
+    targets = {
+        item.item_id: item.source_projection.replace("Explanation.", "中文说明。")
+        for inventory in case.index.inventories
+        for item in inventory.items
+    }
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+
+    source = tmp_path / "source.epub"
+    with zipfile.ZipFile(source) as archive:
+        raw = archive.read("OEBPS/chapter.xhtml")
+    parsed = parse_resource(raw, "application/xhtml+xml")
+    assert parsed.tree is not None
+    indexed = index_resource(parsed)
+    node = next(node for node in parsed.tree.iter() if node.get("id") == "code")
+    path = element_path(node)
+    span = indexed.nodes[path].full
+    plan = build_code_plan(source, {"OEBPS/chapter.xhtml": {path: "block"}})
+    AtomicStore.atomic_write_bytes(store.root / "checks" / "code.json", canonical_json_bytes(plan))
+
+    output = tmp_path / "reader.epub"
+    published = publish_atomic(store, output, StubChecker())
+    verification = published["verification"]
+    assert isinstance(verification, dict) and verification["code_policy"] == CODE_POLICY
+    recovered = recover_atomic(store, output, StubChecker())
+    assert recovered is not None and recovered["sha256"] == published["sha256"]
+    with zipfile.ZipFile(output) as archive:
+        rendered = archive.read("OEBPS/chapter.xhtml")
+    assert raw[span.start : span.end] in rendered
+    assert "中文说明。".encode() in rendered
+    assert b"epub:prefix" not in rendered

@@ -46,6 +46,28 @@ def test_chinese_words_join_across_empty_index_anchors_without_changing_anchor_i
     assert stats["removed_spaces"] >= 3
 
 
+def test_empty_locator_anchor_with_monospace_style_is_transparent_to_chinese_spacing() -> None:
+    raw, stats = clean(
+        '<p>搜<a id="index-marker" class="mono"></a> 索</p>',
+        "<title>Chapter</title><style>.mono { font-family: monospace; }</style>",
+    )
+
+    assert '<p>搜<a id="index-marker" class="mono"></a>索</p>'.encode() in raw
+    assert stats["removed_empty_tags"] == 0
+    assert stats["removed_spaces"] == 1
+
+
+def test_empty_locator_anchor_inside_code_keeps_original_whitespace_bytes() -> None:
+    preserved = '<pre>搜<a id="index-marker" class="mono"></a> 索</pre>'.encode()
+    raw, stats = clean(
+        preserved.decode(),
+        "<title>Chapter</title><style>.mono { font-family: monospace; }</style>",
+    )
+
+    assert preserved in raw
+    assert stats == {"removed_empty_tags": 0, "removed_spaces": 0, "changed_documents": 0}
+
+
 def test_chinese_words_join_across_formatting_and_ordinary_links_but_urls_stay_exact() -> None:
     raw, _stats = clean(
         '<p><span>搜索</span><em> </em><a href="chapter2.xhtml">引擎 优化</a>方法。</p>'
@@ -129,6 +151,112 @@ def test_visible_empty_anchor_css_remains_a_spacing_boundary() -> None:
     raw, stats = clean(body, head)
 
     assert paragraphs(raw) == ["搜索 引擎", "人工 智能"]
+    assert stats == {"removed_empty_tags": 0, "removed_spaces": 0, "changed_documents": 0}
+
+
+@pytest.mark.parametrize(
+    "style",
+    (
+        "border:currentcolor none 0",
+        "border:currentcolor hidden 2px",
+        "border:currentcolor solid 0",
+        "border-left-style:solid;border-left-width:0",
+        "border-left-width:1px",
+        "border-left:solid 1px;border-left-width:0",
+        "border-inline-start-style:solid;border-inline-start-width:0",
+        "border-inline-start-width:1px",
+        "padding-bottom:2px;border-bottom:rgb(0,0,238) dotted 1px",
+        "padding-top:2px;border-top:rgb(0,0,238) dotted 1px",
+        "background:#fff",
+    ),
+)
+def test_nonadvancing_inline_decoration_does_not_split_chinese_text(style: str) -> None:
+    raw, _stats = clean(f'<p>在 <a href="chapter.xhtml" style="{style}">第 5 章</a></p>')
+
+    assert paragraphs(raw) == ["在第 5 章"]
+
+
+@pytest.mark.parametrize(
+    "style",
+    (
+        "padding-left:2px",
+        "padding-right:2px",
+        "margin-left:2px",
+        "margin-right:2px",
+        "border-left:currentcolor dotted 1px",
+        "border-right:currentcolor dotted 1px",
+        "border-left-style:solid",
+        "border-left-width:0;border-left:solid 1px",
+        "border-inline-start-style:solid",
+        "border-inline-start-style:solid;border-inline-start-width:1px",
+        "border-inline-start-style:solid;border-inline-start-width:initial",
+        "border-inline-style:solid none;border-inline-width:1px",
+        "display:inline-block;width:1em",
+    ),
+)
+def test_horizontal_inline_box_spacing_remains_a_text_boundary(style: str) -> None:
+    raw, stats = clean(f'<p>搜索<a id="box" style="{style}"></a> 引擎</p>')
+
+    assert paragraphs(raw) == ["搜索 引擎"]
+    assert stats == {"removed_empty_tags": 0, "removed_spaces": 0, "changed_documents": 0}
+
+
+def test_ltr_logical_border_overrides_the_mapped_physical_side() -> None:
+    raw, _stats = clean('<p dir="ltr">搜索<a style="border-left:1px solid;border-inline-start:0 solid"></a> 引擎</p>')
+
+    assert paragraphs(raw) == ["搜索引擎"]
+
+
+@pytest.mark.parametrize("container", ('dir="rtl"', 'style="direction:rtl"'))
+def test_inherited_rtl_keeps_physical_and_logical_border_sides_distinct(container: str) -> None:
+    raw, stats = clean(
+        f'<div {container}><p>搜索<a style="border-left:1px solid;border-inline-start:0 solid"></a> 引擎</p></div>'
+    )
+
+    assert paragraphs(raw) == ["搜索 引擎"]
+    assert stats == {"removed_empty_tags": 0, "removed_spaces": 0, "changed_documents": 0}
+
+
+@pytest.mark.parametrize("container", ('dir="auto"', 'style="writing-mode:vertical-rl"'))
+def test_unresolved_direction_or_vertical_writing_is_preserved(container: str) -> None:
+    raw, stats = clean(f"<p {container}>搜索 引擎</p>")
+
+    assert paragraphs(raw) == ["搜索 引擎"]
+    assert stats == {"removed_empty_tags": 0, "removed_spaces": 0, "changed_documents": 0}
+
+
+def test_block_box_decoration_does_not_prevent_its_text_edge_cleanup() -> None:
+    raw, _stats = clean(
+        '<p style="display:block;margin:10px 0 0;padding:0;border:currentcolor none 0;background:#fff"> 搜索 引擎 </p>'
+    )
+
+    assert paragraphs(raw) == ["搜索引擎"]
+
+
+@pytest.mark.parametrize(
+    ("selector", "body"),
+    (
+        ("ol.ol-with-buletless-items > ::before", '<ol class="ol-with-buletless-items"><li></li></ol>'),
+        (".container ::before", '<div class="container"><span></span></div>'),
+        ("::before", "<div></div>"),
+    ),
+)
+def test_generated_content_with_implicit_universal_subject_does_not_block_cleanup(selector: str, body: str) -> None:
+    raw, _stats = clean(
+        body + "<p>搜索 引擎</p>",
+        f'<title>Chapter</title><style>{selector} {{ content: "★"; }}</style>',
+    )
+
+    assert paragraphs(raw) == ["搜索引擎"]
+
+
+def test_pseudo_element_normalization_does_not_rewrite_attribute_values() -> None:
+    raw, stats = clean(
+        '<p>搜索<a id="generated" data-marker="::before"></a> 引擎</p>',
+        '<title>Chapter</title><style>[data-marker="::before"]::before { content: "★"; }</style>',
+    )
+
+    assert paragraphs(raw) == ["搜索 引擎"]
     assert stats == {"removed_empty_tags": 0, "removed_spaces": 0, "changed_documents": 0}
 
 

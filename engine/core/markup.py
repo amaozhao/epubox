@@ -66,7 +66,7 @@ class _RootSeen(Exception):
 
 
 def _validate_doctype(data: bytes | str) -> None:
-    """Reject custom DTD declarations before lxml can expand them."""
+    """Allow empty DTD subsets, rejecting custom content before lxml can expand it."""
 
     parser = expat.ParserCreate()
     if isinstance(data, str):
@@ -87,15 +87,25 @@ def _validate_doctype(data: bytes | str) -> None:
             raise UnsafeMarkupError(str(exc)) from exc
 
     def doctype(_name: str, system_id: str | None, _public_id: str | None, internal: bool) -> None:
-        if internal:
-            raise UnsafeMarkupError("internal DTD subsets are not allowed")
         if system_id and system_id.rsplit("/", 1)[-1].lower() not in _TRUSTED_XHTML_DTDS:
             raise UnsafeMarkupError(f"external entity is not allowed: {system_id}")
+        if internal:
+            # Expat sends unhandled DTD tokens here before interpreting declarations.
+            # Whitespace-only subsets (including <!DOCTYPE html[]>) have no effect.
+            parser.DefaultHandler = subset_content
+
+    def subset_content(value: str) -> None:
+        if value.strip(" \t\r\n"):
+            raise UnsafeMarkupError("non-empty internal DTD subsets are not allowed")
+
+    def end_doctype() -> None:
+        parser.DefaultHandler = None
 
     def root(_name: str, _attributes: dict[str, str]) -> None:
         raise _RootSeen
 
     parser.StartDoctypeDeclHandler = doctype
+    parser.EndDoctypeDeclHandler = end_doctype
     parser.StartElementHandler = root
     try:
         parser.Parse(source, True)

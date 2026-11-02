@@ -254,6 +254,8 @@ class CodeContext:
             if not declarations:
                 continue
             for selector in _selectors(rule.prelude):
+                if _has_pseudo_element(selector):
+                    continue
                 specificity = _specificity(selector)
                 for node in self._code_matches(selector, namespaces, path):
                     for name, value, important in declarations:
@@ -281,6 +283,8 @@ class CodeContext:
             if not declarations:
                 continue
             for selector in _selectors(rule.prelude):
+                if _has_pseudo_element(selector):
+                    continue
                 specificity = _specificity(selector)
                 for node in self._code_matches(selector, namespaces, path):
                     values: dict[str, _Winner] = {}
@@ -643,6 +647,21 @@ def _without_pseudos(selector: str) -> str:
         result.append(token)
         index += 1
     return tinycss2.serialize(result).strip() or "*"
+
+
+def _has_pseudo_element(selector: str) -> bool:
+    """Return whether a selector targets generated content instead of a source element."""
+    tokens = tinycss2.parse_component_value_list(selector)
+    legacy = {"before", "after", "first-line", "first-letter"}
+    for index, token in enumerate(tokens):
+        if token.type != "literal" or getattr(token, "value", None) != ":" or index + 1 >= len(tokens):
+            continue
+        following = tokens[index + 1]
+        if following.type == "literal" and getattr(following, "value", None) == ":":
+            return True
+        if following.type == "ident" and str(getattr(following, "lower_value", "")) in legacy:
+            return True
+    return False
 
 
 def _specificity(selector: str) -> tuple[int, int, int]:

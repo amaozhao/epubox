@@ -881,6 +881,131 @@ def test_upgrade_fills_an_empty_xhtml_title_from_the_first_heading() -> None:
     assert b"<h1>\xe7\xb4\xa2\xe5\xbc\x95</h1>" in result
 
 
+def test_upgrade_removes_only_proven_character_count_markers_without_changing_visible_text() -> None:
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Title</title></head><body>'
+        b'<p>Before <st c="12">middle &amp; text</st><span> after</span><st c="13"></st></p>'
+        b'<div id="charCountTotal" value="123"></div>'
+        b"</body></html>"
+    )
+    before_text = "".join(parse_xml_bytes(raw).getroot().itertext())
+
+    result = _normalize_xhtml(raw)
+
+    assert "".join(parse_xml_bytes(result).getroot().itertext()) == before_text
+    assert b"Before middle &amp; text<span> after</span>" in result
+    assert b'<st c="12">' not in result and b'<st c="13">' not in result
+    assert b'<div id="charCountTotal"></div>' in result
+
+
+@pytest.mark.parametrize(
+    "near_miss",
+    (
+        b'<st c="bad">keep invalid offset</st>',
+        b'<st c="14" class="meaningful">keep attributed</st>',
+        b'<st c="14"><code>keep child</code></st>',
+        b'<st c="14"><!--keep comment-->keep text</st>',
+        b'<st c="14"><?keep instruction?>keep text</st>',
+        b'<pre><st c="14">keep protected text</st></pre>',
+        (
+            b'<svg xmlns="http://www.w3.org/2000/svg">'
+            b'<st xmlns="http://www.w3.org/1999/xhtml" c="14">keep protected text</st></svg>'
+        ),
+        b'<st c="\xc2\xb2">keep non-ASCII digit</st>',
+        b'<st c="999999999999999999999999999999999999">keep oversized offset</st>',
+        b'<div id="charCountTotal" value="bad"></div>',
+        b'<div id="charCountTotal" value="\xc2\xb2"></div>',
+        b'<div id="charCountTotal" value="999999999999999999999999999999999999"></div>',
+        b'<div id="charCountTotal" value="123">keep text</div>',
+    ),
+)
+def test_upgrade_keeps_all_converter_markers_when_the_full_pattern_is_not_proven(near_miss: bytes) -> None:
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Title</title></head><body>'
+        b'<p><st c="12">ordinary marker</st></p>'
+        + near_miss
+        + b'<div id="charCountTotal" value="123"></div></body></html>'
+    )
+
+    assert _normalize_xhtml(raw) == raw
+
+
+@pytest.mark.parametrize(
+    "stylesheet",
+    (
+        "st { color: red; }",
+        "xhtml|st { color: red; }",
+        "[c] { color: red; }",
+        "#charCountTotal { color: red; }",
+        "p > :first-child { color: red; }",
+        "p > * { color: red; }",
+        "* { color: red; }",
+        "st+span { color: red; }",
+        r"s\74 { color: red; }",
+        "@media (width > 1px) { st { color: red; } }",
+        "@supports (display: grid) { [c] { color: red; } }",
+    ),
+)
+def test_upgrade_keeps_converter_markers_when_inline_css_could_depend_on_them(stylesheet: str) -> None:
+    raw = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Title</title>'
+        f"<style>{stylesheet}</style></head><body>"
+        '<p><st c="12">ordinary marker</st></p>'
+        '<div id="charCountTotal" value="123"></div></body></html>'
+    ).encode()
+
+    assert _normalize_xhtml(raw) == raw
+
+
+def test_upgrade_keeps_converter_markers_when_packaged_css_targets_them(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "3.0", nav=True)
+    document = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Title</title></head><body>'
+        b'<p><st c="12">ordinary marker</st></p>'
+        b'<div id="charCountTotal" value="123"></div></body></html>'
+    )
+    inventory = replace(
+        inventory,
+        manifest=(*inventory.manifest, ManifestItem("marker-css", "OEBPS/marker.css", "text/css")),
+    )
+
+    result = upgrade_package(
+        source,
+        inventory,
+        {"OEBPS/chapter.xhtml": document, "OEBPS/marker.css": b"st { color: red; }"},
+    )
+
+    assert result["OEBPS/chapter.xhtml"] == document
+
+
+@pytest.mark.parametrize("packaged", [False, True])
+@pytest.mark.parametrize(
+    "stylesheet",
+    ["[value]::before {content: attr(value)}", "div::before {content: attr(value)}", "p:empty {display: none}"],
+)
+def test_upgrade_keeps_markers_when_css_observes_counter_value_or_empty_parent(tmp_path, packaged, stylesheet):
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "3.0", nav=True)
+    style = "" if packaged else f"<style>{stylesheet}</style>"
+    document = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Title</title>'
+        f'{style}</head><body><p><st c="12"/></p>'
+        '<div id="charCountTotal" value="123"/></body></html>'
+    ).encode()
+    replacements = {"OEBPS/chapter.xhtml": document}
+    if packaged:
+        inventory = replace(
+            inventory,
+            manifest=(*inventory.manifest, ManifestItem("marker-css", "OEBPS/marker.css", "text/css")),
+        )
+        replacements["OEBPS/marker.css"] = stylesheet.encode()
+
+    result = upgrade_package(source, inventory, replacements)
+
+    assert result["OEBPS/chapter.xhtml"] == document
+
+
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le"])
 def test_upgrade_replaces_legacy_xhtml_doctype_without_serializing_body(tmp_path: Path, encoding: str) -> None:
     source = tmp_path / "book.epub"

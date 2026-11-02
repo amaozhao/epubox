@@ -130,6 +130,30 @@ def test_translate_cli_stops_on_unsupported_source_and_lists_each_resource_once(
         assert result.output.count(resource) == 1
 
 
+@pytest.mark.parametrize("code", ("invalid_xml", "invalid_mimetype", "multiple_renditions", "unsafe_reference"))
+def test_translate_cli_stops_on_deterministic_source_validation_errors_without_retrying(
+    tmp_path: Path, monkeypatch, code: str
+) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def invalid_source(*_args, **_kwargs):
+        calls.append(True)
+        raise EpubValidationError(code, "Invalid source EPUB")
+
+    monkeypatch.setattr(main, "translate_book", invalid_source)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    assert "原书结构校验失败，已停止自动续跑" in result.output
+    assert "Invalid source EPUB" in result.output
+    assert "重复重试不会解决" in result.output
+    assert "自动续跑：" not in result.output
+    assert "本轮翻译中断" not in result.output
+
+
 def test_translate_cli_retries_epubcheck_timeout_five_times(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source.epub"
     source.write_bytes(b"fixture")
@@ -221,7 +245,9 @@ def test_translate_cli_limits_unsuccessful_runs_to_five(tmp_path: Path, monkeypa
         assert result.output.count("状态：") == 1
 
 
-def test_translate_cli_stops_when_translation_attention_makes_no_progress(tmp_path: Path, monkeypatch) -> None:
+def test_translate_cli_uses_all_five_rounds_when_translation_attention_makes_no_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
     source = tmp_path / "source.epub"
     source.write_bytes(b"fixture")
     calls = []
@@ -241,14 +267,14 @@ def test_translate_cli_stops_when_translation_attention_makes_no_progress(tmp_pa
     monkeypatch.setattr(main, "translate_book", stuck)
     result = CliRunner().invoke(main.app, ["translate", str(source)])
 
-    assert result.exit_code == 1 and len(calls) == 2
-    assert result.output.count("自动续跑：") == 1
-    assert "没有新增已接受单元或 HTTP 请求" in result.output
-    assert "再次启动命令可继续重试失败项" in result.output
-    assert "重复失败：translate:u-code: untranslated English remains" in result.output
+    assert result.exit_code == 1 and len(calls) == 5
+    assert result.output.count("自动续跑：") == 4
+    assert "第 5/5 轮" in result.output
+    assert "自动续跑停止" not in result.output
+    assert "untranslated English remains" in result.output
 
 
-def test_each_translate_command_has_one_restart_grant_across_automatic_rounds(tmp_path, monkeypatch):
+def test_each_translate_round_has_one_restart_grant_shared_by_nested_entrypoints(tmp_path, monkeypatch):
     from engine.services.retry import claim_restart
 
     source = tmp_path / "source.epub"
@@ -256,13 +282,13 @@ def test_each_translate_command_has_one_restart_grant_across_automatic_rounds(tm
     claims = []
 
     def stuck(_path, **_options):
-        claims.append(claim_restart(tmp_path / "work"))
+        claims.append((claim_restart(tmp_path / "work"), claim_restart(tmp_path / "work")))
         return RunOutcome("needs_attention", tmp_path / "work", "translation", reason="still failed")
 
     monkeypatch.setattr(main, "translate_book", stuck)
     for _ in range(2):
         CliRunner().invoke(main.app, ["translate", str(source)])
-    assert claims == [True, False, True, False]
+    assert claims == [(True, False)] * 10
 
 
 def test_plain_resume_command_grants_recovery_but_explicit_targets_do_not(tmp_path, monkeypatch):
@@ -421,7 +447,7 @@ def test_resume_cli_reports_unfinished_run_as_nonzero(tmp_path: Path, monkeypatc
 
     assert result.exit_code == 1
     assert "needs_attention" in result.output
-    assert "one item needs repair" not in result.output
+    assert "one item needs repair" in result.output
 
 
 def test_resume_cli_forwards_explicit_retry_and_budget_targets(tmp_path: Path, monkeypatch) -> None:

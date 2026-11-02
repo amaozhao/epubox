@@ -711,7 +711,7 @@ def test_direct_api_infers_nondefault_provider_as_explicit(tmp_path):
         cli.translate_book(source, provider="cr_proxy")
 
 
-def test_finished_translation_with_errors_prints_only_summary(tmp_path, capsys):
+def test_unfinished_translation_prints_summary_and_failure_reason(tmp_path, capsys):
     from main import _print_result
 
     result = cli.RunOutcome(
@@ -729,5 +729,6 @@ def test_finished_translation_with_errors_prints_only_summary(tmp_path, capsys):
     assert getattr(raised.value, "exit_code", None) == 1
     captured = capsys.readouterr()
     assert "1884/2398" in captured.out and "state.json" in captured.out
-    assert captured.err == "" and "long error content" not in captured.out
+    assert captured.err == "translate:unit: long error content\n"
+    assert "long error content" not in captured.out
     assert result.reason == "translate:unit: long error content"

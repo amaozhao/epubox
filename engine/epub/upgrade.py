@@ -7,8 +7,10 @@ import zipfile
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
+import tinycss2
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import element_path, parse_xml_bytes, qname_local_name
@@ -31,6 +33,8 @@ _NCX = "http://www.daisy.org/z3986/2005/ncx/"
 _XML = "http://www.w3.org/XML/1998/namespace"
 _SVG = "http://www.w3.org/2000/svg"
 _MATHML = "http://www.w3.org/1998/Math/MathML"
+_PROTECTED_MARKER_ANCESTORS = {"code", "math", "pre", "script", "style"}
+_NESTED_CSS_RULES = {"container", "document", "layer", "media", "scope", "starting-style", "supports"}
 _UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 _OPF_ELEMENTS = {
     "package",
@@ -83,9 +87,14 @@ def upgrade_package(
             return archive.read(path)
 
         result = {path: data for path, data in replacements.items() if path not in names or archive.read(path) != data}
+        marker_css_safe = not any(
+            _converter_marker_css_hooks(read(item.path))
+            for item in inventory.manifest
+            if item.media_type == "text/css" and item.path in names | set(replacements)
+        )
         for path in inventory.documents:
             current = read(path)
-            normalized = _normalize_xhtml(current)
+            normalized = _normalize_xhtml(current, allow_converter_markers=marker_css_safe)
             if normalized != current:
                 result[path] = normalized
 
@@ -375,7 +384,7 @@ def _flatten_metadata(metadata: etree._Element) -> None:
         metadata.remove(wrapper)
 
 
-def _normalize_xhtml(data: bytes) -> bytes:
+def _normalize_xhtml(data: bytes, *, allow_converter_markers: bool = True) -> bytes:
     """Patch legacy prolog/root syntax without serializing protected content."""
 
     parsed = parse_resource(data, "application/xhtml+xml")
@@ -419,6 +428,11 @@ def _normalize_xhtml(data: bytes) -> bytes:
 
     patches.extend(_empty_title_patches(data, indexed, root))
     patches.extend(_legacy_img_dimension_patches(data, indexed))
+    if allow_converter_markers and not any(
+        _converter_marker_css_hooks("".join(element.itertext()).encode(indexed.encoding))
+        for element in root.iter(f"{{{_XHTML}}}style")
+    ):
+        patches.extend(_converter_marker_patches(indexed, root))
     for start, end, replacement in _entity_patches(data, indexed):
         if not any(start < patch_end and end > patch_start for patch_start, patch_end, _ in patches):
             patches.append((start, end, replacement))
@@ -427,6 +441,117 @@ def _normalize_xhtml(data: bytes) -> bytes:
     for start, end, replacement in sorted(patches, reverse=True):
         result = result[:start] + replacement + result[end:]
     return result
+
+
+def _converter_marker_patches(indexed: ResourceIndex, root: etree._Element) -> tuple[tuple[int, int, bytes], ...]:
+    """Remove a complete, internally consistent set of converter character markers."""
+
+    markers = [element for element in root.iter(f"{{{_XHTML}}}st")]
+    totals = [element for element in root.iter(f"{{{_XHTML}}}div") if element.get("id") == "charCountTotal"]
+    if not markers or len(totals) != 1:
+        return ()
+    offsets = [_ascii_decimal(element.get("c", "")) for element in markers]
+    if any(
+        len(element) or set(element.attrib) != {"c"} or offset is None or _protected_marker_ancestor(element)
+        for element, offset in zip(markers, offsets, strict=True)
+    ):
+        return ()
+    proven_offsets = [offset for offset in offsets if offset is not None]
+    if proven_offsets != sorted(set(proven_offsets)):
+        return ()
+    total = totals[0]
+    total_value = _ascii_decimal(total.get("value", ""))
+    if (
+        len(total)
+        or set(total.attrib) != {"id", "value"}
+        or total_value is None
+        or total_value < proven_offsets[-1]
+        or "".join(total.itertext()).strip()
+        or total.getparent() is None
+        or etree.QName(total.getparent()).namespace != _XHTML
+        or etree.QName(total.getparent()).localname != "body"
+        or total.getnext() is not None
+    ):
+        return ()
+
+    patches: list[tuple[int, int, bytes]] = []
+    for element in markers:
+        node = indexed.nodes[element_path(element)]
+        if node.self_closing:
+            patches.append((node.full.start, node.full.end, b""))
+        else:
+            patches.append((node.starttag.start, node.starttag.end, b""))
+            patches.append((node.endtag.start, node.endtag.end, b""))
+    total_node = indexed.nodes[element_path(total)]
+    starttag = indexed.raw[total_node.starttag.start : total_node.starttag.end].decode(indexed.encoding)
+    value_attribute = re.search(r"\s+value\s*=\s*(['\"])[0-9]{1,12}\1", starttag)
+    if value_attribute is None:
+        return ()
+    value_start = total_node.starttag.start + len(starttag[: value_attribute.start()].encode(indexed.encoding))
+    value_end = total_node.starttag.start + len(starttag[: value_attribute.end()].encode(indexed.encoding))
+    patches.append((value_start, value_end, b""))
+    return tuple(patches)
+
+
+def _converter_marker_css_hooks(data: bytes) -> bool:
+    """Return whether CSS selectors could observe removal of converter marker elements."""
+
+    try:
+        rules, _encoding = tinycss2.parse_stylesheet_bytes(data, skip_comments=True, skip_whitespace=True)
+    except UnicodeDecodeError:
+        return True
+    return _converter_marker_rule_hooks(rules)
+
+
+def _converter_marker_rule_hooks(rules: list[Any]) -> bool:
+    for rule in rules:
+        if getattr(rule, "type", None) == "error":
+            return True
+        if getattr(rule, "type", None) == "qualified-rule":
+            if _converter_marker_selector_hook(tinycss2.serialize(rule.prelude)) or re.search(
+                r"\battr\s*\(\s*(?:c|value)\b", tinycss2.serialize(rule.content), re.IGNORECASE
+            ):
+                return True
+        elif (
+            getattr(rule, "type", None) == "at-rule"
+            and getattr(rule, "content", None) is not None
+            and getattr(rule, "lower_at_keyword", "") in _NESTED_CSS_RULES
+        ):
+            nested = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
+            if _converter_marker_rule_hooks(nested):
+                return True
+    return False
+
+
+def _converter_marker_selector_hook(selector: str) -> bool:
+    return bool(
+        "*" in selector
+        or "\\" in selector
+        or re.search(r"#charCountTotal\b", selector, re.IGNORECASE)
+        or re.search(r"\[\s*(?:[-\w*]+\|)?(?:c|value)(?:\s*[~|^$*]?=|\s*\])", selector, re.IGNORECASE)
+        or re.search(r"(?:^|[\s>+~,(])(?:[-\w*]+\|)?st(?=$|[\s>+~,.#[:])", selector, re.IGNORECASE)
+        or re.search(r":(?:first|last|only|nth)(?:-(?:child|of-type))?\b", selector, re.IGNORECASE)
+        or re.search(r":empty\b", selector, re.IGNORECASE)
+        or re.search(r"[+~]", selector)
+    )
+
+
+def _protected_marker_ancestor(element: etree._Element) -> bool:
+    for ancestor in element.iterancestors():
+        if not isinstance(ancestor.tag, str):
+            continue
+        name = etree.QName(ancestor)
+        if (
+            name.namespace in {_SVG, _MATHML}
+            or name.namespace == _XHTML
+            and name.localname in _PROTECTED_MARKER_ANCESTORS
+        ):
+            return True
+    return False
+
+
+def _ascii_decimal(value: str) -> int | None:
+    return int(value) if re.fullmatch(r"[0-9]{1,12}", value) else None
 
 
 def _empty_title_patches(

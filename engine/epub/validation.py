@@ -191,7 +191,7 @@ def inspect_epub(
 ) -> PackageInventory:
     """Validate an immutable source snapshot and return its complete package inventory."""
     with zipfile.ZipFile(source) as archive:
-        entries = _validate_zip(archive, limits)
+        entries = _validate_zip(archive, limits, require_canonical_mimetype_layout=for_output)
         rootfiles = _container_rootfiles(_read_xml(archive, "META-INF/container.xml"))
         if len(rootfiles) != 1:
             raise EpubValidationError(
@@ -349,9 +349,15 @@ def _classify_epubcheck_output(output: str) -> tuple[tuple[str, ...], tuple[str,
     return tuple(buckets["FATAL"]), tuple(buckets["ERROR"]), tuple(buckets["WARNING"])
 
 
-def _validate_zip(archive: zipfile.ZipFile, limits: ZipLimits) -> dict[str, int]:
+def _validate_zip(
+    archive: zipfile.ZipFile, limits: ZipLimits, *, require_canonical_mimetype_layout: bool = True
+) -> dict[str, int]:
     infos = archive.infolist()
-    if not infos or infos[0].filename != "mimetype" or infos[0].compress_type != zipfile.ZIP_STORED:
+    # Source entry order/compression does not affect resource identity. Publication
+    # writes canonical packaging; its inspection must still enforce that layout.
+    if require_canonical_mimetype_layout and (
+        not infos or infos[0].filename != "mimetype" or infos[0].compress_type != zipfile.ZIP_STORED
+    ):
         raise EpubValidationError("invalid_mimetype_layout", "mimetype must be the first uncompressed ZIP entry")
     if len(infos) > limits.max_entries:
         raise EpubValidationError("too_many_entries", f"EPUB contains {len(infos)} ZIP entries")

@@ -17,7 +17,7 @@ from engine.core.markup import element_path, qname_local_name
 from engine.epub.parsing import ParsedResource, parse_resource
 from engine.epub.ranges import ResourceIndex, index_resource
 from engine.epub.styles import source_stylesheets
-from engine.epub.upgrade import _entity_patches
+from engine.epub.upgrade import _entity_patches, _normalize_xhtml
 from engine.schemas.bridge import TRANSLATABLE_ATTRIBUTES
 
 CODE_POLICY = "source-code-v2"
@@ -193,7 +193,10 @@ def apply_code_plan(
         raise TypeError("EPUB replacements must map resource paths to bytes")
     for resource, context in contexts.items():
         candidate = result.get(resource, context.raw)
-        indexed, paths = _validate_candidate(context, candidate)
+        try:
+            indexed, paths = _validate_candidate(context, candidate)
+        except ValueError as error:
+            raise ValueError(f"{resource}: {error}") from error
         patches = [
             (
                 indexed.nodes[paths[region.path]].full,
@@ -228,8 +231,11 @@ def verify_code_plan(
                 raise ValueError(f"output is missing selected code resource: {resource}")
             candidate = archive.read(resource)
             mapping = (node_maps or {}).get(resource)
-            indexed, paths = _validate_candidate(context, candidate, mapping)
-            _validate_restored(context, candidate, indexed=indexed, paths=paths)
+            try:
+                indexed, paths = _validate_candidate(context, candidate, mapping)
+                _validate_restored(context, candidate, indexed=indexed, paths=paths)
+            except ValueError as error:
+                raise ValueError(f"{resource}: {error}") from error
     return stats
 
 
@@ -400,13 +406,27 @@ def _validate_candidate(
         source_topology[source_path] != candidate_topology[target_path] for source_path, target_path in paths.items()
     ):
         raise ValueError("candidate element topology differs from source")
+    normalized_nodes: dict[tuple[int, ...], Any] | None = None
     for path, source_node in context.nodes.items():
         if path not in paths:
             continue
-        if _frozen_attributes(source_node.attrib, root=not path) != _frozen_attributes(
-            nodes[paths[path]].attrib, root=not path
-        ):
-            raise ValueError(f"candidate frozen attribute differs from source at {path}")
+        actual = _frozen_attributes(nodes[paths[path]].attrib)
+        expected = _frozen_attributes(source_node.attrib)
+        if actual == expected:
+            continue
+        if normalized_nodes is None:
+            # Publication upgrades legacy XHTML before restoring code. Derive the
+            # permitted attribute changes from the immutable source, never from
+            # the candidate. Disable element deletion to retain source paths.
+            _parsed, _indexed_resource, normalized_nodes = _indexed(
+                _normalize_xhtml(context.raw, allow_converter_markers=False), "normalized source"
+            )
+        normalized = _frozen_attributes(normalized_nodes[path].attrib)
+        if actual != normalized:
+            changed = sorted(
+                name for name in expected.keys() | actual.keys() if expected.get(name) != actual.get(name)
+            )
+            raise ValueError(f"candidate frozen attribute differs from source at {path}: {', '.join(changed)}")
     return indexed, paths
 
 
@@ -522,7 +542,7 @@ def _family(declaration: Any) -> bool:
     )
 
 
-def _frozen_attributes(attributes: Mapping[str, str], *, root: bool) -> dict[str, str]:
+def _frozen_attributes(attributes: Mapping[str, str]) -> dict[str, str]:
     allowed = TRANSLATABLE_ATTRIBUTES | {"style"}
     return {
         name: value
@@ -551,8 +571,8 @@ def _removable(node: Any) -> bool:
     return (
         qname_local_name(node.tag).lower() in {"span", "em", "strong"}
         and not node.attrib
-        and not node.text
-        and all(_removable(child) and not child.tail for child in node if isinstance(child.tag, str))
+        and not (node.text or "").strip()
+        and all(_removable(child) and not (child.tail or "").strip() for child in node)
     )
 
 

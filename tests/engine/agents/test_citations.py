@@ -514,3 +514,30 @@ def test_source_identical_title_case_prose_still_fails_in_chinese_context() -> N
     result = error(value, f"说明如下：{sentence}。")
 
     assert result is not None and result.startswith("untranslated English remains:")
+
+
+def test_source_defined_quoted_term_may_follow_its_chinese_translation() -> None:
+    source = (
+        "Preemptive Rights grant existing shareholders the opportunity to purchase new shares before they are "
+        "offered to others, protecting their ownership from dilution and ensuring they can invest in future "
+        "financing rounds on favorable terms, often outlined in term sheets as "
+        "“Right to Participate Pro Rata in Future Rounds.”"
+    )
+    target = (
+        "优先认购权赋予现有股东在其他投资者之前购买新股的机会，从而保护其所有权免于稀释，并确保他们能以"
+        "优惠条款参与未来的融资轮次。这在投资条款书中通常被描述为“按比例参与未来轮次的权利”"
+        "（Right to Participate Pro Rata in Future Rounds）。"
+    )
+    value = member().model_copy(update={"source_projection": source, "registry": {}})
+
+    assert error(value, target) is None
+
+
+def test_arbitrary_source_quotation_does_not_exempt_title_case_prose() -> None:
+    sentence = "This Replacement Remains Entirely Untranslated In The Target"
+    source = f"The user wrote “{sentence}.”"
+    value = member().model_copy(update={"source_projection": source, "registry": {}})
+
+    result = error(value, f"用户写道：（{sentence}）。")
+
+    assert result is not None and result.startswith("untranslated English remains:")

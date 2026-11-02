@@ -27,7 +27,7 @@ from engine.core.markup import element_path
 from engine.epub.parsing import XHTML_NAMESPACE, parse_resource
 from engine.epub.ranges import CharSpan, RawSpan, index_resource
 
-CLEANUP_POLICY = "zh-inline-v3"
+CLEANUP_POLICY = "zh-inline-v4"
 _EMPTY = {"span", "em", "strong"}
 _BLOCKS = {
     "body",
@@ -132,7 +132,16 @@ class _Safety:
                     tinycss2.parse_declaration_list(node.get("style"), skip_comments=True, skip_whitespace=True),
                     (1_000_000, 0, 0),
                 )
+        for node in nodes:
+            if self.direction(node) is None or self.writing_mode(node) != "horizontal-tb":
+                # Bidirectional auto-detection and vertical inline axes require a full layout engine.
+                self.whitespace.add(node)
         for (node, pseudo), values in self.values.items():
+            direction = self.direction(node)
+            writing_mode = self.writing_mode(node)
+            if direction is None or writing_mode != "horizontal-tb":
+                self.whitespace.add(node)
+                continue
             display = values.get("display")
             mode = (
                 display.value
@@ -154,8 +163,41 @@ class _Safety:
                     and winner.value not in {"normal", "nowrap", "inherit", "unset", "initial"}
                 ):
                     self.whitespace.add(node)
-                if _visual(name, winner.value, mode):
+                if _visual(name, winner.value, mode, block=not pseudo and _name(node) in _BLOCKS):
                     self.visual.add(node)
+            if not (not pseudo and _name(node) in _BLOCKS) and _border_box_advances(values, direction):
+                self.visual.add(node)
+
+    def direction(self, node: Any) -> str | None:
+        values = self.values.get((node, ""), {})
+        winner = values.get("direction")
+        if winner is not None:
+            if winner.value in {"ltr", "rtl"}:
+                return winner.value
+            if winner.value == "initial":
+                return "ltr"
+            if winner.value not in {"inherit", "unset"}:
+                return None
+        attribute = (node.get("dir") or "").lower()
+        if attribute in {"ltr", "rtl"}:
+            return attribute
+        if attribute:
+            return None
+        parent = node.getparent()
+        return self.direction(parent) if parent is not None else "ltr"
+
+    def writing_mode(self, node: Any) -> str | None:
+        values = self.values.get((node, ""), {})
+        winner = values.get("writing-mode")
+        if winner is not None:
+            if winner.value == "horizontal-tb":
+                return winner.value
+            if winner.value == "initial":
+                return "horizontal-tb"
+            if winner.value not in {"inherit", "unset"}:
+                return None
+        parent = node.getparent()
+        return self.writing_mode(parent) if parent is not None else "horizontal-tb"
 
     def load(self, base: str, href: str) -> None:
         path = _resolve(base, href)
@@ -187,10 +229,7 @@ class _Safety:
                     rule.content or [], skip_comments=True, skip_whitespace=True
                 )
                 for selector in _selectors(rule.prelude):
-                    pseudo = re.search(r"::?(before|after|first-letter|first-line)\b", selector, re.IGNORECASE)
-                    subject = re.sub(
-                        r"::?(?:before|after|first-letter|first-line)\b", "", selector, flags=re.IGNORECASE
-                    )
+                    subject, pseudo = _pseudo_subject(selector)
                     try:
                         matches = set(self.code.select(subject, namespaces))
                     except (ValueError, NotImplementedError):
@@ -206,7 +245,7 @@ class _Safety:
                         matches,
                         declarations,
                         _specificity(selector),
-                        pseudo.group(1).lower() if pseudo is not None else "",
+                        pseudo,
                         conditional=conditional,
                     )
 
@@ -221,6 +260,7 @@ class _Safety:
     ) -> None:
         if declarations:
             self.empty.update(matches)
+        conditional_values: dict[str, _Winner] = {}
         for declaration in declarations:
             if declaration.type == "error":
                 raise ValueError("invalid CSS declaration prevents typography cleanup")
@@ -229,52 +269,278 @@ class _Safety:
                 value = tinycss2.serialize(declaration.value).strip().lower()
                 self.order += 1
                 candidate = _Winner(value, bool(declaration.important), specificity, self.order)
+                assignments = [(name, value), *_border_assignments(name, value)]
                 if conditional:
                     # Viewport-dependent rules may apply on a reader; keep their potential boundaries.
                     if name == "white-space" and value not in {"normal", "nowrap", "inherit", "unset", "initial"}:
                         self.whitespace.update(matches)
-                    if _visual(name, value, "inline-block"):
-                        self.visual.update(matches)
+                    if name in {"direction", "writing-mode"} and value not in {
+                        "initial",
+                        "inherit",
+                        "ltr",
+                        "horizontal-tb",
+                    }:
+                        self.whitespace.update(matches)
+                    self.visual.update(
+                        node
+                        for node in matches
+                        if _visual(name, value, "inline-block", block=not pseudo and _name(node) in _BLOCKS)
+                    )
+                    for assigned_name, assigned_value in assignments:
+                        assigned = _Winner(
+                            assigned_value,
+                            candidate.important,
+                            candidate.specificity,
+                            candidate.order,
+                        )
+                        current = conditional_values.get(assigned_name)
+                        if current is None or (assigned.important, assigned.specificity, assigned.order) >= (
+                            current.important,
+                            current.specificity,
+                            current.order,
+                        ):
+                            conditional_values[assigned_name] = assigned
                     continue
                 for node in matches:
                     values = self.values.setdefault((node, pseudo), {})
-                    current = values.get(name)
-                    if current is None or (candidate.important, candidate.specificity, candidate.order) >= (
-                        current.important,
-                        current.specificity,
-                        current.order,
-                    ):
-                        values[name] = candidate
+                    for assigned_name, assigned_value in assignments:
+                        assigned = _Winner(
+                            assigned_value,
+                            candidate.important,
+                            candidate.specificity,
+                            candidate.order,
+                        )
+                        current = values.get(assigned_name)
+                        if current is None or (assigned.important, assigned.specificity, assigned.order) >= (
+                            current.important,
+                            current.specificity,
+                            current.order,
+                        ):
+                            values[assigned_name] = assigned
+        if conditional:
+            self.visual.update(
+                node
+                for node in matches
+                if (pseudo or _name(node) not in _BLOCKS)
+                and (direction := self.direction(node)) is not None
+                and self.writing_mode(node) == "horizontal-tb"
+                and _border_box_advances(conditional_values, direction)
+            )
 
 
-def _visual(name: str, value: str, display: str) -> bool:
+def _pseudo_subject(selector: str) -> tuple[str, str]:
+    """Return the originating-element selector and generated pseudo name."""
+    tokens = tinycss2.parse_component_value_list(selector)
+    names = {"before", "after", "first-letter", "first-line"}
+    for index, token in enumerate(tokens):
+        if token.type != "literal" or getattr(token, "value", None) != ":":
+            continue
+        name_index = index + 1
+        if (
+            name_index < len(tokens)
+            and tokens[name_index].type == "literal"
+            and getattr(tokens[name_index], "value", None) == ":"
+        ):
+            name_index += 1
+        if name_index >= len(tokens) or tokens[name_index].type != "ident":
+            continue
+        name = str(getattr(tokens[name_index], "lower_value", ""))
+        if name not in names:
+            continue
+        prefix = tokens[:index]
+        meaningful = [part for part in prefix if part.type != "comment"]
+        implicit_universal = (
+            not meaningful
+            or meaningful[-1].type == "whitespace"
+            or (meaningful[-1].type == "literal" and getattr(meaningful[-1], "value", None) in {">", "+", "~"})
+        )
+        subject = tinycss2.serialize(prefix)
+        if implicit_universal:
+            subject += "*"
+        subject += tinycss2.serialize(tokens[name_index + 1 :])
+        return subject, name
+    return selector, ""
+
+
+_ZERO_LENGTH = re.compile(r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[a-z]+|%)?\Z")
+_BORDER_STYLES = {"solid", "dotted", "dashed", "double", "groove", "ridge", "inset", "outset"}
+_BORDER_SIDES = ("left", "right")
+
+
+def _advances(value: str) -> bool:
+    return value not in {"auto", "none", "normal", "transparent", "initial", "unset"} and not bool(
+        _ZERO_LENGTH.fullmatch(value)
+    )
+
+
+def _horizontal_shorthand(value: str) -> bool:
+    parts = value.split()
+    if not parts:
+        return False
+    if len(parts) == 1:
+        horizontal = parts
+    elif len(parts) in {2, 3}:
+        horizontal = parts[1:2]
+    elif len(parts) == 4:
+        horizontal = [parts[1], parts[3]]
+    else:
+        return True
+    return any(_advances(part) for part in horizontal)
+
+
+def _border_components(value: str) -> tuple[str, str]:
+    style, width = "none", "medium"
+    dynamic = False
+    for token in tinycss2.parse_component_value_list(value):
+        if token.type in {"whitespace", "comment"}:
+            continue
+        serialized = tinycss2.serialize([token]).strip().lower()
+        if token.type == "ident" and serialized in _BORDER_STYLES | {"none", "hidden"}:
+            style = serialized
+        elif (token.type == "ident" and serialized in {"thin", "medium", "thick"}) or token.type in {
+            "dimension",
+            "number",
+        }:
+            width = serialized
+        elif token.type == "function" and getattr(token, "lower_name", "") in {"calc", "clamp", "max", "min", "var"}:
+            dynamic = True
+    if dynamic and style == "none":
+        return "dynamic", "dynamic"
+    return style, width
+
+
+def _quad_horizontal(value: str) -> tuple[str, str]:
+    parts = value.split()
+    if len(parts) == 1:
+        return parts[0], parts[0]
+    if len(parts) in {2, 3}:
+        return parts[1], parts[1]
+    if len(parts) == 4:
+        return parts[3], parts[1]
+    return "dynamic", "dynamic"
+
+
+def _inline_pair(value: str) -> tuple[str, str]:
+    parts = value.split()
+    if len(parts) == 1:
+        return parts[0], parts[0]
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return "dynamic", "dynamic"
+
+
+def _border_assignments(name: str, value: str) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+
+    def assign(sides: tuple[str, ...], style: str | None = None, width: str | None = None) -> None:
+        for side in sides:
+            if style is not None:
+                result.append((f"@border-{side}-style", style))
+            if width is not None:
+                result.append((f"@border-{side}-width", width))
+
+    if name == "border":
+        style, width = _border_components(value)
+        assign(_BORDER_SIDES, style, width)
+    elif name == "border-left":
+        style, width = _border_components(value)
+        assign(("left",), style, width)
+    elif name == "border-right":
+        style, width = _border_components(value)
+        assign(("right",), style, width)
+    elif name == "border-inline":
+        style, width = _border_components(value)
+        assign(("inline-start", "inline-end"), style, width)
+    elif name == "border-inline-start":
+        style, width = _border_components(value)
+        assign(("inline-start",), style, width)
+    elif name == "border-inline-end":
+        style, width = _border_components(value)
+        assign(("inline-end",), style, width)
+    elif name == "border-left-style":
+        assign(("left",), style=value)
+    elif name == "border-right-style":
+        assign(("right",), style=value)
+    elif name == "border-inline-start-style":
+        assign(("inline-start",), style=value)
+    elif name == "border-inline-end-style":
+        assign(("inline-end",), style=value)
+    elif name == "border-left-width":
+        assign(("left",), width=value)
+    elif name == "border-right-width":
+        assign(("right",), width=value)
+    elif name == "border-inline-start-width":
+        assign(("inline-start",), width=value)
+    elif name == "border-inline-end-width":
+        assign(("inline-end",), width=value)
+    elif name == "border-style":
+        start, end = _quad_horizontal(value)
+        assign(("left",), style=start)
+        assign(("right",), style=end)
+    elif name == "border-width":
+        start, end = _quad_horizontal(value)
+        assign(("left",), width=start)
+        assign(("right",), width=end)
+    elif name == "border-inline-style":
+        start, end = _inline_pair(value)
+        assign(("inline-start",), style=start)
+        assign(("inline-end",), style=end)
+    elif name == "border-inline-width":
+        start, end = _inline_pair(value)
+        assign(("inline-start",), width=start)
+        assign(("inline-end",), width=end)
+    return result
+
+
+def _winner(values: Mapping[str, _Winner], *names: str) -> _Winner | None:
+    candidates = [values[name] for name in names if name in values]
+    return max(candidates, key=lambda item: (item.important, item.specificity, item.order), default=None)
+
+
+def _border_box_advances(values: Mapping[str, _Winner], direction: str) -> bool:
+    logical = {
+        "left": "inline-start" if direction == "ltr" else "inline-end",
+        "right": "inline-end" if direction == "ltr" else "inline-start",
+    }
+    for side in _BORDER_SIDES:
+        style = _winner(values, f"@border-{side}-style", f"@border-{logical[side]}-style")
+        width = _winner(values, f"@border-{side}-width", f"@border-{logical[side]}-width")
+        style_value = style.value if style is not None else "none"
+        width_value = width.value if width is not None else "medium"
+        if width_value in {"initial", "unset"}:
+            width_value = "medium"
+        if style_value not in {"none", "hidden", "initial", "unset"} and _advances(width_value):
+            return True
+    return False
+
+
+def _visual(name: str, value: str, display: str, *, block: bool = False) -> bool:
     if display in {"none", "contents"}:
         return False
     if name == "content":
         return value not in {"none", "normal", '""', "''"}
-    if name in {"background", "background-image", "background-color"}:
-        return re.sub(r"\s+", "", value) not in {"none", "transparent", "rgba(0,0,0,0)", "#0000", "#00000000"}
-    if name == "counter-increment":
-        return value != "none"
+    if block:
+        return False
     if name == "display":
         return value in {"block", "flex", "grid", "table", "list-item", "flow-root"}
     if name in {
         "width",
-        "height",
         "min-width",
-        "min-height",
         "inline-size",
-        "block-size",
         "min-inline-size",
-        "min-block-size",
     }:
-        if display == "inline":
-            return False
-    elif not name.startswith(("margin", "padding", "border")):
+        return display != "inline" and _advances(value)
+    if name in {"margin", "padding"}:
+        return _horizontal_shorthand(value)
+    if name.startswith(
+        ("margin-left", "margin-right", "margin-inline", "padding-left", "padding-right", "padding-inline")
+    ):
+        return any(_advances(part) for part in value.split())
+    if name.startswith(
+        ("margin-top", "margin-bottom", "margin-block", "padding-top", "padding-bottom", "padding-block")
+    ):
         return False
-    return value not in {"auto", "none", "normal", "transparent", "initial", "unset"} and not all(
-        re.fullmatch(r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[a-z]+|%)?", part) for part in value.split()
-    )
+    return False
 
 
 def _url_label(node: Any) -> bool:
@@ -309,6 +575,16 @@ def _protected(node: Any, safety: _Safety) -> bool:
     )
 
 
+def _empty_locator_anchor(node: Any) -> bool:
+    return (
+        _name(node) == "a"
+        and bool(node.get("id") or node.get("name"))
+        and node.get("href") is None
+        and len(node) == 0
+        and not "".join(node.itertext())
+    )
+
+
 def _clean(
     raw: bytes,
     *,
@@ -338,7 +614,12 @@ def _clean(
     descendants = set(body.iter())
     blocked: set[Any] = set()
     for node in nodes:
-        if node.getparent() in blocked or code.is_code(node) or _protected(node, safety):
+        if (
+            node.getparent() in blocked
+            or code.is_code(node)
+            and not _empty_locator_anchor(node)
+            or _protected(node, safety)
+        ):
             blocked.add(node)
     lexical = {(slot.path, slot.field, slot.special_index): slot for slot in index.slots if slot.field != "attribute"}
     flows: dict[tuple[int, ...], list[CharSpan | None]] = {}

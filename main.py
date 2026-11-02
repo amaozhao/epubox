@@ -15,9 +15,36 @@ from engine.item.views import SourceViewError
 from engine.services import state
 from engine.services.atomic import IdentityMismatch, StoreLocked
 from engine.services.resume import plan_resume
-from engine.services.retry import restart_command
+from engine.services.retry import begin_restart_round, restart_command
 
 app = typer.Typer()
+
+_NON_RETRYABLE_SOURCE_VALIDATION_CODES = frozenset(
+    {
+        "archive_too_large",
+        "duplicate_zip_entry",
+        "empty_spine",
+        "entry_too_large",
+        "external_manifest_resource",
+        "invalid_manifest_id",
+        "invalid_mimetype",
+        "invalid_mimetype_layout",
+        "invalid_xml",
+        "missing_manifest_resource",
+        "missing_opf",
+        "missing_resource",
+        "missing_rootfile",
+        "missing_spine_resource",
+        "multiple_renditions",
+        "suspicious_compression",
+        "too_many_entries",
+        "unsafe_path",
+        "unsafe_reference",
+        "unsupported_epub_version",
+        "zip_encrypted",
+        "zip_symlink",
+    }
+)
 
 
 @app.command("translate", help="完整翻译一本 EPUB，未完成时自动续跑，最多 5 轮（含首次）。")
@@ -59,8 +86,8 @@ def translate(
         )
         if getattr(ctx.get_parameter_source(name), "name", None) == "COMMANDLINE"
     )
-    previous_attention: tuple[object, ...] | None = None
     for attempt in range(1, 6):
+        begin_restart_round()
         try:
             result = translate_book(
                 epub_path,
@@ -100,7 +127,10 @@ def translate(
                     typer.echo(f"- {detail}", err=True)
                 typer.echo("这是本地兼容性检查，重复重试不会解决；原书和现有断点均已保留。", err=True)
                 raise typer.Exit(1) from error
-            previous_attention = None
+            if isinstance(error, EpubValidationError) and error.code in _NON_RETRYABLE_SOURCE_VALIDATION_CODES:
+                typer.echo(f"翻译未完成：原书结构校验失败，已停止自动续跑。\n原因：{error}", err=True)
+                typer.echo("这是本地 EPUB 校验错误，重复重试不会解决；原书和现有断点均已保留。", err=True)
+                raise typer.Exit(1) from error
             if attempt == 5:
                 typer.echo(f"翻译未完成：{error}", err=True)
                 raise typer.Exit(1) from error
@@ -113,24 +143,6 @@ def translate(
             if result.status == "needs_attention" and result.phase == "preflight":
                 _print_result(result)
                 return
-            if result.status == "needs_attention" and result.phase == "translation":
-                attention = (
-                    result.work_dir,
-                    result.accepted_units,
-                    result.required_units,
-                    result.http_attempts,
-                    result.reason,
-                )
-                if attention == previous_attention:
-                    typer.echo("自动续跑停止：翻译结果没有新增已接受单元或 HTTP 请求。")
-                    typer.echo("本次命令的恢复机会已使用；再次启动命令可继续重试失败项，历史计数和已完成内容保留。")
-                    if result.reason:
-                        typer.echo(f"重复失败：{result.reason}", err=True)
-                    _print_result(result)
-                    return
-                previous_attention = attention
-            else:
-                previous_attention = None
             if attempt == 5:
                 _print_result(result)
                 return
@@ -204,7 +216,7 @@ def _print_result(result: RunOutcome) -> None:
                     "EPUBCheck 仍未完全通过。详情见报告。"
                 )
         return
-    if result.reason and not (result.status == "needs_attention" and result.phase == "translation"):
+    if result.reason:
         typer.echo(result.reason, err=True)
     raise typer.Exit(1)
 

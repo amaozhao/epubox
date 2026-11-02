@@ -301,6 +301,30 @@ def test_linked_and_imported_css_participate_in_cascade_and_hash_only_used_style
     }
 
 
+@pytest.mark.parametrize(
+    "pseudo_rule",
+    (
+        "p.dropcap::first-letter, p.dropcap::before { white-space:pre-wrap; font-family:monospace }",
+        (
+            "@media (min-width: 1px) {"
+            "p.dropcap::first-letter, p.dropcap::before { white-space:pre-wrap; font-family:monospace }"
+            "}"
+        ),
+    ),
+)
+def test_pseudo_element_font_and_whitespace_do_not_classify_originating_prose_as_code(
+    pseudo_rule: str,
+) -> None:
+    root = _root(
+        '<p id="prose" class="dropcap">Natural prose.</p><span id="code" class="literal">let value = 1;</span>',
+        f"<style>{pseudo_rule}.literal {{ white-space:pre-wrap; font-family:monospace }}</style>",
+    )
+    context = CodeContext(root, "OPS/chapter.xhtml")
+
+    assert not context.is_code(_by_id(root, "prose"))
+    assert context.regions == {_by_id(root, "code"): "inline"}
+
+
 def test_declared_namespace_prefix_matches_xhtml_code_selector() -> None:
     root = _root(
         '<p id="code" class="listing">let value = 1;</p>',

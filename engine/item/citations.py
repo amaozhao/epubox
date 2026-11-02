@@ -27,6 +27,10 @@ _NAME_WORD = r"[A-Z][A-Za-z]*(?:[’'-][A-Za-z]+)*"
 _SOURCE_NAME = re.compile(
     rf"(?<![A-Za-z]){_NAME_WORD}(?:\s+(?:(?:and|for|in|of|on|the|to)\s+)*{_NAME_WORD}){{1,7}}(?![A-Za-z])"
 )
+_SOURCE_DEFINED_NAME_CUE = re.compile(
+    r"\b(?:as|called|entitled|named|titled)\s*[\"'“‘]\s*$",
+    re.IGNORECASE,
+)
 _SOURCE_QUOTED_CUE = re.compile(
     r"\b(?P<cue>called|citation|entitled|example|named|phrase|query|quotation|quote|"
     r"(?:example|sample)\s+(?:phrase|sentence|text)|search(?:es|ed|ing)?(?:\s+(?:for|of))?|"
@@ -193,6 +197,8 @@ def _contains_focused_term(phrase: str, term: str) -> bool:
 def _has_name_context(source: str, name: str) -> bool:
     for match in re.finditer(re.escape(name), source):
         if re.match(r"\s*\(", source[match.end() :]):
+            return True
+        if _SOURCE_DEFINED_NAME_CUE.search(source[max(0, match.start() - 120) : match.start()]):
             return True
         sentence_start = max(source.rfind(mark, 0, match.start()) for mark in ".!?") + 1
         if re.search(

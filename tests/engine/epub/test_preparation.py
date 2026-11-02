@@ -33,6 +33,37 @@ class StubChecker:
         return EpubCheckResult(("stub-epubcheck",), 0)
 
 
+def test_empty_nav_dtd_subset_survives_atomic_preparation(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub")
+    with zipfile.ZipFile(source) as archive:
+        resources = [(info, archive.read(info)) for info in archive.infolist()]
+    with zipfile.ZipFile(source, "w") as archive:
+        for info, raw in resources:
+            if info.filename == "OEBPS/nav.xhtml":
+                raw = b'<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html[]>' + raw
+            archive.writestr(info, raw)
+    original = source.read_bytes()
+    prepared = prepare_book(
+        source,
+        tmp_path / "work",
+        PreparationConfig(
+            run_id="empty-nav-dtd",
+            adapter_version=ATOMIC_ADAPTER_VERSION,
+            extractor_version=ATOMIC_EXTRACTOR_VERSION,
+        ),
+        StubChecker(),
+    )
+    store = RunStore(prepared.work_dir)
+    documents = [store.read_document(document_id) for document_id in prepared.preparation.document_hashes]
+    nav = next(document for document in documents if document.resource.path == "OEBPS/nav.xhtml")
+
+    assert prepared.preparation.state == "parsed_ready"
+    assert nav.units
+    assert "<!DOCTYPE html[]>" in nav.source_markup
+    assert nav.adapter_version == ATOMIC_ADAPTER_VERSION
+    assert source.read_bytes() == original
+
+
 def test_compact_preparation_extracts_source_and_keeps_records_in_five_shards(tmp_path: Path) -> None:
     source = make_epub(tmp_path / "book.epub")
     source_hash = hashlib.sha256(source.read_bytes()).hexdigest()

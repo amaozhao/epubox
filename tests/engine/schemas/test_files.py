@@ -9,6 +9,7 @@ WORDS = frozenset(
     [
         "adversary",
         "alignment",
+        "archive",
         "assembly",
         "association",
         "atomic",

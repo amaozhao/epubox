@@ -1,4 +1,4 @@
-"""An explicit command restart differs from another automatic round."""
+"""Bounded recovery grants across commands, automatic rounds, and nested calls."""
 
 import asyncio
 import json
@@ -177,3 +177,82 @@ def test_automatic_retries_keep_failed_items_separate_through_later_rounds(tmp_p
         entry = next(value for value in _read(journal, item_id).entries if value.stage == failed_stage)
         assert len(entry.merged_events) == 3
         assert entry.singleton_events == ()
+
+
+@pytest.mark.parametrize("failed_stage", ["translate", "review"])
+@pytest.mark.parametrize("successful_round", [3, None])
+def test_cli_rounds_dispatch_exhausted_items_and_preserve_completed_work(
+    tmp_path, monkeypatch, failed_stage, successful_round
+):
+    from typer.testing import CliRunner
+
+    import main
+    from engine.cli import RunOutcome
+
+    case = prepare_case(tmp_path, "<p>Bad phrase</p><p>Good phrase</p>", ("Bad phrase", "Good phrase"))
+    failed_id = case.batch.items[0].item_id
+    current_round = 0
+    calls = []
+    outcomes = []
+
+    async def transport(stage, payload):
+        ids = tuple(item["item_id"] for item in payload["items"])
+        calls.append((current_round, stage, ids))
+        response = answer(stage, payload)
+        if stage == failed_stage and (successful_round is None or current_round < successful_round):
+            body = json.loads(response["raw"])
+            for item in body["items"]:
+                if item["item_id"] == failed_id:
+                    if failed_stage == "translate":
+                        item["target"] = ""
+                    else:
+                        item["decision"] = "needs_attention"
+            response["raw"] = json.dumps(body)
+        return response
+
+    def run():
+        return asyncio.run(
+            run_translation(
+                case.session.store.root,
+                model=SimpleNamespace(id=case.prepared.plan.translation_config["model"]),
+                transport=transport,
+                reopen_attention=True,
+            )
+        )
+
+    assert run().status == "needs_attention"
+    journal = BodyJournal(case.session.store)
+    assert failure_count(journal, journal.records()[failed_id], failed_stage) == 10
+    before = len(calls)
+
+    def translate(_source, **_options):
+        nonlocal current_round
+        current_round += 1
+        result = run()
+        outcomes.append(result)
+        return RunOutcome(
+            "completed" if result.status == "translated" else "needs_attention",
+            case.session.store.root,
+            "translation",
+            accepted_units=result.accepted_units,
+            required_units=case.prepared.plan.required_unit_count,
+            http_attempts=result.http_attempts,
+            reason=result.reason,
+        )
+
+    monkeypatch.setattr(main, "translate_book", translate)
+    result = CliRunner().invoke(main.app, ["translate", str(tmp_path / "source.epub")])
+
+    expected_rounds = successful_round or 5
+    assert current_round == expected_rounds, result.output
+    assert result.exit_code == (0 if successful_round else 1), result.output
+    retried = calls[before:]
+    assert {round_number for round_number, _, _ in retried} == set(range(1, expected_rounds + 1))
+    assert all(ids == (failed_id,) for _, _, ids in retried)
+    if failed_stage == "review":
+        assert all(stage == "review" for _, stage, _ in retried)
+    assert [outcome.http_attempts for outcome in outcomes] == sorted({outcome.http_attempts for outcome in outcomes})
+    journal = BodyJournal(case.session.store)
+    assert failure_count(journal, journal.records()[failed_id], failed_stage) == (
+        10 + expected_rounds - bool(successful_round)
+    )

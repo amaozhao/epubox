@@ -34,7 +34,7 @@ _restart_runs: ContextVar[_RestartSession | None] = ContextVar("epubox_restart_r
 
 @contextmanager
 def restart_scope(*, explicit_targets: bool = False) -> Iterator[None]:
-    """Share one explicit restart grant across a command's automatic rounds."""
+    """Share restart grants and item isolation across nested entrypoints."""
     if not explicit_targets and _restart_runs.get() is not None:
         yield
         return
@@ -63,6 +63,13 @@ def claim_restart(root: Path, scope: str = "root") -> bool:
         return False
     session.granted.add(identity)
     return True
+
+
+def begin_restart_round() -> None:
+    """Renew the bounded recovery grant while preserving command-wide isolation."""
+    session = _restart_runs.get()
+    if session is not None:
+        session.granted.clear()
 
 
 def isolate_restart_items(root: Path, item_ids: Collection[str]) -> None:
