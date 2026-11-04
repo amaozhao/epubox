@@ -33,6 +33,7 @@ from engine.epub.preparation import (
 from engine.epub.preservation import CODE_POLICY
 from engine.epub.publication import publish_book, recover_publication
 from engine.epub.styles import FONT_POLICY
+from engine.epub.upgrade import COVER_POLICY
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.orchestrator import (
@@ -444,6 +445,7 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
             or proof.get("epub_version") != "3.0"
             or proof.get("font_policy") != FONT_POLICY
             or proof.get("cleanup_policy") != CLEANUP_POLICY
+            or proof.get("cover_policy") != COVER_POLICY
             or not code_policy_current(store, proof)
         ):
             from engine.epub.publish import publish_atomic
@@ -476,6 +478,7 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
             verification.get("epub_version") != "3.0"
             or verification.get("font_policy") != FONT_POLICY
             or verification.get("cleanup_policy") != CLEANUP_POLICY
+            or verification.get("cover_policy") != COVER_POLICY
             or verification.get("code_policy") != CODE_POLICY
         ):
             converted = publish_book(

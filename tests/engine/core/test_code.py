@@ -6,6 +6,7 @@ import pytest
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.code import CODE_CLASSIFICATION_VERSION, CodeContext, monospace_family
+from engine.item.atoms import extract_resource
 
 XHTML = "http://www.w3.org/1999/xhtml"
 
@@ -18,6 +19,33 @@ def _by_id(root: etree._Element, value: str) -> etree._Element:
     return next(node for node in root.iter() if node.get("id") == value)
 
 
+def test_generated_python_listing_is_protected_but_same_markup_for_prose_stays_translatable() -> None:
+    def listing(ident: str, first: str, second: str) -> str:
+        return (
+            f'<div id="{ident}" class="class-0-1">'
+            f'<span class="class-0-2"><span class="bookSpan">{first}</span></span><br/>'
+            f'<span class="class-0-2"><span class="bookSpan">{second}</span></span></div>'
+        )
+
+    root = _root(
+        listing("python", "def render(row):", "&#160;&#160;&#160;&#160;return row[0]")
+        + listing("fields", "name: str = Field(min_length=1)", "&#160;&#160;&#160;&#160;count: int")
+        + listing("prose", "Note: important", "Example: basic")
+    )
+    path = "OPS/chapter.xhtml"
+    assert CodeContext(root, path).regions == {
+        _by_id(root, "python"): "block",
+        _by_id(root, "fields"): "block",
+    }
+
+    data = etree.tostring(root)
+    frozen = extract_resource(data, path, "source", extractor_version="epubox-atomic-6")
+    fresh = extract_resource(data, path, "source")
+    assert len(frozen.items) == 3
+    assert len(fresh.items) == 1
+    assert "Note: important" in fresh.items[0].source_projection
+
+
 def test_semantic_code_elements_form_maximal_nonoverlapping_regions() -> None:
     root = _root(
         '<p id="p">Before <code id="code">x <var id="var">n</var></code> after.</p>'
@@ -25,7 +53,7 @@ def test_semantic_code_elements_form_maximal_nonoverlapping_regions() -> None:
     )
     context = CodeContext(root, "OPS/chapter.xhtml")
 
-    assert CODE_CLASSIFICATION_VERSION == "code-context-1"
+    assert CODE_CLASSIFICATION_VERSION == "code-context-2"
     assert context.regions == {
         _by_id(root, "code"): "inline",
         _by_id(root, "pre"): "block",

@@ -422,7 +422,8 @@ def test_partial_code_styling_does_not_hide_natural_language_paragraphs() -> Non
     assert [item.atomic_tag for item in result.items] == ["p", "p", "p"]
 
 
-def test_atomic_six_protects_plain_preformatted_code_and_preserves_raw_bytes() -> None:
+@pytest.mark.parametrize("extractor_version", ("epubox-atomic-6", EXTRACTOR_VERSION))
+def test_atomic_protects_plain_preformatted_code_and_preserves_raw_bytes(extractor_version: str) -> None:
     code = (
         '<p id="logs" title="Runtime output" '
         'style="margin:0;white-space:pre-wrap;font-family:Menlo,Consolas,monospace">'
@@ -430,7 +431,7 @@ def test_atomic_six_protects_plain_preformatted_code_and_preserves_raw_bytes() -
     )
     raw = source(code + "<p>Translate nearby prose.</p>")
 
-    current = extract_resource(raw, "OPS/logs.xhtml", "source")
+    current = extract_resource(raw, "OPS/logs.xhtml", "source", extractor_version=extractor_version)
     version_five = extract_resource(
         raw,
         "OPS/logs.xhtml",
@@ -438,7 +439,6 @@ def test_atomic_six_protects_plain_preformatted_code_and_preserves_raw_bytes() -
         extractor_version="epubox-atomic-5",
     )
 
-    assert EXTRACTOR_VERSION == "epubox-atomic-6"
     assert texts(current) == ["Translate nearby prose."]
     assert texts(version_five) == ["INFO ready\n\nWARN retry\n", "Runtime output", "Translate nearby prose."]
     assert not any(item.kind == "attribute" for item in current.items)

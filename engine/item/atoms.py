@@ -31,7 +31,7 @@ from engine.schemas.contracts import Unit
 from engine.schemas.internal import DocumentPlan as StructuralDocument
 from engine.schemas.internal import RegistryEntry, ResourceRecord, SlotRange
 
-EXTRACTOR_VERSION = "epubox-atomic-6"
+EXTRACTOR_VERSION = "epubox-atomic-7"
 ADAPTER_VERSION = "epubox-bytes-1"
 DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
 EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
@@ -39,6 +39,7 @@ _LEGACY_EXTRACTOR_VERSION = "epubox-atomic-2"
 _V3_EXTRACTOR_VERSION = "epubox-atomic-3"
 _V4_EXTRACTOR_VERSION = "epubox-atomic-4"
 _V5_EXTRACTOR_VERSION = "epubox-atomic-5"
+_V6_EXTRACTOR_VERSION = "epubox-atomic-6"
 _SUPPORTED_EXTRACTOR_VERSIONS = frozenset(
     {
         "epubox-atomic-1",
@@ -46,15 +47,12 @@ _SUPPORTED_EXTRACTOR_VERSIONS = frozenset(
         _V3_EXTRACTOR_VERSION,
         _V4_EXTRACTOR_VERSION,
         _V5_EXTRACTOR_VERSION,
+        _V6_EXTRACTOR_VERSION,
         EXTRACTOR_VERSION,
     }
 )
-_NAVIGATION_EXTRACTOR_VERSIONS = frozenset(
-    {_LEGACY_EXTRACTOR_VERSION, _V3_EXTRACTOR_VERSION, _V4_EXTRACTOR_VERSION, _V5_EXTRACTOR_VERSION, EXTRACTOR_VERSION}
-)
-_STEM_TITLE_FILTER_EXTRACTOR_VERSIONS = frozenset(
-    {_V3_EXTRACTOR_VERSION, _V4_EXTRACTOR_VERSION, _V5_EXTRACTOR_VERSION, EXTRACTOR_VERSION}
-)
+_NAVIGATION_EXTRACTOR_VERSIONS = frozenset(_SUPPORTED_EXTRACTOR_VERSIONS - {"epubox-atomic-1"})
+_STEM_TITLE_FILTER_EXTRACTOR_VERSIONS = frozenset(_NAVIGATION_EXTRACTOR_VERSIONS - {_LEGACY_EXTRACTOR_VERSION})
 _NAVIGATION_TYPES = frozenset({"toc", "page-list", "landmarks"})
 
 
@@ -87,8 +85,10 @@ class _AtomicExtractor(_Extractor):
         if parsed.tree is None:
             raise RangeError("genuine HTML has no proven source mapping")
         self._code_context = (
-            CodeContext(parsed.tree, path, styles)
-            if extractor_version == EXTRACTOR_VERSION and parsed.kind == "xhtml"
+            CodeContext(
+                parsed.tree, path, styles, recognize_rendered_python=extractor_version != _V6_EXTRACTOR_VERSION
+            )
+            if extractor_version in {_V6_EXTRACTOR_VERSION, EXTRACTOR_VERSION} and parsed.kind == "xhtml"
             else None
         )
         super().__init__(parsed.text, path, source_hash, media_type, config, None, tree=parsed.tree)
@@ -96,7 +96,9 @@ class _AtomicExtractor(_Extractor):
             self.boundaries.append(
                 {
                     "kind": "code_style_context",
-                    "policy": CODE_CLASSIFICATION_VERSION,
+                    "policy": "code-context-1"
+                    if extractor_version == _V6_EXTRACTOR_VERSION
+                    else CODE_CLASSIFICATION_VERSION,
                     "styles": dict(sorted(self._code_context.stylesheet_hashes.items())),
                 }
             )

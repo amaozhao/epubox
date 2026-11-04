@@ -27,7 +27,7 @@ from engine.epub.preservation import (
     verify_code_plan,
 )
 from engine.epub.replace import replacement_fingerprint
-from engine.epub.upgrade import navigation_spine_additions
+from engine.epub.upgrade import COVER_POLICY, navigation_spine_additions, repair_cover_metadata
 from engine.epub.validation import (
     FONT_MEDIA_PREFIXES,
     FONT_SUFFIXES,
@@ -59,6 +59,7 @@ class PackageVerification:
     code_plan_hash: str | None = None
     code_stats: dict[str, int] | None = None
     code_node_maps: dict[str, list[list[list[int]]]] | None = None
+    cover_policy: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
@@ -78,6 +79,8 @@ class PackageVerification:
             value["cleanup_stats"] = self.cleanup_stats
         if self.cleanup_only:
             value["cleanup_only"] = True
+        if self.cover_policy is not None:
+            value["cover_policy"] = self.cover_policy
         if self.code_policy is not None:
             value["code_policy"] = self.code_policy
             value["code_plan_hash"] = self.code_plan_hash
@@ -256,6 +259,10 @@ def verify_staged_epub(
         if new_issues:
             raise EpubValidationError("invalid_references", new_issues[0].message, issues=new_issues)
         warnings.extend(output_issues)
+        if upgraded and repair_cover_metadata(output, output_inventory) is not None:
+            raise EpubValidationError(
+                "cover_policy_failed", "Output cover declarations are inconsistent or incomplete"
+            )
         if expected_language:
             warnings.extend(_validate_metadata(output, output_inventory, accepted_targets, expected_language))
     result = output_inventory.epubcheck
@@ -325,6 +332,7 @@ def verify_staged_epub(
         encode_code_maps({path: paths for path, paths in (code_node_maps or {}).items() if path in code_resources})
         if code_node_maps
         else None,
+        cover_policy=COVER_POLICY if upgraded else None,
     )
 
 

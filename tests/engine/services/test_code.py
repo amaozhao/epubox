@@ -9,7 +9,7 @@ from engine.agents.workflow import _failed
 from engine.schemas.contracts import ItemStatus, canonical_hash, canonical_json_bytes
 from engine.services import state
 from engine.services.atomic import IdentityMismatch
-from engine.services.code import _is_source_code
+from engine.services.code import _source_code_version
 from engine.services.journal import BodyJournal
 from engine.services.manual import import_codex_translation
 from tests.engine.agents import test_workflow as fixtures
@@ -171,7 +171,7 @@ def test_atomic4_code_shape_requires_whole_prewrapped_generic_monospace_source(
     case = _atomic4_rust_case(tmp_path, monkeypatch, body=body, projections=(projection,))
     member = case.batch.items[0]
 
-    assert not _is_source_code(case.session, member)
+    assert _source_code_version(case.session, member) is None
 
 
 @pytest.mark.parametrize("damage", ("split", "projection", "registry"))
@@ -191,7 +191,7 @@ def test_atomic4_code_shape_rejects_nonwhole_or_identity_changed_member(tmp_path
     else:
         changed = member.model_copy(update={"registry": {}})
 
-    assert not _is_source_code(case.session, changed)
+    assert _source_code_version(case.session, changed) is None
 
 
 def test_atomic4_code_shape_rejects_changed_source_resource_hash(tmp_path, monkeypatch):
@@ -208,7 +208,7 @@ def test_atomic4_code_shape_rejects_changed_source_resource_hash(tmp_path, monke
     monkeypatch.setattr(code_module.state, "snapshot", lambda _root: tampered)
 
     with pytest.raises(IdentityMismatch, match="source resource changed"):
-        _is_source_code(case.session, member)
+        _source_code_version(case.session, member)
 
 
 def test_atomic4_code_recovery_does_not_bypass_unrelated_protocol_failure(tmp_path, monkeypatch):
@@ -331,3 +331,49 @@ def test_plain_prose_cannot_claim_code_preservation(tmp_path, body):
     state.write(journal._result_path(member.item_id), canonical_json_bytes(forged))
     with pytest.raises(IdentityMismatch):
         BodyJournal(case.session.store)
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        None,
+        "untranslated English remains: def render(row): return row[0]",
+        "response root must contain exactly protocol, request_id, and items",
+    ),
+)
+def test_rendered_python_in_atomic6_resumes_from_source(tmp_path, monkeypatch, error):
+    import engine.epub.preparation as epub_preparation
+    from engine.services import preparation
+
+    version = "epubox-atomic-6"
+    monkeypatch.setattr(preparation, "ATOMIC_EXTRACTOR_VERSION", version)
+    monkeypatch.setattr(epub_preparation, "ATOMIC_EXTRACTOR_VERSION", version)
+    monkeypatch.setattr(
+        epub_preparation, "extract_resource", partial(epub_preparation.extract_resource, extractor_version=version)
+    )
+    monkeypatch.setattr(fixtures, "EXTRACTOR_VERSION", version)
+    case = fixtures.prepare_case(
+        tmp_path,
+        '<div class="class-0-1">'
+        '<span class="class-0-2"><span class="bookSpan">def render(row):</span></span><br/>'
+        '<span class="class-0-2"><span class="bookSpan">&#160;&#160;&#160;&#160;return row[0]</span></span>'
+        "</div>",
+        (
+            (
+                "⟦+b1⟧⟦+g1⟧⟦+g2⟧def render(row):⟦-g2⟧⟦-g1⟧⟦-b1⟧⟦=x1⟧"
+                "⟦+b2⟧⟦+g3⟧⟦+g4⟧\xa0\xa0\xa0\xa0return row[0]⟦-g4⟧⟦-g3⟧⟦-b2⟧"
+            ),
+        ),
+    )
+    journal = BodyJournal(case.session.store, case.session)
+    (member,) = case.batch.items
+    if error is not None:
+        journal.save(_failed(member, journal.records()[member.item_id], "translate", error, case.batch))
+
+    record = journal.recover_results()[member.item_id]
+
+    assert record.status == ItemStatus.REVIEWED
+    assert record.target_projection == member.source_projection
+    assert record.checks["preserved_code"] == {"version": 3, "member_hash": canonical_hash(member)}
+    assert BodyJournal(case.session.store).records()[member.item_id] == record
+    assert all(not request.attempts for request in journal._requests.values())

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import posixpath
 import re
+import textwrap
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -17,7 +19,7 @@ from lxml import etree  # type: ignore[attr-defined]
 
 from engine.item.policy import _BLOCK_TAGS
 
-CODE_CLASSIFICATION_VERSION = "code-context-1"
+CODE_CLASSIFICATION_VERSION = "code-context-2"
 
 _SEMANTIC_BLOCK = {"pre"}
 _SEMANTIC_INLINE = {"code", "kbd", "samp", "var", "tt"}
@@ -65,6 +67,8 @@ _KNOWN_MONOSPACE = {
 _NESTED = {"container", "document", "layer", "media", "scope", "starting-style", "supports"}
 _RELEVANT = {"white-space", "font-family", "font", "all"}
 _SUSPICIOUS = re.compile(r"(?:white-space|font(?:-family)?|mono(?:space)?|code|pre-wrap)", re.IGNORECASE)
+_GENERATED_CLASS = re.compile(r"class-[0-9]+-[0-9]+")
+_XHTML = "{http://www.w3.org/1999/xhtml}"
 _CLASS_ALIASES = {
     "code-block": "codeblock",
     "code_block": "codeblock",
@@ -92,6 +96,81 @@ class _Conditional:
     resource: str
 
 
+def is_rendered_python_block(node: etree._Element) -> bool:
+    """Recognize Python listings flattened into generated line spans and breaks."""
+    if (
+        node.tag != f"{_XHTML}div"
+        or not _GENERATED_CLASS.fullmatch(node.get("class", ""))
+        or (node.text or "").strip()
+    ):
+        return False
+    lines = []
+    line_class = None
+    for index, child in enumerate(node):
+        if (child.tail or "").strip():
+            return False
+        if index % 2:
+            if child.tag != f"{_XHTML}br" or len(child) or (child.text or "").strip():
+                return False
+            continue
+        css_class = child.get("class", "")
+        if (
+            child.tag != f"{_XHTML}span"
+            or not _GENERATED_CLASS.fullmatch(css_class)
+            or (line_class is not None and line_class != css_class)
+            or len(child) != 1
+            or (child.text or "").strip()
+        ):
+            return False
+        line_class = css_class
+        text = child[0]
+        if text.tag != f"{_XHTML}span" or text.get("class") != "bookSpan" or len(text) or (text.tail or "").strip():
+            return False
+        lines.append((text.text or "").replace("\xa0", " "))
+    if sum(bool(line.strip()) for line in lines) < 2:
+        return False
+    try:
+        statements = ast.parse(textwrap.dedent("\n".join(lines))).body
+    except IndentationError:
+        # Some conversions put the first field's indentation in CSS.
+        try:
+            fields = ast.parse("\n".join(line.lstrip() for line in lines)).body
+        except (SyntaxError, ValueError):
+            return False
+        return (
+            bool(fields)
+            and all(isinstance(field, ast.AnnAssign) for field in fields)
+            and any(isinstance(field, ast.AnnAssign) and field.value is not None for field in fields)
+        )
+    except (SyntaxError, ValueError):
+        return False
+    return bool(statements) and all(
+        isinstance(
+            statement,
+            (
+                ast.Assign,
+                ast.AugAssign,
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.For,
+                ast.AsyncFor,
+                ast.While,
+                ast.If,
+                ast.Try,
+                ast.With,
+                ast.Import,
+                ast.ImportFrom,
+            ),
+        )
+        or isinstance(statement, ast.AnnAssign)
+        and statement.value is not None
+        or isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        for statement in statements
+    )
+
+
 class CodeContext:
     """Classify maximal source elements whose content must remain byte-faithful code."""
 
@@ -100,6 +179,8 @@ class CodeContext:
         root: etree._Element | etree._ElementTree,
         resource_path: str,
         styles: Mapping[str, str] | None = None,
+        *,
+        recognize_rendered_python: bool = True,
     ) -> None:
         self.root = root.getroot() if isinstance(root, etree._ElementTree) else root
         if not isinstance(self.root.tag, str):
@@ -116,7 +197,7 @@ class CodeContext:
         self._load_document_styles()
         self._load_inline_styles()
         self._validate_conditionals()
-        candidates = self._candidates()
+        candidates = self._candidates(recognize_rendered_python)
         self.regions: dict[etree._Element, Literal["block", "inline"]] = self._maximal(candidates)
         self._code_nodes = {
             descendant for region in self.regions for descendant in region.iter() if isinstance(descendant.tag, str)
@@ -407,7 +488,7 @@ class CodeContext:
             else None
         )
 
-    def _candidates(self) -> dict[etree._Element, Literal["block", "inline"]]:
+    def _candidates(self, recognize_rendered_python: bool) -> dict[etree._Element, Literal["block", "inline"]]:
         result: dict[etree._Element, Literal["block", "inline"]] = {}
         for node in self._elements:
             name = _name(node)
@@ -419,6 +500,9 @@ class CodeContext:
                 result[node] = "inline"
                 continue
             if _is_caption(node):
+                continue
+            if recognize_rendered_python and is_rendered_python_block(node):
+                result[node] = "block"
                 continue
             if "programcode" in classes:
                 for descendant in node.iterdescendants():

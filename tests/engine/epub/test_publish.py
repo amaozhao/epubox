@@ -19,6 +19,7 @@ from engine.epub.cleanup import CLEANUP_POLICY
 from engine.epub.diagnostics import compare
 from engine.epub.publish import _language, publish_atomic, recover_atomic, repack_completed, validate_atomic_output
 from engine.epub.replace import replacement_fingerprint
+from engine.epub.upgrade import COVER_POLICY
 from engine.epub.validation import EpubCheckResult, EpubValidationError
 from engine.epub.verification import file_hash, verify_baseline
 from engine.item.inline import events_to_projection, parse_projection
@@ -818,6 +819,75 @@ def test_repack_completed_cleans_finished_epub_without_source_or_content_damage(
     }
     with zipfile.ZipFile(second) as archive:
         assert archive.read("OEBPS/chapter.xhtml") == cleaned
+
+
+def test_publish_atomic_preserves_cover_from_source_with_svg_wrapper(tmp_path: Path, monkeypatch) -> None:
+    from tests.engine.agents import test_workflow
+
+    opf_path = "OEBPS/content.opf"
+    cover_path = "OEBPS/images/front.jpg"
+    cover = b"original cover image"
+
+    def source_with_cover(path, documents):
+        fixture = make_epub(path.with_name("fixture.epub"), documents)
+        with zipfile.ZipFile(fixture) as archive:
+            opf = archive.read(opf_path).replace(b"</metadata>", b'<meta name="cover" content="c0"/></metadata>')
+        opf = opf.replace(
+            b"</manifest>", b'<item id="front" href="images/front.jpg" media-type="image/jpeg"/></manifest>'
+        )
+        publish_module.stage_epub(fixture, path, {opf_path: opf, cover_path: cover}, allow_additions=True)
+        return path
+
+    monkeypatch.setattr(test_workflow, "make_epub", source_with_cover)
+    case = _case(
+        tmp_path,
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
+        '<image xlink:href="images/front.jpg"/></svg><p>English text.</p>',
+        ("English text.",),
+    )
+    targets = {
+        item.item_id: item.source_projection.replace("English text.", "中文正文。")
+        for inventory in case.index.inventories
+        for item in inventory.items
+    }
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+    output = tmp_path / "translated.epub"
+
+    publish_atomic(case.session.store, output, StubChecker())
+
+    with zipfile.ZipFile(output) as archive:
+        opf = parse_xml_bytes(archive.read(opf_path))
+        cover_meta = opf.find('.//{*}meta[@name="cover"]')
+        image = opf.find('.//{*}item[@id="front"]')
+        assert cover_meta is not None and cover_meta.get("content") == "front"
+        assert image is not None and "cover-image" in image.get("properties", "").split()
+        assert archive.read(cover_path) == cover
+        chapter = archive.read("OEBPS/chapter.xhtml")
+        assert b'xlink:href="images/front.jpg"' in chapter
+        assert "中文正文。".encode() in chapter
+
+
+def test_repack_completed_repairs_cover_metadata_without_changing_book_content(tmp_path: Path) -> None:
+    fixture = make_epub(tmp_path / "fixture.epub")
+    opf_path = "OEBPS/content.opf"
+    cover_path = "OEBPS/cover.jpg"
+    with zipfile.ZipFile(fixture) as archive:
+        opf = archive.read(opf_path).replace(
+            b"</manifest>",
+            b'<item id="cover" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/></manifest>',
+        )
+    source = tmp_path / "completed.epub"
+    publish_module.stage_epub(fixture, source, {opf_path: opf, cover_path: b"jpeg"}, allow_additions=True)
+    output = tmp_path / "completed-cover.epub"
+
+    published = repack_completed(source, output, StubChecker())
+
+    proof = published["verification"]
+    assert isinstance(proof, dict) and proof["cover_policy"] == COVER_POLICY
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(output) as repaired:
+        assert set(original.namelist()) == set(repaired.namelist())
+        assert b'<meta name="cover" content="cover"/>' in repaired.read(opf_path)
+        assert all(repaired.read(path) == original.read(path) for path in original.namelist() if path != opf_path)
 
 
 def _element_error(path: Path, needle: str, code: str, message: str, *, occurrence: int = 0) -> str:

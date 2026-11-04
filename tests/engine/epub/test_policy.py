@@ -103,6 +103,60 @@ def test_static_book_with_local_mathjax_is_supported(tmp_path: Path, for_output:
 
 
 @pytest.mark.parametrize(
+    ("src", "declared", "altered", "supported"),
+    [
+        ("../../js/book.js", False, False, True),
+        ("../../js/book.js", True, False, True),
+        ("../../js/book.js", False, True, False),
+        ("../../js/book.js?mode=reader", False, False, False),
+        ("../../%6as/book.js", False, False, False),
+        ("https://example.com/js/book.js", False, False, False),
+    ],
+)
+def test_pagination_helper_requires_verified_local_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, src: str, declared: bool, altered: bool, supported: bool
+) -> None:
+    helper = b"function nextPage() { window.scrollBy(window.innerWidth, 0); }"
+    monkeypatch.setattr(
+        validation_module, "_PAGINATION_SCRIPT_DIGESTS", {len(helper): hashlib.sha256(helper).hexdigest()}
+    )
+    source = make_epub(
+        tmp_path / "original.epub",
+        {
+            "xhtml/chapter.xhtml": '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title>'
+            f'<script type="text/javascript" src="{src}"></script></head><body><p>Static text.</p></body></html>'
+        },
+    )
+    with zipfile.ZipFile(source) as archive:
+        opf = archive.read("OEBPS/content.opf").replace(
+            b"<manifest>",
+            b'<manifest><item id="reader" href="../js/book.js" media-type="application/javascript"/>',
+        )
+    if declared:
+        opf = opf.replace(b'id="c0"', b'id="c0" properties="scripted"')
+    scripted = tmp_path / "scripted.epub"
+    stage_epub(
+        source,
+        scripted,
+        {
+            "OEBPS/content.opf": opf,
+            "js/book.js": b'document.write("New content");'.ljust(len(helper)) if altered else helper,
+        },
+        allow_additions=True,
+    )
+
+    for for_output in (False, True):
+        if supported:
+            inventory = inspect_epub(scripted, "source", checker=StubChecker(), for_output=for_output)
+            assert "OEBPS/xhtml/chapter.xhtml" in inventory.documents
+        else:
+            with pytest.raises(EpubValidationError) as caught:
+                inspect_epub(scripted, "source", checker=StubChecker(), for_output=for_output)
+            assert caught.value.code == "unsupported_source"
+            assert caught.value.issues[0].code == "scripted_content"
+
+
+@pytest.mark.parametrize(
     ("head", "body"),
     [
         ('<script>document.write("Generated content");</script>', "<p>Some static content.</p>"),

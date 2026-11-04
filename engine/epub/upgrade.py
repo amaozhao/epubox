@@ -4,7 +4,7 @@ import html.entities
 import posixpath
 import re
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -32,7 +32,9 @@ _EPUB = "http://www.idpf.org/2007/ops"
 _NCX = "http://www.daisy.org/z3986/2005/ncx/"
 _XML = "http://www.w3.org/XML/1998/namespace"
 _SVG = "http://www.w3.org/2000/svg"
+_XLINK = "http://www.w3.org/1999/xlink"
 _MATHML = "http://www.w3.org/1998/Math/MathML"
+COVER_POLICY = "epub-cover-v1"
 _PROTECTED_MARKER_ANCESTORS = {"code", "math", "pre", "script", "style"}
 _NESTED_CSS_RULES = {"container", "document", "layer", "media", "scope", "starting-style", "supports"}
 _UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -115,9 +117,7 @@ def upgrade_package(
                 result[inventory.ncx_path] = synced_ncx
 
         items = {item.get("id", ""): item for item in manifest if qname_local_name(item.tag) == "item"}
-        cover_id = _cover(metadata, package)
-        remove_dangling_refinements(package, metadata)
-        _order_metadata(metadata)
+        _legacy_metadata(metadata, package)
         for item in items.values():
             path = _resolve(inventory.opf_path, item.get("href", ""))
             media_type = item.get("media-type", "")
@@ -142,10 +142,6 @@ def upgrade_package(
                         item.attrib.pop("properties", None)
                 for value in actual:
                     _add_property(item, value)
-        cover_item = _cover_item(package, items, inventory.opf_path, cover_id, read)
-        if cover_item is not None:
-            _add_property(cover_item, "cover-image")
-
         nav_path = inventory.nav_path or next(
             (
                 path
@@ -173,9 +169,10 @@ def upgrade_package(
                     _add_property(item, "nav")
                     break
 
-        # Navigation may expose auxiliary pages omitted from an EPUB 2 spine.
-        # Register them without changing the original default reading order.
         nav_data = result[nav_path] if nav_path in result else read(nav_path)
+        cover_item = _normalize_cover(package, inventory, read, nav_path=nav_path, nav_data=nav_data)
+        remove_dangling_refinements(package, metadata)
+        _order_metadata(metadata)
         cover_path = _resolve(inventory.opf_path, cover_item.get("href", "")) if cover_item is not None else None
         for path in _auxiliary_covers(nav_data, nav_path, inventory):
             current = result[path] if path in result else read(path)
@@ -186,6 +183,7 @@ def upgrade_package(
         if repaired_nav != nav_data:
             result[nav_path] = repaired_nav
             nav_data = repaired_nav
+        # Register auxiliary navigation targets without changing the default reading order.
         spine = _child(package, "spine")
         registered = {item.get("idref") for item in spine if qname_local_name(item.tag) == "itemref"}
         for item_id in navigation_spine_additions(inventory, nav_data, nav_path):
@@ -765,13 +763,9 @@ def _valid_utc(value: str) -> bool:
     return True
 
 
-def _cover(metadata: etree._Element, package: etree._Element) -> str | None:
-    cover_id: str | None = None
-    for item in list(metadata):
-        if qname_local_name(item.tag) == "meta" and item.get("name", "").lower() == "cover":
-            cover_id = (item.get("content") or "").strip() or cover_id
-            metadata.remove(item)
-        elif qname_local_name(item.tag) == "meta" and item.get("name"):
+def _legacy_metadata(metadata: etree._Element, package: etree._Element) -> None:
+    for item in metadata:
+        if qname_local_name(item.tag) == "meta" and item.get("name") and item.get("name").lower() != "cover":
             original = item.get("name", "")
             value = item.get("content", "")
             item.attrib.clear()
@@ -785,7 +779,6 @@ def _cover(metadata: etree._Element, package: etree._Element) -> str | None:
                 item.set("property", f"epubox:{name}")
                 _declare_epubox(package)
             item.text = value
-    return cover_id
 
 
 def _order_metadata(metadata: etree._Element) -> None:
@@ -799,55 +792,122 @@ def _order_metadata(metadata: etree._Element) -> None:
         metadata.append(item)
 
 
-def _cover_item(
+def repair_cover_metadata(archive: zipfile.ZipFile, inventory: PackageInventory) -> bytes | None:
+    """Return an OPF replacement if a finished EPUB 3 needs its cover metadata repaired."""
+    if not inventory.epub_version.startswith("3"):
+        return None
+    original = archive.read(inventory.opf_path)
+    tree = parse_xml_bytes(original)
+    before = etree.tostring(tree, encoding="utf-8")
+    nav_path = inventory.nav_path
+    _normalize_cover(
+        tree.getroot(),
+        inventory,
+        archive.read,
+        nav_path=nav_path,
+        nav_data=archive.read(nav_path) if nav_path else None,
+    )
+    if etree.tostring(tree, encoding="utf-8") == before:
+        return None
+    return etree.tostring(tree, encoding="utf-8", xml_declaration=original.lstrip().startswith(b"<?xml"))
+
+
+def _normalize_cover(
     package: etree._Element,
-    items: Mapping[str, etree._Element],
-    opf_path: str,
-    cover_id: str | None,
-    read,
+    inventory: PackageInventory,
+    read: Callable[[str], bytes],
+    *,
+    nav_path: str | None,
+    nav_data: bytes | None,
 ) -> etree._Element | None:
-    candidates = [items[cover_id]] if cover_id is not None and cover_id in items else []
-    guide = next((item for item in package if qname_local_name(item.tag) == "guide"), None)
-    if guide is not None:
-        references = [
-            item
-            for item in guide
-            if qname_local_name(item.tag) == "reference" and item.get("type", "").lower() == "cover"
+    metadata = _child(package, "metadata")
+    items = {item.get("id", ""): item for item in _child(package, "manifest") if qname_local_name(item.tag) == "item"}
+    opf_path = inventory.opf_path
+    legacy = [
+        node for node in metadata if qname_local_name(node.tag) == "meta" and node.get("name", "").lower() == "cover"
+    ]
+    marked = [item for item in items.values() if "cover-image" in item.get("properties", "").split()]
+    by_path = {
+        path: item
+        for item in items.values()
+        if (path := _local_resource(opf_path, item.get("href", ""))) in inventory.entries
+    }
+    images = {path: item for path, item in by_path.items() if item.get("media-type", "").startswith("image/")}
+    cover = next((item for item in marked if item in images.values()), None)
+    if cover is None:
+        paths = [
+            _local_resource(opf_path, items[cover_id].get("href", ""))
+            for node in reversed(legacy)
+            if (cover_id := node.get("content", "").strip()) in items
         ]
-        paths = {_resolve(opf_path, item.get("href", "")) for item in references}
-        candidates.extend(item for item in items.values() if _resolve(opf_path, item.get("href", "")) in paths)
-    for item in candidates:
-        if item.get("media-type", "").startswith("image/"):
-            return item
-        path = _resolve(opf_path, item.get("href", ""))
-        if item.get("media-type") != "application/xhtml+xml":
+        guide = next((item for item in package if qname_local_name(item.tag) == "guide"), None)
+        if guide is not None:
+            paths.extend(
+                _local_resource(opf_path, item.get("href", ""))
+                for item in guide
+                if qname_local_name(item.tag) == "reference" and item.get("type", "").lower() == "cover"
+            )
+        if nav_path and nav_data:
+            paths.extend(
+                _local_resource(nav_path, link.get("href", ""))
+                for link in _cover_landmarks(parse_xml_bytes(nav_data).getroot())
+            )
+        cover = _cover_from_pages(paths, by_path, images, read)
+    if cover is not None:
+        _add_property(cover, "cover-image")
+        for item in marked:
+            if item is not cover:
+                properties = [value for value in item.get("properties", "").split() if value != "cover-image"]
+                if properties:
+                    item.set("properties", " ".join(properties))
+                else:
+                    item.attrib.pop("properties")
+
+    # EPUB 3 also permits this declaration for readers using EPUB 2 metadata.
+    cover_id = cover.get("id") if cover is not None else None
+    compatible = next(
+        (node for node in legacy if node.get("name") == "cover" and cover_id and node.get("content") == cover_id), None
+    )
+    for node in legacy:
+        if node is not compatible:
+            metadata.remove(node)
+    if cover_id and compatible is None:
+        etree.SubElement(metadata, f"{{{_OPF}}}meta", name="cover", content=cover_id)
+    return cover
+
+
+def _cover_from_pages(
+    paths: list[str],
+    items: Mapping[str, etree._Element],
+    images: Mapping[str, etree._Element],
+    read: Callable[[str], bytes],
+) -> etree._Element | None:
+    for path in paths:
+        if path in images:
+            return images[path]
+        if path not in items or items[path].get("media-type") not in {"application/xhtml+xml", "text/html"}:
             continue
         try:
             document = parse_xml_bytes(read(path)).getroot()
         except (KeyError, ValueError):
             continue
-        source = next(
-            (
-                node.get("src")
-                for node in document.iter()
-                if isinstance(node.tag, str) and qname_local_name(node.tag) == "img" and node.get("src")
-            ),
-            None,
-        )
-        if source:
-            image_path = _resolve(path, source)
-            found = next(
-                (
-                    value
-                    for value in items.values()
-                    if value.get("media-type", "").startswith("image/")
-                    and _resolve(opf_path, value.get("href", "")) == image_path
-                ),
-                None,
+        sources = {
+            _local_resource(
+                path,
+                node.get("src", "")
+                if qname_local_name(node.tag) == "img"
+                else node.get("href") or node.get(f"{{{_XLINK}}}href", ""),
             )
-            if found is not None:
-                return found
+            for node in document.iter(f"{{{_XHTML}}}img", "img", f"{{{_SVG}}}image")
+        }
+        if len(sources) == 1 and (image_path := next(iter(sources))) in images:
+            return images[image_path]
     return None
+
+
+def _local_resource(base: str, href: str) -> str:
+    url = urlsplit(href)
+    return _resolve(base, href) if url.path and not url.scheme and not url.netloc else ""
 
 
 def _declare_epubox(package: etree._Element) -> None:
@@ -1126,4 +1186,4 @@ def _zip_time(info: zipfile.ZipInfo) -> str:
     return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}Z"
 
 
-__all__ = ["navigation_spine_additions", "upgrade_package"]
+__all__ = ["COVER_POLICY", "navigation_spine_additions", "repair_cover_metadata", "upgrade_package"]

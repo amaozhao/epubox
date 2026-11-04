@@ -132,6 +132,7 @@ def _book(
     nav_property: bool = True,
     ncx: bool = True,
     cover_id: str = "cover",
+    legacy_cover: bool = False,
 ) -> PackageInventory:
     chapter = (
         b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head>'
@@ -157,7 +158,7 @@ def _book(
         f"{metadata_start}"
         f'<dc:identifier id="uid"{scheme}>urn:test:book</dc:identifier><dc:title>Book</dc:title><dc:language>en</dc:language>'
         f"<dc:creator{creator}>A Author</dc:creator>"
-        f"{modified}{'' if epub3 else f'<meta name="cover" content="{cover_id}"/>'}{metadata_end}<manifest>"
+        f"{modified}{f'<meta name="cover" content="{cover_id}"/>' if legacy_cover or not epub3 else ''}{metadata_end}<manifest>"
         f'<item id="c1" href="chapter.xhtml" media-type="{"application/xhtml+xml" if epub3 else "text/html"}"{' properties="svg"' if epub3 else ""}/>'
         f'<item id="cover" href="cover.jpg" media-type="image/jpeg"{' properties="cover-image"' if epub3 else ""}/>'
         f'{ncx_item}{nav_item}</manifest><spine toc="ncx"><itemref idref="c1"/></spine>'
@@ -284,6 +285,9 @@ def test_upgrade_converts_legacy_packages_to_epub3(tmp_path: Path, version: str)
     assert items["c1"].get("media-type") == "application/xhtml+xml"
     assert "svg" in items["c1"].get("properties", "").split()
     assert "cover-image" in items["cover"].get("properties", "").split()
+    assert [
+        item.get("content") for item in _elements(upgraded[inventory.opf_path], "meta") if item.get("name") == "cover"
+    ] == ["cover"]
     nav = next(item for item in items.values() if "nav" in item.get("properties", "").split())
     nav_path = "OEBPS/" + str(nav.get("href"))
     assert nav_path in upgraded
@@ -293,7 +297,7 @@ def test_upgrade_converts_legacy_packages_to_epub3(tmp_path: Path, version: str)
 
 def test_upgrade_keeps_valid_epub3_package_bytes_and_filters_unchanged_replacements(tmp_path: Path) -> None:
     source = tmp_path / "book.epub"
-    inventory = _book(source, "3.0", nav=True)
+    inventory = _book(source, "3.0", nav=True, legacy_cover=True)
     with ZipFile(source) as archive:
         opf = archive.read(inventory.opf_path)
         chapter = archive.read("OEBPS/chapter.xhtml")
@@ -305,7 +309,6 @@ def test_upgrade_keeps_valid_epub3_package_bytes_and_filters_unchanged_replaceme
         {inventory.opf_path: opf, "OEBPS/chapter.xhtml": translated},
     )
 
-    assert inventory.opf_path not in upgraded
     assert upgraded == {"OEBPS/chapter.xhtml": translated}
 
 
@@ -687,6 +690,46 @@ def test_upgrade_does_not_mark_html_cover_as_cover_image(tmp_path: Path) -> None
 
     items = {item.get("id"): item for item in _elements(upgraded[inventory.opf_path], "item")}
     assert "cover-image" not in items["c1"].get("properties", "").split()
+
+
+def test_upgrade_keeps_modern_cover_when_legacy_metadata_disagrees(tmp_path: Path) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "3.0", nav=True)
+    with ZipFile(source) as archive:
+        opf = archive.read(inventory.opf_path).replace(b"</metadata>", b'<meta name="cover" content="c1"/></metadata>')
+        chapter = archive.read("OEBPS/chapter.xhtml").replace(
+            b"</body>", b'<img src="other.jpg" alt="Other image"/></body>'
+        )
+    opf = opf.replace(b"</manifest>", b'<item id="other" href="other.jpg" media-type="image/jpeg"/></manifest>')
+    inventory = replace(inventory, entries={**inventory.entries, "OEBPS/other.jpg": 4})
+
+    upgraded = upgrade_package(source, inventory, {inventory.opf_path: opf, "OEBPS/chapter.xhtml": chapter})
+
+    repaired = upgraded[inventory.opf_path]
+    assert [
+        item.get("id") for item in _elements(repaired, "item") if "cover-image" in item.get("properties", "").split()
+    ] == ["cover"]
+    assert [item.get("content") for item in _elements(repaired, "meta") if item.get("name") == "cover"] == ["cover"]
+
+
+@pytest.mark.parametrize("attribute", ["href", "xlink:href"])
+def test_upgrade_identifies_image_inside_svg_cover_page(tmp_path: Path, attribute: str) -> None:
+    source = tmp_path / "book.epub"
+    inventory = _book(source, "2.0", cover_id="c1")
+    with ZipFile(source) as archive:
+        chapter = archive.read("OEBPS/chapter.xhtml").replace(
+            b'<svg xmlns="http://www.w3.org/2000/svg"/>',
+            f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
+            f'<image {attribute}="cover.jpg"/></svg>'.encode(),
+        )
+
+    upgraded = upgrade_package(source, inventory, {"OEBPS/chapter.xhtml": chapter})
+
+    opf = upgraded[inventory.opf_path]
+    assert [
+        item.get("id") for item in _elements(opf, "item") if "cover-image" in item.get("properties", "").split()
+    ] == ["cover"]
+    assert [item.get("content") for item in _elements(opf, "meta") if item.get("name") == "cover"] == ["cover"]
 
 
 def test_upgrade_replaces_obsolete_epub2_manifest_requirements_with_properties(tmp_path: Path) -> None:

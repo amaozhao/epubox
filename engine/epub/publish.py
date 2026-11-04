@@ -21,7 +21,7 @@ from engine.epub.preservation import (
 from engine.epub.ranges import RawSpan, SlotSpan, index_resource
 from engine.epub.replace import replace_resources
 from engine.epub.styles import FONT_POLICY, use_reader_fonts
-from engine.epub.upgrade import upgrade_package
+from engine.epub.upgrade import COVER_POLICY, repair_cover_metadata, upgrade_package
 from engine.epub.validation import EpubValidationError, inspect_epub
 from engine.epub.verification import (
     file_hash,
@@ -56,6 +56,10 @@ def repack_completed(
     inventory = inspect_epub(source, source_hash, checker=checker)
     media_types = {item.path: item.media_type for item in inventory.manifest}
     replacements, cleanup = cleanup_resources({}, media_types=media_types, source=source)
+    with zipfile.ZipFile(source) as archive:
+        opf = repair_cover_metadata(archive, inventory)
+    if opf is not None:
+        replacements[inventory.opf_path] = opf
     staged = output_path.parent / f".{output_path.name}.{uuid.uuid4().hex}.candidate.epub"
     try:
         stage_epub(source, staged, replacements)
@@ -118,6 +122,7 @@ def publish_atomic(
                 and proof.get("epub_version") == "3.0"
                 and proof.get("font_policy") == FONT_POLICY
                 and proof.get("cleanup_policy") == CLEANUP_POLICY
+                and proof.get("cover_policy") == COVER_POLICY
                 and code_policy_current(store, proof)
             ):
                 return recovered

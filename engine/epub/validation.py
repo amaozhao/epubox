@@ -35,6 +35,11 @@ FONT_OBFUSCATION_ALGORITHMS = {
     "http://ns.adobe.com/pdf/enc#RC",
 }
 
+# Reviewed standalone book.js: styles, scrolling and pagination; no generated text or imports.
+_PAGINATION_SCRIPT_DIGESTS = {
+    5164: "c08a3888297a915925eda597f7ca328d4ae9cd690c7174bc179dc9c4eef0f7a2",
+}
+
 
 @lru_cache(maxsize=1)
 def _mathjax_distributions() -> dict[str, dict[str, str]]:
@@ -560,7 +565,7 @@ def _support_blockers(
 def _script_blocker(
     archive: zipfile.ZipFile, root: ET.Element, resource: str, manifest: tuple[ManifestItem, ...], *, declared: bool
 ) -> str | None:
-    """Accept static documents with local MathJax rendering, without running JS."""
+    """Accept static documents with verified local reading helpers, without running JS."""
     head = next((node for node in root if _local_name(node.tag) == "head"), None)
     head_scripts = set(head) if head is not None else set()
     local_scripts = {
@@ -568,13 +573,14 @@ def _script_blocker(
     }
     configs: list[dict[str, object]] = []
     loaders: list[tuple[str, str, str]] = []
+    verified_pagination = False
     has_scripts = any(_local_name(node.tag) == "script" for node in root.iter())
     for node in root.iter():
         if has_scripts and (
             (_local_name(node.tag) == "base" and node.get("href"))
             or node.get("{http://www.w3.org/XML/1998/namespace}base")
         ):
-            return "Base URLs can redirect MathJax resources outside the verified package"
+            return "Base URLs can redirect script resources outside the verified package"
         if declared and _local_name(node.tag) in {
             "form",
             "input",
@@ -604,16 +610,29 @@ def _script_blocker(
                 continue
             return "MathJax configuration contains unsupported executable code"
         src = urlsplit(node.get("src", "").strip())
+        filename = PurePosixPath(unquote(src.path)).name
         if (
             script_type not in {"", "text/javascript", "application/javascript"}
             or src.scheme
             or src.netloc
             or src.fragment
             or not src.path
-            or PurePosixPath(unquote(src.path)).name != "MathJax.js"
+            or filename not in {"MathJax.js", "book.js"}
             or (node.text or "").strip()
+            or len(node)
         ):
-            return "Unknown executable script; only local MathJax rendering is supported"
+            return "Unknown executable script; only verified local reading helpers are supported"
+        if filename == "book.js":
+            if node.tag != "{http://www.w3.org/1999/xhtml}script" or src.query or "%" in src.path:
+                return "Unverified local book.js pagination helper"
+            path = _resolve_package_path(resource, src.path)
+            if path not in local_scripts:
+                return "Pagination helper is missing from the local JavaScript manifest"
+            digest = _PAGINATION_SCRIPT_DIGESTS.get(archive.getinfo(path).file_size)
+            if digest is None or hashlib.sha256(_read_bytes(archive, path)).hexdigest() != digest:
+                return "Unverified local book.js pagination helper"
+            verified_pagination = True
+            continue
         path = _resolve_package_path(resource, src.path)
         if path not in local_scripts:
             return "MathJax loader is missing from the local JavaScript manifest"
@@ -622,8 +641,10 @@ def _script_blocker(
         if digest not in _mathjax_distributions():
             return "Unrecognized MathJax loader; generated reading content cannot be verified"
         loaders.append((path, digest, src.query))
-    if (declared or configs or loaders) and not (configs and loaders):
+    if (configs or loaders) and not (configs and loaders):
         return "Scripted content requires a verified local MathJax loader and declarative configuration"
+    if declared and not (loaders or verified_pagination):
+        return "Scripted content requires a verified local reading helper"
     for path, digest, query in loaders:
         reason = _mathjax_dependencies(archive, path, _mathjax_distributions()[digest], configs, query, local_scripts)
         if reason:
