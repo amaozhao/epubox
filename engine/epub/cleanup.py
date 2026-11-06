@@ -24,10 +24,11 @@ from engine.core.code import (
     _without_pseudos,
 )
 from engine.core.markup import element_path
+from engine.epub.chapter import CHAPTER_LABEL, HEADING_TAGS
 from engine.epub.parsing import XHTML_NAMESPACE, parse_resource
 from engine.epub.ranges import CharSpan, RawSpan, index_resource
 
-CLEANUP_POLICY = "zh-inline-v4"
+CLEANUP_POLICY = "zh-inline-v5"
 _EMPTY = {"span", "em", "strong"}
 _BLOCKS = {
     "body",
@@ -41,7 +42,7 @@ _BLOCKS = {
     "caption",
     "figcaption",
     "blockquote",
-    *{f"h{i}" for i in range(1, 7)},
+    *HEADING_TAGS,
 }
 _PROTECTED = {"pre", "code", "kbd", "samp", "var", "tt", "script", "style", "math", "svg", "textarea"}
 _BREAKS = {"br", "hr", "img", "audio", "video", "iframe", "object", "canvas", "input"}
@@ -660,12 +661,27 @@ def _clean(
 
     walk(body, paths[body])
     spaces: set[RawSpan] = set()
-    for flow in flows.values():
+    heading_paths = {
+        paths[node]
+        for node in nodes
+        if _name(node) in HEADING_TAGS
+        or _name(node) == "li"
+        and any(_name(parent) == "nav" for parent in node.iterancestors())
+    }
+    chapter_paths: set[tuple[int, ...]] = set()
+    for path, flow in flows.items():
         start = 0
         for end in range(len(flow) + 1):
             if end == len(flow) or flow[end] is None:
                 _spaces([char for char in flow[start:end] if char is not None], start == 0, end == len(flow), spaces)
                 start = end + 1
+        if path in heading_paths:
+            chars = [char for char in flow if char is not None]
+            if label := CHAPTER_LABEL.match("".join(char.text for char in chars)):
+                chapter_paths.add(path)
+                if label["gap"]:
+                    start, end = label.span("gap")
+                    spaces.difference_update(char.raw for char in chars[start:end])
     # Character spans already bind decoded whitespace (including entities) to its exact original bytes.
     patches = list(spaces)
     removable: set[Any] = set()
@@ -683,6 +699,7 @@ def _clean(
             or not emptied(paths[node], "text")
             or any(child not in removable or not emptied(paths[child], "tail") for child in node)
             or node in safety.empty
+            or any(paths[parent] in chapter_paths for parent in node.iterancestors())
         ):
             continue
         removable.add(node)

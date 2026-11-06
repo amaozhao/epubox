@@ -329,7 +329,8 @@ async def test_real_derived_navigation_uses_no_model_item_and_tracks_accepted_ti
     published = publish_book(store, output, StubChecker())
     assert published["path"] == str(output)
     with zipfile.ZipFile(output) as archive:
-        assert "第一章" in archive.read("OEBPS/nav.xhtml").decode()
+        assert ">第1章</h1>" in archive.read("OEBPS/chapter.xhtml").decode()
+        assert ">第1章</a>" in archive.read("OEBPS/nav.xhtml").decode()
 
 
 @pytest.mark.asyncio

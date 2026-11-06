@@ -8,6 +8,7 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import find_by_element_path, parse_xml_safely, qname_local_name, serialize_xml
 from engine.epub.assembly import assemble_document, derive_navigation_projection
+from engine.epub.chapter import chapter_render_events
 from engine.epub.cleanup import cleanup_resources
 from engine.epub.preservation import apply_code_plan, effective_code_plan
 from engine.epub.replace import replace_resources
@@ -53,6 +54,7 @@ def validate_assembled_document(
     *,
     source_to_target: Mapping[str, str] | None = None,
     changeset: Mapping[tuple[str, str], str] | Sequence[tuple[str, str]] = (),
+    chapter_typography: bool = False,
 ) -> None:
     """Re-read actual XML and prove it consumes the immutable plan and accepted targets."""
     if document.format != DOCUMENT_FORMAT:
@@ -128,7 +130,8 @@ def validate_assembled_document(
         if _unit_element_identities(unit, actual_nodes) != expected_identities:
             raise EpubValidationError("inline_identity_mismatch", f"Inline object order mismatch: {unit_id}")
         actual_text = _unit_region_text(unit, actual_nodes)
-        if actual_text != _expected_unit_text(document, unit, events):
+        rendered_events = chapter_render_events(document, unit, events) if chapter_typography else events
+        if actual_text != _expected_unit_text(document, unit, rendered_events):
             raise EpubValidationError("target_text_mismatch", f"Target text mismatch: {unit_id}")
 
 
@@ -214,7 +217,7 @@ def publish_book(
                 raise EpubValidationError("unit_not_accepted", f"Unit is not currently accepted: {unit.unit_id}")
             document_targets[unit.unit_id] = target
             version_vector[unit.unit_id] = record.revision
-        assembled = assemble_document(document, document_targets, identity=identity)
+        assembled = assemble_document(document, document_targets, identity=identity, chapter_typography=not identity)
         replacements[document.resource.path] = assembled.markup.encode("utf-8")
         accepted_by_resource[document.resource.path] = document_targets
         assembled_documents[document.resource.path] = (document, document_targets, assembled.source_to_target)
@@ -229,6 +232,7 @@ def publish_book(
             replacements[path].decode("utf-8"),
             source_to_target=sidecar,
             changeset=changesets.get(path, {}),
+            chapter_typography=not identity,
         )
     replacements = upgrade_package(snapshot, inventory, replacements)
     media_types = {item.path: item.media_type for item in inventory.manifest}

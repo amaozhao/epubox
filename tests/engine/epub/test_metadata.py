@@ -1,18 +1,70 @@
 from __future__ import annotations
 
+import codecs
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
 import pytest
+from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import parse_xml_bytes, qname_local_name
-from engine.epub.publish import publish_atomic
+from engine.epub.publish import _language, publish_atomic
 from engine.epub.upgrade import upgrade_package
 from engine.services.journal import BodyJournal
 from tests.engine.epub.test_factory import make_epub
 from tests.engine.epub.test_preparation import StubChecker
-from tests.engine.epub.test_publish import _case
+from tests.engine.epub.test_publish import XHTML, _case
 from tests.engine.epub.test_upgrade import _book, _elements
+
+XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+
+
+def test_language_patch_preserves_utf8_protected_bytes_and_line_endings() -> None:
+    raw = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\r\n'
+        b'<html xmlns="http://www.w3.org/1999/xhtml" lang="en">\r\n'
+        b"<head><style>a>b{color:red}</style><script>if (a > b) x();</script></head>\r\n"
+        b"<body><p>Text</p></body></html>"
+    )
+
+    result = _language(raw, "application/xhtml+xml", opf=False)
+
+    root = parse_xml_bytes(result).getroot()
+    assert root.get("lang") == "zh-Hans" and root.get(XML_LANG) == "zh-Hans"
+    assert b"<style>a>b{color:red}</style><script>if (a > b) x();</script>" in result
+    assert result.count(b"\r\n") == raw.count(b"\r\n")
+
+
+def test_language_patch_preserves_utf16_bom_and_protected_text() -> None:
+    text = (
+        '<?xml version="1.0" encoding="UTF-16"?>\r\n'
+        f'<html xmlns="{XHTML}"><head><script>const value = "原样";</script></head>'
+        "<body><p>Text</p></body></html>"
+    )
+    raw = codecs.BOM_UTF16_LE + text.encode("utf-16-le")
+
+    result = _language(raw, "application/xhtml+xml", opf=False)
+
+    root = etree.fromstring(result)
+    assert result.startswith(codecs.BOM_UTF16_LE)
+    assert root.get("lang") == "zh-Hans" and root.get(XML_LANG) == "zh-Hans"
+    assert 'const value = "原样";' in result[len(codecs.BOM_UTF16_LE) :].decode("utf-16-le")
+
+
+def test_package_language_patch_changes_only_primary_dc_language_text() -> None:
+    raw = (
+        b'<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+        b'xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata>'
+        b"<dc:title>Title</dc:title><dc:language>en</dc:language>"
+        b'<meta property="dcterms:modified">2026-09-28T00:00:00Z</meta>'
+        b"</metadata><manifest/><spine/></package>"
+    )
+
+    result = _language(raw, "application/oebps-package+xml", opf=True)
+
+    assert b"<dc:language>zh-Hans</dc:language>" in result
+    assert b"<dc:title>Title</dc:title>" in result
+    assert b"2026-09-28T00:00:00Z" in result
 
 
 @pytest.mark.parametrize("dependent_first", (False, True))

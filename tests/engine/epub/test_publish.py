@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 import hashlib
 import json
 import os
@@ -17,7 +16,7 @@ from engine.agents.workflow import run_workflow
 from engine.core.markup import parse_xml_bytes
 from engine.epub.cleanup import CLEANUP_POLICY
 from engine.epub.diagnostics import compare
-from engine.epub.publish import _language, publish_atomic, recover_atomic, repack_completed, validate_atomic_output
+from engine.epub.publish import publish_atomic, recover_atomic, repack_completed, validate_atomic_output
 from engine.epub.replace import replacement_fingerprint
 from engine.epub.upgrade import COVER_POLICY
 from engine.epub.validation import EpubCheckResult, EpubValidationError
@@ -33,7 +32,6 @@ from tests.engine.epub.test_factory import make_epub
 from tests.engine.epub.test_preparation import StubChecker
 
 XHTML = "http://www.w3.org/1999/xhtml"
-XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
 
 def _case(root: Path, body: str, projections: tuple[str, ...]) -> ReadyCase:
@@ -144,54 +142,6 @@ def test_publication_applies_approved_code_plan_after_validated_fill(tmp_path, m
         assert "输出指针" not in rendered.decode() and "数量" not in rendered.decode()
     assert targets == original_targets
     assert {path: state.read(path) for path in before} == before
-
-
-def test_language_patch_preserves_utf8_protected_bytes_and_line_endings() -> None:
-    raw = (
-        b'<?xml version="1.0" encoding="UTF-8"?>\r\n'
-        b'<html xmlns="http://www.w3.org/1999/xhtml" lang="en">\r\n'
-        b"<head><style>a>b{color:red}</style><script>if (a > b) x();</script></head>\r\n"
-        b"<body><p>Text</p></body></html>"
-    )
-
-    result = _language(raw, "application/xhtml+xml", opf=False)
-
-    root = parse_xml_bytes(result).getroot()
-    assert root.get("lang") == "zh-Hans" and root.get(XML_LANG) == "zh-Hans"
-    assert b"<style>a>b{color:red}</style><script>if (a > b) x();</script>" in result
-    assert result.count(b"\r\n") == raw.count(b"\r\n")
-
-
-def test_language_patch_preserves_utf16_bom_and_protected_text() -> None:
-    text = (
-        '<?xml version="1.0" encoding="UTF-16"?>\r\n'
-        f'<html xmlns="{XHTML}"><head><script>const value = "原样";</script></head>'
-        "<body><p>Text</p></body></html>"
-    )
-    raw = codecs.BOM_UTF16_LE + text.encode("utf-16-le")
-
-    result = _language(raw, "application/xhtml+xml", opf=False)
-
-    root = etree.fromstring(result)
-    assert result.startswith(codecs.BOM_UTF16_LE)
-    assert root.get("lang") == "zh-Hans" and root.get(XML_LANG) == "zh-Hans"
-    assert 'const value = "原样";' in result[len(codecs.BOM_UTF16_LE) :].decode("utf-16-le")
-
-
-def test_package_language_patch_changes_only_primary_dc_language_text() -> None:
-    raw = (
-        b'<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
-        b'xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata>'
-        b"<dc:title>Title</dc:title><dc:language>en</dc:language>"
-        b'<meta property="dcterms:modified">2026-09-28T00:00:00Z</meta>'
-        b"</metadata><manifest/><spine/></package>"
-    )
-
-    result = _language(raw, "application/oebps-package+xml", opf=True)
-
-    assert b"<dc:language>zh-Hans</dc:language>" in result
-    assert b"<dc:title>Title</dc:title>" in result
-    assert b"2026-09-28T00:00:00Z" in result
 
 
 def test_atomic_publish_uses_reviewed_results_preserves_resources_and_recovers(

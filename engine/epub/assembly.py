@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from lxml import etree  # type: ignore[attr-defined]
 
 from engine.core.markup import element_path, find_by_element_path, parse_xml_safely, serialize_xml
+from engine.epub.chapter import chapter_render_events
 from engine.item.inline import events_to_projection, parse_projection, plain_text, validate_projection
 from engine.schemas.contracts import DOCUMENT_FORMAT, DocumentPlan, RegistryEntry, Unit
 
@@ -159,6 +160,7 @@ def assemble_document(
     targets: Mapping[str, str],
     *,
     identity: bool = False,
+    chapter_typography: bool = False,
 ) -> AssembledDocument:
     """Build XML from the immutable source template and accepted text projections."""
 
@@ -178,6 +180,8 @@ def assemble_document(
         if unit.region.get("type") == "attribute":
             attribute_units.append((unit, target))
         else:
+            if chapter_typography and not identity:
+                events = chapter_render_events(document, unit, events)
             _apply_content_unit(document, unit, events, source_nodes, source_keys, target_nodes)
 
     # Attribute ownership is separate from subtree ownership and must be applied last.

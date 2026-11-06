@@ -544,8 +544,8 @@ def test_derived_navigation_tracks_current_accepted_title_and_rejects_stale_or_f
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     chapter = (
-        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter 1</title></head>'
-        "<body><p>Chapter body.</p></body></html>"
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>First chapter</title></head>'
+        "<body><h1>Chapter 1</h1><p>Chapter body.</p></body></html>"
     )
     _, store, plan, documents = _prepared(tmp_path, chapter=chapter)
     binding_document = next(
@@ -565,8 +565,8 @@ def test_derived_navigation_tracks_current_accepted_title_and_rejects_stale_or_f
     )
     source_unit = next(unit for unit in source_document.units if unit.unit_id == binding["source_unit_id"])
     records = _accepted_records(documents)
-    records[source_unit.unit_id] = _planned_record(source_document, source_unit, "第一章")
-    derived_target = derive_navigation_projection(target_unit, "第一章")
+    records[source_unit.unit_id] = _planned_record(source_document, source_unit, "第 1 章。")
+    derived_target = derive_navigation_projection(target_unit, "第 1 章。")
     records[target_unit.unit_id] = UnitRecord(
         unit_id=target_unit.unit_id,
         document_id=binding_document.document_id,
@@ -594,7 +594,8 @@ def test_derived_navigation_tracks_current_accepted_title_and_rejects_stale_or_f
     output = tmp_path / "derived.epub"
     publish_book(store, output, StubChecker())
     with zipfile.ZipFile(output) as archive:
-        assert "第一章" in archive.read("OEBPS/nav.xhtml").decode()
+        assert ">第1章</h1>" in archive.read("OEBPS/chapter.xhtml").decode()
+        assert ">第1章</a>" in archive.read("OEBPS/nav.xhtml").decode()
 
     replacement = _planned_record(source_document, source_unit, "第二章").model_copy(
         update={"revision": 2, "accepted_revision": 2}

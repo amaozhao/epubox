@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from engine.epub.chapter import chapter_render_events
 from engine.epub.parsing import parse_resource
 from engine.epub.ranges import NodeSpan, RangeError, RawSpan, ResourceIndex, SlotSpan, index_resource
 from engine.item.atoms import _span
@@ -32,6 +33,7 @@ def fill_resource(
     targets: Mapping[str, str],
     *,
     identity: bool = False,
+    chapter_typography: bool = False,
 ) -> bytes:
     """Render every validated target while copying all unregistered source bytes."""
     saved = AtomicDocument.model_validate_json(inventory.model_dump_json())
@@ -64,6 +66,10 @@ def fill_resource(
             raise FillError("identity rendering requires every original source projection")
         return raw
 
+    if chapter_typography:
+        for item in saved.items:
+            if targets[item.item_id] != item.source_projection:
+                events[item.item_id] = chapter_render_events(saved.document, item, events[item.item_id])
     renderer = _Renderer(raw, saved, index, targets, events)
     result = renderer.render()
     _verify_result(result, saved, index)

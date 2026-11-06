@@ -137,7 +137,7 @@ def publish_atomic(
                 path = document.document.resource.path
                 raw = archive.read(path)
                 owned = {item.item_id: targets[item.item_id] for item in document.items}
-                rendered = fill_resource(raw, document, owned)
+                rendered = fill_resource(raw, document, owned, chapter_typography=True)
                 if path in inventory.documents or path == inventory.opf_path:
                     rendered = _language(
                         rendered, document.document.resource.media_type, opf=path == inventory.opf_path

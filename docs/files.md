@@ -204,6 +204,7 @@
 | tests/engine/services/test_store.py、tests/engine/services/test_contracts.py | T17 | 原存储测试改名，单词且≤1000行 |
 | engine/epub/publish.py、engine/epub/verification.py、tests/engine/epub/test_publish.py | T18 | 原字节回填后的候选校验和事务发布，单词且≤1000行 |
 | engine/epub/bindings.py、tests/engine/epub/test_bindings.py、tests/engine/epub/test_checker.py、tests/engine/epub/test_publication.py | T18 | 原出版模块拆分及测试改名，单词且≤1000行 |
+| engine/epub/chapter.py、tests/engine/epub/test_chapter.py | T18 | 章号排版、正文及目录导出回归，单词且≤1000行 |
 | engine/execution/atomic.py、tests/engine/execution/test_atomic.py | T19 | 原子 workflow 调度与每批进度接线，单词且≤1000行 |
 | tests/engine/test_command.py、tests/engine/services/test_report.py | T19 | CLI 参数/进度及报告回归，单词且≤1000行 |
 | docs/publication.md | T17/T18/T19 | 正文恢复、出版、CLI 和验收边界，单词且≤1000行 |
