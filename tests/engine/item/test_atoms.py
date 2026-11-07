@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from engine.epub.fill import fill_resource
 from engine.epub.ranges import RangeError
 from engine.item.atoms import _LEGACY_EXTRACTOR_VERSION, EXTRACTOR_VERSION, extract_resource
-from engine.item.inline import parse_projection, validate_projection
+from engine.item.inline import ProjectionError, events_to_projection, parse_projection, validate_projection
 from engine.item.views import validate_source_views
 from engine.schemas.bridge import AtomicDocument, ByteSpan
 from engine.schemas.contracts import canonical_json_bytes, parse_contract
@@ -277,6 +277,51 @@ def test_opf_and_ncx_use_exact_namespaces_and_preserve_machine_fields_and_author
     assert all(item.channel == "navigation" for item in navigation.items)
     machine = extract_resource(b"<root><p>Machine text</p></root>", "OPS/data.xml", "book-source", "application/xml")
     assert not machine.items and not machine.source_map.locations
+
+
+@pytest.mark.parametrize(
+    ("path", "media_type", "markup"),
+    (
+        (
+            "content.opf",
+            "application/oebps-package+xml",
+            (
+                f'<package xmlns="{OPF}" xmlns:dc="{DC}"><metadata>'
+                "<dc:title>Python 金融 交易</dc:title><dc:description>中文 Python 简介</dc:description>"
+                "</metadata><manifest/><spine/></package>"
+            ),
+        ),
+        (
+            "toc.ncx",
+            "application/x-dtbncx+xml",
+            (
+                f'<ncx xmlns="{NCX}"><docTitle><text>Python 金融 交易</text></docTitle>'
+                "<navMap><navPoint><navLabel><text>第2章 搭建 Python 工作流</text></navLabel>"
+                '<content src="chapter.xhtml"/></navPoint></navMap></ncx>'
+            ),
+        ),
+    ),
+)
+def test_mixed_chinese_metadata_and_navigation_keep_frozen_text_ranges(path, media_type, markup):
+    raw = markup.encode()
+    inventory = extract_resource(raw, path, "book-source", media_type)
+    targets = {}
+    assert len(inventory.items) == 2
+    for item in inventory.items:
+        validate_projection(item)
+        assert any(entry.boundary_type == "existing_chinese" for entry in item.registry.values())
+        protected = next(iter(item.registry))
+        with pytest.raises(ProjectionError):
+            validate_projection(item, item.source_projection.replace(f"⟦={protected}⟧", "改写"))
+        events = parse_projection(item.source_projection)
+        moved = events_to_projection(
+            [event for event in events if event.kind == "marker"] + [event for event in events if event.kind == "text"]
+        )
+        with pytest.raises(ProjectionError, match="protected text marker boundary"):
+            validate_projection(item, moved)
+        targets[item.item_id] = item.source_projection.replace("Python", "PYTHON")
+    validate_source_views(inventory.document)
+    assert fill_resource(raw, inventory, targets) == raw.replace(b"Python", b"PYTHON")
 
 
 @pytest.mark.parametrize(

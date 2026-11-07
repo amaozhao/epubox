@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import codecs
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
@@ -8,15 +9,47 @@ import pytest
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import parse_xml_bytes, qname_local_name
+from engine.epub.preparation import PreparationConfig
 from engine.epub.publish import _language, publish_atomic
 from engine.epub.upgrade import upgrade_package
 from engine.services.journal import BodyJournal
+from engine.services.preparation import prepare_translation
 from tests.engine.epub.test_factory import make_epub
 from tests.engine.epub.test_preparation import StubChecker
 from tests.engine.epub.test_publish import XHTML, _case
 from tests.engine.epub.test_upgrade import _book, _elements
 
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+
+
+def test_published_mixed_language_titles_can_be_prepared_again(tmp_path, monkeypatch):
+    case = _case(tmp_path, "<p>Body.</p>", ("Body.",))
+    targets = {
+        item.item_id: item.source_projection.replace("Reliable systems", "Python 金融 交易")
+        .replace("Chapter 1", "第2章 搭建 Python 工作流")
+        .replace("Body.", "中文 Python 正文。")
+        for inventory in case.index.inventories
+        for item in inventory.items
+    }
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+    output = tmp_path / "published-cn.epub"
+    publish_atomic(case.session.store, output, StubChecker())
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("preparing a finished EPUB must validate mixed fields before any HTTP")
+
+    result = asyncio.run(
+        prepare_translation(
+            output,
+            tmp_path / "reimport",
+            PreparationConfig(run_id="reimport", auto_extract=False, translation_config={"model": "fake"}),
+            StubChecker(),
+            term_transport=forbidden,
+            resolution_transport=forbidden,
+        )
+    )
+    assert result.status == "ready"
+    assert result.prepared is not None
 
 
 def test_language_patch_preserves_utf8_protected_bytes_and_line_endings() -> None:

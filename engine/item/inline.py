@@ -168,6 +168,19 @@ def validate_projection(
     if literals and _literal_text_zones(source_events, literals) != _literal_text_zones(target_events, literals):
         raise ProjectionError("text moved across a literal marker boundary")
 
+    kind = str(_field(unit, "unit_type", "kind", default="")).lower()
+    if any(word in kind for word in ("attribute", "metadata", "navigation", "plain", "opf")):
+        protected_text = {
+            ref
+            for ref in source_shape["inventory"]
+            if ref.startswith("x")
+            and _field(refs.get(ref), "boundary_type") in {"existing_chinese", "whitespace", "protected_text"}
+        }
+        if protected_text and _literal_text_zones(source_events, protected_text) != _literal_text_zones(
+            target_events, protected_text
+        ):
+            raise ProjectionError("text moved across a protected text marker boundary")
+
     if any(ref.startswith("b") for ref in source_shape["inventory"]):
         if _boundary_domain_sequence(source_shape, refs) != _boundary_domain_sequence(target_shape, refs):
             raise ProjectionError("text moved across a protected range or boundary")
@@ -469,8 +482,18 @@ def _unit_allows_markers(unit: Any, refs: Mapping[str, Any], inventory: set[str]
         )
     if not any(word in kind for word in ("attribute", "metadata", "navigation", "plain", "opf")):
         return True
+    # Plain fields may contain source-owned text atoms, including Chinese that
+    # extraction protects from translation. They still cannot introduce markup.
     return bool(inventory) and all(
-        ref.startswith("x") and _field(refs.get(ref), "boundary_type") == "literal_marker" for ref in inventory
+        ref.startswith("x")
+        and (
+            _field(refs.get(ref), "boundary_type") == "literal_marker"
+            or _field(refs.get(ref), "boundary_type") in {"existing_chinese", "whitespace", "protected_text"}
+            and _field(refs.get(ref), "movement") in {"locked", "fixed"}
+            and isinstance(_field(refs.get(ref), "hints"), Mapping)
+            and {"slot_id", "start", "end"} <= _field(refs.get(ref), "hints", default={}).keys()
+        )
+        for ref in inventory
     )
 
 
