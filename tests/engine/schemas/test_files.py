@@ -230,6 +230,7 @@ def test_current_stage_new_files_and_documents_conform() -> None:
         ROOT / "tests/engine/services/terms/test_inputs.py",
         ROOT / "tests/engine/services/terms/test_planning.py",
         ROOT / "engine/services/preflight.py",
+        ROOT / "engine/services/lists.py",
         ROOT / "tests/engine/services/test_preflight.py",
         ROOT / "engine/agents/terms.py",
         ROOT / "engine/services/terms/runner.py",

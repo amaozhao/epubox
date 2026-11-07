@@ -3,9 +3,11 @@ from lxml import etree  # type: ignore[attr-defined]
 
 from engine.epub.fill import fill_resource
 from engine.item.atoms import extract_resource
+from engine.item.inline import validate_projection
 from engine.item.members import materialize_members, merge_member_targets
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import ItemRecord, canonical_hash
+from engine.services.lists import validate_list_pieces
 from engine.services.preflight import preflight_atomic_resources
 
 XHTML = "http://www.w3.org/1999/xhtml"
@@ -84,3 +86,76 @@ def test_one_oversized_li_blocks_the_whole_list() -> None:
     assert report.check is None
     assert report.diagnostics[0].atomic_tag == "ul" and report.diagnostics[0].status == "blocked"
     assert not report.pieces
+
+
+def nested_directory(tag):
+    entries = "".join(
+        f'<ol><li><a href="chapter.xhtml#s{number}">Section {number} {"word " * 450}</a>'
+        f'<span class="page">{number + 1}</span></li></ol>'
+        for number in range(6)
+    )
+    body = f'<{tag} start="3"><li><span>Part One</span>{entries}</li></{tag}>'
+    raw = f'<html xmlns="{XHTML}"><head/><body>{body}</body></html>'.encode()
+    inventory = extract_resource(raw, "OPS/chapter.xhtml", "book")
+    limits = BudgetLimits(
+        source_tokens=1500,
+        source_hard_limit=1500,
+        input_tokens=50_000,
+        output_tokens=None,
+        context_tokens=60_000,
+        output_version=7,
+    )
+    report = preflight_atomic_resources((inventory,), {"OPS/chapter.xhtml": raw}, limits, "gpt-3.5-turbo")
+    assert report.passed
+    return raw, inventory, report
+
+
+@pytest.mark.parametrize("tag", ["ol", "ul"])
+def test_nested_directory_under_one_outer_item_splits_and_preserves_links(tag):
+    raw, inventory, report = nested_directory(tag)
+    members = materialize_members((inventory,), report)
+    assert len(members) > 1
+    assert all(piece.translate.fits and piece.review.fits for piece in report.pieces)
+    records = {}
+    for member in members:
+        target = member.source_projection.replace("word", "文字").replace("Part One", "第一部分")
+        validate_projection(member, target)
+        records[member.item_id] = ItemRecord(
+            item_id=member.item_id,
+            segment_id=member.item_id,
+            terms_hash="terms",
+            context_hash="context",
+            target_projection=target,
+            target_hash=canonical_hash(target),
+        )
+    parent = inventory.items[0]
+    merged = merge_member_targets(parent, members, records)
+    result = fill_resource(raw, inventory, {parent.item_id: merged})
+    root = etree.fromstring(result)
+    links = root.findall(".//{*}a")
+    assert [link.get("href") for link in links] == [f"chapter.xhtml#s{number}" for number in range(6)]
+    assert [span.text for span in root.findall('.//{*}span[@class="page"]')] == [str(n + 1) for n in range(6)]
+    assert root.find(f".//{{{XHTML}}}{tag}").get("start") == "3"
+    assert len(root.findall(f".//{{{XHTML}}}{tag}")) == (7 if tag == "ol" else 1)
+    assert b"word" not in result and "第一部分".encode() in result
+
+
+@pytest.mark.parametrize("damage", ["prefix", "suffix", "bytes", "missing", "duplicate"])
+def test_nested_list_rejects_changed_wrappers_bytes_and_coverage(damage):
+    _raw, inventory, report = nested_directory("ol")
+    pieces = list(report.pieces)
+    if damage == "prefix":
+        pieces[1] = pieces[1].model_copy(update={"source_prefix": ""})
+    elif damage == "suffix":
+        pieces[0] = pieces[0].model_copy(update={"source_suffix": ""})
+    elif damage == "bytes":
+        span = pieces[0].source_span
+        pieces[0] = pieces[0].model_copy(
+            update={"source_span": span.model_copy(update={"byte_end": span.byte_end + 1})}
+        )
+    elif damage == "missing":
+        pieces.pop()
+    else:
+        pieces.insert(1, pieces[0])
+    with pytest.raises(ValueError):
+        validate_list_pieces(inventory.items[0], pieces, node_spans=inventory.source_map.node_spans)

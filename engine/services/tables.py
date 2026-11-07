@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,17 +26,25 @@ def row_receipt(root: Path) -> Path:
     return root / "checks" / "rows.json"
 
 
+def group_receipt(root: Path) -> Path:
+    return root / "checks" / "groups.json"
+
+
 def upgrade_receipt(base: Any, target: Path, record: Any) -> Path:
-    """Keep the old failed receipt and add a source-bound table-row proof before HTTP."""
+    """Keep a failed receipt and add a source-bound group-splitting proof before HTTP."""
     from engine.services.preflight import _PreflightRecord, _read
 
+    if state.is_file(groups := group_receipt(base.root)):
+        return groups
     if state.is_file(rows := row_receipt(base.root)):
-        return rows  # The immutable write below still rejects any changed proof.
+        target = rows
     if not state.is_file(target):
         return target
     previous = _read(target, _PreflightRecord, "epubox-preflight-record-1")
     allowed = {
-        item.item_id for item in previous.report.diagnostics if item.atomic_tag == "table" and item.status == "blocked"
+        item.item_id
+        for item in previous.report.diagnostics
+        if item.atomic_tag in {"table", "ul", "ol"} and item.status == "blocked"
     }
     if previous.report.check is not None or not allowed or previous == record:
         return target
@@ -53,22 +61,27 @@ def upgrade_receipt(base: Any, target: Path, record: Any) -> Path:
         != tuple(piece for piece in record.report.pieces if piece.item_id not in allowed)
         or state.is_file(base.root / "prepared.json")
         or state.is_file(base.root / "bookplan.json")
-        or list(state.glob(base.root / "requests", "*.json"))
-        or list(state.glob(base.root / "members", "*.json"))
+        or any(
+            list(state.glob(base.root / name, "*.json"))
+            for name in ("requests", "members", "responses", "results", "frames", "parts")
+        )
     ):
-        raise IdentityMismatch("table-row preflight upgrade requires unchanged inputs and no dispatched work")
-    return row_receipt(base.root)
+        raise IdentityMismatch("group-splitting preflight upgrade requires unchanged inputs and no dispatched work")
+    lists_changed = any(
+        item.item_id in allowed and item.atomic_tag in {"ul", "ol"} for item in previous.report.diagnostics
+    )
+    return group_receipt(base.root) if lists_changed or target == row_receipt(base.root) else row_receipt(base.root)
 
 
 def unpad(piece: Any, projection: str) -> str:
-    """Remove only the exact virtual row-group wrappers frozen with this piece."""
+    """Remove only the exact virtual ancestor wrappers frozen with this piece."""
     prefix = getattr(piece, "source_prefix", "")
     suffix = getattr(piece, "source_suffix", "")
     if not projection.startswith(prefix) or not projection.endswith(suffix):
-        raise ValueError("table piece virtual wrappers changed")
+        raise ValueError("piece virtual wrappers changed")
     end = len(projection) - len(suffix) if suffix else len(projection)
     if len(prefix) >= end:
-        raise ValueError("table piece must retain its original row projection")
+        raise ValueError("piece must retain its original source projection")
     return projection[len(prefix) : end]
 
 
@@ -124,8 +137,6 @@ def split_table(
     model: str,
 ) -> tuple[PreflightPiece, ...]:
     """Keep each outer tr whole; virtual section wrappers never reach parent output."""
-    from engine.services.preflight import _piece
-
     events, cuts, rows = _layout(parent)
     if len(rows) < 2:
         return ()
@@ -139,6 +150,24 @@ def split_table(
     byte_cuts = (parent.source_span.byte_start, *(byte_ends[ref] for ref in rows[:-1]), parent.source_span.byte_end)
     if len(positions) != len(byte_cuts) or tuple(sorted(byte_cuts)) != byte_cuts:
         raise ValueError("table row markers differ from their source-byte order")
+    return split_padded_groups(inventory, parent, events, cuts, byte_cuts, limits, model)
+
+
+def split_padded_groups(
+    inventory: AtomicDocument,
+    parent: AtomicItem,
+    events: Sequence[Event],
+    cuts: dict[int, tuple[str, ...]],
+    byte_cuts: Sequence[int],
+    limits: BudgetLimits,
+    model: str,
+) -> tuple[PreflightPiece, ...]:
+    """Pack source slices with balanced temporary ancestor wrappers."""
+    from engine.services.preflight import _piece
+
+    positions = tuple(cuts)
+    if len(positions) != len(byte_cuts) or tuple(sorted(byte_cuts)) != tuple(byte_cuts):
+        raise ValueError("group marker seams differ from their source-byte order")
     result: list[PreflightPiece] = []
     start = 0
     while start < len(positions) - 1:
@@ -172,13 +201,21 @@ def split_table(
     return tuple(result) if len(result) > 1 else ()
 
 
-def validate_table_pieces(parent: AtomicItem, pieces: Sequence[Any]) -> None:
+def validate_table_pieces(
+    parent: AtomicItem, pieces: Sequence[Any], *, node_spans: Mapping[str, ByteSpan] | None = None
+) -> None:
     """Prove row seams and padding against the unchanged complete parent projection."""
     events, cuts, rows = _layout(parent)
     if len(rows) < 2:
         raise ValueError("split tables require multiple complete outer rows")
     position = 0
     seen: list[str] = []
+    offsets = {0: parent.source_span.byte_start, len(events): parent.source_span.byte_end}
+    if node_spans is not None:
+        offsets.update(
+            (position, node_spans[parent.registry[ref].source_node_key].byte_end)
+            for position, ref in zip(tuple(cuts)[1:-1], rows[:-1], strict=True)
+        )
     for piece in pieces:
         if piece.source_prefix != _padding(cuts[position]):
             raise ValueError("table piece prefix differs from its frozen row-group boundary")
@@ -188,6 +225,10 @@ def validate_table_pieces(parent: AtomicItem, pieces: Sequence[Any]) -> None:
             raise ValueError("table pieces must cut only between complete outer rows")
         if piece.source_suffix != _padding(cuts[end], close=True):
             raise ValueError("table piece suffix differs from its frozen row-group boundary")
+        if node_spans is not None and (
+            piece.source_span.byte_start != offsets[position] or piece.source_span.byte_end != offsets[end]
+        ):
+            raise ValueError("table piece byte span differs from its source row boundary")
         validate_projection(piece.source_projection)
         contained = [
             event.value[1:]

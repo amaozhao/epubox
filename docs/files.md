@@ -223,6 +223,8 @@
 
 2026-10-21 新增 `engine/services/tables.py`、`tests/engine/item/test_tables.py`、`tests/engine/services/test_tables.py`，负责超长表格完整行请求、行组包装与父表合并校验、失败预检凭据升级及恢复回归。`tables` 已登记到单词清单；三个文件均不超过 1000 行。
 
+2026-11-07 新增 `engine/services/lists.py`，负责嵌套列表安全切分、临时祖先包装及合并边界校验，复用表格切分的预算打包和失败预检升级机制。`lists` 为已登记单词，模块不超过 1000 行。
+
 2026-10-22 新增 `engine/epub/cleanup.py`、`tests/engine/epub/test_cleanup.py`，负责出版候选中的空装饰标签及中文普通空白整理，并保护索引、代码、实体、链接及 CSS 布局。`cleanup` 已登记到单词清单；两个文件均不超过 1000 行。
 
 2026-11-01 新增 `tests/engine/epub/test_spacing.py`，覆盖跨索引锚点、格式与链接的中文空白清理，实体及 Unicode 空格、CSS 级联和导入、URL 保护、UTF-16 字节回填与 EPUB 重打包。保留中英文及数字边界原有空格；`spacing` 已登记到单词清单，文件不超过 1000 行。

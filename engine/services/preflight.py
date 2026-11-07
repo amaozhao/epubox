@@ -6,7 +6,6 @@ import hashlib
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from weakref import WeakKeyDictionary
@@ -36,6 +35,8 @@ from engine.schemas.contracts import (
 from engine.schemas.internal import Event
 from engine.services import state
 from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, StaleWrite
+from engine.services.lists import split_list as _split_list
+from engine.services.lists import validate_list_pieces
 from engine.services.parallel import PROCESS_MIN_BYTES, ordered_map
 
 if TYPE_CHECKING:
@@ -252,8 +253,10 @@ def prepare_preflight(
 
 def receipt_path(root: Path) -> Path:
     """Return the active logical preflight receipt without changing old records."""
-    from engine.services.tables import row_receipt
+    from engine.services.tables import group_receipt, row_receipt
 
+    if state.is_file(groups := group_receipt(root)):
+        return groups
     if state.is_file(rows := row_receipt(root)):
         return rows
     overlay = root / _OUTPUT_RECEIPT
@@ -657,92 +660,6 @@ def _split_virtual(
     return _pack_fragments(inventory, item, fragments, byte_cuts, limits, model)
 
 
-def _split_list(
-    inventory: AtomicDocument,
-    raw: bytes,
-    item: AtomicItem,
-    limits: BudgetLimits,
-    model: str,
-) -> tuple[PreflightPiece, ...]:
-    parsed = parse_resource(raw, inventory.document.resource.media_type)
-    index = index_resource(parsed)
-    parent_path = inventory.document.nodes[item.node_key].element_path
-    children = sorted(
-        (
-            (node.element_path, node.node_key)
-            for node in inventory.document.nodes.values()
-            if node.element_path[:-1] == parent_path
-        ),
-        key=lambda value: value[0],
-    )
-    if len(children) < 2 or any(index.nodes[path].qname.rsplit("}", 1)[-1] != "li" for path, _key in children):
-        return ()
-    refs = {
-        entry.source_node_key: ref
-        for ref, entry in item.registry.items()
-        if entry.parent_ref == item.node_key and entry.hints.get("element") == "li"
-    }
-    if set(refs) != {key for _path, key in children}:
-        return ()
-    direct_refs = set(refs.values())
-    events = parse_projection(item.source_projection)
-    closes: dict[str, int] = {}
-    groups: list[str] = []
-    for position, event in enumerate(events, 1):
-        if event.kind != "marker" or event.value[:1] not in {"+", "-"} or event.value[1:2] != "g":
-            continue
-        edge, ref = event.value[0], event.value[1:]
-        if edge == "+":
-            if ref in direct_refs and groups:
-                return ()
-            groups.append(ref)
-        elif not groups or groups.pop() != ref:
-            return ()
-        elif not groups and ref in direct_refs:
-            closes[ref] = position
-    ordered_refs = tuple(refs[key] for _path, key in children)
-    if groups or set(closes) != set(ordered_refs):
-        return ()
-    positions = (0, *(closes[ref] for ref in ordered_refs[:-1]), len(events))
-    if tuple(sorted(positions)) != positions or len(set(positions)) != len(positions):
-        return ()
-    fragments = tuple(events_to_projection(events[start:end]) for start, end in pairwise(positions))
-    byte_cuts = (
-        item.source_span.byte_start,
-        *(index.nodes[path].full.end for path, _key in children[:-1]),
-        item.source_span.byte_end,
-    )
-    return _pack_fragments(inventory, item, fragments, byte_cuts, limits, model)
-
-
-def validate_list_pieces(parent: AtomicItem, pieces: Sequence[PreflightPiece]) -> None:
-    """Require every split list piece to contain complete direct li groups."""
-    direct = {
-        ref
-        for ref, entry in parent.registry.items()
-        if entry.parent_ref == parent.node_key and entry.hints.get("element") == "li"
-    }
-    seen: set[str] = set()
-    for piece in pieces:
-        groups: list[str] = []
-        for event in parse_projection(piece.source_projection):
-            if event.kind != "marker" or event.value[1:2] != "g" or event.value[:1] not in {"+", "-"}:
-                continue
-            edge, ref = event.value[0], event.value[1:]
-            if edge == "+":
-                groups.append(ref)
-                if ref in direct:
-                    if len(groups) != 1 or ref in seen:
-                        raise ValueError("split list pieces must start at complete direct li boundaries")
-                    seen.add(ref)
-            elif not groups or groups.pop() != ref:
-                raise ValueError("split list pieces must preserve marker nesting")
-        if groups:
-            raise ValueError("split list pieces must end at complete direct li boundaries")
-    if not direct or seen != direct:
-        raise ValueError("split list pieces must exactly cover every direct li")
-
-
 def _pack_fragments(
     inventory: AtomicDocument,
     item: AtomicItem,
@@ -994,6 +911,7 @@ __all__ = [
     "read_preflight",
     "receipt_path",
     "require_preflight",
+    "validate_list_pieces",
     "verify_preflight_window",
     "write_preflight",
 ]

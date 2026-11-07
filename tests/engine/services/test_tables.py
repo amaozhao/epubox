@@ -9,7 +9,7 @@ import pytest
 from engine import cli
 from engine.item.budget import request_source_tokens
 from engine.item.inline import validate_projection
-from engine.services import state, tables
+from engine.services import preflight, state, tables
 from engine.services.atomic import IdentityMismatch
 from engine.services.journal import BodyJournal
 from engine.services.partition import build_plan
@@ -23,21 +23,28 @@ from tests.engine.execution.test_atomic import answer
 from tests.engine.services.test_preparing import atomic_config, forbidden
 
 
-def blocked_checkpoint(tmp_path, monkeypatch):
+def blocked_checkpoint(tmp_path, monkeypatch, tag="table"):
+    body = (
+        "<table><tbody>" + "".join(f"<tr><td>{'word ' * 900}</td></tr>" for _ in range(3)) + "</tbody></table>"
+        if tag == "table"
+        else "<ol><li>Part One<ol>"
+        + "".join(f'<li><a href="chapter.xhtml#entry{n}">{"word " * 900}</a></li>' for n in range(3))
+        + "</ol></li></ol>"
+    )
     source = make_epub(
         tmp_path / "book.epub",
-        {
-            "chapter.xhtml": "<table><tbody>"
-            + "".join(f"<tr><td>{'word ' * 900}</td></tr>" for _ in range(3))
-            + "</tbody></table>"
-        },
+        {"chapter.xhtml": body},
     )
     root = source.with_suffix("")
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     state.initialize(root, source, digest, "atomic-run")
     cli._write_source_hint(root, source, digest, "atomic-run")
     with monkeypatch.context() as patch:
-        patch.setattr(tables, "split_table", lambda *_args: ())
+        patch.setattr(
+            tables if tag == "table" else preflight,
+            "split_table" if tag == "table" else "_split_list",
+            lambda *_args: (),
+        )
         result = asyncio.run(
             prepare_translation(
                 source,
@@ -57,8 +64,9 @@ def blocked_checkpoint(tmp_path, monkeypatch):
     return source, root
 
 
-def test_failed_table_preflight_upgrades_without_replacing_old_receipt_or_source(tmp_path, monkeypatch):
-    source, root = blocked_checkpoint(tmp_path, monkeypatch)
+@pytest.mark.parametrize("tag", ["table", "ol"])
+def test_failed_group_preflight_upgrades_without_replacing_old_receipt_or_source(tmp_path, monkeypatch, tag):
+    source, root = blocked_checkpoint(tmp_path, monkeypatch, tag)
     prior = state.read(root / "checks/preflight.json")
     source_bytes = source.read_bytes()
     preparation = state.read(root / "preparation.json")
@@ -67,14 +75,14 @@ def test_failed_table_preflight_upgrades_without_replacing_old_receipt_or_source
     result = asyncio.run(resume_preparation(root, StubChecker(), term_transport=forbidden))
 
     assert result.status == "ready", result.reason
-    assert receipt_path(root) == root / "checks/rows.json"
+    assert receipt_path(root) == root / ("checks/rows.json" if tag == "table" else "checks/groups.json")
     assert state.read(root / "checks/preflight.json") == prior
     assert state.read(root / "preparation.json") == preparation
     assert {path.name: state.read(path) for path in state.glob(root / "inventories", "*.json")} == inventories
     assert source.read_bytes() == source_bytes
     assert not list(state.glob(root / "requests", "*.json"))
     session = ReadySession(RunStore(root))
-    rows = [member for member in session.index.members if member.atomic_tag == "table"]
+    rows = [member for member in session.index.members if member.atomic_tag == tag]
     assert len(rows) == 3
     assert all(session.index.source_tokens[member.item_id] <= 1500 for member in rows)
     assert asyncio.run(resume_preparation(root, StubChecker(), term_transport=forbidden)).status == "ready"
@@ -84,8 +92,9 @@ def test_failed_table_preflight_upgrades_without_replacing_old_receipt_or_source
     ).passed
 
 
-def test_table_preflight_upgrade_rejects_existing_dispatched_work(tmp_path, monkeypatch):
-    _source, root = blocked_checkpoint(tmp_path, monkeypatch)
+@pytest.mark.parametrize("tag", ["table", "ol"])
+def test_group_preflight_upgrade_rejects_existing_dispatched_work(tmp_path, monkeypatch, tag):
+    _source, root = blocked_checkpoint(tmp_path, monkeypatch, tag)
     store = RunStore(root)
     preparation = store.read_preparation()
     state.write(root / "requests/saved.json", b"{}")
@@ -98,8 +107,24 @@ def test_table_preflight_upgrade_rejects_existing_dispatched_work(tmp_path, monk
     assert state.read(root / "checks/preflight.json") == prior
 
 
-def test_split_table_translates_reviews_publishes_and_resumes_without_new_requests(tmp_path, monkeypatch):
-    source, root = blocked_checkpoint(tmp_path, monkeypatch)
+def test_nested_list_upgrade_composes_with_a_saved_row_receipt(tmp_path, monkeypatch):
+    _source, root = blocked_checkpoint(tmp_path, monkeypatch, "ol")
+    prior = state.read(root / "checks/preflight.json")
+    state.write(root / "checks/rows.json", prior)
+    assert receipt_path(root) == root / "checks/rows.json"
+
+    result = asyncio.run(resume_preparation(root, StubChecker(), term_transport=forbidden))
+
+    assert result.status == "ready"
+    assert receipt_path(root) == root / "checks/groups.json"
+    assert state.read(root / "checks/preflight.json") == prior
+    assert state.read(root / "checks/rows.json") == prior
+    assert not list(state.glob(root / "requests", "*.json"))
+
+
+@pytest.mark.parametrize("tag", ["table", "ol"])
+def test_split_group_translates_reviews_publishes_and_resumes_without_new_requests(tmp_path, monkeypatch, tag):
+    source, root = blocked_checkpoint(tmp_path, monkeypatch, tag)
     original = source.read_bytes()
     runtime = BodyJournal.runtime
     calls = []
@@ -127,8 +152,13 @@ def test_split_table_translates_reviews_publishes_and_resumes_without_new_reques
     assert set(calls) == {"translate", "review"}
     with ZipFile(output) as archive:
         rendered = archive.read("OEBPS/chapter.xhtml")
-        assert rendered.count(b"<table>") == 1 and rendered.count(b"<tbody>") == 1
-        assert rendered.count(b"<tr>") == 3 and b"word" not in rendered
+        if tag == "table":
+            assert rendered.count(b"<table>") == 1 and rendered.count(b"<tbody>") == 1
+            assert rendered.count(b"<tr>") == 3
+        else:
+            assert rendered.count(b"<ol>") == 2 and rendered.count(b"<li>") == 4
+            assert all(f'href="chapter.xhtml#entry{n}"'.encode() in rendered for n in range(3))
+        assert b"word" not in rendered
         assert "译文".encode() in rendered
     count = len(calls)
     assert cli.resume_book(root, output=output).status == "completed"
@@ -136,12 +166,13 @@ def test_split_table_translates_reviews_publishes_and_resumes_without_new_reques
     assert source.read_bytes() == original
 
 
-def test_row_members_are_not_further_split_into_cells_and_old_json_has_no_padding_fields(tmp_path, monkeypatch):
-    _source, root = blocked_checkpoint(tmp_path, monkeypatch)
+@pytest.mark.parametrize("tag", ["table", "ol"])
+def test_padded_members_are_not_further_split_and_old_json_has_no_padding_fields(tmp_path, monkeypatch, tag):
+    _source, root = blocked_checkpoint(tmp_path, monkeypatch, tag)
     assert asyncio.run(resume_preparation(root, StubChecker(), term_transport=forbidden)).status == "ready"
     session = ReadySession(RunStore(root))
     for member in session.index.members:
-        if member.atomic_tag == "table":
+        if member.atomic_tag == tag:
             assert build_plan(session, member, trigger_stage="translate", trigger_count=10) is None
         else:
             saved = json.loads(member.model_dump_json())

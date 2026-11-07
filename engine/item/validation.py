@@ -6,7 +6,7 @@ from types import MappingProxyType
 from typing import Any
 
 from engine.item.inline import projection_identities, validate_projection
-from engine.schemas.bridge import AtomicItem
+from engine.schemas.bridge import AtomicItem, ByteSpan
 from engine.schemas.contracts import RegistryEntry, canonical_hash
 from engine.schemas.members import RequestMember
 from engine.services.preflight import validate_list_pieces
@@ -71,15 +71,19 @@ def initialize_verified_catalog(
             channels[lane] = (*prior, item_id)[-2:]
 
 
-def validate_coverage(parent: AtomicItem, pieces: Sequence[Any]) -> None:
+def validate_coverage(
+    parent: AtomicItem, pieces: Sequence[Any], *, node_spans: Mapping[str, ByteSpan] | None = None
+) -> None:
     if not pieces or pieces[0].source_span.byte_start != parent.source_span.byte_start:
         raise ValueError("preflight pieces must start at the parent source span")
     if pieces[-1].source_span.byte_end != parent.source_span.byte_end:
         raise ValueError("preflight pieces must end at the parent source span")
     if any(left.source_span.byte_end != right.source_span.byte_start for left, right in pairwise(pieces)):
         raise ValueError("preflight piece spans must be contiguous")
-    if parent.atomic_tag != "table" and any(piece.source_prefix or piece.source_suffix for piece in pieces):
-        raise ValueError("only split tables may carry virtual row-group wrappers")
+    if parent.atomic_tag not in {"table", "ul", "ol"} and any(
+        piece.source_prefix or piece.source_suffix for piece in pieces
+    ):
+        raise ValueError("only split tables and lists may carry virtual ancestor wrappers")
     if "".join(unpad(piece, piece.source_projection) for piece in pieces) != parent.source_projection:
         raise ValueError("preflight piece projections must exactly reconstruct their parent")
     if any(not piece.translate.fits or not piece.review.fits for piece in pieces):
@@ -103,9 +107,9 @@ def validate_coverage(parent: AtomicItem, pieces: Sequence[Any]) -> None:
         else set()
     )
     if parent.atomic_tag in {"ul", "ol"}:
-        validate_list_pieces(parent, pieces)
+        validate_list_pieces(parent, pieces, node_spans=node_spans)
     elif parent.atomic_tag == "table":
-        validate_table_pieces(parent, pieces)
+        validate_table_pieces(parent, pieces, node_spans=node_spans)
     elif any(piece.source_span.byte_end not in safe_offsets for piece in pieces[:-1]):
         raise ValueError("split member seams must use frozen safe source boundaries")
     for piece in pieces:

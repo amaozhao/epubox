@@ -482,6 +482,8 @@ def _derive_adaptive_children(
     inventory = base.index.inventories_by_id.get(parent.document_id)
     if inventory is None:
         raise IdentityMismatch("part parent document is unavailable")
+    if parent.source_prefix or parent.source_suffix:
+        return None
     if parent.atomic_tag in {"ul", "ol"}:
         children = _derive_children(base, parent, limit, measure_tokens=measure_tokens)
         return "list_items", children, ("",) * (len(children) + 1)
