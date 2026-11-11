@@ -16,7 +16,7 @@ uv sync --extra dev
 
 所有模型阶段（术语提取、术语消歧、初译、校对及章节检查）统一使用非流式请求，一次接收完整响应。主、备用接口每次请求的 HTTP 超时和总等待上限均为 300 秒；重试同样适用。旧断点中的较短超时不覆盖此策略，已完成记录继续复用。运行中的进程需重启后才会使用新策略。
 
-可通过 `EPUBCHECK_COMMAND='java -jar /absolute/path/epubcheck.jar'` 或 `--epubcheck-command` 指定检查器。未显式指定时，开发工作区优先使用已验证的 `.tools/epubcheck/epubcheck-5.3.0/`；没有该版本时才选其他内置版本，均无时使用系统命令。原书无法安全解析、词表输入不合法或输出路径不安全时，不会发起模型请求。可定位的原书 EPUBCheck 问题会记录为基线，成品仍须通过出版校验。
+可通过 `EPUBCHECK_COMMAND='java -jar /absolute/path/epubcheck.jar'` 或 `--epubcheck-command` 指定检查器。未显式指定时，开发工作区优先使用已验证的 `.tools/epubcheck/epubcheck-5.3.0/`，其次是其他内置版本和系统命令。新翻译运行会在调用模型前，用原文组装整本 EPUB 3.0 候选并运行 EPUBCheck。可自动修复的结构问题会在组装时处理，剩余错误会一次列出并停止本次运行。正式成品仍须通过出版校验。
 
 ## 一个命令翻译整本书
 

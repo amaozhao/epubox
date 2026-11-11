@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import shutil
+import tempfile
 import uuid
 import zipfile
 from collections.abc import Mapping
@@ -16,8 +17,18 @@ from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, T
 from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
 from engine.epub.bindings import resolve_derived_navigation
-from engine.epub.styles import source_stylesheets
-from engine.epub.validation import EpubChecker, PackageInventory, ZipLimits, inspect_epub
+from engine.epub.preservation import apply_code_plan, effective_code_plan
+from engine.epub.styles import source_stylesheets, use_reader_fonts
+from engine.epub.upgrade import upgrade_package
+from engine.epub.validation import (
+    EpubChecker,
+    EpubValidationError,
+    PackageInventory,
+    ZipLimits,
+    inspect_epub,
+    require_clean_epubcheck,
+)
+from engine.epub.verification import stage_epub
 from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS, extract_resource
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
@@ -68,11 +79,45 @@ class _ResourceInput:
     extractor_version: str = ATOMIC_EXTRACTOR_VERSION
 
 
+def validate_publication_compatibility(
+    source_snapshot: Path,
+    inventory: PackageInventory,
+    checker: EpubChecker | object,
+) -> None:
+    """Prove that the complete source can pass the deterministic publication transforms."""
+
+    replacements = upgrade_package(source_snapshot, inventory, {})
+    replacements, removed_paths = use_reader_fonts(source_snapshot, inventory, replacements)
+    code_plan = effective_code_plan(source_snapshot)
+    if code_plan is not None:
+        replacements, _stats = apply_code_plan(source_snapshot, replacements, code_plan)
+    with tempfile.TemporaryDirectory(prefix="epubox-publication-preflight-") as temporary:
+        candidate = Path(temporary) / "candidate.epub"
+        stage_epub(
+            source_snapshot,
+            candidate,
+            replacements,
+            allow_additions=True,
+            removed_paths=removed_paths,
+        )
+        result = checker.check(candidate)  # type: ignore[attr-defined]
+        try:
+            require_clean_epubcheck(result)
+        except EpubValidationError as error:
+            raise EpubValidationError(
+                "publication_preflight_failed",
+                str(error),
+                issues=error.issues,
+            ) from error
+
+
 def prepare_book(
     source: Path,
     work_root: Path,
     config: PreparationConfig,
     checker: EpubChecker | object,
+    *,
+    publication_preflight: bool = False,
 ) -> PreparedBook:
     """Create the immutable source gate; no model or translation plan is touched."""
 
@@ -134,6 +179,8 @@ def prepare_book(
                     {"source_validation": {"source_hash": source_hash, **inventory.epubcheck.to_dict()}}
                 ),
             )
+        if publication_preflight:
+            validate_publication_compatibility(snapshot, inventory, checker)
         atomic = _atomic_config(config)
         with zipfile.ZipFile(snapshot) as archive:
             manifest = {item.path: item for item in inventory.manifest}

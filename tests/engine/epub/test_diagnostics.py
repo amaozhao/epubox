@@ -116,7 +116,9 @@ async def test_malformed_display_report_does_not_block_preparation_advancement(t
     prepared = prepare_book(source, tmp_path / "work", PreparationConfig(run_id="display"), Checker())
     store = RunStore(prepared.work_dir)
     (store.root / "report.json").write_text("{broken")
-    monkeypatch.setattr(pipeline, "_p1", lambda *args: (store, prepared.preparation, prepared.preparation_hash))
+    monkeypatch.setattr(
+        pipeline, "_p1", lambda *args, **kwargs: (store, prepared.preparation, prepared.preparation_hash)
+    )
     reached = []
 
     async def advance(*args, **kwargs):

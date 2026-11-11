@@ -16,6 +16,7 @@ import main as main_module
 from engine import cli
 from engine.epub import publish as atomic_publish
 from engine.epub.preparation import PreparationConfig, prepare_book
+from engine.epub.validation import EpubValidationError, ValidationIssue
 from engine.execution.state import TranslationRunResult
 from engine.item.atoms import ADAPTER_VERSION, EXTRACTOR_VERSION
 from engine.services import journal as journal_module
@@ -52,6 +53,64 @@ def test_source_diagnostics_and_inherited_output_errors_are_visible(capsys, tmp_
     assert "保留原书 1 个 EPUBCheck 问题" in text
     assert "未新增问题" in text
     assert "EPUBCheck 仍未完全通过" in text
+
+
+def test_translate_reports_publication_failure_once(tmp_path, monkeypatch):
+    source = make_epub(tmp_path / "book.epub")
+    calls = []
+
+    def fail_publication(*args, **kwargs):
+        calls.append(True)
+        return cli.RunOutcome(
+            "failed",
+            tmp_path,
+            "publication",
+            accepted_units=6481,
+            required_units=6481,
+            http_attempts=1125,
+            reason="译文已全部保存，EPUB 3.0 出版校验未通过。",
+        )
+
+    monkeypatch.setattr(main_module, "translate_book", fail_publication)
+    result = CliRunner().invoke(app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert calls == [True]
+    assert "已接受：6481/6481；累计HTTP：1125" in result.output
+    assert "译文已全部保存，EPUB 3.0 出版校验未通过" in result.output
+    assert "翻译未完成" not in result.output
+    assert "自动续跑" not in result.output
+
+
+def test_translate_reports_all_publication_preflight_errors_once(tmp_path, monkeypatch):
+    source = make_epub(tmp_path / "book.epub")
+    calls = []
+
+    def fail_preflight(*args, **kwargs):
+        calls.append(True)
+        raise EpubValidationError(
+            "publication_preflight_failed",
+            "Failed to validate candidate",
+            issues=(ValidationIssue("RSC-005", "chapter.xhtml"), ValidationIssue("RSC-007", "nav.xhtml")),
+        )
+
+    monkeypatch.setattr(main_module, "translate_book", fail_preflight)
+    result = CliRunner().invoke(app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert calls == [True]
+    assert "本次未发起模型请求" in result.output
+    assert "chapter.xhtml" in result.output and "nav.xhtml" in result.output
+    assert "自动续跑" not in result.output
+
+
+def test_progress_does_not_repeat_identical_translation_counts(capsys):
+    show = _progress_printer()
+    report = {"phase": "translation", "accepted_units": 10, "required_units": 10, "http_attempts": 3}
+    show(report | {"execution_state": "running"})
+    show(report | {"execution_state": "translated"})
+
+    assert capsys.readouterr().out.count("10/10") == 1
 
 
 def test_legacy_completed_baseline_recovery_uses_explicit_checker_without_model(tmp_path, monkeypatch):

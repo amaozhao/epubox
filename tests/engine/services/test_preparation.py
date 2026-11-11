@@ -9,6 +9,7 @@ import pytest
 import engine.services.preparation as pipeline_module
 from engine.agents.runtime import ProviderError
 from engine.epub.preparation import PreparationConfig
+from engine.epub.validation import EpubCheckResult, EpubValidationError
 from engine.services.preparation import PreparationProgress, prepare_translation, resume_preparation
 from engine.services.store import RunStore
 from engine.services.terms.planning import TERM_PLANNER_VERSION
@@ -40,6 +41,38 @@ def config(*, auto_extract: bool = True, user_terms_path: Path | None = None) ->
 
 def source_book(tmp_path: Path, text: str = "Memory allocation is fast.") -> Path:
     return make_epub(tmp_path / "source.epub", {"chapter.xhtml": f"<p>{text}</p>"})
+
+
+def test_publication_preflight_blocks_before_term_model_requests(tmp_path: Path) -> None:
+    source = source_book(tmp_path)
+    model_calls = 0
+
+    class CandidateChecker:
+        def check(self, path: Path) -> EpubCheckResult:
+            if path.name != "candidate.epub":
+                return EpubCheckResult(("stub-epubcheck",), 0)
+            error = f"ERROR(RSC-005): {path}/OEBPS/chapter.xhtml(1,1): candidate is incompatible"
+            return EpubCheckResult(("stub-epubcheck",), 1, errors=(error,))
+
+    async def forbidden_model(*_args):
+        nonlocal model_calls
+        model_calls += 1
+        raise AssertionError("publication preflight must finish before model requests")
+
+    with pytest.raises(EpubValidationError) as raised:
+        asyncio.run(
+            prepare_translation(
+                source,
+                tmp_path / "work",
+                config(),
+                CandidateChecker(),
+                term_transport=forbidden_model,
+                publication_preflight=True,
+            )
+        )
+
+    assert raised.value.code == "publication_preflight_failed"
+    assert model_calls == 0
 
 
 def test_disabled_extraction_reaches_ready_only_after_freeze_and_every_unit(tmp_path: Path) -> None:

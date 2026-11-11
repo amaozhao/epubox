@@ -877,6 +877,60 @@ def test_upgrade_deduplicates_empty_calibre_pagebreak_ids_without_changing_nodes
     assert tuple(parse_xml_bytes(result).getroot().itertext()) == tuple(parse_xml_bytes(raw).getroot().itertext())
 
 
+def test_upgrade_repairs_dangling_aria_references_across_the_package(tmp_path: Path) -> None:
+    source = tmp_path / "split.epub"
+    inventory = _book(source, "3.0", nav=True)
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head>'
+        b"""<body><section title="keep aria-labelledby='other-chapter'" aria-labelledby = 'other-chapter'"""
+        b""" aria-label="Fallback" aria-describedby="missing first&#x9;second absent" aria-controls=' '>"""
+        b'<h1 id="first">First</h1><p id="second">Second</p>'
+        b'<a href="nav.xhtml#other-chapter">Contents</a><pre><code>&lt;keep&gt;</code></pre>'
+        b"</section></body></html>"
+    )
+    with ZipFile(source) as archive:
+        nav = archive.read("OEBPS/nav.xhtml").replace(
+            b'<nav epub:type="toc">', b'<nav epub:type="toc" id="other-chapter" aria-owns="absent">'
+        )
+    result = upgrade_package(source, inventory, {"OEBPS/chapter.xhtml": chapter, "OEBPS/nav.xhtml": nav})
+
+    assert result["OEBPS/chapter.xhtml"] == chapter.replace(b" aria-labelledby = 'other-chapter'", b"").replace(
+        b"missing first&#x9;second absent\" aria-controls=' '", b'first second"'
+    )
+    assert result["OEBPS/nav.xhtml"] == nav.replace(b' aria-owns="absent"', b"")
+    assert _normalize_xhtml(result["OEBPS/chapter.xhtml"]) == result["OEBPS/chapter.xhtml"]
+
+
+@pytest.mark.parametrize("attribute", ["aria-activedescendant", "aria-details", "aria-errormessage", "aria-flowto"])
+def test_upgrade_preserves_valid_aria_and_removes_missing_aria_targets(attribute: str) -> None:
+    raw = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head><body>'
+        f'<div {attribute}="missing"><p>Text</p></div>'
+        f'<div {attribute}="a&amp;b"><p id="a&amp;b">Text</p></div></body></html>'
+    ).encode()
+
+    assert _normalize_xhtml(raw) == raw.replace(f' {attribute}="missing"'.encode(), b"")
+
+
+def test_upgrade_discards_a_list_in_aria_activedescendant() -> None:
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head><body>'
+        b'<div aria-activedescendant="a b"><p id="a">First</p><p id="b">Second</p></div>'
+        b"</body></html>"
+    )
+
+    assert _normalize_xhtml(raw) == raw.replace(b' aria-activedescendant="a b"', b"")
+
+
+def test_upgrade_repairs_aria_on_a_start_tag_rewritten_by_another_rule() -> None:
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title aria-describedby="missing"/></head>'
+        b"<body><h1>Chapter</h1></body></html>"
+    )
+
+    assert _normalize_xhtml(raw) == raw.replace(b'<title aria-describedby="missing"/>', b"<title>Chapter</title>")
+
+
 @pytest.mark.parametrize(
     "reference",
     (

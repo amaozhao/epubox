@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import os
 import shutil
-import traceback
 import uuid
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -35,6 +34,7 @@ from engine.epub.preservation import CODE_POLICY
 from engine.epub.publication import publish_book, recover_publication
 from engine.epub.styles import FONT_POLICY
 from engine.epub.upgrade import COVER_POLICY
+from engine.epub.validation import EpubValidationError, ValidationIssue
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.orchestrator import (
@@ -57,7 +57,7 @@ from engine.services.coherence import _read as read_coherence_record
 from engine.services.coherence import add_http_budget, retry_document_check
 from engine.services.legacy import _default_work_root, _existing_run_id, _resolve_work_root
 from engine.services.preparation import PreparationProgress, prepare_translation, resume_preparation
-from engine.services.report import write_report
+from engine.services.report import write_failure_report, write_report
 from engine.services.retry import restart_command
 from engine.services.store import RunStore
 from engine.services.terms.planning import ATOMIC_TERM_PLANNER_VERSION
@@ -78,6 +78,7 @@ class RunOutcome:
     output_sha256: str | None = None
     reason: str | None = None
     report_path: Path | None = None
+    validation_issues: tuple[ValidationIssue, ...] = ()
 
 
 def _provider(value: str) -> str:
@@ -710,7 +711,13 @@ async def _advance_source(
 ) -> RunOutcome:
     try:
         prepared = await prepare_translation(
-            source, work_root, config, checker, model=model, progress=_preparation_progress(progress)
+            source,
+            work_root,
+            config,
+            checker,
+            model=model,
+            progress=_preparation_progress(progress),
+            publication_preflight=True,
         )
         from engine.services.session import remember
 
@@ -721,9 +728,14 @@ async def _advance_source(
     except Exception as error:
         if config.run_id is not None:
             failure_hash = config.expected_source_hash or _sha256_file(source)
-            _record_internal_failure(
+            phase = (
+                "preflight"
+                if isinstance(error, EpubValidationError) and error.code == "publication_preflight_failed"
+                else "preparation"
+            )
+            write_failure_report(
                 work_root if state.compact(work_root) else work_root / failure_hash / safe_id(config.run_id),
-                "preparation",
+                phase,
                 error,
             )
         raise
@@ -760,7 +772,7 @@ async def _advance_work_dir(
     except StoreLocked:
         raise
     except Exception as error:
-        _record_internal_failure(work_dir, "preparation", error)
+        write_failure_report(work_dir, "preparation", error)
         raise
     return await _finish(
         prepared.status,
@@ -808,7 +820,7 @@ async def _finish(
             ready_session=ready_session,
         )
     except Exception as error:
-        _record_internal_failure(work_dir, "translation", error)
+        write_failure_report(work_dir, "translation", error)
         raise
     store = RunStore(work_dir)
     atomic = state.is_file(work_dir / "prepared.json")
@@ -850,7 +862,20 @@ async def _finish(
         if progress is not None:
             progress({"phase": "publication", "notice": "出版：EPUB 3.0 已组装并校验完成。"})
     except Exception as error:
-        _record_internal_failure(work_dir, "publication", error)
+        if isinstance(error, EpubValidationError) and error.code == "epubcheck_failed":
+            return _record(
+                RunOutcome(
+                    "failed",
+                    work_dir,
+                    "publication",
+                    accepted_units=translated.accepted_units,
+                    required_units=count,
+                    http_attempts=translated.http_attempts,
+                    reason=f"译文已全部保存，EPUB 3.0 出版校验未通过。\n{error}",
+                    validation_issues=error.issues,
+                )
+            )
+        write_failure_report(work_dir, "publication", error)
         raise
     return _record(
         RunOutcome(
@@ -874,6 +899,7 @@ def _record(outcome: RunOutcome) -> RunOutcome:
         output_path=outcome.output_path,
         output_sha256=outcome.output_sha256,
         reason=outcome.reason,
+        validation_issues=[issue.__dict__ for issue in outcome.validation_issues],
     )
     saved = strict_json_loads(state.read(report))
     http = saved.get("http") if isinstance(saved, dict) else None
@@ -881,24 +907,6 @@ def _record(outcome: RunOutcome) -> RunOutcome:
     if type(attempts) is not int:
         raise ValueError("run report did not contain HTTP accounting")
     return replace(outcome, report_path=state.artifact(report), http_attempts=attempts)
-
-
-def _record_internal_failure(work_dir: Path, phase: str, error: Exception) -> None:
-    work_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        AtomicStore.atomic_write_bytes(work_dir / "internal-error.txt", traceback.format_exc().encode())
-        _record(RunOutcome("failed", work_dir, phase, reason=f"{type(error).__name__}: {error}"))
-    except Exception as reporting_error:  # noqa: BLE001 - preserve the original failure
-        fallback = {
-            "format": "epubox-failure-report-1",
-            "status": "failed",
-            "phase": phase,
-            "reason": f"{type(error).__name__}: {error}",
-            "work_dir": str(work_dir),
-            "report_incomplete": True,
-        }
-        AtomicStore.atomic_write_bytes(work_dir / "report.json", canonical_json_bytes(fallback))
-        error.add_note(f"full diagnostic report unavailable: {reporting_error}")
 
 
 def _preparation_progress(progress: ProgressCallback | None) -> Callable[[PreparationProgress], None] | None:

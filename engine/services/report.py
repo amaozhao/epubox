@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import traceback
 from copy import deepcopy
 from pathlib import Path
 from typing import Literal
 
 from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS
+from engine.epub.validation import EpubValidationError
 from engine.schemas.contracts import (
     ItemRecord,
     ItemStatus,
@@ -19,7 +21,7 @@ from engine.schemas.contracts import (
 )
 from engine.schemas.ready import AtomicPreparedInput
 from engine.services import state
-from engine.services.atomic import CorruptRecord, IdentityMismatch, safe_id
+from engine.services.atomic import AtomicStore, CorruptRecord, IdentityMismatch, safe_id
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.store import RunStore
 from engine.services.working import BudgetCache
@@ -36,6 +38,7 @@ def write_report(
     output_path: Path | None = None,
     output_sha256: str | None = None,
     reason: str | None = None,
+    validation_issues: list[JsonValue] | None = None,
 ) -> Path:
     """Snapshot facts without treating report.json as a resume authority."""
     preparation = store.read_preparation()
@@ -237,6 +240,8 @@ def write_report(
         diagnostic = previous.get("source_validation") if isinstance(previous, dict) else None
         if isinstance(diagnostic, dict) and diagnostic.get("source_hash") == preparation.source_hash:
             report["source_validation"] = diagnostic
+    if validation_issues:
+        report["validation_issues"] = validation_issues
     publish_path = store.root / "publish.json"
     if state.is_file(publish_path):
         publication = strict_json_loads(state.read(publish_path))
@@ -246,7 +251,31 @@ def write_report(
     return path
 
 
-__all__ = ["write_report"]
+def write_failure_report(work_dir: Path, phase: str, error: Exception) -> None:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    reason = f"{type(error).__name__}: {error}"
+    issues: list[JsonValue] = (
+        [issue.__dict__ for issue in error.issues] if isinstance(error, EpubValidationError) else []
+    )
+    try:
+        AtomicStore.atomic_write_bytes(work_dir / "internal-error.txt", traceback.format_exc().encode())
+        write_report(RunStore(work_dir), status="failed", phase=phase, reason=reason, validation_issues=issues)
+    except Exception as reporting_error:  # noqa: BLE001 - preserve the original failure
+        fallback: dict[str, JsonValue] = {
+            "format": "epubox-failure-report-1",
+            "status": "failed",
+            "phase": phase,
+            "reason": reason,
+            "work_dir": str(work_dir),
+            "report_incomplete": True,
+        }
+        if issues:
+            fallback["validation_issues"] = issues
+        AtomicStore.atomic_write_bytes(work_dir / "report.json", canonical_json_bytes(fallback))
+        error.add_note(f"full diagnostic report unavailable: {reporting_error}")
+
+
+__all__ = ["write_failure_report", "write_report"]
 
 
 def _atomic_progress(store: RunStore) -> tuple[dict[str, JsonValue], list[JsonValue]]:

@@ -123,6 +123,13 @@ def translate(
             typer.echo("这是本地兼容性检查，重复重试不会解决；原书和现有断点均已保留。", err=True)
             raise typer.Exit(1) from error
         except Exception as error:
+            if isinstance(error, EpubValidationError) and error.code == "publication_preflight_failed":
+                typer.echo("EPUB 3.0 出版预检未通过，本次未发起模型请求。", err=True)
+                for issue in error.issues:
+                    typer.echo(f"- {issue.message}", err=True)
+                if not error.issues:
+                    typer.echo(str(error), err=True)
+                raise typer.Exit(1) from error
             if isinstance(error, EpubValidationError) and error.code == "unsupported_source":
                 typer.echo("翻译未完成：原书包含当前不支持的内容，已停止自动续跑。", err=True)
                 details = tuple(
@@ -143,6 +150,9 @@ def translate(
         else:
             explicit = frozenset()  # Later rounds resume the configuration validated by the first result.
             if result.status == "completed":
+                _print_result(result)
+                return
+            if result.status == "failed" and result.phase == "publication":
                 _print_result(result)
                 return
             if result.status == "needs_attention" and result.phase == "preflight":
@@ -382,7 +392,7 @@ def _progress_printer():
                     f"局部问题={failed}，累计HTTP={attempts}"
                 )
             return
-        key = (phase, succeeded, planned, failed, attempts, report.get("execution_state"))
+        key = (phase, succeeded, planned, failed, attempts)
         if key == last:
             return
         last = key

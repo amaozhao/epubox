@@ -187,7 +187,7 @@ def verify_staged_epub(
     source_code: bool = False,
 ) -> PackageVerification:
     output_hash = file_hash(staged_path)
-    output_inventory = inspect_epub(staged_path, output_hash, checker=checker, for_output=True)
+    output_inventory = inspect_epub(staged_path, output_hash, checker=checker, for_output=True, require_clean=upgraded)
     if upgraded and output_inventory.epub_version != "3.0":
         raise EpubValidationError("epub_version_changed", "Upgraded output must be EPUB 3.0")
     if not upgraded and output_inventory.epub_version != source_inventory.epub_version:
@@ -269,12 +269,6 @@ def verify_staged_epub(
     source_result = source_inventory.epubcheck
     if result is None or source_result is None:
         raise EpubValidationError("missing_epubcheck", "EPUBCheck evidence is missing")
-    if upgraded and not result.passed:
-        raise EpubValidationError(
-            "epubcheck_failed",
-            "Upgraded EPUB 3.0 still has EPUBCheck ERROR/FATAL: "
-            + next(iter((*result.fatals, *result.errors)), "checker failed"),
-        )
     node_maps: dict[str, dict[tuple[int, ...], tuple[int, ...]]] = {}
     if cleanup_only and cleanup is not None and not upgraded and (not source_result.passed or not result.passed):
         node_maps = _cleanup_node_maps(

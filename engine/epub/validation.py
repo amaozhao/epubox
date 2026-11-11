@@ -91,6 +91,23 @@ class EpubCheckResult:
         }
 
 
+def require_clean_epubcheck(result: EpubCheckResult) -> None:
+    if result.passed:
+        return
+    issues = tuple(
+        ValidationIssue("epubcheck_failed", message, severity)
+        for severity, messages in (("fatal", result.fatals), ("error", result.errors))
+        for message in messages
+    )
+    raise EpubValidationError(
+        "epubcheck_failed",
+        f"Upgraded EPUB 3.0 still has EPUBCheck ERROR/FATAL "
+        f"({len(result.errors)} errors, {len(result.fatals)} fatals): "
+        + (issues[0].message if issues else "checker failed"),
+        issues=issues,
+    )
+
+
 class EpubChecker:
     """Small configurable wrapper around a real EPUBCheck command."""
 
@@ -193,6 +210,7 @@ def inspect_epub(
     checker: EpubChecker | object,
     limits: ZipLimits = DEFAULT_ZIP_LIMITS,
     for_output: bool = False,
+    require_clean: bool = False,
 ) -> PackageInventory:
     """Validate an immutable source snapshot and return its complete package inventory."""
     with zipfile.ZipFile(source) as archive:
@@ -238,6 +256,8 @@ def inspect_epub(
     check_result = checker.check(source)  # type: ignore[attr-defined]
     if not isinstance(check_result, EpubCheckResult):
         raise TypeError("checker.check() must return EpubCheckResult")
+    if require_clean:
+        require_clean_epubcheck(check_result)
     from engine.epub.diagnostics import validate
 
     validate(source, check_result)

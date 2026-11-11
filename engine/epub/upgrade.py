@@ -22,7 +22,7 @@ from engine.epub.metadata import (
     unique_identifier,
 )
 from engine.epub.parsing import parse_resource
-from engine.epub.ranges import ResourceIndex, index_resource
+from engine.epub.ranges import ResourceIndex, _attributes, index_resource
 from engine.epub.validation import PackageInventory
 
 _OPF = "http://www.idpf.org/2007/opf"
@@ -35,6 +35,19 @@ _SVG = "http://www.w3.org/2000/svg"
 _XLINK = "http://www.w3.org/1999/xlink"
 _MATHML = "http://www.w3.org/1998/Math/MathML"
 COVER_POLICY = "epub-cover-v1"
+_ARIA_IDREFS = frozenset(
+    {
+        "aria-activedescendant",
+        "aria-controls",
+        "aria-describedby",
+        "aria-details",
+        "aria-errormessage",
+        "aria-flowto",
+        "aria-labelledby",
+        "aria-owns",
+    }
+)
+_XML_SPACE = " \t\r\n"
 _PROTECTED_MARKER_ANCESTORS = {"code", "math", "pre", "script", "style"}
 _NESTED_CSS_RULES = {"container", "document", "layer", "media", "scope", "starting-style", "supports"}
 _UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -459,7 +472,55 @@ def _normalize_xhtml(
     result = data
     for start, end, replacement in sorted(patches, reverse=True):
         result = result[:start] + replacement + result[end:]
+    if patches:
+        if not any(_ARIA_IDREFS.intersection(element.attrib) for element in root.iter()):
+            return result
+        # Resolve IDs after normalization and index the updated start tags.
+        parsed = parse_resource(result, "application/xhtml+xml")
+        if parsed.tree is None:
+            return result
+        root = parsed.tree.getroot()
+        indexed = index_resource(parsed)
+    for start, end, replacement in sorted(_dangling_aria_patches(result, indexed, root), reverse=True):
+        result = result[:start] + replacement + result[end:]
     return result
+
+
+def _dangling_aria_patches(
+    data: bytes, indexed: ResourceIndex, root: etree._Element
+) -> Iterable[tuple[int, int, bytes]]:
+    """Drop only ID references that cannot resolve within this XHTML document."""
+    ids = {element.get("id") for element in root.iter() if element.get("id")}
+    for element in root.iter():
+        changes: dict[str, str] = {}
+        for name in _ARIA_IDREFS.intersection(element.attrib):
+            value = element.attrib[name]
+            if name == "aria-activedescendant":
+                # Unlike an IDREF list, this property requires an exact match.
+                if value not in ids:
+                    changes[name] = ""
+                continue
+            tokens = re.findall(r"[^ \t\r\n]+", value)
+            local = [token for token in tokens if token in ids]
+            if not tokens or local != tokens:
+                changes[name] = " ".join(local)
+        if not changes:
+            continue
+        span = indexed.nodes[element_path(element)].starttag
+        tag = data[span.start : span.end].decode(indexed.encoding)
+        for name, start, end in _attributes(tag, 0, len(tag)):
+            if name not in changes:
+                continue
+            value = changes[name]
+            if not value:
+                name_start = tag.rindex(name, 0, start)
+                start = len(tag[:name_start].rstrip(_XML_SPACE))
+                end += 1  # Include the closing quote.
+            yield (
+                span.start + len(tag[:start].encode(indexed.encoding)),
+                span.start + len(tag[:end].encode(indexed.encoding)),
+                html.escape(value, quote=True).encode(indexed.encoding),
+            )
 
 
 _CALIBRE_PAGEBREAK_ID = re.compile(r"calibre_pb_[0-9]+\Z")

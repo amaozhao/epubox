@@ -33,6 +33,54 @@ class StubChecker:
         return EpubCheckResult(("stub-epubcheck",), 0)
 
 
+def test_publication_preflight_rejects_all_candidate_errors_before_preparation_commit(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub")
+    original = source.read_bytes()
+
+    class CandidateChecker:
+        def __init__(self) -> None:
+            self.paths: list[Path] = []
+
+        def check(self, path: Path) -> EpubCheckResult:
+            self.paths.append(path)
+            if path.name != "candidate.epub":
+                return EpubCheckResult(("stub-epubcheck",), 0)
+            errors = (
+                f"ERROR(RSC-005): {path}/OEBPS/chapter.xhtml(1,1): first candidate error",
+                f"ERROR(RSC-005): {path}/OEBPS/nav.xhtml(1,1): second candidate error",
+            )
+            return EpubCheckResult(("stub-epubcheck",), 1, errors=errors)
+
+    checker = CandidateChecker()
+    config = PreparationConfig(run_id="publication-preflight")
+
+    with pytest.raises(EpubValidationError) as raised:
+        prepare_book(source, tmp_path / "work", config, checker, publication_preflight=True)
+
+    assert raised.value.code == "publication_preflight_failed"
+    assert len(raised.value.issues) == 2
+    assert len(checker.paths) == 2
+    assert checker.paths[0].name == "source.epub"
+    assert checker.paths[1].name == "candidate.epub"
+    assert source.read_bytes() == original
+    assert not list((tmp_path / "work").glob("*/publication-preflight/preparation.json"))
+
+
+def test_low_level_preparation_remains_permissive_without_publication_preflight(tmp_path: Path) -> None:
+    source = make_epub(tmp_path / "book.epub")
+    checker = StubChecker()
+
+    prepared = prepare_book(
+        source,
+        tmp_path / "work",
+        PreparationConfig(run_id="permissive"),
+        checker,
+    )
+
+    assert prepared.preparation.state == "parsed_ready"
+    assert len(checker.paths) == 1 and checker.paths[0].name == "source.epub"
+
+
 def test_empty_nav_dtd_subset_survives_atomic_preparation(tmp_path: Path) -> None:
     source = make_epub(tmp_path / "book.epub")
     with zipfile.ZipFile(source) as archive:

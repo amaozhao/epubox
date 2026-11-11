@@ -86,9 +86,16 @@ async def prepare_translation(
     model: Any = None,
     output_policy_hash: str = "preserve-source-resources-1",
     progress: ProgressCallback | None = None,
+    publication_preflight: bool = False,
 ) -> PreparationPipelineResult:
     """Create P1 if needed, then advance the durable run through P4."""
-    store, preparation, preparation_hash = _p1(source, work_root, config, checker)
+    store, preparation, preparation_hash = _p1(
+        source,
+        work_root,
+        config,
+        checker,
+        publication_preflight=publication_preflight,
+    )
     if progress is not None and state.is_file(store.root / "report.json"):
         try:
             report = strict_json_loads(state.read(store.root / "report.json"))
@@ -701,7 +708,12 @@ async def _advance_atomic(
 
 
 def _p1(
-    source: Path, work_root: Path, config: PreparationConfig, checker: object
+    source: Path,
+    work_root: Path,
+    config: PreparationConfig,
+    checker: object,
+    *,
+    publication_preflight: bool = False,
 ) -> tuple[RunStore, PreparationPlan, str]:
     config = _pipeline_config(config)
     source = source.resolve(strict=True)
@@ -731,7 +743,13 @@ def _p1(
             ):
                 raise IdentityMismatch("resume configuration differs from the committed P1 inputs")
             return store, preparation, _sha256(preparation_path)
-    prepared = prepare_book(source, work_root, config, checker)
+    prepared = prepare_book(
+        source,
+        work_root,
+        config,
+        checker,
+        publication_preflight=publication_preflight,
+    )
     store = RunStore(prepared.work_dir)
     preparation = store.read_preparation()
     return store, preparation, _sha256(store.root / "preparation.json")
