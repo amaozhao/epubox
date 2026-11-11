@@ -88,6 +88,95 @@ def test_one_oversized_li_blocks_the_whole_list() -> None:
     assert not report.pieces
 
 
+def test_nested_list_after_inline_code_splits_inside_protected_text_domain() -> None:
+    body = (
+        '<ol start="3"><li>Start <code>fixed_code</code> details<ol>'
+        + "".join(f'<li id="step-{number}">{"word " * 650}</li>' for number in range(3))
+        + "</ol></li></ol>"
+    )
+    raw = f'<html xmlns="{XHTML}"><head/><body>{body}</body></html>'.encode()
+    inventory = extract_resource(raw, "OPS/chapter.xhtml", "book")
+    limits = BudgetLimits(
+        source_tokens=1500,
+        source_hard_limit=1500,
+        input_tokens=50_000,
+        output_tokens=None,
+        context_tokens=60_000,
+        output_version=7,
+    )
+    report = preflight_atomic_resources((inventory,), {"OPS/chapter.xhtml": raw}, limits, "gpt-3.5-turbo")
+
+    assert report.passed
+    assert report.diagnostics[0].status == "split"
+    assert all(piece.translate.fits and piece.review.fits for piece in report.pieces)
+    assert all(piece.translate.source_tokens <= 1500 for piece in report.pieces)
+    members = materialize_members((inventory,), report)
+    assert len(members) > 1
+    assert any("⟦+b" in member.source_prefix for member in members)
+    parent = inventory.items[0]
+    identity_records = {
+        member.item_id: ItemRecord(
+            item_id=member.item_id,
+            segment_id=member.item_id,
+            terms_hash="terms",
+            context_hash="context",
+            target_projection=member.source_projection,
+            target_hash=canonical_hash(member.source_projection),
+        )
+        for member in members
+    }
+    merged_source = merge_member_targets(parent, members, identity_records)
+    assert merged_source == parent.source_projection
+    assert fill_resource(raw, inventory, {parent.item_id: merged_source}, identity=True) == raw
+    records = {
+        member.item_id: identity_records[member.item_id].model_copy(
+            update={
+                "target_projection": (target := member.source_projection.replace("word", "文字")),
+                "target_hash": canonical_hash(target),
+            }
+        )
+        for member in members
+    }
+    merged = merge_member_targets(parent, members, records)
+    result = fill_resource(raw, inventory, {parent.item_id: merged})
+    assert b"<code>fixed_code</code>" in result
+    assert b' start="3"' in result
+    assert [node.get("id") for node in etree.fromstring(result).findall(".//{*}li[@id]")] == [
+        f"step-{number}" for number in range(3)
+    ]
+    assert b"word" not in result and "文字".encode() in result
+
+
+def test_successful_legacy_nested_pieces_keep_their_identities(monkeypatch) -> None:
+    from engine.services import lists
+
+    body = (
+        "<ol><li>Part<ol>"
+        + f"<li>{'word ' * 600}</li>" * 2
+        + "<li>Start <code>fixed_code</code> Details<ol>"
+        + f"<li>{'word ' * 200}</li>" * 3
+        + "</ol></li></ol></li></ol>"
+    )
+    raw = f'<html xmlns="{XHTML}"><head/><body>{body}</body></html>'.encode()
+    inventory = extract_resource(raw, "OPS/chapter.xhtml", "book")
+    limits = BudgetLimits(
+        source_tokens=1500,
+        source_hard_limit=1500,
+        input_tokens=50_000,
+        output_tokens=None,
+        context_tokens=60_000,
+        output_version=7,
+    )
+    layout = lists._nested_layout
+    with monkeypatch.context() as legacy:
+        legacy.setattr(lists, "_nested_layout", lambda parent, **kwargs: layout(parent, protected_domains=False))
+        previous = preflight_atomic_resources((inventory,), {"OPS/chapter.xhtml": raw}, limits, "gpt-3.5-turbo")
+    assert previous.passed and previous.diagnostics[0].status == "split"
+    current = preflight_atomic_resources((inventory,), {"OPS/chapter.xhtml": raw}, limits, "gpt-3.5-turbo")
+    assert current == previous
+    materialize_members((inventory,), current)
+
+
 def nested_directory(tag):
     entries = "".join(
         f'<ol><li><a href="chapter.xhtml#s{number}">Section {number} {"word " * 450}</a>'

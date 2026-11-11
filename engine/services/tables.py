@@ -30,13 +30,16 @@ def group_receipt(root: Path) -> Path:
     return root / "checks" / "groups.json"
 
 
-def upgrade_receipt(base: Any, target: Path, record: Any) -> Path:
-    """Keep a failed receipt and add a source-bound group-splitting proof before HTTP."""
+def upgrade_receipt(base: Any, target: Path, record: Any, *, attribute_ids: set[str] | None = None) -> Path:
+    """Keep failed receipts and add a source-bound splitting proof before HTTP."""
     from engine.services.preflight import _PreflightRecord, _read
 
-    if state.is_file(groups := group_receipt(base.root)):
-        return groups
-    if state.is_file(rows := row_receipt(base.root)):
+    attributes = base.root / "checks/attributes.json"
+    if state.is_file(attributes):
+        target = attributes
+    elif state.is_file(groups := group_receipt(base.root)):
+        target = groups
+    elif state.is_file(rows := row_receipt(base.root)):
         target = rows
     if not state.is_file(target):
         return target
@@ -44,7 +47,8 @@ def upgrade_receipt(base: Any, target: Path, record: Any) -> Path:
     allowed = {
         item.item_id
         for item in previous.report.diagnostics
-        if item.atomic_tag in {"table", "ul", "ol"} and item.status == "blocked"
+        if item.status == "blocked"
+        and (item.atomic_tag in {"table", "ul", "ol"} or item.item_id in (attribute_ids or set()))
     }
     if previous.report.check is not None or not allowed or previous == record:
         return target
@@ -70,6 +74,8 @@ def upgrade_receipt(base: Any, target: Path, record: Any) -> Path:
     lists_changed = any(
         item.item_id in allowed and item.atomic_tag in {"ul", "ol"} for item in previous.report.diagnostics
     )
+    if allowed.intersection(attribute_ids or ()):
+        return attributes
     return group_receipt(base.root) if lists_changed or target == row_receipt(base.root) else row_receipt(base.root)
 
 

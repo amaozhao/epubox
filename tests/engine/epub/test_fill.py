@@ -67,6 +67,30 @@ def test_unchanged_nested_attribute_keeps_its_original_entity_bytes() -> None:
     assert b'alt="A&#38;B"' in result
 
 
+@pytest.mark.parametrize(
+    ("label", "source_suffix", "target_suffix", "expected_suffix"),
+    (
+        ("n", "-gram count", "n-gram 计数", "-gram 计数"),
+        ("n", "-gram count", "-gram 计数", "-gram 计数"),
+        ("n", " n-gram count", " n-gram 计数", " n-gram 计数"),
+        ("m", "-gram count", "n-gram 计数", "n-gram 计数"),
+        ("n", "-gram count", "n-grams 计数", "n-grams 计数"),
+    ),
+)
+def test_fill_preserves_a_word_joined_to_an_svg_symbol(label, source_suffix, target_suffix, expected_suffix) -> None:
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" aria-label="{label}"><path d="M0 0"/></svg>'
+    raw = source(f"<p>Each {svg}<span>{source_suffix}</span></p>")
+    inventory = extract_resource(raw, "OPS/chapter.xhtml", "book")
+    item = next(item for item in inventory.items if item.atomic_tag == "p")
+    values = targets(inventory) | {
+        item.item_id: item.source_projection.replace("Each ", "每个 ").replace(source_suffix, target_suffix)
+    }
+
+    rendered = fill_resource(raw, inventory, values, chapter_typography=True)
+
+    assert f"{svg}<span>{expected_suffix}</span>".encode() in rendered
+
+
 def test_identity_validates_every_input_and_preserves_bytes() -> None:
     raw = source("<p>A &amp; B</p>")
     inventory = extract_resource(raw, "OPS/chapter.xhtml", "book")

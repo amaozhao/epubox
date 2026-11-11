@@ -17,7 +17,7 @@ from engine.core.markup import element_path, qname_local_name
 from engine.epub.parsing import ParsedResource, parse_resource
 from engine.epub.ranges import ResourceIndex, index_resource
 from engine.epub.styles import source_stylesheets
-from engine.epub.upgrade import _entity_patches, _normalize_xhtml
+from engine.epub.upgrade import _css_id_references, _entity_patches, _missing_kobo_script_paths, _normalize_xhtml
 from engine.schemas.bridge import TRANSLATABLE_ATTRIBUTES
 
 CODE_POLICY = "source-code-v2"
@@ -94,7 +94,7 @@ def _build_code_plan(
                 raise ValueError(f"code resource has no selected regions: {resource}")
             raw = archive.read(resource)
             parsed, indexed, nodes = _indexed(raw, "source")
-            if parsed.kind != "xhtml":
+            if parsed.kind != "xhtml" or parsed.tree is None:
                 raise ValueError(f"selected code resource is not XHTML: {resource}")
             paths = sorted(selected)
             _paths(paths)
@@ -207,7 +207,7 @@ def apply_code_plan(
         restored = candidate
         for span, data in sorted(patches, key=lambda item: item[0].start, reverse=True):
             restored = restored[: span.start] + data + restored[span.end :]
-        _validate_restored(context, restored)
+        _validate_restored(context, restored, paths=paths)
         if restored != context.raw or resource in result:
             result[resource] = restored
     return result, stats
@@ -288,7 +288,16 @@ class _Region:
 
 
 class _Context:
-    __slots__ = ("entity_patches", "indexed", "nodes", "parsed", "raw", "regions")
+    __slots__ = (
+        "entity_patches",
+        "indexed",
+        "nodes",
+        "parsed",
+        "protected_ids",
+        "raw",
+        "regions",
+        "upgrade_removed",
+    )
 
     def __init__(
         self,
@@ -298,6 +307,8 @@ class _Context:
         nodes: dict[tuple[int, ...], Any],
         regions: tuple[_Region, ...],
         entity_patches: tuple[tuple[int, int, bytes], ...],
+        upgrade_removed: tuple[tuple[int, ...], ...],
+        protected_ids: set[str],
     ):
         self.raw = raw
         self.parsed = parsed
@@ -305,6 +316,8 @@ class _Context:
         self.nodes = nodes
         self.regions = regions
         self.entity_patches = entity_patches
+        self.upgrade_removed = upgrade_removed
+        self.protected_ids = protected_ids
 
 
 def _source_contexts(source: Path, plan: Mapping[str, object]) -> tuple[dict[str, _Context], dict[str, int]]:
@@ -335,7 +348,7 @@ def _source_contexts(source: Path, plan: Mapping[str, object]) -> tuple[dict[str
             if _hash(raw) != record["source_hash"]:
                 raise ValueError(f"source resource hash differs from code plan: {resource}")
             parsed, indexed, nodes = _indexed(raw, "source")
-            if parsed.kind != "xhtml":
+            if parsed.kind != "xhtml" or parsed.tree is None:
                 raise ValueError(f"selected code resource is not XHTML: {resource}")
             context = CodeContext(parsed.tree, resource, styles)
             automatic = {element_path(node): kind for node, kind in context.regions.items()}
@@ -373,7 +386,16 @@ def _source_contexts(source: Path, plan: Mapping[str, object]) -> tuple[dict[str
                 raise ValueError(f"source code regions are not canonical: {resource}")
             _paths(paths)
             selected_regions += len(regions)
-            contexts[resource] = _Context(raw, parsed, indexed, nodes, tuple(regions), _entity_patches(raw, indexed))
+            contexts[resource] = _Context(
+                raw,
+                parsed,
+                indexed,
+                nodes,
+                tuple(regions),
+                _entity_patches(raw, indexed),
+                _missing_kobo_script_paths(parsed.tree.getroot(), resource, set(names)),
+                _css_id_references(styles.values()),
+            )
     return contexts, {
         "checked_resources": len(contexts),
         "selected_bytes": selected_bytes,
@@ -392,13 +414,51 @@ def _validate_candidate(
         raise ValueError(f"candidate topology cannot be verified: {error}") from error
     source_topology = {path: span.qname for path, span in context.indexed.nodes.items()}
     candidate_topology = {path: span.qname for path, span in indexed.nodes.items()}
-    paths = dict(node_map or {path: path for path in source_topology})
+    identity_paths = {path: path for path in source_topology}
+    upgrade_paths = _canonical_path_map(context, set(context.upgrade_removed))
+
+    def valid_shape(candidate: Mapping[tuple[int, ...], tuple[int, ...]]) -> bool:
+        if set(candidate.values()) != set(candidate_topology):
+            return False
+        missing_paths = set(source_topology) - set(candidate)
+        selected_paths = tuple(region.path for region in context.regions)
+        if any(
+            any(_contains(root, path) for root in selected_paths) or not _authorized_removal(context, path)
+            for path in missing_paths
+        ):
+            return False
+        try:
+            if dict(candidate) != _canonical_path_map(context, missing_paths):
+                return False
+        except ValueError:
+            return False
+        return all(
+            source_topology[source_path] == candidate_topology[target_path]
+            for source_path, target_path in candidate.items()
+        )
+
+    if node_map is None:
+        paths = identity_paths if set(candidate_topology) == set(source_topology) else upgrade_paths
+    else:
+        direct = dict(node_map)
+        composed = (
+            {
+                source_path: node_map[upgrade_path]
+                for source_path, upgrade_path in upgrade_paths.items()
+                if upgrade_path in node_map
+            }
+            if set(node_map) <= set(upgrade_paths.values())
+            else {}
+        )
+        paths = direct if valid_shape(direct) or not composed else composed
     _validate_path_map(paths)
     if set(paths.values()) != set(candidate_topology):
         raise ValueError("candidate element mapping is incomplete or non-bijective")
     selected = tuple(region.path for region in context.regions)
     missing = set(source_topology) - set(paths)
-    if any(any(_contains(root, path) for root in selected) or not _removable(context.nodes[path]) for path in missing):
+    if any(
+        any(_contains(root, path) for root in selected) or not _authorized_removal(context, path) for path in missing
+    ):
         raise ValueError("candidate removed a non-decorative or selected source element")
     if paths != _canonical_path_map(context, missing):
         raise ValueError("candidate element mapping is not the canonical order-preserving deletion map")
@@ -419,7 +479,12 @@ def _validate_candidate(
             # permitted attribute changes from the immutable source, never from
             # the candidate. Disable element deletion to retain source paths.
             _parsed, _indexed_resource, normalized_nodes = _indexed(
-                _normalize_xhtml(context.raw, allow_converter_markers=False), "normalized source"
+                _normalize_xhtml(
+                    context.raw,
+                    allow_converter_markers=False,
+                    protected_ids=context.protected_ids,
+                ),
+                "normalized source",
             )
         normalized = _frozen_attributes(normalized_nodes[path].attrib)
         if actual != normalized:
@@ -576,6 +641,10 @@ def _removable(node: Any) -> bool:
     )
 
 
+def _authorized_removal(context: _Context, path: tuple[int, ...]) -> bool:
+    return path in context.upgrade_removed or _removable(context.nodes[path])
+
+
 def _canonical_path_map(
     context: _Context,
     missing: set[tuple[int, ...]],
@@ -592,7 +661,7 @@ def _canonical_path_map(
                 continue
             child_path = element_path(child)
             if child_path in missing:
-                if not _removable(child) or any(_contains(child_path, path) for path in result):
+                if not _authorized_removal(context, child_path) or any(_contains(child_path, path) for path in result):
                     raise ValueError("candidate deletion does not match an empty decorative subtree")
                 continue
             target_path = result[source_path] + (retained_index,)

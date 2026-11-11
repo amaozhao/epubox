@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -25,6 +27,16 @@ from tests.engine.agents.test_workflow import prepare_case
 from tests.engine.epub.test_factory import make_epub
 from tests.engine.epub.test_preparation import StubChecker
 from tests.engine.services.test_store import _prepare
+
+
+def test_cli_preloads_atomic_publication_with_its_fill_dependency():
+    script = (
+        "import sys\n"
+        "import engine.cli\n"
+        "assert 'engine.epub.fill' in sys.modules\n"
+        "assert 'engine.epub.publish' in sys.modules\n"
+    )
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def test_source_diagnostics_and_inherited_output_errors_are_visible(capsys, tmp_path):

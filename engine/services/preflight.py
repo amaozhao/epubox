@@ -6,12 +6,14 @@ import hashlib
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from weakref import WeakKeyDictionary
 
 from pydantic import Field
 
+from engine.core.code import CODE_CLASSIFICATION_VERSIONS
 from engine.epub.fill import fill_resource
 from engine.epub.parsing import parse_resource
 from engine.epub.ranges import index_resource
@@ -75,6 +77,11 @@ class PreflightDiagnostic(FrozenModel):
     context_tokens: int = Field(ge=0, strict=True)
     failures: tuple[str, ...] = ()
     piece_ids: tuple[str, ...] = ()
+    source_label: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @property
+    def label(self) -> str:
+        return self.source_label or self.atomic_tag or "text"
 
 
 class PreflightReport(FrozenModel):
@@ -202,7 +209,14 @@ def write_preflight(
     from engine.services.tables import upgrade_receipt
 
     with base.lock(), state.batch(base.root):
-        target = upgrade_receipt(base, target, record)
+        target = upgrade_receipt(
+            base,
+            target,
+            record,
+            attribute_ids={
+                item.item_id for inventory in inventories for item in inventory.items if item.kind == "attribute"
+            },
+        )
         for inventory in inventories:
             _write_immutable(
                 base.path("inventories", inventory.document.document_id),
@@ -255,6 +269,8 @@ def receipt_path(root: Path) -> Path:
     """Return the active logical preflight receipt without changing old records."""
     from engine.services.tables import group_receipt, row_receipt
 
+    if state.is_file(attributes := root / "checks/attributes.json"):
+        return attributes
     if state.is_file(groups := group_receipt(root)):
         return groups
     if state.is_file(rows := row_receipt(root)):
@@ -570,6 +586,11 @@ def _preflight_item(
         context_tokens=max(whole.translate.context_tokens, whole.review.context_tokens),
         failures=tuple(dict.fromkeys(failures)),
         piece_ids=tuple(piece.piece_id for piece in selected),
+        source_label=(
+            f"{inventory.document.nodes[item.node_key].qname.rsplit('}', 1)[-1]}@{item.region['attribute_name']}"
+            if status == "blocked" and item.kind == "attribute"
+            else None
+        ),
     )
 
 
@@ -597,6 +618,7 @@ def _extract_inventory(work: _ExtractInput) -> AtomicDocument:
         document.resource.media_type,
         extractor_version=_extractor_version(document),
         styles=work.styles,
+        code_policy=_code_policy(document),
     )
 
 
@@ -641,6 +663,14 @@ def _split_virtual(
     limits: BudgetLimits,
     model: str,
 ) -> tuple[PreflightPiece, ...]:
+    if item.kind == "attribute":
+        from engine.item.attributes import attribute_boundaries
+
+        cuts = attribute_boundaries(inventory, item, raw)
+        offsets = (0, *(offset for offset, _byte in cuts), len(item.source_projection))
+        fragments = tuple(item.source_projection[start:end] for start, end in pairwise(offsets))
+        byte_cuts = (item.source_span.byte_start, *(byte for _offset, byte in cuts), item.source_span.byte_end)
+        return _pack_fragments(inventory, item, fragments, byte_cuts, limits, model, binary=True)
     boundaries = item.region.get("safe_boundaries")
     if not isinstance(boundaries, list) or not boundaries:
         return ()
@@ -667,6 +697,8 @@ def _pack_fragments(
     byte_cuts: Sequence[int],
     limits: BudgetLimits,
     model: str,
+    *,
+    binary: bool = False,
 ) -> tuple[PreflightPiece, ...]:
     if len(fragments) + 1 != len(byte_cuts):
         return ()
@@ -675,7 +707,9 @@ def _pack_fragments(
     while start < len(fragments):
         chosen: PreflightPiece | None = None
         chosen_end = start + 1
-        for end in range(start + 1, len(fragments) + 1):
+        low, high = start + 1, len(fragments)
+        while low <= high:
+            end = (low + high) // 2 if binary else low
             byte_start, byte_end = byte_cuts[start], byte_cuts[end]
             source = "".join(fragments[start:end])
             piece_id = (
@@ -694,8 +728,12 @@ def _pack_fragments(
                 model,
             )
             if not candidate.translate.fits or not candidate.review.fits:
-                break
+                if not binary:
+                    break
+                high = end - 1
+                continue
             chosen, chosen_end = candidate, end
+            low = end + 1
         if chosen is None:
             return ()
         result.append(chosen)
@@ -839,6 +877,22 @@ def _extractor_version(document: DocumentPlan) -> str:
         if document.extractor_version in _SUPPORTED_EXTRACTOR_VERSIONS
         else ATOMIC_EXTRACTOR_VERSION
     )
+
+
+def _code_policy(document: DocumentPlan) -> str | None:
+    policies = [
+        boundary.get("policy") for boundary in document.boundaries if boundary.get("kind") == "code_style_context"
+    ]
+    if not policies:
+        if document.resource.media_type == "application/xhtml+xml" and document.extractor_version in {
+            "epubox-atomic-6",
+            ATOMIC_EXTRACTOR_VERSION,
+        }:
+            raise IdentityMismatch("prepared XHTML document is missing its code classification policy")
+        return None
+    if len(policies) != 1 or not isinstance(policies[0], str) or policies[0] not in CODE_CLASSIFICATION_VERSIONS:
+        raise IdentityMismatch("prepared document has an invalid code classification policy")
+    return policies[0]
 
 
 def _snapshot_resources(path: Path, inventories: Sequence[AtomicDocument]) -> dict[str, bytes]:

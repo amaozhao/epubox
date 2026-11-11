@@ -1,0 +1,10 @@
+Generated with the built-in image_gen tool.
+
+Use case: logo-brand
+Asset type: square website icon / favicon for epubox.com (EPUBox), an EPUB ebook translation tool.
+Primary request: create one polished, distinctive square brand icon. Fuse an open book and a compact box into ONE coherent, bold geometric symbol: two crisp pages rise from a simple box-like base, with elegant negative space suggesting a subtle lowercase e. The silhouette should communicate digital books and organized knowledge.
+Style/medium: premium minimal flat vector-like brand design rendered as a high-resolution raster. Strong solid shapes, restrained geometry, optically balanced.
+Composition/framing: exactly 1:1 square canvas, preferably 1024x1024. One centered symbol filling about 72% of the canvas with even breathing room, on a solid deep ink-blue background. Bright ivory book mark with a small teal accent integrated into one page. Background reaches all four edges, square corners.
+Constraints: favicon readability at 32px, strong contrast, few broad shapes. One final icon only.
+Text: none. No domain lettering, no wordmark.
+Avoid: multiple variants, presentation board, mockup, frame, drop shadows, photorealism, 3D, gradients, tiny lines, ornamental detail, sparkles, arrows, watermark.

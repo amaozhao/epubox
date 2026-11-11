@@ -498,7 +498,7 @@ async def _advance_atomic(
                 _http_attempts(store),
                 "\n".join(
                     f"预检阻塞：{diagnostic.resource_path}，单元 {diagnostic.item_id}，"
-                    f"标签 {diagnostic.atomic_tag or 'text'}，正文 {diagnostic.source_tokens} tokens；"
+                    f"标签 {diagnostic.label}，待译内容 {diagnostic.source_tokens} tokens；"
                     f"原因：{'; '.join(diagnostic.failures)}"
                     for diagnostic in blocked
                 ),

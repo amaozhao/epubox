@@ -6,13 +6,13 @@ import zipfile
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS, extract_resource
+from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS
 from engine.schemas.bridge import AtomicDocument
 from engine.schemas.budget import BudgetLimits
 from engine.schemas.contracts import DocumentPlan, JsonValue, PreparationPlan, TermExtractionPlan, parse_contract
 from engine.services import state
 from engine.services.atomic import IdentityMismatch
-from engine.services.preflight import require_preflight
+from engine.services.preflight import _extract_inventory, _ExtractInput, require_preflight
 from engine.services.terms.planning import plan_atomic_terms, plan_term_extraction
 
 if TYPE_CHECKING:
@@ -114,13 +114,8 @@ def canonical_documents(
 
             styles = source_stylesheets(archive)
             by_id = {
-                document_id: extract_resource(
-                    archive.read(document.resource.path),
-                    document.resource.path,
-                    preparation.source_hash,
-                    document.resource.media_type,
-                    extractor_version=document.extractor_version,
-                    styles=styles,
+                document_id: _extract_inventory(
+                    _ExtractInput(document, archive.read(document.resource.path), preparation.source_hash, styles)
                 )
                 for document_id, document in documents.items()
             }

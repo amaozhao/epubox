@@ -124,7 +124,7 @@ def materialize_document_members(
         diagnostic = diagnostics[parent.item_id]
         if diagnostic.status == "blocked" or tuple(piece.piece_id for piece in pieces) != diagnostic.piece_ids:
             raise ValueError("preflight diagnostics differ from accepted piece coverage")
-        _validate_coverage(parent, pieces, node_spans=inventory.source_map.node_spans)
+        _validate_coverage(parent, pieces, node_spans=inventory.source_map.node_spans, inventory=inventory)
         if any(
             piece.item_id != parent.item_id
             or piece.document_id != parent.document_id

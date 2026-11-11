@@ -6,7 +6,7 @@ from types import MappingProxyType
 from typing import Any
 
 from engine.item.inline import projection_identities, validate_projection
-from engine.schemas.bridge import AtomicItem, ByteSpan
+from engine.schemas.bridge import AtomicDocument, AtomicItem, ByteSpan
 from engine.schemas.contracts import RegistryEntry, canonical_hash
 from engine.schemas.members import RequestMember
 from engine.services.preflight import validate_list_pieces
@@ -72,7 +72,11 @@ def initialize_verified_catalog(
 
 
 def validate_coverage(
-    parent: AtomicItem, pieces: Sequence[Any], *, node_spans: Mapping[str, ByteSpan] | None = None
+    parent: AtomicItem,
+    pieces: Sequence[Any],
+    *,
+    node_spans: Mapping[str, ByteSpan] | None = None,
+    inventory: AtomicDocument | None = None,
 ) -> None:
     if not pieces or pieces[0].source_span.byte_start != parent.source_span.byte_start:
         raise ValueError("preflight pieces must start at the parent source span")
@@ -106,7 +110,18 @@ def validate_coverage(
         if isinstance(boundaries, list)
         else set()
     )
-    if parent.atomic_tag in {"ul", "ol"}:
+    if parent.kind == "attribute":
+        from engine.item.attributes import attribute_boundaries
+
+        if inventory is None:
+            raise ValueError("split attributes require frozen source evidence")
+        boundaries_by_byte = {byte: offset for offset, byte in attribute_boundaries(inventory, parent)}
+        cursor = 0
+        for piece in pieces[:-1]:
+            cursor += len(piece.source_projection)
+            if boundaries_by_byte.get(piece.source_span.byte_end) != cursor:
+                raise ValueError("attribute piece seam differs from its verified source boundary")
+    elif parent.atomic_tag in {"ul", "ol"}:
         validate_list_pieces(parent, pieces, node_spans=node_spans)
     elif parent.atomic_tag == "table":
         validate_table_pieces(parent, pieces, node_spans=node_spans)

@@ -1,4 +1,4 @@
-"""Conservative CSS checks used only to decide inline reorder permission."""
+"""Conservative CSS checks used to decide inline reorder permission and code faces."""
 
 from __future__ import annotations
 
@@ -9,6 +9,139 @@ from enum import StrEnum
 from typing import Any, Literal
 
 import tinycss2
+
+
+class CodeStyleError(ValueError):
+    """A deterministic local code/style compatibility failure."""
+
+
+class StylesheetSources(dict[str, str]):
+    """Decoded CSS plus the complete package inventory proving absent resources."""
+
+    def __init__(self, styles: Mapping[str, str], *, package_paths: Iterable[str]) -> None:
+        super().__init__(styles)
+        self.package_paths = frozenset(package_paths)
+
+
+GENERIC_FAMILIES = frozenset(
+    {
+        "serif",
+        "sans-serif",
+        "monospace",
+        "cursive",
+        "fantasy",
+        "system-ui",
+        "ui-serif",
+        "ui-sans-serif",
+        "ui-monospace",
+        "ui-rounded",
+        "math",
+        "fangsong",
+    }
+)
+
+KNOWN_MONOSPACE_FAMILIES = frozenset(
+    {
+        "andale mono",
+        "consolas",
+        "courier",
+        "courier new",
+        "dejavu sans mono",
+        "fira code",
+        "jetbrains mono",
+        "liberation mono",
+        "lucida console",
+        "menlo",
+        "monaco",
+        "noto sans mono",
+        "roboto mono",
+        "sf mono",
+        "sfmono-regular",
+        "source code pro",
+        "ubuntu mono",
+    }
+)
+
+
+def font_family_kind(value: str, *, generic_anywhere: bool = True) -> Literal["mono", "other", "dynamic", "invalid"]:
+    """Apply the static font-family heuristic used for code protection.
+
+    Current policy accepts a generic at any list position and follows the first
+    recognized generic or known face. Legacy policy retains the older final-generic
+    restriction. Actual glyph selection remains reader and platform dependent.
+    """
+    tokens = tinycss2.parse_component_value_list(value)
+    if any(token.type == "function" for token in tokens):
+        return "dynamic"
+    groups = _family_groups(tokens)
+    if groups is None:
+        return "invalid"
+    if not generic_anywhere:
+        names: list[str] = []
+        for index, group in enumerate(groups):
+            generics = [token for token in group if token.type == "ident" and token.lower_value in GENERIC_FAMILIES]
+            if generics and (len(group) != 1 or index != len(groups) - 1):
+                return "invalid"
+            names.append(" ".join(str(token.value) for token in group).casefold())
+        final = groups[-1]
+        generic_mono = (
+            len(final) == 1 and final[0].type == "ident" and final[0].lower_value in {"monospace", "ui-monospace"}
+        )
+        return "mono" if generic_mono or any(name in KNOWN_MONOSPACE_FAMILIES for name in names) else "other"
+    if any(_misuses_generic(group) for group in groups):
+        return "invalid"
+    return "mono" if _selects_monospace(groups) else "other"
+
+
+def monospace_family(value: str, *, generic_anywhere: bool = True) -> bool:
+    """Return whether a valid family list explicitly selects a known monospace face."""
+    return font_family_kind(value, generic_anywhere=generic_anywhere) == "mono"
+
+
+def _family_groups(tokens: Sequence[Any]) -> list[list[Any]] | None:
+    """Split component values into comma separated groups of family tokens."""
+    groups: list[list[Any]] = [[]]
+    for token in tokens:
+        if token.type in {"whitespace", "comment"}:
+            continue
+        if token.type == "literal" and getattr(token, "value", None) == ",":
+            if not groups[-1]:
+                return None
+            groups.append([])
+        elif token.type in {"ident", "string"}:
+            groups[-1].append(token)
+        else:
+            return None
+    if not groups[-1]:
+        return None
+    return groups
+
+
+def _generic_family(group: Sequence[Any]) -> str | None:
+    """Return the generic keyword when the group is exactly one generic family."""
+    if len(group) != 1:
+        return None
+    token = group[0]
+    if token.type == "ident" and token.lower_value in GENERIC_FAMILIES:
+        return token.lower_value
+    return None
+
+
+def _misuses_generic(group: Sequence[Any]) -> bool:
+    """Return whether a group mixes a generic keyword with other family names."""
+    if _generic_family(group) is not None:
+        return False
+    return any(token.type == "ident" and token.lower_value in GENERIC_FAMILIES for token in group)
+
+
+def _selects_monospace(groups: Sequence[Sequence[Any]]) -> bool:
+    """Return whether the family list selects a monospace face."""
+    for group in groups:
+        if (generic := _generic_family(group)) is not None:
+            return generic in {"monospace", "ui-monospace"}
+        if " ".join(str(token.value) for token in group).casefold() in KNOWN_MONOSPACE_FAMILIES:
+            return True
+    return False
 
 
 class ReorderPolicy(StrEnum):

@@ -4,6 +4,8 @@ import hashlib
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from engine.epub.cleanup import CLEANUP_POLICY, cleanup_resources
 from tests.engine.epub.test_factory import make_epub
 
@@ -192,3 +194,70 @@ def test_nested_empty_wrappers_are_removed_in_one_idempotent_pass() -> None:
     assert stats["removed_empty_tags"] == 3
     repeated, again = cleanup_resources(resources, media_types=MEDIA_TYPES)
     assert repeated == resources and again["changed_documents"] == 0
+
+
+@pytest.mark.parametrize("pseudo", ["marker", "selection", "placeholder", "file-selector-button", "spelling-error"])
+@pytest.mark.parametrize("subject", [".bullet1 ", ".bullet1 > ", ".bullet1 li", ""])
+def test_generated_pseudo_elements_keep_css_and_allow_chinese_cleanup(pseudo, subject):
+    css = f"{subject}::{pseudo} {{ font-size: 10px; }}"
+    raw = document(
+        '<ul class="bullet1"><li>中 文 内容。</li></ul><p>普 通 正文。</p>',
+        f"<title>Chapter</title><style>{css}</style>",
+    )
+    result, stats = clean(raw)
+    assert "<li>中文内容。</li>".encode() in result[PATH]
+    assert "<p>普通正文。</p>".encode() in result[PATH]
+    assert css.encode() in result[PATH]
+    assert not stats.get("skipped_documents", 0)
+
+
+def test_uncertain_optional_typography_keeps_one_document_and_finishes_other_documents():
+    unsafe = document(
+        "<p>中 文 原样。</p><span></span>", "<style>p::future-layout(example) { font-size: 10px; }</style>"
+    )
+    other = "OEBPS/other.xhtml"
+    plain = document("<p>普 通 正文。</p>")
+    mappings = {}
+    result, stats = cleanup_resources({PATH: unsafe, other: plain}, node_maps=mappings)
+    assert result[PATH] == unsafe
+    assert "<p>普通正文。</p>".encode() in result[other]
+    assert stats["skipped_documents"] == 1
+    assert stats["changed_documents"] == 1
+    assert mappings[PATH] and all(source == target for source, target in mappings[PATH].items())
+
+
+@pytest.mark.parametrize("pseudo,skipped", [("marker", False), ("future-layout(example)", True)])
+def test_saved_translation_publishes_with_pseudo_elements_and_optional_cleanup_fallback(
+    tmp_path, monkeypatch, pseudo, skipped
+):
+    from engine.epub.publish import publish_atomic, recover_atomic
+    from engine.schemas.contracts import canonical_json_bytes
+    from engine.services.journal import BodyJournal
+    from tests.engine.epub.test_preparation import StubChecker
+    from tests.engine.epub.test_publish import _case
+
+    css = f".bullet1 ::{pseudo} {{ font-size:10px; }}"
+    case = _case(tmp_path, f'<style>{css}</style><p class="bullet1">English text.</p>', ("English text.",))
+    targets = {
+        item.item_id: item.source_projection.replace("English text.", "中 文 译文。")
+        for inventory in case.index.inventories
+        for item in inventory.items
+    }
+    before = canonical_json_bytes(targets)
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+    output = tmp_path / "reader.epub"
+
+    result = publish_atomic(case.session.store, output, StubChecker())
+
+    proof = result["verification"]
+    assert isinstance(proof, dict)
+    stats = proof["cleanup_stats"]
+    assert isinstance(stats, dict)
+    assert bool(stats.get("skipped_documents", 0)) == skipped
+    with zipfile.ZipFile(output) as archive:
+        rendered = archive.read("OEBPS/chapter.xhtml")
+    assert ("中 文 译文。" if skipped else "中文译文。").encode() in rendered
+    assert b"English text." not in rendered
+    assert css.encode() in rendered
+    assert canonical_json_bytes(targets) == before
+    assert recover_atomic(case.session.store, output, checker=StubChecker()) is not None

@@ -159,7 +159,33 @@ def _looks_like_bibliographic_reference(text: str) -> bool:
             and (has_original_title or has_publisher_hint(stripped))
         ):
             return True
+        if _looks_like_chinese_reference_entry(stripped):
+            return True
     return False
+
+
+_CHINESE_REFERENCE_TITLE = re.compile(r'[”"》]\s*[（(](?P<original>[^（）()]{1,300})[）)]\s*[,，]?\s*(?=《)')
+_CHINESE_REFERENCE_PUBLICATION = re.compile(r"《[^》]{1,60}》")
+_CHINESE_REFERENCE_YEAR = re.compile(
+    r"(?:[（(]\s*(?:18|19|20)\d{2}[a-z]?\s*[年]?\s*[）)]|(?:18|19|20)\d{2}[a-z]?\s*[年。.])"
+)
+_CHINESE_REFERENCE_VOLUME = re.compile(r"第\s*\d+\s*[卷期]")
+_CHINESE_REFERENCE_PAGES = re.compile(r"\d+\s*[-–—~]\s*\d+")
+
+
+def _looks_like_chinese_reference_entry(value: str) -> bool:
+    """Allow the original title beside a translated title and journal citation."""
+    title = _CHINESE_REFERENCE_TITLE.search(value)
+    if title is None or len(re.findall(r"[A-Za-z][A-Za-z'’.-]*", title["original"])) < 6:
+        return False
+    citation = value[title.end() :]
+    if not _CHINESE_REFERENCE_PUBLICATION.match(citation) or not _CHINESE_REFERENCE_YEAR.search(citation):
+        return False
+    if not (_CHINESE_REFERENCE_VOLUME.search(citation) or _CHINESE_REFERENCE_PAGES.search(citation)):
+        return False
+    start, end = title.span("original")
+    remainder = value[:start] + value[end:]
+    return _analyze_untranslated_english_text(remainder).decision != EnglishResidualDecision.FAIL
 
 
 UNTRANSLATED_SKIP_TAGS = {"pre", "code", "math", "script", "style"}

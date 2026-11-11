@@ -6,6 +6,7 @@ import pytest
 from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.code import CODE_CLASSIFICATION_VERSION, CodeContext, monospace_family
+from engine.core.styles import CodeStyleError
 from engine.item.atoms import extract_resource
 
 XHTML = "http://www.w3.org/1999/xhtml"
@@ -19,12 +20,18 @@ def _by_id(root: etree._Element, value: str) -> etree._Element:
     return next(node for node in root.iter() if node.get("id") == value)
 
 
-def test_generated_python_listing_is_protected_but_same_markup_for_prose_stays_translatable() -> None:
+@pytest.mark.parametrize(
+    ("block_class", "line_class", "text_class"),
+    (("class-0-1", "class-0-2", "bookSpan"), ("class48", "class39", "bookspan")),
+)
+def test_generated_python_listing_is_protected_but_same_markup_for_prose_stays_translatable(
+    block_class: str, line_class: str, text_class: str
+) -> None:
     def listing(ident: str, first: str, second: str) -> str:
         return (
-            f'<div id="{ident}" class="class-0-1">'
-            f'<span class="class-0-2"><span class="bookSpan">{first}</span></span><br/>'
-            f'<span class="class-0-2"><span class="bookSpan">{second}</span></span></div>'
+            f'<div id="{ident}" class="{block_class}">'
+            f'<span class="{line_class}"><span class="{text_class}">{first}</span></span><br/>'
+            f'<span class="{line_class}"><span class="{text_class}">{second}</span></span></div>'
         )
 
     root = _root(
@@ -53,7 +60,7 @@ def test_semantic_code_elements_form_maximal_nonoverlapping_regions() -> None:
     )
     context = CodeContext(root, "OPS/chapter.xhtml")
 
-    assert CODE_CLASSIFICATION_VERSION == "code-context-2"
+    assert CODE_CLASSIFICATION_VERSION == "code-context-3"
     assert context.regions == {
         _by_id(root, "code"): "inline",
         _by_id(root, "pre"): "block",
@@ -291,6 +298,71 @@ def test_known_system_monospace_family_is_recognized_without_generic_fallback(fa
 
 def test_quoted_generic_monospace_is_not_a_generic_family() -> None:
     assert not monospace_family("'monospace'")
+
+
+def test_generic_family_may_appear_at_any_position_in_the_family_list() -> None:
+    assert monospace_family("monospace, monospace")
+    assert monospace_family("monospace, serif")
+    assert not monospace_family("serif, monospace")
+
+
+def test_generic_family_before_a_named_face_keeps_the_named_face_selection() -> None:
+    root = _root(
+        '<p><span id="literal" style="font-family: monospace, monospace">std::cout</span>'
+        '<span id="prose" style="font-family: serif, monospace">ordinary words</span></p>'
+    )
+    context = CodeContext(root, "OPS/chapter.xhtml")
+
+    assert context.regions == {_by_id(root, "literal"): "inline"}
+    assert not context.is_code(_by_id(root, "prose"))
+
+
+def test_generic_family_mixed_with_other_names_still_fails_closed() -> None:
+    root = _root('<p><span id="bad" style="font-family: monospace monospace">std::cout</span></p>')
+
+    with pytest.raises(CodeStyleError):
+        CodeContext(root, "OPS/chapter.xhtml")
+
+
+def test_calibre_numbered_code_classes_are_recognized_as_code() -> None:
+    root = _root(
+        '<div class="programcode1" id="PC1"><div class="unorderedlist">'
+        '<div class="fixedline1" id="line">@Html.ActionLink("Home", "Index")</div>'
+        "</div></div>"
+        '<p class="chapter1" id="prose">Ordinary words.</p>'
+    )
+    context = CodeContext(root, "OPS/chapter.xhtml")
+
+    assert context.regions == {_by_id(root, "line"): "block"}
+    assert not context.is_code(_by_id(root, "prose"))
+
+
+def test_context_two_replays_before_numbered_calibre_classes_and_generic_reordering() -> None:
+    root = _root('<div class="programcode1"><div id="line" class="fixedline1">let value = 1;</div></div>')
+
+    legacy = CodeContext(root, "OPS/chapter.xhtml", policy="code-context-2")
+    current = CodeContext(root, "OPS/chapter.xhtml", policy="code-context-3")
+
+    assert legacy.regions == {}
+    assert current.regions == {_by_id(root, "line"): "block"}
+
+    generic = _root('<span id="generic" style="font-family:monospace,serif">literal</span>')
+    with pytest.raises(CodeStyleError):
+        CodeContext(generic, "OPS/chapter.xhtml", policy="code-context-2")
+    assert CodeContext(generic, "OPS/chapter.xhtml", policy="code-context-3").regions == {
+        _by_id(generic, "generic"): "inline"
+    }
+
+
+def test_context_two_does_not_recognize_new_generated_python_class_shape() -> None:
+    root = _root(
+        '<div id="python" class="class48">'
+        '<span class="class39"><span class="bookspan">def render(row):</span></span><br/>'
+        '<span class="class39"><span class="bookspan">&#160;&#160;return row[0]</span></span></div>'
+    )
+
+    assert CodeContext(root, "OPS/chapter.xhtml", policy="code-context-2").regions == {}
+    assert CodeContext(root, "OPS/chapter.xhtml", policy="code-context-3").regions == {_by_id(root, "python"): "block"}
 
 
 def test_block_requires_preformatted_whitespace_and_explicit_monospace() -> None:
@@ -607,3 +679,37 @@ def test_conditional_inherited_style_that_changes_descendant_code_fails_closed()
 
     with pytest.raises(ValueError, match="conditional code style"):
         CodeContext(root, "OPS/chapter.xhtml")
+
+
+SHELL = (
+    '<p id="shell" class="class_s1BD"><span class="num">1 </span>'
+    '<span class="comment">#!/bin/bash</span><br/>'
+    '<span class="num">&#160;2 </span><span class="keyword">set</span> -euo pipefail<br/>'
+    '<span class="num">&#160;<span id="page_593"/>3 </span>'
+    '<span class="variable">HANDOFF_FILE</span>=&quot;${1:?missing handoff file path}&quot;<br/>'
+    '<span class="num">4 </span>git worktree add ../attempt -b attempt<br/></p>'
+)
+
+
+@pytest.mark.parametrize("page_anchor", ("", '<span id="page_594"/>'))
+def test_numbered_highlighted_shell_is_preserved_without_swallowing_prose(page_anchor):
+    shell = SHELL.replace('<span class="num">4 ', page_anchor + '<span class="num">4 ')
+    root = etree.fromstring(
+        ('<html xmlns="http://www.w3.org/1999/xhtml"><body>' + shell + "<p>Translate this.</p></body></html>").encode()
+    )
+    block = next(node for node in root.iter() if node.get("id") == "shell")
+    assert CodeContext(root, "OPS/chapter.xhtml").regions == {block: "block"}
+
+
+def test_numbered_prose_or_broken_line_sequence_cannot_claim_shell_preservation():
+    for body in (SHELL.replace("#!/bin/bash", "A shell script starts here."), SHELL.replace("4 </span>", "8 </span>")):
+        root = etree.fromstring(
+            ('<html xmlns="http://www.w3.org/1999/xhtml"><body>' + body + "</body></html>").encode()
+        )
+        assert not CodeContext(root, "OPS/chapter.xhtml").regions
+
+
+def test_atomic7_frozen_shell_inventory_keeps_its_original_members():
+    raw = ('<html xmlns="http://www.w3.org/1999/xhtml"><body>' + SHELL + "</body></html>").encode()
+    frozen = extract_resource(raw, "OPS/chapter.xhtml", "source", extractor_version="epubox-atomic-7")
+    assert any("#!/bin/bash" in item.source_projection for item in frozen.items)

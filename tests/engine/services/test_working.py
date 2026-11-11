@@ -1,5 +1,9 @@
+from types import SimpleNamespace
+from typing import Any, cast
+
 import pytest
 
+from engine.services.ready import _source_view_text
 from engine.services.working import RecordSequence, RecordView
 
 
@@ -36,6 +40,28 @@ def test_oversized_record_is_not_retained_and_sequence_preserves_order():
     assert list(values) == ["b", "a"]
     assert view.cached_bytes == 0
     assert reads == ["a", "b", "b", "a", "b", "a"]
+
+
+def test_source_view_text_reads_one_oversized_inventory_once_per_member():
+    reads = []
+    views = {
+        "v1": SimpleNamespace(text="First view."),
+        "v2": SimpleNamespace(text="Second view."),
+        "v3": SimpleNamespace(text="Third view."),
+    }
+
+    def load(key):
+        reads.append(key)
+        value = SimpleNamespace(document=SimpleNamespace(source_views=views))
+        return cast(Any, value), 20
+
+    inventories = RecordView(("document",), load, max_bytes=10)
+
+    assert _source_view_text(inventories, "document", ("v1", "v2", "v3")) == ("First view.\nSecond view.\nThird view.")
+    assert reads == ["document"]
+    assert inventories.cached_bytes == 0
+    assert _source_view_text(inventories, "document", ()) == ""
+    assert reads == ["document"]
 
 
 def test_budget_cache_evicts_models_without_serializing_them():

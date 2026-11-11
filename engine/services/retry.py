@@ -15,6 +15,7 @@ from engine.agents.workflow import _validate_saved_record
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_json_bytes
 from engine.services import state
 from engine.services.atomic import IdentityMismatch
+from engine.services.attributes import contextual_retry_feedback
 from engine.services.custody import epoch as saved_epoch
 from engine.services.custody import retry_checks
 
@@ -144,16 +145,16 @@ def retry_units(journal: BodyJournal, unit_ids: Sequence[str], *, retry_unknown:
                     saved_epoch(journal._records[item], "translation_epoch") for item in item_ids
                 )
                 for record in candidates:
+                    message = (
+                        str(record.failure["message"]) if record.failure and record.failure.get("message") else None
+                    )
+                    feedback = contextual_retry_feedback(journal, record, message) if message is not None else None
                     reopened = (
                         _initial(journal, record.item_id).model_copy(
                             update={
                                 "checks": {
                                     "translation_epoch": translation_epoch,
-                                    **(
-                                        {"retry_feedback": str(record.failure["message"])[:1200]}
-                                        if record.failure and record.failure.get("message")
-                                        else {}
-                                    ),
+                                    **({"retry_feedback": feedback} if feedback is not None else {}),
                                 }
                             }
                         )
@@ -162,7 +163,8 @@ def retry_units(journal: BodyJournal, unit_ids: Sequence[str], *, retry_unknown:
                             update={
                                 "stage": "proofread",
                                 "status": ItemStatus.LOCAL_VALID,
-                                "checks": retry_checks(record, review_epoch),
+                                "checks": retry_checks(record, review_epoch)
+                                | ({"retry_feedback": feedback} if feedback is not None else {}),
                                 "failure": None,
                                 "next_action": "review",
                             }

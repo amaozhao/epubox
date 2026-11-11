@@ -71,6 +71,56 @@ def test_streamed_budget_hash_is_byte_identical_to_canonical_payload() -> None:
         assert preflight_module.preflight_budget_hash("模型-α", limits_payload, pieces) == expected
 
 
+def test_preflight_replays_frozen_context_two_under_atomic_seven() -> None:
+    raw = source(
+        '<div class="programcode1"><div class="fixedline1">let value = 1;</div></div><p id="prose">Translate this.</p>'
+    )
+    legacy = extract_resource(
+        raw,
+        "OEBPS/chapter.xhtml",
+        "source",
+        code_policy="code-context-2",
+    )
+    current = extract_resource(
+        raw,
+        "OEBPS/chapter.xhtml",
+        "source",
+        code_policy="code-context-3",
+    )
+
+    replayed = preflight_module._extract_inventory(preflight_module._ExtractInput(legacy.document, raw, "source"))
+    replayed_current = preflight_module._extract_inventory(
+        preflight_module._ExtractInput(current.document, raw, "source")
+    )
+
+    assert replayed == legacy
+    assert replayed_current == current
+    assert current != legacy
+    assert any("let value" in item.source_projection for item in legacy.items)
+    assert all("let value" not in item.source_projection for item in current.items)
+
+    forged = legacy.document.model_copy(
+        update={
+            "boundaries": tuple(
+                boundary | ({"policy": "code-context-forged"} if boundary.get("kind") == "code_style_context" else {})
+                for boundary in legacy.document.boundaries
+            )
+        }
+    )
+    with pytest.raises(IdentityMismatch, match="code classification policy"):
+        preflight_module._extract_inventory(preflight_module._ExtractInput(forged, raw, "source"))
+
+    missing = legacy.document.model_copy(
+        update={
+            "boundaries": tuple(
+                boundary for boundary in legacy.document.boundaries if boundary.get("kind") != "code_style_context"
+            )
+        }
+    )
+    with pytest.raises(IdentityMismatch, match="missing its code classification policy"):
+        preflight_module._extract_inventory(preflight_module._ExtractInput(missing, raw, "source"))
+
+
 def stored(tmp_path: Path, raw: bytes, *, translation: dict | None = None):
     epub = make_epub(tmp_path / "input.epub", {"chapter.xhtml": raw.decode()})
     snapshot = tmp_path / "source.epub"

@@ -102,6 +102,49 @@ _HINT_LIMIT = 160
 _TERM_MODES = {"preferred", "required", "keep_source"}
 
 
+def is_numbered_shell_block(node: etree._Element) -> bool:
+    """Recognize a complete shell listing by its shebang and consecutive line labels."""
+    xhtml = "{http://www.w3.org/1999/xhtml}"
+    if node.tag != f"{xhtml}p" or (node.text or "").strip():
+        return False
+    if any(child.tag not in {f"{xhtml}span", f"{xhtml}br"} for child in node.iterdescendants()):
+        return False
+    lines: list[str] = []
+    current: list[str] | None = None
+    for child in node:
+        if (
+            child.tag == f"{xhtml}span"
+            and child.get("id")
+            and not len(child)
+            and not (child.text or "").strip()
+            and not (child.tail or "").strip()
+        ):
+            continue
+        if child.tag == f"{xhtml}br":
+            if current is None or len(child) or (child.text or "").strip() or (child.tail or "").strip():
+                return False
+            lines.append("".join(current))
+            current = None
+            continue
+        if current is None:
+            label = "".join(child.itertext())
+            if not re.fullmatch(r"\s*" + str(len(lines) + 1) + r"\s+", label):
+                return False
+            if any(len(descendant) or (descendant.text or "").strip() for descendant in child):
+                return False
+            current = [child.tail or ""]
+        else:
+            current.append("".join(child.itertext()))
+            current.append(child.tail or "")
+    if current is not None:
+        lines.append("".join(current))
+    return (
+        len(lines) >= 3
+        and re.fullmatch(r"#!\s*(?:/bin/|/usr/bin/(?:env\s+)?)(?:bash|sh|zsh|ksh)\s*", lines[0]) is not None
+        and sum(bool(line.strip()) for line in lines[1:]) >= 2
+    )
+
+
 def is_styled_code_block(node: etree._Element) -> bool:
     """Recognize complete, explicitly preformatted monospace blocks with syntax spans."""
     xhtml = "http://www.w3.org/1999/xhtml"

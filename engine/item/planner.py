@@ -17,6 +17,7 @@ import tiktoken
 
 from engine.agents.runtime import request_messages
 from engine.core.markup import UnsafeMarkupError, find_by_element_path, parse_xml_safely, qname_local_name
+from engine.core.tokens import encode_text
 from engine.item.inline import Event, events_to_projection, parse_projection, validate_projection
 from engine.schemas.internal import CutPlan, DocumentPlan, Segment, Unit, UnitRecord, canonical_hash
 
@@ -591,7 +592,7 @@ def _planner_tokenizer() -> Any | None:
 def _count_tokens(text: str) -> int:
     tokenizer = _planner_tokenizer()
     if tokenizer is not None:
-        return len(tokenizer.encode(text))
+        return len(encode_text(tokenizer, text))
     return max(1, len(text.encode("utf-8")))
 
 

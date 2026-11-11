@@ -416,3 +416,15 @@ def test_v4_actual_review_output_uses_the_saved_target() -> None:
     assert short.output_tokens == 4096
     assert long.output_tokens > short.output_tokens
     assert any(reason.startswith("output ") for reason in long.failures)
+
+
+def test_measure_budget_accepts_source_text_that_looks_like_a_special_token() -> None:
+    """A source document may contain "<|endoftext|>" verbatim; budgeting must not raise."""
+    source = (
+        'Canberra is known for its modern architecture and is often referred to as the "City of the Sun."'
+        "<|endoftext|>\r\ninstruct: The capital of Australia is **Canberra**.<|im_end|>"
+    )
+    request = payload("translate", (item(source),))
+    result = measure_budget(stage="translate", payload=request, limits=limits())
+
+    assert result.input_tokens > 0

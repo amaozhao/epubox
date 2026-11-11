@@ -14,6 +14,7 @@ WORDS = frozenset(
         "association",
         "atomic",
         "atoms",
+        "attributes",
         "audit",
         "base",
         "bindings",

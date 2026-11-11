@@ -13,7 +13,7 @@ from engine.services.working import BudgetCache, RecordView
 
 
 class _Tokenizer:
-    def encode(self, value: str) -> list[int]:
+    def encode(self, value: str, **kwargs: object) -> list[int]:
         return list(value.encode("utf-8"))
 
 

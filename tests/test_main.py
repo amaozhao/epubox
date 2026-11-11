@@ -91,6 +91,37 @@ def test_translate_cli_stops_on_source_projection_errors_without_retrying(tmp_pa
 
 
 @pytest.mark.parametrize(
+    "message",
+    (
+        "missing stylesheet required by code classification: EPUB/styles/stylesheet.css",
+        "remote stylesheet cannot be resolved for code classification: https://example.com/code.css",
+        "css import cycle includes stylesheet EPUB/styles/code.css",
+        "dynamic code style cannot be classified safely on <p>",
+    ),
+)
+def test_translate_cli_stops_on_code_style_errors_without_retrying(tmp_path: Path, monkeypatch, message: str) -> None:
+    source = tmp_path / "source.epub"
+    source.write_bytes(b"fixture")
+    calls = []
+
+    def invalid_code_style(*_args, **_kwargs):
+        calls.append(True)
+        raise main.CodeStyleError(message)
+
+    monkeypatch.setattr(main, "translate_book", invalid_code_style)
+    result = CliRunner().invoke(main.app, ["translate", str(source)])
+
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    assert "代码和样式兼容性校验失败，已停止自动续跑" in result.output
+    assert message in result.output
+    assert "这是本地兼容性检查，重复重试不会解决" in result.output
+    assert "原书和现有断点均已保留" in result.output
+    assert "自动续跑：" not in result.output
+    assert "本轮翻译中断" not in result.output
+
+
+@pytest.mark.parametrize(
     ("issues", "resources"),
     [
         (

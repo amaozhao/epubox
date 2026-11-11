@@ -424,7 +424,7 @@ def _verify(store: RunStore, ready: AtomicPreparedInput, progress: Callable[[str
         value = (
             plain_text(member.source_projection)
             if source_views is None
-            else "\n".join(inventories[document_id].document.source_views[view_id].text for view_id in source_views)
+            else _source_view_text(inventories, document_id, source_views)
         )
         return value, len(value.encode("utf-8")) * 2
 
@@ -609,6 +609,14 @@ def _inventory_view(store: RunStore, ready: AtomicPreparedInput) -> RecordView[A
         *(key for key in ready.plan.inventory_hashes if key not in ready.preparation.reading_order),
     )
     return RecordView(ordered, load, max_bytes=_SOURCE_CACHE_BYTES)
+
+
+def _source_view_text(inventories: Mapping[str, AtomicDocument], document_id: str, view_ids: Sequence[str]) -> str:
+    """Read one inventory once while composing one member's source views."""
+    if not view_ids:
+        return ""
+    source_views = inventories[document_id].document.source_views
+    return "\n".join(source_views[view_id].text for view_id in view_ids)
 
 
 class _DocumentView(Mapping[str, object]):

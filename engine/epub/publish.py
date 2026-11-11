@@ -232,18 +232,22 @@ def validate_atomic_output(store: RunStore, output_path: Path) -> None:
 
 
 def _recover(store, output_path, plan, targets, *, checker: object | None = None) -> dict[str, object] | None:
+    publish_path = store.root / "publish.json"
+    if not state.is_file(publish_path):
+        return None
     code_plan = _code_plan(store)
+    versions = _versions(targets, code_plan)
     intent = recover_publication(
-        store.root / "publish.json",
+        publish_path,
         plan_fingerprint=canonical_hash(plan),
-        version_vector=_versions(targets, code_plan),
+        version_vector=versions,
         allow_policy_upgrade=True,
     )
     if intent is None and code_plan is not None:
         # A newly approved code plan upgrades an existing verified publication
         # without reopening translation or discarding its accepted target proofs.
         intent = recover_publication(
-            store.root / "publish.json",
+            publish_path,
             plan_fingerprint=canonical_hash(plan),
             version_vector=_versions(targets),
             allow_policy_upgrade=True,
@@ -263,7 +267,20 @@ def _recover(store, output_path, plan, targets, *, checker: object | None = None
     snapshot = state.snapshot(store.root)
     if file_hash(snapshot) != plan.source_hash:
         raise EpubValidationError("source_changed", "Source snapshot changed after publication")
-    verify_baseline(snapshot, output_path, verification, checker, code_plan=code_plan)
+    previous_versions = intent.get("version_vector")
+    previous_code = (
+        previous_versions.get("@source-code", canonical_hash(None)) if isinstance(previous_versions, dict) else None
+    )
+    verify_baseline(
+        snapshot,
+        output_path,
+        verification,
+        checker,
+        code_plan=code_plan,
+        allow_code_plan_upgrade=(
+            previous_versions != versions and previous_code == verification.get("code_plan_hash")
+        ),
+    )
     return {"path": str(output_path), "sha256": target_hash, "verification": verification, "publish": intent}
 
 

@@ -17,6 +17,16 @@ def _get_tokenizer() -> Any | None:
             return None
 
 
+def encode_text(tokenizer: Any, text: str) -> list[int]:
+    """Encode plain payload text, including text that looks like a special token.
+
+    EPUB sources legitimately contain strings such as "<|endoftext|>". tiktoken
+    rejects those by default, and no payload we encode is ever handed to the
+    provider as a special token, so they must be counted as ordinary text.
+    """
+    return tokenizer.encode(text, disallowed_special=())
+
+
 def count_tokens(text: str) -> int:
     """Count tokens without requiring network access."""
     if not text:
@@ -24,4 +34,4 @@ def count_tokens(text: str) -> int:
     tokenizer = _get_tokenizer()
     if tokenizer is None:
         return max(1, len(re.findall(r"\w+|[^\w\s]", text)))
-    return len(tokenizer.encode(text))
+    return len(encode_text(tokenizer, text))

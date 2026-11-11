@@ -1,4 +1,4 @@
-"""Source-grounded citation-title handling for translation script checks."""
+"""Source-grounded titles and linguistic examples for translation script checks."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from difflib import SequenceMatcher
 
-from engine.item.inline import parse_projection
+from engine.item.inline import parse_projection, plain_text
 from engine.schemas.contracts import RegistryEntry
 from engine.schemas.internal import Event
 
@@ -34,17 +34,31 @@ _SOURCE_DEFINED_NAME_CUE = re.compile(
 _SOURCE_QUOTED_CUE = re.compile(
     r"\b(?P<cue>called|citation|entitled|example|named|phrase|query|quotation|quote|"
     r"(?:example|sample)\s+(?:phrase|sentence|text)|search(?:es|ed|ing)?(?:\s+(?:for|of))?|"
-    r"sentence|term|title|titled|word)\b"
+    r"sentence|term|title|titled|translation|word)\b"
     r"[^.!?。！？\"“”‘’]{0,40}(?:\"(?P<straight>[^\"]{2,200})\"|"
     r"“(?P<curly>[^”]{2,200})”|‘(?P<single>[^’]{2,200})’)",
     re.IGNORECASE,
 )
-_TARGET_QUOTED_TEXT = re.compile(r"\"([^\"]{2,200})\"|“([^”]{2,200})”|‘([^’]{2,200})’")
+_QUOTED_TEXT = re.compile(r"\"([^\"]{2,200})\"|“([^”]{2,200})”|‘([^’]{2,200})’")
+_NUMBERED_REFERENCE_TITLE = re.compile(
+    r"(?:^|\n)\s*\[\d+\]\s+[^\n]{2,180}?"
+    r"(?:\"(?P<straight>[^\"]{2,200})\"|“(?P<curly>[^”]{2,200})”)"
+    r"\s*,?\s*(?:18|19|20)\d{2}[a-z]?\b",
+    re.IGNORECASE,
+)
 _FOCUSED_QUOTED_CUE = re.compile(
-    r"^(?:example|phrase|quotation|quote|sentence|term|word|(?:example|sample)\s+)", re.IGNORECASE
+    r"^(?:example|phrase|quotation|quote|sentence|term|translation|word|(?:example|sample)\s+)", re.IGNORECASE
 )
 _TOKENIZATION_CUE = re.compile(r"\btokeni[sz](?:er|ation|e[ds]?|ing)\b", re.IGNORECASE)
 _EXAMPLE_SENTENCE_CUE = re.compile(r"^(?:(?:example|sample)\s+)?sentence$", re.IGNORECASE)
+_EXPLICIT_EXAMPLE_CUE = re.compile(r"\b(?:sentence|translation)\s*:\s*$", re.IGNORECASE)
+_CANDIDATE_TRANSLATION_CUE = re.compile(
+    r"\bcandidate translation(?:\s+(?:that\s+)?is(?:\s+just)?)?\s*:?\s*$", re.IGNORECASE
+)
+_REFERENCE_TRANSLATIONS_CUE = re.compile(
+    r"\b(?:its references are|reference (?:translations?|sentences?) (?:is|are))\s*:?\s*$", re.IGNORECASE
+)
+_REFERENCE_TRANSLATIONS_JOIN = re.compile(r"\s*(?:,\s*(?:and\s+)?|and\s+)\s*", re.IGNORECASE)
 
 
 def script_paragraphs_without_retained_titles(
@@ -52,16 +66,17 @@ def script_paragraphs_without_retained_titles(
     target_projection: str,
     registry: Mapping[str, RegistryEntry],
 ) -> tuple[str, ...]:
-    """Return target paragraphs without bounded English text retained from the source."""
+    """Return target paragraphs without bounded quoted text retained from the source."""
     source_events = parse_projection(source_projection)
     target_events = parse_projection(target_projection)
     source_ranges = _range_texts(source_events)
     target_ranges = _range_texts(target_events)
     source_text = _unmarked_text(source_events, registry)
     grounded_quotes = _source_grounded_quoted_phrases(
-        source_text,
+        plain_text(source_events),
         tuple(source_ranges.values()),
-        tokenization_examples=any("\u4e00" <= char <= "\u9fff" for char in _unmarked_text(target_events, registry)),
+        translated_context=any("\u4e00" <= char <= "\u9fff" for char in _unmarked_text(target_events, registry)),
+        scoring_context=any("\u4e00" <= char <= "\u9fff" for char in plain_text(target_events)),
     )
     retained: set[str] = set()
 
@@ -94,7 +109,7 @@ def script_paragraphs_without_retained_titles(
 
     def flush() -> None:
         if text := "".join(parts):
-            paragraphs.append(text)
+            paragraphs.append(_without_source_quoted_phrases(grounded_quotes, text))
         parts.clear()
 
     for event in target_events:
@@ -105,7 +120,7 @@ def script_paragraphs_without_retained_titles(
                     for ref in stack
                 )
                 text = event.value if nested else _without_source_names(source_text, event.value)
-                parts.append(_without_source_quoted_phrases(grounded_quotes, text))
+                parts.append(text)
         elif event.value.startswith("+"):
             ref = event.value[1:]
             if registry[ref].hints.get("source_view_boundary") == "paragraph":
@@ -127,25 +142,57 @@ def _without_source_names(source: str, target: str) -> str:
 
 
 def _source_grounded_quoted_phrases(
-    source: str, focused: Sequence[str], *, tokenization_examples: bool = False
-) -> Counter[str]:
+    source: str, focused: Sequence[str], *, translated_context: bool, scoring_context: bool
+) -> tuple[Counter[str], Counter[str]]:
+    scoring = _source_scoring_quotes(source) if scoring_context else {}
     result: Counter[str] = Counter()
     terms = tuple(term for value in focused if (term := _focused_term_key(value)) is not None)
     for match in _SOURCE_QUOTED_CUE.finditer(source):
         value = next(match.group(name) for name in ("straight", "curly", "single") if match.group(name) is not None)
-        tokenization = tokenization_examples and _tokenization_example(source, match)
+        tokenization = translated_context and _tokenization_example(source, match)
         key = _quoted_phrase_key(value, max_words=40 if tokenization else 20)
         if key is None:
             continue
         cue = match.group("cue")
+        quote_start = next(
+            match.start(name) - 1 for name in ("straight", "curly", "single") if match.group(name) is not None
+        )
+        if quote_start in scoring:
+            continue
+        explicit_example = translated_context and _EXPLICIT_EXAMPLE_CUE.search(
+            source[max(0, quote_start - 120) : quote_start]
+        )
         if (
             not tokenization
+            and not explicit_example
             and _FOCUSED_QUOTED_CUE.match(cue)
             and not any(_contains_focused_term(key, term) for term in terms)
         ):
             continue
         result[key] += 1
-    return result
+    for match in _NUMBERED_REFERENCE_TITLE.finditer(source):
+        group = "straight" if match.group("straight") is not None else "curly"
+        if match.start(group) - 1 not in scoring and (key := _quoted_phrase_key(match.group(group))):
+            result[key] += 1
+    return result, Counter(scoring.values())
+
+
+def _source_scoring_quotes(source: str) -> dict[int, str]:
+    """Find source strings used as candidate or reference translations in a worked example."""
+    examples: dict[int, str] = {}
+    previous_end = 0
+    in_references = False
+    for match in _QUOTED_TEXT.finditer(source):
+        gap = source[previous_end : match.start()]
+        in_references = bool(
+            _REFERENCE_TRANSLATIONS_CUE.search(gap) or in_references and _REFERENCE_TRANSLATIONS_JOIN.fullmatch(gap)
+        )
+        if in_references or _CANDIDATE_TRANSLATION_CUE.search(gap):
+            value = next(value for value in match.groups() if value is not None)
+            if key := _quoted_phrase_key(value, case_sensitive=True):
+                examples[match.start()] = key
+        previous_end = match.end()
+    return examples
 
 
 def _tokenization_example(source: str, match: re.Match[str]) -> bool:
@@ -158,28 +205,31 @@ def _tokenization_example(source: str, match: re.Match[str]) -> bool:
     return _TOKENIZATION_CUE.search(before + " " + after) is not None
 
 
-def _without_source_quoted_phrases(grounded: Counter[str], target: str) -> str:
-    if not grounded:
+def _without_source_quoted_phrases(grounded: tuple[Counter[str], Counter[str]], target: str) -> str:
+    ordinary, scoring = grounded
+    if not ordinary and not scoring:
         return target
 
     def remove(match: re.Match[str]) -> str:
         value = next(value for value in match.groups() if value is not None)
         # Longer keys can only enter the counter through source-proven examples.
-        key = _quoted_phrase_key(value, max_words=40)
-        if key is None or grounded[key] <= 0:
-            return match.group(0)
-        grounded[key] -= 1
-        return ""
+        key = _quoted_phrase_key(value, max_words=40, case_sensitive=True)
+        if key is not None:
+            for counts, spelling in ((scoring, key), (ordinary, key.casefold())):
+                if counts[spelling] > 0:
+                    counts[spelling] -= 1
+                    return ""
+        return match.group(0)
 
-    return _TARGET_QUOTED_TEXT.sub(remove, target)
+    return _QUOTED_TEXT.sub(remove, target)
 
 
-def _quoted_phrase_key(value: str, *, max_words: int = 20) -> str | None:
+def _quoted_phrase_key(value: str, *, max_words: int = 20, case_sensitive: bool = False) -> str | None:
     normalized = re.sub(r"\s+", " ", value).strip(" \t,.;:!?，。；：！？、")
     words = re.findall(r"[A-Za-z][A-Za-z’'-]*", normalized)
     if not 2 <= len(words) <= max_words or any("\u4e00" <= char <= "\u9fff" for char in normalized):
         return None
-    return normalized.casefold()
+    return normalized if case_sensitive else normalized.casefold()
 
 
 def _focused_term_key(value: str) -> str | None:

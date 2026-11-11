@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
+import engine.epub.publish as atomic_publication
 from engine.agents.models import build_run_model
 from engine.agents.pool import limit_workflows
 from engine.agents.runtime import (
@@ -433,10 +434,11 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
         return None
     store = RunStore(work_dir)
     if state.is_file(work_dir / "prepared.json"):
-        from engine.epub.publish import code_policy_current, recover_atomic
         from engine.services.ready import read_ready
 
-        published = recover_atomic(store, output, checker=checker_for_source(state.snapshot(work_dir), epubcheck))
+        published = atomic_publication.recover_atomic(
+            store, output, checker=checker_for_source(state.snapshot(work_dir), epubcheck)
+        )
         if published is None:
             return None
         proof = published.get("verification")
@@ -446,11 +448,9 @@ def _completed_run_outcome(work_dir: Path, output: Path, epubcheck: str | None =
             or proof.get("font_policy") != FONT_POLICY
             or proof.get("cleanup_policy") != CLEANUP_POLICY
             or proof.get("cover_policy") != COVER_POLICY
-            or not code_policy_current(store, proof)
+            or not atomic_publication.code_policy_current(store, proof)
         ):
-            from engine.epub.publish import publish_atomic
-
-            published = publish_atomic(
+            published = atomic_publication.publish_atomic(
                 store, output, checker_for_source(state.snapshot(work_dir), epubcheck), overwrite=True
             )
         count = read_ready(store).plan.required_unit_count
@@ -536,9 +536,7 @@ def resume_book(
     ):
         raise IdentityMismatch("resume work directory does not match its frozen run identity")
     if state.is_file(work_dir / "prepared.json"):
-        from engine.epub.publish import validate_atomic_output
-
-        validate_atomic_output(store, output)
+        atomic_publication.validate_atomic_output(store, output)
     completed = _completed_run_outcome(work_dir, output, epubcheck)
     if completed is not None:
         return completed
@@ -843,10 +841,10 @@ async def _finish(
         if progress is not None:
             progress({"phase": "publication", "notice": "出版：正在组装并校验 EPUB 3.0。"})
         if atomic:
-            from engine.epub.publish import publish_atomic
-
             options = {"journal": verified_journal} if verified_journal is not None else {}
-            published = publish_atomic(store, output, checker, overwrite=overwrite, session=ready_session, **options)
+            published = atomic_publication.publish_atomic(
+                store, output, checker, overwrite=overwrite, session=ready_session, **options
+            )
         else:
             published = publish_book(store, output, checker, overwrite=overwrite)
         if progress is not None:
@@ -970,7 +968,7 @@ def _write_source_hint(work_dir: Path, source: Path, source_hash: str, run_id: s
 
 def _preparation_reason(prepared: Any) -> str | None:
     details = [
-        f"{diagnostic.resource_path} [{diagnostic.item_id}, {diagnostic.atomic_tag or 'text'}, "
+        f"{diagnostic.resource_path} [{diagnostic.item_id}, {diagnostic.label}, "
         f"{diagnostic.source_tokens} tokens]: {', '.join(diagnostic.failures)}"
         for diagnostic in prepared.diagnostics
     ]

@@ -617,15 +617,30 @@ def _script_blocker(
             or src.netloc
             or src.fragment
             or not src.path
-            or filename not in {"MathJax.js", "book.js"}
             or (node.text or "").strip()
             or len(node)
         ):
             return "Unknown executable script; only verified local reading helpers are supported"
+        path = _resolve_package_path(resource, src.path)
+        if filename == "kobo.js":
+            if (
+                node.tag == "{http://www.w3.org/1999/xhtml}script"
+                and not src.query
+                and "%" not in src.path
+                and path not in archive.namelist()
+                and path not in local_scripts
+                and not declared
+            ):
+                # Calibre can retain Kobo's head marker after removing the
+                # helper itself.  With no packaged bytes there is nothing to
+                # execute or generate, so the XHTML remains static.
+                continue
+            return "Unverified local kobo.js reading helper"
+        if filename not in {"MathJax.js", "book.js"}:
+            return "Unknown executable script; only verified local reading helpers are supported"
         if filename == "book.js":
             if node.tag != "{http://www.w3.org/1999/xhtml}script" or src.query or "%" in src.path:
                 return "Unverified local book.js pagination helper"
-            path = _resolve_package_path(resource, src.path)
             if path not in local_scripts:
                 return "Pagination helper is missing from the local JavaScript manifest"
             digest = _PAGINATION_SCRIPT_DIGESTS.get(archive.getinfo(path).file_size)
@@ -633,7 +648,6 @@ def _script_blocker(
                 return "Unverified local book.js pagination helper"
             verified_pagination = True
             continue
-        path = _resolve_package_path(resource, src.path)
         if path not in local_scripts:
             return "MathJax loader is missing from the local JavaScript manifest"
         loader = _read_bytes(archive, path)

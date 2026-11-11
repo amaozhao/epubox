@@ -398,6 +398,7 @@ def verify_baseline(
     checker: object | None = None,
     *,
     code_plan: Mapping[str, object] | None = None,
+    allow_code_plan_upgrade: bool = False,
 ) -> None:
     """Recheck inherited EPUBCheck failures without trusting a persisted command."""
     epubcheck = verification.get("epubcheck")
@@ -425,6 +426,8 @@ def verify_baseline(
 
             code_plan = effective_code_plan(source_path, code_plan)
             if verification.get("code_plan_hash") != canonical_hash(code_plan):
+                if allow_code_plan_upgrade:
+                    return
                 raise EpubValidationError("invalid_publish_intent", "Source code policy differs from published plan")
             raw_maps = verification.get("code_node_maps")
             maps = decode_code_maps(raw_maps) if raw_maps is not None and raw_maps != {} else None
@@ -533,14 +536,17 @@ def recover_publication(
     if data.get("format") != "epubox-publish-1":
         raise EpubValidationError("invalid_publish_intent", "Unknown publish intent format")
     fingerprints = {_publication_fingerprint(plan_fingerprint)}
+    versions = [dict(version_vector)]
     if allow_policy_upgrade:
         verification = data.get("verification")
         previous_policy = verification.get("cleanup_policy") if isinstance(verification, dict) else None
         if previous_policy is None or isinstance(previous_policy, str):
             fingerprints.add(_policy_fingerprint(plan_fingerprint, previous_policy))
-    if data.get("plan_fingerprint") not in fingerprints or data.get("version_vector") != dict(
-        sorted(version_vector.items())
-    ):
+        if isinstance(verification, dict) and verification.get("code_policy") == CODE_POLICY:
+            previous_code = verification.get("code_plan_hash")
+            if isinstance(previous_code, str) and re.fullmatch(r"[0-9a-f]{64}", previous_code):
+                versions.append(dict(version_vector) | {"@source-code": previous_code})
+    if data.get("plan_fingerprint") not in fingerprints or data.get("version_vector") not in versions:
         return None
     target = Path(str(data.get("target_path", "")))
     target_hash = data.get("target_hash")

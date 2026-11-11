@@ -222,6 +222,27 @@ def test_code_overlay_accepts_only_source_derived_image_dimension_normalization(
         apply_code_plan(source, {RESOURCE: normalized.replace(b'width="20"', b'width="21"')}, plan)
 
 
+def test_code_overlay_accepts_source_derived_calibre_pagebreak_id_deduplication(tmp_path: Path) -> None:
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Code</title></head><body>'
+        b'<div class="calibre3" id="calibre_pb_0"></div>'
+        b'<div class="calibre6" id="calibre_pb_0"></div>'
+        b'<pre id="code"><code>int main() { return 0; }</code></pre><p>Translate.</p></body></html>'
+    )
+    source = _archive(tmp_path / "source.epub", raw)
+    plan = discover_code_plan(source)
+    assert plan is not None
+    normalized = _normalize_xhtml(raw).replace(b"Translate.", "翻译。".encode())
+
+    restored, stats = apply_code_plan(source, {RESOURCE: normalized}, plan)
+
+    assert restored[RESOURCE].count(b'id="calibre_pb_0"') == 1
+    assert b'<div class="calibre6"></div>' in restored[RESOURCE]
+    assert b'<pre id="code"><code>int main() { return 0; }</code></pre>' in restored[RESOURCE]
+    output = _archive(tmp_path / "output.epub", restored[RESOURCE])
+    assert verify_code_plan(source, output, plan) == stats
+
+
 def test_code_plan_rejects_unauthorized_or_overlapping_source_regions(tmp_path: Path) -> None:
     raw = _markup()
     source = _archive(tmp_path / "source.epub", raw)

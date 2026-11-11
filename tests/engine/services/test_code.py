@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import zipfile
 from functools import partial
 
 import pytest
 
 from engine.agents.workflow import _failed
+from engine.execution.atomic import run_atomic
+from engine.item.atoms import extract_resource
 from engine.schemas.contracts import ItemStatus, canonical_hash, canonical_json_bytes
 from engine.services import state
 from engine.services.atomic import IdentityMismatch
 from engine.services.code import _source_code_version
 from engine.services.journal import BodyJournal
 from engine.services.manual import import_codex_translation
+from engine.services.partition import build_plan, plan_path
+from engine.services.parts import PartJournal
 from tests.engine.agents import test_workflow as fixtures
+from tests.engine.core.test_code import SHELL
+from tests.engine.execution.test_atomic import answer
 
 _ATOMIC4 = "epubox-atomic-4"
 _RUST = "⟦=x1⟧⟦+g1⟧fn⟦-g1⟧ main() {\n        ⟦+g2⟧let⟦-g2⟧ index = values[index / 2];\n    }"
@@ -334,6 +342,10 @@ def test_plain_prose_cannot_claim_code_preservation(tmp_path, body):
 
 
 @pytest.mark.parametrize(
+    ("block_class", "line_class", "text_class"),
+    (("class-0-1", "class-0-2", "bookSpan"), ("class48", "class39", "bookspan")),
+)
+@pytest.mark.parametrize(
     "error",
     (
         None,
@@ -341,7 +353,9 @@ def test_plain_prose_cannot_claim_code_preservation(tmp_path, body):
         "response root must contain exactly protocol, request_id, and items",
     ),
 )
-def test_rendered_python_in_atomic6_resumes_from_source(tmp_path, monkeypatch, error):
+def test_rendered_python_in_atomic6_resumes_from_source(
+    tmp_path, monkeypatch, error, block_class, line_class, text_class
+):
     import engine.epub.preparation as epub_preparation
     from engine.services import preparation
 
@@ -354,9 +368,9 @@ def test_rendered_python_in_atomic6_resumes_from_source(tmp_path, monkeypatch, e
     monkeypatch.setattr(fixtures, "EXTRACTOR_VERSION", version)
     case = fixtures.prepare_case(
         tmp_path,
-        '<div class="class-0-1">'
-        '<span class="class-0-2"><span class="bookSpan">def render(row):</span></span><br/>'
-        '<span class="class-0-2"><span class="bookSpan">&#160;&#160;&#160;&#160;return row[0]</span></span>'
+        f'<div class="{block_class}">'
+        f'<span class="{line_class}"><span class="{text_class}">def render(row):</span></span><br/>'
+        f'<span class="{line_class}"><span class="{text_class}">&#160;&#160;&#160;&#160;return row[0]</span></span>'
         "</div>",
         (
             (
@@ -377,3 +391,46 @@ def test_rendered_python_in_atomic6_resumes_from_source(tmp_path, monkeypatch, e
     assert record.checks["preserved_code"] == {"version": 3, "member_hash": canonical_hash(member)}
     assert BodyJournal(case.session.store).records()[member.item_id] == record
     assert all(not request.attempts for request in journal._requests.values())
+
+
+@pytest.mark.parametrize("previously_reviewed", (False, True))
+def test_frozen_shell_with_existing_sentence_parts_resumes_without_http(tmp_path, monkeypatch, previously_reviewed):
+    import engine.epub.preparation as epub_preparation
+    from engine.services import preparation
+
+    version = "epubox-atomic-6"
+    monkeypatch.setattr(preparation, "ATOMIC_EXTRACTOR_VERSION", version)
+    monkeypatch.setattr(epub_preparation, "ATOMIC_EXTRACTOR_VERSION", version)
+    monkeypatch.setattr(
+        epub_preparation, "extract_resource", partial(epub_preparation.extract_resource, extractor_version=version)
+    )
+    monkeypatch.setattr(fixtures, "EXTRACTOR_VERSION", version)
+    raw = ('<html xmlns="http://www.w3.org/1999/xhtml"><body>' + SHELL + "</body></html>").encode()
+    extracted = extract_resource(raw, "OEBPS/chapter.xhtml", "source", extractor_version=version)
+    case = fixtures.prepare_case(tmp_path, SHELL, tuple(item.source_projection for item in extracted.items))
+    journal = BodyJournal(case.session.store, case.session)
+    (member,) = case.batch.items
+    failed = _failed(member, journal.records()[member.item_id], "translate", "invalid response root", case.batch)
+    journal.save(failed)
+    plan = build_plan(case.session, member, failed, trigger_stage="translate", trigger_count=10)
+    assert plan is not None and len(plan.children) > 4
+    journal.store._atomic_write(plan_path(journal.store.root, member.item_id), plan)
+    PartJournal.initialize(journal, plan)
+    assert _source_code_version(case.session, member) == 4, member
+    if previously_reviewed:
+        response = answer("translate", case.batch.payload)
+        target = json.loads(response["raw"])["items"][0]["target"]
+        import_codex_translation(journal, member, failed, target, user_authorized=True)
+
+    async def unexpected_http(stage, payload):
+        ids = {item["item_id"] for item in payload["items"]}
+        assert not ids.intersection({member.item_id, *(child.item_id for child in plan.children)})
+        return answer(stage, payload)
+
+    result = asyncio.run(run_atomic(journal.store.root, transport=unexpected_http, ready_session=case.session))
+    assert result.status == "translated", result.reason
+    record = BodyJournal(case.session.store).records()[member.item_id]
+    assert record.status == ItemStatus.REVIEWED
+    assert record.target_projection == member.source_projection
+    assert record.checks["preserved_code"] == {"version": 4, "member_hash": canonical_hash(member)}
+    assert state.exists(plan_path(journal.store.root, member.item_id))

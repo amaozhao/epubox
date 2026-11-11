@@ -502,6 +502,17 @@ def test_atomic_protects_plain_preformatted_code_and_preserves_raw_bytes(extract
     assert code_bytes in filled and "翻译相邻正文。" in filled.decode()
 
 
+def test_atomic_six_rejects_a_conflicting_code_policy() -> None:
+    with pytest.raises(ValueError, match="atomic-6 requires code-context-1"):
+        extract_resource(
+            source("<p>Text.</p>"),
+            "OPS/chapter.xhtml",
+            "source",
+            extractor_version="epubox-atomic-6",
+            code_policy="code-context-2",
+        )
+
+
 def test_atomic_six_uses_an_opaque_atom_for_complex_inline_code() -> None:
     code = (
         '<span id="identifier" title="Code tooltip" style="font-family:monospace">'

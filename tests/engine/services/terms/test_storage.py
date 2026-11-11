@@ -22,8 +22,11 @@ from engine.services.terms.storage import write_plan
 from tests.engine.epub.test_factory import make_epub
 
 
-def atomic_plan(tmp_path: Path):
-    source = make_epub(tmp_path / "input.epub", {"chapter.xhtml": "<p>One.</p><p>Two.</p>"})
+def atomic_plan(tmp_path: Path, *, code_policy: str | None = None):
+    body = "<p>One.</p><p>Two.</p>"
+    if code_policy is not None:
+        body += '<div class="programcode1"><div class="fixedline1">let value = 1;</div></div>'
+    source = make_epub(tmp_path / "input.epub", {"chapter.xhtml": body})
     root = tmp_path / "work"
     store = RunStore(root)
     snapshot = root / "source.epub"
@@ -31,7 +34,7 @@ def atomic_plan(tmp_path: Path):
     source_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
     with zipfile.ZipFile(snapshot) as archive:
         raw = archive.read("OEBPS/chapter.xhtml")
-    inventory = extract_resource(raw, "OEBPS/chapter.xhtml", source_hash)
+    inventory = extract_resource(raw, "OEBPS/chapter.xhtml", source_hash, code_policy=code_policy)
     document_hash = store.write_document(inventory.document)
     store.write_user_terms(())
     extraction = {
@@ -146,8 +149,9 @@ def test_atomic_plan_is_rejected_without_its_preflight_receipt(tmp_path: Path) -
     assert not (store.root / "glossary" / "plan.json").exists()
 
 
-def test_saved_atomic_response_replays_without_receipt_or_new_http(tmp_path: Path) -> None:
-    store, _inventory, plan = atomic_plan(tmp_path)
+@pytest.mark.parametrize("code_policy", [None, "code-context-2"])
+def test_saved_atomic_response_replays_without_receipt_or_new_http(tmp_path: Path, code_policy: str | None) -> None:
+    store, _inventory, plan = atomic_plan(tmp_path, code_policy=code_policy)
     store.write_term_plan(plan)
 
     async def first(_kind, payload):

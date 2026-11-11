@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from engine.schemas.contracts import FrozenModel, ItemRecord, canonical_hash
+from engine.schemas.contracts import FrozenModel, ItemRecord, ItemStatus, canonical_hash
 
 
 class ManualArtifact(FrozenModel):
@@ -18,6 +18,7 @@ class ManualArtifact(FrozenModel):
     member_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_projection_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     prior: ItemRecord
+    replaces_reviewed: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     target_projection: str = Field(min_length=1)
     target_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -25,6 +26,8 @@ class ManualArtifact(FrozenModel):
     def validate_hashes(self) -> ManualArtifact:
         if self.prior.item_id != self.member_id or self.prior.segment_id != self.member_id:
             raise ValueError("manual artifact prior record belongs to another member")
+        if self.replaces_reviewed != (self.prior.status == ItemStatus.REVIEWED):
+            raise ValueError("manual artifact reviewed replacement authorization differs from its prior state")
         if self.target_hash != canonical_hash(self.target_projection):
             raise ValueError("manual artifact target hash does not match its target")
         return self

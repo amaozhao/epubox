@@ -340,6 +340,74 @@ def test_source_grounded_example_does_not_hide_unquoted_english_prose() -> None:
     assert result is not None and result.startswith("untranslated English remains:")
 
 
+BLEU_CANDIDATE_SOURCE = (
+    "The original paper explains why with a candidate translation that is just “the the the the the the the.” "
+)
+BLEU_REFERENCES_SOURCE = "Its references are “The cat is on the mat” and “There is a cat on the mat.” "
+BLEU_CANDIDATE_TARGET = "原论文用一个候选译文“the the the the the the the。”解释了原因。"
+BLEU_REFERENCES_TARGET = "其参考译文是“The cat is on the mat”和“There is a cat on the mat”。"
+
+
+def test_bleu_example_quotes_may_remain_english_inside_inline_spans() -> None:
+    source = f"⟦+g1⟧{BLEU_CANDIDATE_SOURCE}⟦-g1⟧⟦+g2⟧{BLEU_REFERENCES_SOURCE}⟦-g2⟧"
+    target = f"⟦+g1⟧{BLEU_CANDIDATE_TARGET}⟦-g1⟧⟦+g2⟧{BLEU_REFERENCES_TARGET}⟦-g2⟧"
+
+    assert error(linked_member(source), target) is None
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    (
+        (BLEU_CANDIDATE_SOURCE, BLEU_CANDIDATE_TARGET),
+        (BLEU_REFERENCES_SOURCE, BLEU_REFERENCES_TARGET),
+    ),
+)
+def test_bleu_example_quotes_may_remain_english_in_split_parts(source: str, target: str) -> None:
+    value = member().model_copy(update={"source_projection": source, "registry": {}})
+
+    assert error(value, target) is None
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    (
+        (
+            BLEU_CANDIDATE_SOURCE,
+            BLEU_CANDIDATE_TARGET.replace("the the the the the the the", "the the the the the the"),
+        ),
+        (BLEU_CANDIDATE_SOURCE, BLEU_CANDIDATE_TARGET + "另一个候选译文是“the the the the the the the”。"),
+        (BLEU_CANDIDATE_SOURCE, BLEU_CANDIDATE_TARGET + ENGLISH_SENTENCE),
+        (BLEU_CANDIDATE_SOURCE, "“the the the the the the the。”"),
+        (
+            BLEU_CANDIDATE_SOURCE,
+            BLEU_CANDIDATE_TARGET.replace("“the the the the the the the。”", "the the the the the the the"),
+        ),
+        (BLEU_REFERENCES_SOURCE, BLEU_REFERENCES_TARGET.replace("There", "there")),
+        (BLEU_REFERENCES_SOURCE, BLEU_REFERENCES_TARGET.replace("There is a cat", "There is a dog")),
+        (
+            f"{BLEU_REFERENCES_SOURCE} The reader said “{ENGLISH_SENTENCE}”",
+            f"{BLEU_REFERENCES_TARGET}读者说：“{ENGLISH_SENTENCE}”",
+        ),
+    ),
+    ids=(
+        "changed-count",
+        "duplicated",
+        "unquoted-tail",
+        "no-chinese",
+        "unquoted",
+        "changed-case",
+        "changed-word",
+        "unrelated-quote",
+    ),
+)
+def test_bleu_quote_exemption_is_limited_to_grounded_quoted_text(source: str, target: str) -> None:
+    value = member().model_copy(update={"source_projection": source, "registry": {}})
+
+    result = error(value, target)
+
+    assert result is not None and result.startswith("untranslated English remains:")
+
+
 def test_generic_example_cue_does_not_exempt_long_quoted_prose_without_a_focused_term() -> None:
     sentence = "This replacement remains entirely untranslated and contains a complete English sentence."
     source = f"For example, “{sentence}”"
@@ -471,6 +539,47 @@ def test_source_article_titles_may_remain_english() -> None:
     assert error(member().model_copy(update={"source_projection": source, "registry": {}}), target) is None
 
 
+def test_numbered_reference_may_retain_exact_quoted_source_title() -> None:
+    source = (
+        "[4] Xuezhi Wang et al., “Self-Consistency Improves Chain of Thought Reasoning in Language Models,” "
+        "2023. This paper proposes the self-consistency method, which aggregates a consistent answer from "
+        "multiple sampled reasoning paths. Available at: https://doi.org/10.48550/arXiv.2203.11171."
+    )
+    target = (
+        "[4] Xuezhi Wang 等，“Self-Consistency Improves Chain of Thought Reasoning in Language Models”，"
+        "2023 年。本文提出了自洽性方法，该方法通过聚合多条采样推理路径中的一致答案来提高准确性。"
+        "获取链接：https://doi.org/10.48550/arXiv.2203.11171。"
+    )
+    value = member().model_copy(update={"source_projection": source, "registry": {}})
+
+    assert error(value, target) is None
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        (
+            "[4] Xuezhi Wang 等，“Self-Consistency Replaces the Source With a Different English Title”，"
+            "2023 年。本文介绍了该方法。"
+        ),
+        (
+            "[4] Xuezhi Wang 等，“Self-Consistency Improves Chain of Thought Reasoning in Language Models”，"
+            "2023 年。This unrelated sentence remains entirely untranslated in the target."
+        ),
+    ),
+)
+def test_numbered_reference_title_exemption_does_not_hide_other_english(target: str) -> None:
+    source = (
+        "[4] Xuezhi Wang et al., “Self-Consistency Improves Chain of Thought Reasoning in Language Models,” "
+        "2023. This paper proposes the method."
+    )
+    value = member().model_copy(update={"source_projection": source, "registry": {}})
+
+    result = error(value, target)
+
+    assert result is not None and result.startswith("untranslated English remains:")
+
+
 def test_source_identical_english_prose_still_fails() -> None:
     sentence = "The client will automatically retrieve the new URL."
     value = member().model_copy(update={"source_projection": sentence, "registry": {}})
@@ -541,3 +650,59 @@ def test_arbitrary_source_quotation_does_not_exempt_title_case_prose() -> None:
     result = error(value, f"用户写道：（{sentence}）。")
 
     assert result is not None and result.startswith("untranslated English remains:")
+
+
+@pytest.mark.parametrize(
+    "source,target",
+    [
+        (
+            "For example, consider this English sentence: “The cat sat on the mat.” ",
+            "例如，考虑这句英文：“The cat sat on the mat.”",
+        ),
+        (
+            "Then consider the Gaelic translation: “Shuigh an cat ar an mata.”",
+            "然后参考盖尔语的译文：“Shuigh an cat ar an mata。”",
+        ),
+        (
+            "Consider this Scottish Gaelic translation: “Shuigh an cat ar an mata.”",
+            "考虑这句苏格兰盖尔语译文：“Shuigh an cat ar an mata。”",
+        ),
+    ],
+)
+def test_source_labeled_language_example_retains_its_exact_quoted_sentence(source, target):
+    value = member().model_copy(update={"source_projection": source, "registry": {}})
+    assert error(value, target) is None
+
+
+@pytest.mark.parametrize(
+    "source,target",
+    [
+        ("Consider this English sentence: “The cat sat on the mat.”", "例如：“The dog sat on the mat.”"),
+        (
+            "Consider this English sentence: “The cat sat on the mat.”",
+            "例如：“The cat sat on the mat.”再看：“The cat sat on the mat.”",
+        ),
+        (
+            "Consider this English sentence: “The cat sat on the mat.”",
+            "Consider this English sentence: “The cat sat on the mat.”",
+        ),
+        (
+            "Consider this English sentence: “The cat sat on the mat.”",
+            "例如：“The cat sat on the mat.” This explanation remains entirely untranslated and must fail.",
+        ),
+        ("The user wrote “The cat sat on the mat.”", "用户写道：“The cat sat on the mat.”"),
+        ("Consider this English sentence: “The cat sat on the mat.”", "例如：The cat sat on the mat."),
+    ],
+)
+def test_language_example_exception_does_not_allow_untranslated_or_changed_prose(source, target):
+    value = member().model_copy(update={"source_projection": source, "registry": {}})
+    result = error(value, target)
+    assert result is not None
+
+
+def test_exact_language_example_can_span_translatable_inline_markers():
+    source = "Consider this English sentence: “The ⟦+g1⟧cat⟦-g1⟧ sat on the mat.”"
+    value = member(title="cat").model_copy(update={"source_projection": source})
+    target = "考虑这句英文：“The ⟦+g1⟧cat⟦-g1⟧ sat on the mat.”"
+    assert error(value, target) is None
+    assert error(value, target.replace("cat", "dog")) is not None

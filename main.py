@@ -10,6 +10,7 @@ from typing import Any, cast
 import typer
 
 from engine.cli import RunOutcome, resume_book, translate_book
+from engine.core.styles import CodeStyleError
 from engine.epub.validation import EpubValidationError
 from engine.item.views import SourceViewError
 from engine.services import state
@@ -116,6 +117,10 @@ def translate(
         except SourceViewError as error:
             typer.echo(f"翻译未完成：原文投影校验失败，已停止自动续跑。\n原因：{error}", err=True)
             typer.echo("这是本地结构校验错误；原书和现有断点均已保留，修复程序后可用相同命令继续。", err=True)
+            raise typer.Exit(1) from error
+        except CodeStyleError as error:
+            typer.echo(f"翻译未完成：代码和样式兼容性校验失败，已停止自动续跑。\n原因：{error}", err=True)
+            typer.echo("这是本地兼容性检查，重复重试不会解决；原书和现有断点均已保留。", err=True)
             raise typer.Exit(1) from error
         except Exception as error:
             if isinstance(error, EpubValidationError) and error.code == "unsupported_source":

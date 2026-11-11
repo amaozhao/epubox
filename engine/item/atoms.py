@@ -10,7 +10,7 @@ from typing import Any, cast
 import regex
 from lxml import etree  # type: ignore[attr-defined]
 
-from engine.core.code import CODE_CLASSIFICATION_VERSION, CodeContext
+from engine.core.code import CODE_CLASSIFICATION_VERSION, CODE_CLASSIFICATION_VERSIONS, CodeContext
 from engine.epub.parsing import NCX_NAMESPACE, OPF_NAMESPACE, XHTML_NAMESPACE, ParsedResource, parse_resource
 from engine.epub.ranges import RangeError, ResourceIndex, index_resource
 from engine.item.extractor import _to_document_plan
@@ -79,14 +79,28 @@ class _AtomicExtractor(_Extractor):
         config: Mapping[str, Any],
         extractor_version: str,
         styles: Mapping[str, str] | None = None,
+        code_policy: str | None = None,
     ):
         self.parsed = parsed
         self.extractor_version = extractor_version
         if parsed.tree is None:
             raise RangeError("genuine HTML has no proven source mapping")
+        selected_policy = code_policy or (
+            "code-context-1" if extractor_version == _V6_EXTRACTOR_VERSION else CODE_CLASSIFICATION_VERSION
+        )
+        if selected_policy not in CODE_CLASSIFICATION_VERSIONS:
+            raise ValueError(f"unsupported code classification policy: {selected_policy}")
+        if extractor_version == _V6_EXTRACTOR_VERSION and selected_policy != "code-context-1":
+            raise ValueError("atomic-6 requires code-context-1")
         self._code_context = (
             CodeContext(
-                parsed.tree, path, styles, recognize_rendered_python=extractor_version != _V6_EXTRACTOR_VERSION
+                parsed.tree,
+                path,
+                styles,
+                recognize_rendered_python=extractor_version != _V6_EXTRACTOR_VERSION,
+                # Keep frozen inventories stable; source-proven recovery protects shell members locally.
+                recognize_numbered_shell=False,
+                policy=selected_policy,
             )
             if extractor_version in {_V6_EXTRACTOR_VERSION, EXTRACTOR_VERSION} and parsed.kind == "xhtml"
             else None
@@ -96,10 +110,13 @@ class _AtomicExtractor(_Extractor):
             self.boundaries.append(
                 {
                     "kind": "code_style_context",
-                    "policy": "code-context-1"
-                    if extractor_version == _V6_EXTRACTOR_VERSION
-                    else CODE_CLASSIFICATION_VERSION,
+                    "policy": selected_policy,
                     "styles": dict(sorted(self._code_context.stylesheet_hashes.items())),
+                    **(
+                        {"missing_styles": sorted(self._code_context.missing_stylesheets)}
+                        if self._code_context.missing_stylesheets
+                        else {}
+                    ),
                 }
             )
         self._elements_by_key = {key: node for node, key in self.node_keys.items()}
@@ -494,6 +511,7 @@ def extract_resource(
     *,
     extractor_version: str = EXTRACTOR_VERSION,
     styles: Mapping[str, str] | None = None,
+    code_policy: str | None = None,
 ) -> AtomicDocument:
     """Prepare raw-byte atom inventory; T15 owns production pipeline integration."""
     parsed = parse_resource(data, media_type)
@@ -503,7 +521,16 @@ def extract_resource(
     index = index_resource(parsed)
     if extractor_version not in _SUPPORTED_EXTRACTOR_VERSIONS:
         raise ValueError(f"unsupported atomic extractor version: {extractor_version}")
-    draft = _AtomicExtractor(parsed, resource_path, source_hash, media_type, config or {}, extractor_version, styles)
+    draft = _AtomicExtractor(
+        parsed,
+        resource_path,
+        source_hash,
+        media_type,
+        config or {},
+        extractor_version,
+        styles,
+        code_policy,
+    )
     document = _to_document_plan(draft.extract())
     lexical = {(slot.path, slot.field, slot.attribute_name, slot.special_index): slot for slot in index.slots}
     spans = {unit.unit_id: _span(unit, document, index, lexical) for unit in document.units}

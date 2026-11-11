@@ -4,7 +4,7 @@ import html.entities
 import posixpath
 import re
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -94,9 +94,20 @@ def upgrade_package(
             for item in inventory.manifest
             if item.media_type == "text/css" and item.path in names | set(replacements)
         )
+        protected_pagebreak_ids = _css_id_references(
+            read(item.path)
+            for item in inventory.manifest
+            if item.media_type == "text/css" and item.path in names | set(replacements)
+        )
         for path in inventory.documents:
             current = read(path)
-            normalized = _normalize_xhtml(current, allow_converter_markers=marker_css_safe)
+            normalized = _normalize_xhtml(
+                current,
+                allow_converter_markers=marker_css_safe,
+                resource_path=path,
+                package_paths=names | set(replacements),
+                protected_ids=protected_pagebreak_ids,
+            )
             if normalized != current:
                 result[path] = normalized
 
@@ -127,7 +138,7 @@ def upgrade_package(
                 if qname_local_name(attribute) in {"fallback-style", "required-modules", "required-namespace"}:
                     item.attrib.pop(attribute)
             if path in names or path in replacements:
-                actual = _content_properties(read(path), item.get("media-type", ""))
+                actual = _content_properties(result.get(path, read(path)), item.get("media-type", ""))
                 if item.get("media-type") == "application/xhtml+xml":
                     # Converters may replace inline formulas/figures with images
                     # without removing their old foreign-content declarations.
@@ -382,7 +393,14 @@ def _flatten_metadata(metadata: etree._Element) -> None:
         metadata.remove(wrapper)
 
 
-def _normalize_xhtml(data: bytes, *, allow_converter_markers: bool = True) -> bytes:
+def _normalize_xhtml(
+    data: bytes,
+    *,
+    allow_converter_markers: bool = True,
+    resource_path: str | None = None,
+    package_paths: set[str] | None = None,
+    protected_ids: set[str] | None = None,
+) -> bytes:
     """Patch legacy prolog/root syntax without serializing protected content."""
 
     parsed = parse_resource(data, "application/xhtml+xml")
@@ -426,6 +444,9 @@ def _normalize_xhtml(data: bytes, *, allow_converter_markers: bool = True) -> by
 
     patches.extend(_empty_title_patches(data, indexed, root))
     patches.extend(_legacy_img_dimension_patches(data, indexed))
+    patches.extend(_duplicate_calibre_pagebreak_patches(data, indexed, root, protected_ids or set()))
+    if resource_path is not None and package_paths is not None:
+        patches.extend(_missing_kobo_script_patches(indexed, root, resource_path, package_paths))
     if allow_converter_markers and not any(
         _converter_marker_css_hooks("".join(element.itertext()).encode(indexed.encoding))
         for element in root.iter(f"{{{_XHTML}}}style")
@@ -439,6 +460,114 @@ def _normalize_xhtml(data: bytes, *, allow_converter_markers: bool = True) -> by
     for start, end, replacement in sorted(patches, reverse=True):
         result = result[:start] + replacement + result[end:]
     return result
+
+
+_CALIBRE_PAGEBREAK_ID = re.compile(r"calibre_pb_[0-9]+\Z")
+_CALIBRE_CLASS = re.compile(r"calibre[0-9]+\Z")
+
+
+def _css_id_references(stylesheets: Iterable[bytes | str]) -> set[str]:
+    references: set[str] = set()
+    pattern = re.compile(r"(calibre_pb_[0-9]+)(?![\w.-])")
+    for stylesheet in stylesheets:
+        text = stylesheet.decode("utf-8", "replace") if isinstance(stylesheet, bytes) else stylesheet
+        references.update(pattern.findall(text))
+    return references
+
+
+def _duplicate_calibre_pagebreak_patches(
+    data: bytes,
+    indexed: ResourceIndex,
+    root: etree._Element,
+    protected_ids: set[str],
+) -> tuple[tuple[int, int, bytes], ...]:
+    """Keep the first empty Calibre pagebreak anchor and de-duplicate later siblings."""
+    body = next((child for child in root if child.tag == f"{{{_XHTML}}}body"), None)
+    if body is None:
+        return ()
+    anchors: list[etree._Element] = []
+    for child in body:
+        if not isinstance(child.tag, str):
+            continue
+        classes = (child.get("class") or "").split()
+        if (
+            child.tag != f"{{{_XHTML}}}div"
+            or not classes
+            or any(_CALIBRE_CLASS.fullmatch(value) is None for value in classes)
+        ):
+            break
+        if any((value.text or "").strip() or (value.tail or "").strip() for value in child.iter()):
+            break
+        if not len(child) and not set(child.attrib) - {"id", "class"}:
+            anchors.append(child)
+    by_id: dict[str, list[etree._Element]] = {}
+    for anchor in anchors:
+        ident = anchor.get("id", "")
+        if _CALIBRE_PAGEBREAK_ID.fullmatch(ident):
+            by_id.setdefault(ident, []).append(anchor)
+    patches: list[tuple[int, int, bytes]] = []
+    for ident, duplicates in by_id.items():
+        all_matches = [
+            element for element in root.iter() if isinstance(element.tag, str) and element.get("id") == ident
+        ]
+        if (
+            len(duplicates) < 2
+            or len(all_matches) != len(duplicates)
+            or ident in protected_ids
+            or data.count(ident.encode(indexed.encoding)) != len(duplicates)
+        ):
+            continue
+        for duplicate in duplicates[1:]:
+            span = indexed.nodes[element_path(duplicate)].starttag
+            starttag = data[span.start : span.end].decode(indexed.encoding)
+            attribute = re.search(rf"\s+id\s*=\s*(['\"]){re.escape(ident)}\1", starttag)
+            if attribute is None:
+                return ()
+            start = span.start + len(starttag[: attribute.start()].encode(indexed.encoding))
+            end = span.start + len(starttag[: attribute.end()].encode(indexed.encoding))
+            patches.append((start, end, b""))
+    return tuple(patches)
+
+
+def _missing_kobo_script_patches(
+    indexed: ResourceIndex, root: etree._Element, resource_path: str, package_paths: set[str]
+) -> tuple[tuple[int, int, bytes], ...]:
+    """Remove Calibre's inert Kobo marker when its referenced helper is absent."""
+
+    return tuple(
+        (indexed.nodes[path].full.start, indexed.nodes[path].full.end, b"")
+        for path in _missing_kobo_script_paths(root, resource_path, package_paths)
+    )
+
+
+def _missing_kobo_script_paths(
+    root: etree._Element, resource_path: str, package_paths: set[str]
+) -> tuple[tuple[int, ...], ...]:
+    """Locate only source-proven inert Kobo markers."""
+
+    head = next((child for child in root if child.tag == f"{{{_XHTML}}}head"), None)
+    if head is None:
+        return ()
+    paths: list[tuple[int, ...]] = []
+    for element in head:
+        if element.tag != f"{{{_XHTML}}}script" or len(element) or (element.text or "").strip():
+            continue
+        script_type = element.get("type", "").strip().lower()
+        src = urlsplit(element.get("src", "").strip())
+        if (
+            script_type not in {"", "text/javascript", "application/javascript"}
+            or src.scheme
+            or src.netloc
+            or src.query
+            or src.fragment
+            or not src.path
+            or "%" in src.path
+            or PurePosixPath(src.path).name != "kobo.js"
+            or _resolve(resource_path, src.path) in package_paths
+        ):
+            continue
+        paths.append(element_path(element))
+    return tuple(paths)
 
 
 def _converter_marker_patches(indexed: ResourceIndex, root: etree._Element) -> tuple[tuple[int, int, bytes], ...]:

@@ -10,7 +10,13 @@ from pathlib import Path
 import pytest
 
 from engine import cli
-from engine.epub.preservation import CODE_POLICY, decode_code_maps, discover_code_plan, verify_code_plan
+from engine.epub.preservation import (
+    CODE_POLICY,
+    apply_code_plan,
+    decode_code_maps,
+    discover_code_plan,
+    verify_code_plan,
+)
 from engine.epub.publication import publish_book
 from engine.epub.publish import publish_atomic, recover_atomic
 from engine.epub.validation import EpubValidationError, inspect_epub
@@ -20,8 +26,10 @@ from engine.schemas.contracts import canonical_hash
 from engine.services import state
 from engine.services.atomic import IdentityMismatch
 from engine.services.journal import BodyJournal
+from tests.engine.core.test_code import SHELL
 from tests.engine.epub.test_factory import make_epub
 from tests.engine.epub.test_preparation import StubChecker
+from tests.engine.epub.test_preservation import _archive, _node_bytes, _path_by_id
 from tests.engine.epub.test_publication import (
     _accepted_records,
     _coherence_checks,
@@ -133,6 +141,42 @@ def test_atomic_publication_automatically_preserves_all_code_without_manual_plan
     assert {path: state.read(path) for path in before} == before
     recovered = recover_atomic(store, output, StubChecker())
     assert recovered is not None and recovered["sha256"] == result["sha256"]
+
+
+def test_atomic_publication_composes_missing_kobo_and_cleanup_code_maps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tests.engine.agents.test_workflow as workflow_fixture
+
+    raw = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title>'
+        '<script type="text/javascript" src="../js/kobo.js"></script></head><body>'
+        "<span></span><pre><code>print(1)</code></pre><p>Explanation.</p></body></html>"
+    )
+
+    def kobo_book(path, _documents):
+        return make_epub(path, {"chapter.xhtml": raw}, version="2.0")
+
+    monkeypatch.setattr(workflow_fixture, "make_epub", kobo_book)
+    case = atomic_case(tmp_path, "unused", ("Explanation.",))
+    targets = {
+        item.item_id: item.source_projection.replace("Explanation.", "中文说明。")
+        for inventory in case.index.inventories
+        for item in inventory.items
+    }
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+    output = tmp_path / "kobo-code.epub"
+
+    result = publish_atomic(case.session.store, output, StubChecker())
+
+    rendered = _resource(output)
+    assert b"kobo.js" not in rendered and b"<span" not in rendered
+    assert b"<pre><code>print(1)</code></pre>" in rendered
+    assert "中文说明。".encode() in rendered
+    proof = result["verification"]
+    assert isinstance(proof, dict) and proof["code_policy"] == CODE_POLICY
+    assert proof["code_stats"]["selected_regions"] == 1
+    assert proof["code_node_maps"]
 
 
 def test_no_code_book_still_records_current_code_policy_and_recovers_without_model(
@@ -338,3 +382,94 @@ def test_v6_code_classification_binds_linked_styles_before_any_model_transport()
     assert frozen.document != replayed.document
     assert all("value" not in item.source_projection for item in frozen.items)
     assert any("value" in item.source_projection for item in replayed.items)
+
+
+def test_publication_restores_numbered_shell_including_standalone_page_anchors(tmp_path):
+    shell = SHELL.replace('<span class="num">4 ', '<span id="page_594"/><span class="num">4 ')
+    raw = (
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Test</title></head><body>'
+        + shell
+        + '<p id="prose">Translate this.</p></body></html>'
+    ).encode()
+    source = _archive(tmp_path / "source.epub", raw)
+    plan = discover_code_plan(source)
+    assert plan is not None
+    candidate = raw.replace(b"set", "错误代码".encode()).replace(b"Translate this.", "翻译正文。".encode())
+    restored, stats = apply_code_plan(source, {RESOURCE: candidate}, plan)
+    path = _path_by_id(raw)["shell"]
+    assert _node_bytes(restored[RESOURCE], path) == _node_bytes(raw, path)
+    assert "翻译正文。".encode() in restored[RESOURCE]
+    output = _archive(tmp_path / "output.epub", restored[RESOURCE])
+    assert verify_code_plan(source, output, plan) == stats
+
+
+def test_package_proves_missing_css_without_losing_available_code_styles(tmp_path):
+    from engine.core.code import CodeContext
+    from engine.epub.parsing import parse_resource
+    from engine.epub.styles import source_stylesheets
+
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+        b'<link rel="stylesheet" href="styles/missing.css"/>'
+        b'<link rel="stylesheet" href="code.css"/></head><body>'
+        b'<p class="listing">  let exact = 1;\n</p><p>Translate prose.</p></body></html>'
+    )
+    source = make_epub(tmp_path / "source.epub", {"chapter.xhtml": raw.decode()})
+    with zipfile.ZipFile(source, "a") as archive:
+        archive.writestr(
+            "OEBPS/code.css", '@import "also-missing.css"; .listing{white-space:pre-wrap;font-family:monospace}'
+        )
+    before = source.read_bytes()
+    with zipfile.ZipFile(source) as archive:
+        styles = source_stylesheets(archive)
+    parsed = parse_resource(raw, "application/xhtml+xml")
+    assert parsed.tree is not None
+    context = CodeContext(parsed.tree, RESOURCE, styles)
+    assert context.missing_stylesheets == {"OEBPS/styles/missing.css", "OEBPS/also-missing.css"}
+    atoms = extract_resource(raw, RESOURCE, "book", styles=styles)
+    assert all("let exact" not in item.source_projection for item in atoms.items)
+    assert any("Translate prose" in item.source_projection for item in atoms.items)
+    assert source.read_bytes() == before
+    # A caller that omitted an existing stylesheet must still fail.
+    styles.pop("OEBPS/code.css")
+    with pytest.raises(ValueError, match="missing stylesheet.*code.css"):
+        CodeContext(parsed.tree, RESOURCE, styles)
+
+
+def test_missing_package_css_survives_font_cleanup_publication_and_recovery(tmp_path, monkeypatch):
+    import tests.engine.agents.test_workflow as workflow_fixture
+
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Code</title>'
+        b'<link rel="stylesheet" href="styles/missing.css"/>'
+        b'<link rel="stylesheet" href="code.css"/></head><body>'
+        b'<p class="listing">  let exact = 1;\n</p><p>Translate prose.</p></body></html>'
+    )
+
+    def book(path, _documents):
+        result = make_epub(path, {"chapter.xhtml": raw.decode()})
+        with zipfile.ZipFile(result, "a") as archive:
+            archive.writestr("OEBPS/code.css", ".listing{white-space:pre-wrap;font-family:monospace}")
+        return result
+
+    monkeypatch.setattr(workflow_fixture, "make_epub", book)
+    case = atomic_case(tmp_path, "unused", ("Translate prose.",))
+    original = (tmp_path / "source.epub").read_bytes()
+    targets = {
+        item.item_id: item.source_projection.replace("Translate prose.", "中文说明。")
+        for inventory in case.index.inventories
+        for item in inventory.items
+    }
+    monkeypatch.setattr(BodyJournal, "parent_targets", lambda self, require_complete=True: targets)
+    output = tmp_path / "reader.epub"
+    result = publish_atomic(case.session.store, output, StubChecker())
+    proof = result["verification"]
+    assert isinstance(proof, dict) and proof["code_policy"] == CODE_POLICY
+    rendered = _resource(output)
+    assert b"  let exact = 1;\n" in rendered
+    assert "中文说明。".encode() in rendered
+    assert b'href="styles/missing.css"' in rendered
+    with zipfile.ZipFile(output) as archive:
+        assert "OEBPS/styles/missing.css" not in archive.namelist()
+    assert recover_atomic(case.session.store, output, checker=StubChecker()) is not None
+    assert (tmp_path / "source.epub").read_bytes() == original

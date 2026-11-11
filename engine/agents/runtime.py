@@ -20,7 +20,7 @@ from uuid import uuid4
 from agno.models.message import Message
 from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 
-from engine.core.tokens import _get_tokenizer, count_tokens
+from engine.core.tokens import _get_tokenizer, count_tokens, encode_text
 from engine.schemas.internal import Attempt, Usage
 
 from . import wire
@@ -206,7 +206,7 @@ def model_input_budget(
     tokenizer = _get_tokenizer()
     if tokenizer is None or tokenizer.name != "cl100k_base":
         raise RuntimeError("tokenizer unavailable for input budget v2")
-    tokens = len(tokenizer.encode(rendered))
+    tokens = len(encode_text(tokenizer, rendered))
     return result | {
         "algorithm_version": 2,
         "cl100k_tokens": tokens,

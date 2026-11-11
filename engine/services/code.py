@@ -9,7 +9,7 @@ from engine.core.code import is_rendered_python_block
 from engine.core.markup import find_by_element_path
 from engine.epub.parsing import XHTML_NAMESPACE, parse_resource
 from engine.item.members import validate_member_target
-from engine.item.policy import is_styled_code_block
+from engine.item.policy import is_numbered_shell_block, is_styled_code_block
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash, canonical_json_bytes
 from engine.services import state
 from engine.services.atomic import IdentityMismatch, StaleWrite
@@ -42,7 +42,9 @@ def _source_code_version(session, member) -> int | None:
         )
     ):
         return 1
-    if member.kind == "p" and is_styled_code_block(node):
+    if member.kind == "p" and is_numbered_shell_block(node):
+        version = 4
+    elif member.kind == "p" and is_styled_code_block(node):
         version = 2
     elif member.kind == "div_text_region" and is_rendered_python_block(node):
         version = 3
@@ -58,7 +60,7 @@ def _source_code_version(session, member) -> int | None:
         and parent.registry == member.registry
         and parent.source_span == member.source_span
         and (
-            version == 2
+            version in {2, 4}
             or parent.region.get("type") == "content"
             and parent.region.get("after_node_key") is None
             and parent.region.get("before_node_key") is None
@@ -85,12 +87,12 @@ def preserved_code_proof(session, record: ItemRecord) -> None:
         or record.failure is not None
         or record.next_action is not None
         or type(version) is not int
-        or version not in {1, 2, 3}
+        or version not in {1, 2, 3, 4}
         or proof != {"version": version, "member_hash": canonical_hash(member)}
         or set(record.checks) - {"preserved_code", "translation_frame", "translation_epoch"}
     ):
         raise IdentityMismatch("preserved code result differs from its canonical source")
-    if version == 3 and record.request_id is None and "translation_frame" not in record.checks:
+    if version in {3, 4} and record.request_id is None and "translation_frame" not in record.checks:
         initial = session.initial_batch(member.item_id)
         if initial is None:
             raise IdentityMismatch("preserved code member has no canonical initial batch")
@@ -108,9 +110,12 @@ def recover_preserved_code(journal) -> tuple[str, ...]:
     journal.session.verify()
     changes = []
     for prior in journal._records.values():
-        if prior.status not in {ItemStatus.PENDING, ItemStatus.NEEDS_ATTENTION}:
-            continue
         member = journal.session.index.members_by_id[prior.item_id]
+        shell_candidate = member.kind == "p" and "#!" in member.source_projection
+        if "preserved_code" in prior.checks or (
+            prior.status not in {ItemStatus.PENDING, ItemStatus.NEEDS_ATTENTION} and not shell_candidate
+        ):
+            continue
         message = str((prior.failure or {}).get("message", ""))
         id_mismatch = (
             prior.stage == "translate"
@@ -122,10 +127,10 @@ def recover_preserved_code(journal) -> tuple[str, ...]:
             and prior.stage in {"translate", "review"}
             and (message.startswith("untranslated English remains:") or id_mismatch)
         )
-        if not legacy_failure and member.kind != "div_text_region":
+        if not legacy_failure and member.kind != "div_text_region" and not shell_candidate:
             continue
         version = _source_code_version(journal.session, member)
-        if version is None or (version != 3 and not legacy_failure):
+        if version is None or (version not in {3, 4} and not legacy_failure):
             continue
         checks = {
             name: prior.checks[name] for name in ("translation_frame", "translation_epoch") if name in prior.checks

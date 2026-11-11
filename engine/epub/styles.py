@@ -15,7 +15,8 @@ from urllib.parse import unquote, urlsplit
 import tinycss2
 from lxml import etree  # type: ignore[attr-defined]
 
-from engine.core.code import CodeContext, monospace_family
+from engine.core.code import CodeContext
+from engine.core.styles import GENERIC_FAMILIES, CodeStyleError, StylesheetSources, monospace_family
 from engine.epub.parsing import ParsedResource, parse_resource
 from engine.epub.ranges import RawSpan, ResourceIndex, SlotSpan, index_resource
 from engine.epub.validation import (
@@ -47,23 +48,9 @@ _FONT_SIZE_KEYWORDS = {
 }
 _CSS_WIDE = {"inherit", "initial", "revert", "revert-layer", "unset"}
 _SYSTEM_FONTS = {"caption", "icon", "menu", "message-box", "small-caption", "status-bar"}
-_GENERIC_FAMILIES = {
-    "serif",
-    "sans-serif",
-    "monospace",
-    "cursive",
-    "fantasy",
-    "system-ui",
-    "ui-serif",
-    "ui-sans-serif",
-    "ui-monospace",
-    "ui-rounded",
-    "math",
-    "fangsong",
-}
 
 
-def source_stylesheets(archive: zipfile.ZipFile) -> dict[str, str]:
+def source_stylesheets(archive: zipfile.ZipFile) -> StylesheetSources:
     """Load local CSS once, including manifest stylesheets without a .css suffix."""
     from engine.epub.validation import _container_rootfiles, _manifest_items, _read_xml
 
@@ -71,7 +58,7 @@ def source_stylesheets(archive: zipfile.ZipFile) -> dict[str, str]:
     paths = {name for name in entries if PurePosixPath(name).suffix.lower() == ".css"}
     roots = _container_rootfiles(_read_xml(archive, "META-INF/container.xml"))
     if len(roots) != 1:
-        raise ValueError("code styles require exactly one EPUB package")
+        raise CodeStyleError("code styles require exactly one EPUB package")
     paths.update(
         item.path
         for item in _manifest_items(_read_xml(archive, roots[0]), roots[0], entries)
@@ -79,10 +66,8 @@ def source_stylesheets(archive: zipfile.ZipFile) -> dict[str, str]:
     )
     result: dict[str, str] = {}
     for path in sorted(paths):
-        raw = archive.read(path)
-        _rules, encoding = tinycss2.parse_stylesheet_bytes(raw)
-        result[path] = raw.decode(encoding.codec_info.name).removeprefix("\ufeff")
-    return result
+        result[path] = _decode_css(archive.read(path), path).removeprefix("\ufeff")
+    return StylesheetSources(result, package_paths=entries)
 
 
 def use_reader_fonts(
@@ -122,11 +107,14 @@ def use_reader_fonts(
         style_paths = {item.path for item in inventory.manifest if item.media_type == "text/css"} | {
             path for path in names | set(replacements) if PurePosixPath(path).suffix.lower() == ".css"
         }
-        styles = {
-            path: _decode_css(source_bytes(path), path)
-            for path in style_paths
-            if path in names or path in replacements
-        }
+        styles = StylesheetSources(
+            {
+                path: _decode_css(source_bytes(path), path)
+                for path in style_paths
+                if path in names or path in replacements
+            },
+            package_paths=names | set(replacements),
+        )
 
         for item in inventory.manifest:
             if item.path in removed or item.path not in names and item.path not in replacements:
@@ -171,7 +159,7 @@ def _clean_css_bytes(raw: bytes, resource: str) -> bytes:
     try:
         rules, encoding = tinycss2.parse_stylesheet_bytes(raw, skip_comments=False, skip_whitespace=False)
     except UnicodeDecodeError as error:
-        raise ValueError(f"CSS decoding failed for {resource}: {error}") from error
+        raise CodeStyleError(f"CSS decoding failed for {resource}: {error}") from error
     changed = _clean_rules(rules, resource)
     if not changed:
         return raw
@@ -279,8 +267,6 @@ def _reader_family(tokens: Iterable[Any]) -> bool:
     value = tinycss2.serialize(tokens).strip().lower()
     if value in _CSS_WIDE:
         return True
-    if monospace_family(tinycss2.serialize(tokens)):
-        return True
     families: list[list[Any]] = [[]]
     for token in tokens:
         kind = getattr(token, "type", "")
@@ -298,16 +284,22 @@ def _reader_family(tokens: Iterable[Any]) -> bool:
         families[-1].append(token)
     if not families[-1]:
         return False
+    # A stack that only repeats the reader monospace stays reader controlled.
+    # Calibre writes "monospace, monospace" for its literal text classes.
+    if len(families) > 1 and all(
+        len(group) == 1 and group[0].type == "ident" and group[0].lower_value == "monospace" for group in families
+    ):
+        return True
     for group in families:
         if not group or any(getattr(token, "type", "") not in {"ident", "string"} for token in group):
             return False
         generics = [
-            token
-            for token in group
-            if token.type == "ident" and getattr(token, "lower_value", "") in _GENERIC_FAMILIES
+            token for token in group if token.type == "ident" and getattr(token, "lower_value", "") in GENERIC_FAMILIES
         ]
         if generics and (len(group) != 1 or group is not families[-1]):
             return False
+    if monospace_family(tinycss2.serialize(tokens)):
+        return True
     final = families[-1]
     return len(final) == 1 and final[0].type == "ident" and final[0].lower_value == "monospace"
 
@@ -436,7 +428,7 @@ def _decode_css(raw: bytes, resource: str) -> str:
         _rules, encoding = tinycss2.parse_stylesheet_bytes(raw)
         return raw.decode(encoding.codec_info.name)
     except (UnicodeDecodeError, LookupError) as error:
-        raise ValueError(f"CSS decoding failed for {resource}: {error}") from error
+        raise CodeStyleError(f"CSS decoding failed for {resource}: {error}") from error
 
 
 def _clean_opf(raw: bytes, resource: str, removed: set[str]) -> bytes:

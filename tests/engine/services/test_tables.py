@@ -23,11 +23,13 @@ from tests.engine.execution.test_atomic import answer
 from tests.engine.services.test_preparing import atomic_config, forbidden
 
 
-def blocked_checkpoint(tmp_path, monkeypatch, tag="table"):
+def blocked_checkpoint(tmp_path, monkeypatch, tag="table", *, inline_code=False):
     body = (
         "<table><tbody>" + "".join(f"<tr><td>{'word ' * 900}</td></tr>" for _ in range(3)) + "</tbody></table>"
         if tag == "table"
-        else "<ol><li>Part One<ol>"
+        else "<ol><li>Part One"
+        + ("<code>fixed_code</code> Details" if inline_code else "")
+        + "<ol>"
         + "".join(f'<li><a href="chapter.xhtml#entry{n}">{"word " * 900}</a></li>' for n in range(3))
         + "</ol></li></ol>"
     )
@@ -64,9 +66,11 @@ def blocked_checkpoint(tmp_path, monkeypatch, tag="table"):
     return source, root
 
 
-@pytest.mark.parametrize("tag", ["table", "ol"])
-def test_failed_group_preflight_upgrades_without_replacing_old_receipt_or_source(tmp_path, monkeypatch, tag):
-    source, root = blocked_checkpoint(tmp_path, monkeypatch, tag)
+@pytest.mark.parametrize(("tag", "inline_code"), [("table", False), ("ol", False), ("ol", True)])
+def test_failed_group_preflight_upgrades_without_replacing_old_receipt_or_source(
+    tmp_path, monkeypatch, tag, inline_code
+):
+    source, root = blocked_checkpoint(tmp_path, monkeypatch, tag, inline_code=inline_code)
     prior = state.read(root / "checks/preflight.json")
     source_bytes = source.read_bytes()
     preparation = state.read(root / "preparation.json")
@@ -122,9 +126,11 @@ def test_nested_list_upgrade_composes_with_a_saved_row_receipt(tmp_path, monkeyp
     assert not list(state.glob(root / "requests", "*.json"))
 
 
-@pytest.mark.parametrize("tag", ["table", "ol"])
-def test_split_group_translates_reviews_publishes_and_resumes_without_new_requests(tmp_path, monkeypatch, tag):
-    source, root = blocked_checkpoint(tmp_path, monkeypatch, tag)
+@pytest.mark.parametrize(("tag", "inline_code"), [("table", False), ("ol", False), ("ol", True)])
+def test_split_group_translates_reviews_publishes_and_resumes_without_new_requests(
+    tmp_path, monkeypatch, tag, inline_code
+):
+    source, root = blocked_checkpoint(tmp_path, monkeypatch, tag, inline_code=inline_code)
     original = source.read_bytes()
     runtime = BodyJournal.runtime
     calls = []
@@ -158,6 +164,8 @@ def test_split_group_translates_reviews_publishes_and_resumes_without_new_reques
         else:
             assert rendered.count(b"<ol>") == 2 and rendered.count(b"<li>") == 4
             assert all(f'href="chapter.xhtml#entry{n}"'.encode() in rendered for n in range(3))
+            if inline_code:
+                assert b"<code>fixed_code</code>" in rendered
         assert b"word" not in rendered
         assert "译文".encode() in rendered
     count = len(calls)

@@ -9,6 +9,7 @@ from engine.core.quality import (
     EnglishResidualDecision,
     classify_untranslated_english_texts,
     find_degenerate_translation,
+    find_untranslated_english_texts,
 )
 
 
@@ -84,3 +85,27 @@ def test_markup_quality_keeps_protected_tags_and_chinese_parent_context(root):
     markup += f"<p>中文说明。<span>{text}</span></p></{root}>"
     assert quality.find_untranslated_english_texts(markup) == [text]
     assert quality._visible_prose_text(markup) == "中文说明。 " + text
+
+
+def test_localised_reference_entry_keeps_its_original_english_title() -> None:
+    text = (
+        "8 短期记忆大约能容纳七项内容： 乔治·A·米勒（George A. Miller），“神奇的数字：7 ± 2：我们处理信息能力的一些极限”"
+        "（“The Magical Number Seven, Plus or Minus Two: Some Limits on Our Capacity for Processing Information”），"
+        "《心理评论》第63卷，第2期（1956年）：81–97，https://doi.org/10.1037/h0043158。"
+    )
+
+    assert quality._looks_like_bibliographic_reference(text)
+    assert find_untranslated_english_texts(text, markup=False) == []
+    with_untranslated_prose = text + " The server must validate every incoming request before returning a response."
+    assert find_untranslated_english_texts(with_untranslated_prose, markup=False) == [with_untranslated_prose]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "这是说明文字。（The client will automatically retrieve the new URL.）",
+        "请参考《心理评论》第63卷（1956年）。正文补充（The client will automatically retrieve the new URL.）。",
+    ],
+)
+def test_english_sentence_inside_brackets_is_still_reported(text: str) -> None:
+    assert find_untranslated_english_texts(text, markup=False) == [text]

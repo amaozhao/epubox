@@ -42,9 +42,15 @@ SourceMap.node_spans 可嵌套，表示完整源元素，不是可直接提交�
 
 translate=no 的继承与后代 translate=yes 的岛保留，岛仍属于已有外层原子；完全保护的代码、媒体或未知外部命名空间子树不产生后代任务。img 的可译属性独立登记；父正文项同时覆盖该节点时，region.patch_owner_id 记录 T07 合并为唯一补丁所需的归属，不提前做目标回填。
 
+代码识别读取样式表时同时保留完整 ZIP 资源清单。仅当清单证明本地 CSS 引用确实不存在时，将其记录为 `code_style_context.missing_styles` 并继续使用现有样式与语义标签；不猜测其他同名 CSS，不修改原书链接。普通调用方提供的不完整样式字典仍不能证明缺失，已存在却未加载的 CSS 继续阻塞。该证据贯穿提取、预检、字体清理和成品回填。无法确定处理方式的 CSS/代码分类错误使用 `CodeStyleError`，命令报告一次后停止自动续跑；临时接口错误维持原重试规则。
+
 XML 白名单按 [基线合同](baseline.md) 固定：XHTML head/title 与 meta name=description 的 content、正文可译属性；NCX docTitle/text 与 navLabel/text；OPF 的明确主书名和纯文本简介。作者、identifier、manifest/spine、路径、ID、foreign namespace 同名字段保留。
 
 虚拟块的 region.safe_boundaries 只保存允许候选的 slot_id、char_offset、byte_offset，使用既有保守句界规则并检查段落空白、字符簇和源实体边界；不在原子项或配对 inline 范围中登记切点。实际在配置预算内选择分组归 T08/T14。这些始终是源位置，不能拿来按原文偏移截断译文。
+
+长属性值也需要满足请求上限。`alt/title/aria-label/aria-description` 和白名单 description/content 超限时，在同一属性的安全空白处分片；实体、字符簇和受保护的字面标记保持完整。每片分别核对初译与校对预算，按原顺序合并为一个完整属性后再转义回填。没有安全切点且仍超限的属性明确阻塞，并显示实际位置（如 `img@alt`）。
+
+属性切点从冻结源槽位和原字节映射推导，成员装配时再次验证；无需改变旧提取器、原子清单或正文不可拆约束。旧失败预检可在源身份、模型、预算和其他单元均不变，且尚无已派发工作时，增加逻辑收据 `checks/attributes.json`。旧收据和词表保留；紧凑存储仍将新收据保存到 plan/state 分片，不增加顶层 JSON 文件。
 
 AtomicDocument 验证完整清单和阅读顺序、source/map 身份、所有 source-owned 范围的字节映射、通道一致及硬原子的整元素范围；缺项、重复后代正文任务或把完整 p 伪改成局部范围都会失败。
 

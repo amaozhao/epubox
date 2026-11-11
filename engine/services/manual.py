@@ -27,6 +27,7 @@ def import_codex_translation(
     target_projection: str,
     *,
     user_authorized: bool,
+    replace_reviewed: bool = False,
 ) -> ItemRecord:
     """Commit one locally validated manual target without inventing provider evidence."""
     journal.session.verify()
@@ -37,7 +38,15 @@ def import_codex_translation(
     current = journal._records.get(member.item_id)
     if current != existing:
         raise StaleWrite("manual translation prior record changed")
-    if existing.status not in _IMPORTABLE:
+    if type(replace_reviewed) is not bool:
+        raise ValueError("reviewed replacement opt-in must be a boolean")
+    if existing.status == ItemStatus.REVIEWED:
+        if not replace_reviewed:
+            raise StaleWrite("manual translation of a reviewed result requires explicit replacement opt-in")
+        journal._require_review_proof(existing)
+    elif replace_reviewed:
+        raise StaleWrite("reviewed replacement opt-in requires a reviewed prior result")
+    elif existing.status not in _IMPORTABLE:
         raise StaleWrite("manual translation can replace only pending, draft, or needs-attention state")
     _validate_target(journal.session, member, target_projection)
     artifact = ManualArtifact(
@@ -46,6 +55,7 @@ def import_codex_translation(
         member_hash=canonical_hash(member),
         source_projection_hash=canonical_hash(member.source_projection),
         prior=existing,
+        replaces_reviewed=replace_reviewed,
         target_projection=target_projection,
         target_hash=canonical_hash(target_projection),
     )
@@ -107,8 +117,12 @@ def manual_proof(session, record: ItemRecord, *, artifact: ManualArtifact | None
     ):
         raise IdentityMismatch("manual translation source identity changed")
     prior = artifact.prior
-    if prior.status not in _IMPORTABLE:
+    if artifact.replaces_reviewed != (prior.status == ItemStatus.REVIEWED):
+        raise IdentityMismatch("manual translation reviewed replacement lacks matching authorization")
+    if prior.status not in _IMPORTABLE and not artifact.replaces_reviewed:
         raise IdentityMismatch("manual translation replaced an ineligible prior state")
+    if artifact.replaces_reviewed and "manual" in prior.checks:
+        manual_proof(session, prior)
     manifest, wire = _canonical_manifest_and_wire(session, member, prior)
     raw_terms = wire.get("terms")
     terms = tuple(term for term in raw_terms if isinstance(term, Mapping)) if isinstance(raw_terms, list) else ()

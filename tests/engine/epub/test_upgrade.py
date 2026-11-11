@@ -11,6 +11,7 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 from engine.core.markup import parse_xml_bytes, qname_local_name
 from engine.epub.upgrade import (
+    _css_id_references,
     _normalize_xhtml,
     _relative,
     _resolve,
@@ -857,6 +858,66 @@ def test_upgrade_removes_unused_legacy_epub_prefix_without_changing_text(tmp_pat
         b"<pre>  &lt;x&gt;  </pre>",
     ):
         assert protected in result
+
+
+def test_upgrade_deduplicates_empty_calibre_pagebreak_ids_without_changing_nodes_or_code() -> None:
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head><body>\n'
+        b'<div class="calibre3" id="calibre_pb_0"></div>\n'
+        b'<div id="calibre_pb_0" class="calibre6"></div>\n'
+        b"<pre><code>int main() { return 0; }</code></pre><p>Translate.</p></body></html>"
+    )
+
+    result = _normalize_xhtml(raw)
+
+    assert result.count(b'id="calibre_pb_0"') == 1
+    assert b'<div class="calibre3" id="calibre_pb_0"></div>' in result
+    assert b'<div class="calibre6"></div>' in result
+    assert b"<pre><code>int main() { return 0; }</code></pre>" in result
+    assert tuple(parse_xml_bytes(result).getroot().itertext()) == tuple(parse_xml_bytes(raw).getroot().itertext())
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        b'<a href="#calibre_pb_0">page</a>',
+        b"<style>#calibre_pb_0 { break-before: page }</style>",
+    ),
+)
+def test_upgrade_keeps_duplicate_calibre_pagebreak_ids_when_document_references_them(reference: bytes) -> None:
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title>'
+        + (reference if reference.startswith(b"<style") else b"")
+        + b'</head><body><div class="calibre3" id="calibre_pb_0"></div>'
+        b'<div class="calibre6" id="calibre_pb_0"></div>'
+        + (reference if reference.startswith(b"<a") else b"")
+        + b"</body></html>"
+    )
+
+    assert _normalize_xhtml(raw) == raw
+
+
+def test_upgrade_keeps_duplicate_calibre_pagebreak_ids_when_packaged_css_references_them() -> None:
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<div class="calibre3" id="calibre_pb_0"></div>'
+        b'<div class="calibre6" id="calibre_pb_0"></div></body></html>'
+    )
+
+    references = _css_id_references((b"[id='calibre_pb_0'] { break-before: page } #calibre_pb_1 { display:block }",))
+    assert references == {"calibre_pb_0", "calibre_pb_1"}
+    assert _normalize_xhtml(raw, protected_ids=references) == raw
+
+
+def test_upgrade_keeps_pagebreak_group_when_same_id_appears_on_nonempty_content() -> None:
+    raw = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<div class="calibre3" id="calibre_pb_0"></div>'
+        b'<div class="calibre6" id="calibre_pb_0"></div>'
+        b'<p id="calibre_pb_0">Visible content.</p></body></html>'
+    )
+
+    assert _normalize_xhtml(raw) == raw
 
 
 def test_upgrade_keeps_epub_vocabulary_separate_from_rdfa_prefix(tmp_path: Path) -> None:

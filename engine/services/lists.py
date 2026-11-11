@@ -30,24 +30,33 @@ def split_list(
     direct = _split_direct(inventory, raw, parent, limits, model)
     if direct:
         return direct
-    events, cuts, anchors = _nested_layout(parent)
-    if len(cuts) < 3:
-        return ()
-    offsets = {
-        position: (
-            inventory.source_map.node_spans[parent.registry[ref].source_node_key].byte_start
-            if opening
-            else inventory.source_map.node_spans[parent.registry[ref].source_node_key].byte_end
+    # Preserve successful historical piece identities before trying new seams.
+    for protected_domains in (False, True):
+        events, cuts, anchors = _nested_layout(parent, protected_domains=protected_domains)
+        if len(cuts) < 3:
+            continue
+        offsets = {
+            position: (
+                inventory.source_map.node_spans[parent.registry[ref].source_node_key].byte_start
+                if opening
+                else inventory.source_map.node_spans[parent.registry[ref].source_node_key].byte_end
+            )
+            for position, (ref, opening) in anchors.items()
+        }
+        offsets[0] = parent.source_span.byte_start
+        offsets[len(events)] = parent.source_span.byte_end
+        pieces = split_padded_groups(
+            inventory, parent, events, cuts, tuple(offsets[pos] for pos in cuts), limits, model
         )
-        for position, (ref, opening) in anchors.items()
-    }
-    offsets[0] = parent.source_span.byte_start
-    offsets[len(events)] = parent.source_span.byte_end
-    return split_padded_groups(inventory, parent, events, cuts, tuple(offsets[pos] for pos in cuts), limits, model)
+        if pieces:
+            return pieces
+    return ()
 
 
 def _nested_layout(
     parent: AtomicItem,
+    *,
+    protected_domains: bool = True,
 ) -> tuple[tuple[Event, ...], dict[int, tuple[str, ...]], dict[int, tuple[str, bool]]]:
     events = validate_projection(parent)
     stack: list[str] = []
@@ -72,7 +81,18 @@ def _nested_layout(
             payload
             and (opening_list or closing_item)
             and all(
-                parent.registry[ancestor].kind == "g" and parent.registry[ancestor].hints.get("element") in _LIST_TAGS
+                (
+                    parent.registry[ancestor].kind == "g"
+                    and parent.registry[ancestor].hints.get("element") in _LIST_TAGS
+                )
+                # A hard interval labels the prose beside an opaque code atom;
+                # it is not an element whose content must stay in one request.
+                # Balance it virtually and remove that padding before merging.
+                or (
+                    protected_domains
+                    and parent.registry[ancestor].kind == "b"
+                    and parent.registry[ancestor].boundary_type == "hard_interval"
+                )
                 for ancestor in stack
             )
         ):

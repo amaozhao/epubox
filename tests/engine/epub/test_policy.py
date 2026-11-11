@@ -156,6 +156,133 @@ def test_pagination_helper_requires_verified_local_bytes(
             assert caught.value.issues[0].code == "scripted_content"
 
 
+def test_missing_kobo_reader_helper_is_removed_from_upgraded_static_book(tmp_path: Path) -> None:
+    from engine.epub.cleanup import cleanup_resources
+    from engine.epub.fill import fill_resource
+    from engine.epub.preservation import apply_code_plan, effective_code_plan
+    from engine.item.atoms import extract_resource
+
+    source = make_epub(
+        tmp_path / "kobo-converted.epub",
+        {
+            "EPUB/chapter.xhtml": (
+                '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title>'
+                '<!-- kobo-style --><script type="text/javascript" src="../../js/kobo.js"></script>'
+                "</head><body><span></span><pre><code>print(1)</code></pre><p>Static text.</p></body></html>"
+            )
+        },
+        version="2.0",
+    )
+    original = source.read_bytes()
+    with zipfile.ZipFile(source) as archive:
+        assert "js/kobo.js" not in archive.namelist()
+        raw = archive.read("OEBPS/EPUB/chapter.xhtml")
+
+    inventory = inspect_epub(source, "source", checker=StubChecker())
+    extracted = extract_resource(raw, "OEBPS/EPUB/chapter.xhtml", inventory.source_hash)
+    targets = {item.item_id: item.source_projection.replace("Static text.", "静态正文。") for item in extracted.items}
+    translated = fill_resource(raw, extracted, targets)
+    replacements = upgrade_package(source, inventory, {"OEBPS/EPUB/chapter.xhtml": translated})
+    code_plan = effective_code_plan(source)
+    assert code_plan is not None
+    identity, _identity_stats = apply_code_plan(source, {"OEBPS/EPUB/chapter.xhtml": raw}, code_plan)
+    assert identity["OEBPS/EPUB/chapter.xhtml"] == raw
+    replacements, code_stats = apply_code_plan(source, replacements, code_plan)
+    assert code_stats["selected_regions"] == 1
+    code_node_maps: dict[str, dict[tuple[int, ...], tuple[int, ...]]] = {}
+    replacements, cleanup = cleanup_resources(replacements, source=source, node_maps=code_node_maps)
+    assert cleanup["removed_empty_tags"] >= 1
+    output = tmp_path / "output.epub"
+    stage_epub(source, output, replacements, allow_additions=True)
+    verify_staged_epub(
+        source,
+        output,
+        inventory,
+        replacements,
+        accepted_targets={path: {} for path in replacements},
+        checker=StubChecker(),
+        upgraded=True,
+        cleanup=cleanup,
+        code_plan=code_plan,
+        code_node_maps=code_node_maps,
+        source_code=True,
+    )
+
+    with zipfile.ZipFile(output) as archive:
+        assert b"kobo.js" not in archive.read("OEBPS/EPUB/chapter.xhtml")
+        assert b"<span" not in archive.read("OEBPS/EPUB/chapter.xhtml")
+        assert b"<pre><code>print(1)</code></pre>" in archive.read("OEBPS/EPUB/chapter.xhtml")
+        assert "<p>静态正文。</p>".encode() in archive.read("OEBPS/EPUB/chapter.xhtml")
+        opf = ET.fromstring(archive.read("OEBPS/content.opf"))
+        chapter = next(item for item in opf.iter() if item.attrib.get("id") == "c0")
+        assert "scripted" not in chapter.attrib.get("properties", "").split()
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "packaged-javascript",
+        "packaged-other-type",
+        "declared-scripted",
+        "query",
+        "percent-encoded-path",
+        "body",
+        "base",
+    ],
+)
+def test_kobo_reader_exception_rejects_executable_or_redirectable_variants(tmp_path: Path, case: str) -> None:
+    src = "../../js/kobo.js"
+    if case == "query":
+        src += "?mode=reader"
+    elif case == "percent-encoded-path":
+        src = "../../%6as/kobo.js"
+    script = f'<script type="text/javascript" src="{src}"></script>'
+    head = '<base href="../../"/>' if case == "base" else ""
+    body = "<p>Static text.</p>"
+    if case == "body":
+        body += script
+    else:
+        head += script
+    source = make_epub(
+        tmp_path / "kobo-variant.epub",
+        {
+            "EPUB/chapter.xhtml": (
+                '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title>'
+                + head
+                + "</head><body>"
+                + body
+                + "</body></html>"
+            )
+        },
+        version="2.0",
+    )
+    replacements: dict[str, bytes] = {}
+    if case == "declared-scripted":
+        with zipfile.ZipFile(source) as archive:
+            replacements["OEBPS/content.opf"] = archive.read("OEBPS/content.opf").replace(
+                b'id="c0"', b'id="c0" properties="scripted"'
+            )
+    elif case.startswith("packaged-"):
+        media_type = "application/javascript" if case == "packaged-javascript" else "text/plain"
+        with zipfile.ZipFile(source) as archive:
+            replacements["OEBPS/content.opf"] = archive.read("OEBPS/content.opf").replace(
+                b"<manifest>",
+                f'<manifest><item id="kobo" href="../js/kobo.js" media-type="{media_type}"/>'.encode(),
+            )
+        replacements["js/kobo.js"] = b'document.body.innerHTML = "Generated";'
+    if replacements:
+        staged = tmp_path / "staged.epub"
+        stage_epub(source, staged, replacements, allow_additions=True)
+        source = staged
+
+    with pytest.raises(EpubValidationError) as caught:
+        inspect_epub(source, "source", checker=StubChecker())
+
+    assert caught.value.code == "unsupported_source"
+    assert caught.value.issues[0].code == "scripted_content"
+
+
 @pytest.mark.parametrize(
     ("head", "body"),
     [

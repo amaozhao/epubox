@@ -12,7 +12,7 @@ import pytest
 
 import engine.services.ready as ready_module
 from engine.item.members import pack_members
-from engine.schemas.contracts import Attempt, canonical_json_bytes
+from engine.schemas.contracts import Attempt, canonical_hash, canonical_json_bytes
 from engine.services import state
 from engine.services.atomic import IdentityMismatch
 from engine.services.preparation import prepare_translation
@@ -596,3 +596,53 @@ def test_initial_batch_lookup_never_scans_other_lazy_batches(tmp_path, monkeypat
     batch = session.initial_batch(item_id)
     assert batch is not None and item_id in batch.manifest.item_ids
     assert session.initial_batch("not-owned") is None
+
+
+def _ready_members(store: RunStore) -> list[Any]:
+    from engine.schemas.members import RequestMember
+
+    return [
+        RequestMember.model_validate_json(state.read(path))
+        for path in sorted(state.glob(store.root / "members", "*.json"))
+    ]
+
+
+def _ready_batches(store: RunStore) -> list[Any]:
+    from engine.schemas.members import MemberBatch
+
+    return [
+        MemberBatch.model_validate_json(state.read(path))
+        for path in sorted(state.glob(store.root / "batches", "*.json"))
+    ]
+
+
+@pytest.mark.parametrize("difference", ["unproven_result", "changed_context", "changed_request", "wrong_owner"])
+def test_initialization_rejects_existing_noncanonical_result_without_overwriting_it(
+    tmp_path: Path, difference
+) -> None:
+    store, ready = prepared(tmp_path)
+    members = _ready_members(store)
+    batches = _ready_batches(store)
+    item_id = members[0].item_id
+    request_id = next(batch.manifest.request_id for batch in batches if item_id in batch.manifest.item_ids)
+    result = {
+        "status": "reviewed",
+        "stage": "reviewed",
+        "target_projection": "译文",
+        "target_hash": canonical_hash("译文"),
+        "request_id": request_id,
+    }
+    if difference == "changed_context":
+        result["context_hash"] = "0" * 64
+    elif difference == "changed_request":
+        result["request_id"] = "tx-" + "0" * 32
+    elif difference == "wrong_owner":
+        result.update(item_id="u-another-item", segment_id="u-another-item")
+    path = store.root / "results" / f"{item_id}.json"
+    saved = json.loads(state.read(path)) | result
+    state.write(path, canonical_json_bytes(saved))
+    before = state.read(path)
+
+    with pytest.raises(ready_module.StaleWrite):
+        ready_module._initial_results(store, ready, members, batches)
+    assert state.read(path) == before

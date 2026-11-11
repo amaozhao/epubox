@@ -1,20 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 
-from engine.agents.workflow import _failed
+from engine.agents.workflow import _failed, run_workflow
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash, canonical_json_bytes
 from engine.services import state
-from engine.services.atomic import IdentityMismatch
+from engine.services.atomic import IdentityMismatch, StaleWrite
 from engine.services.journal import BodyJournal
 from engine.services.manual import import_codex_translation
 from engine.services.partition import build_plan, plan_path
 from engine.services.parts import PartJournal
 from engine.services.resume import plan_resume
 from tests.engine.agents.test_workflow import prepare_case
-from tests.engine.services.test_journal import _compact_case
+from tests.engine.services.test_journal import _answer, _compact_case
 from tests.engine.services.test_partition import _case
 
 
@@ -115,6 +116,83 @@ def test_manual_import_explicitly_replaces_needs_attention_without_http(tmp_path
     assert "review_request_id" not in result.checks
     assert all(not request.attempts for request in journal._requests.values())
     assert BodyJournal(case.session.store).records((member.item_id,))[member.item_id] == result
+
+
+def test_reviewed_correction_requires_opt_in_and_retains_provider_history(tmp_path) -> None:
+    case = prepare_case(tmp_path, "<p>First.</p><p>Second.</p>", ("First.", "Second."))
+    journal = BodyJournal(case.session.store, case.session)
+    calls = []
+
+    async def transport(stage, payload):
+        calls.append(stage)
+        return _answer(stage, payload)
+
+    completed = asyncio.run(
+        run_workflow(
+            case.prepared,
+            case.batch,
+            case.index,
+            journal.runtime(transport=transport),
+            session=journal.session,
+            save=journal.save,
+            records=journal.records(case.batch.manifest.item_ids),
+        )
+    )
+    assert completed.status == "completed"
+    member, sibling = case.batch.items
+    existing = journal.records((member.item_id,))[member.item_id]
+    sibling_before = journal.records((sibling.item_id,))[sibling.item_id]
+    requests_before = dict(journal._requests)
+    request_bytes_before = {
+        path.name: state.read(path) for path in state.glob(journal.store.root / "requests", "*.json")
+    }
+    call_count = len(calls)
+    with pytest.raises(StaleWrite, match="manual translation"):
+        import_codex_translation(journal, member, existing, "修正译文。", user_authorized=True)
+    with pytest.raises(PermissionError, match="explicit user authorization"):
+        import_codex_translation(journal, member, existing, "修正译文。", user_authorized=False, replace_reviewed=True)
+
+    result = import_codex_translation(
+        journal, member, existing, "修正译文。", user_authorized=True, replace_reviewed=True
+    )
+
+    assert result.status == ItemStatus.REVIEWED and result.target_projection == "修正译文。"
+    assert "review_request_id" not in result.checks
+    pointer = result.checks["manual"]
+    assert isinstance(pointer, dict)
+    artifact_path = journal.store.root / "manual" / f"{pointer['artifact_hash']}.json"
+    artifact = json.loads(state.read(artifact_path))
+    assert artifact["replaces_reviewed"] is True
+    assert artifact["prior"] == json.loads(existing.model_dump_json())
+    restarted = BodyJournal(journal.store)
+    assert restarted.records((member.item_id,))[member.item_id] == result
+    assert restarted.records((sibling.item_id,))[sibling.item_id] == sibling_before
+    assert canonical_hash(restarted._requests) == canonical_hash(requests_before)
+    assert {
+        path.name: state.read(path) for path in state.glob(journal.store.root / "requests", "*.json")
+    } == request_bytes_before
+    assert len(calls) == call_count
+
+    from engine.schemas.manual import ManualArtifact
+    from engine.services.manual import manual_proof
+
+    unauthorized = ManualArtifact.model_validate(artifact).model_copy(update={"replaces_reviewed": False})
+    forged = result.model_copy(
+        update={"checks": result.checks | {"manual": {"artifact_hash": canonical_hash(unauthorized)}}}
+    )
+    with pytest.raises(IdentityMismatch, match="reviewed"):
+        manual_proof(restarted.session, forged, artifact=unauthorized)
+
+    second = import_codex_translation(
+        restarted, member, result, "再次修正。", user_authorized=True, replace_reviewed=True
+    )
+    assert BodyJournal(journal.store).records((member.item_id,))[member.item_id] == second
+    original_artifact = state.read(artifact_path)
+    altered = dict(artifact, target_projection="篡改。", target_hash=canonical_hash("篡改。"))
+    state.write(artifact_path, canonical_json_bytes(altered))
+    with pytest.raises(IdentityMismatch, match="artifact hash changed"):
+        BodyJournal(journal.store)
+    state.write(artifact_path, original_artifact)
 
 
 def test_manual_import_accepts_canonical_pending_retry_metadata(tmp_path) -> None:

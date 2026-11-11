@@ -17,9 +17,12 @@ import tinycss2
 from bs4 import BeautifulSoup, Tag
 from lxml import etree  # type: ignore[attr-defined]
 
-from engine.item.policy import _BLOCK_TAGS
+from engine.core.styles import CodeStyleError, StylesheetSources, font_family_kind, monospace_family
+from engine.item.policy import _BLOCK_TAGS, is_numbered_shell_block
 
-CODE_CLASSIFICATION_VERSION = "code-context-2"
+CODE_CLASSIFICATION_VERSION = "code-context-3"
+LEGACY_CODE_CLASSIFICATION_VERSIONS = frozenset({"code-context-1", "code-context-2"})
+CODE_CLASSIFICATION_VERSIONS = LEGACY_CODE_CLASSIFICATION_VERSIONS | {CODE_CLASSIFICATION_VERSION}
 
 _SEMANTIC_BLOCK = {"pre"}
 _SEMANTIC_INLINE = {"code", "kbd", "samp", "var", "tt"}
@@ -31,43 +34,11 @@ _LINE_CLASSES = {"linegroup", "fixedline"}
 _HIGHLIGHTER_CLASSES = {"hljs", "prettify", "prettyprint"}
 _PREFORMATTED = {"pre", "pre-wrap", "break-spaces"}
 _CSS_WIDE = {"inherit", "initial", "revert", "revert-layer", "unset"}
-_GENERICS = {
-    "serif",
-    "sans-serif",
-    "monospace",
-    "cursive",
-    "fantasy",
-    "system-ui",
-    "ui-serif",
-    "ui-sans-serif",
-    "ui-monospace",
-    "ui-rounded",
-    "math",
-    "fangsong",
-}
-_KNOWN_MONOSPACE = {
-    "andale mono",
-    "consolas",
-    "courier",
-    "courier new",
-    "dejavu sans mono",
-    "fira code",
-    "jetbrains mono",
-    "liberation mono",
-    "lucida console",
-    "menlo",
-    "monaco",
-    "noto sans mono",
-    "roboto mono",
-    "sf mono",
-    "sfmono-regular",
-    "source code pro",
-    "ubuntu mono",
-}
 _NESTED = {"container", "document", "layer", "media", "scope", "starting-style", "supports"}
 _RELEVANT = {"white-space", "font-family", "font", "all"}
 _SUSPICIOUS = re.compile(r"(?:white-space|font(?:-family)?|mono(?:space)?|code|pre-wrap)", re.IGNORECASE)
-_GENERATED_CLASS = re.compile(r"class-[0-9]+-[0-9]+")
+_LEGACY_GENERATED_CLASS = re.compile(r"class-[0-9]+-[0-9]+")
+_GENERATED_CLASS = re.compile(r"class(?:[0-9]+|-[0-9]+-[0-9]+)")
 _XHTML = "{http://www.w3.org/1999/xhtml}"
 _CLASS_ALIASES = {
     "code-block": "codeblock",
@@ -78,6 +49,25 @@ _CLASS_ALIASES = {
     "inline_code": "codeinline",
     "code-inline": "codeinline",
 }
+# Calibre repeats a style class with a numeric suffix when the same declaration
+# is reused (programcode1, fixedline1). Only known code names lose that suffix,
+# so an unrelated numbered class keeps its own identity.
+_CODE_CLASS_BASES = frozenset(
+    {
+        "code",
+        "codeblock",
+        "codeinline",
+        "fixedline",
+        "linegroup",
+        "literal",
+        "mono",
+        "monospace",
+        "programcode",
+        "programlisting",
+        "sourcecode",
+    }
+)
+_NUMBERED_CLASS = re.compile(r"^(?P<base>[a-z][a-z-]*?)(?P<suffix>[0-9]+)$")
 
 
 @dataclass(frozen=True)
@@ -96,13 +86,13 @@ class _Conditional:
     resource: str
 
 
-def is_rendered_python_block(node: etree._Element) -> bool:
+def is_rendered_python_block(node: etree._Element, *, policy: str = CODE_CLASSIFICATION_VERSION) -> bool:
     """Recognize Python listings flattened into generated line spans and breaks."""
-    if (
-        node.tag != f"{_XHTML}div"
-        or not _GENERATED_CLASS.fullmatch(node.get("class", ""))
-        or (node.text or "").strip()
-    ):
+    if policy not in CODE_CLASSIFICATION_VERSIONS:
+        raise ValueError(f"unsupported code classification policy: {policy}")
+    generated = _GENERATED_CLASS if policy == CODE_CLASSIFICATION_VERSION else _LEGACY_GENERATED_CLASS
+    text_classes = {"bookSpan", "bookspan"} if policy == CODE_CLASSIFICATION_VERSION else {"bookSpan"}
+    if node.tag != f"{_XHTML}div" or not generated.fullmatch(node.get("class", "")) or (node.text or "").strip():
         return False
     lines = []
     line_class = None
@@ -116,7 +106,7 @@ def is_rendered_python_block(node: etree._Element) -> bool:
         css_class = child.get("class", "")
         if (
             child.tag != f"{_XHTML}span"
-            or not _GENERATED_CLASS.fullmatch(css_class)
+            or not generated.fullmatch(css_class)
             or (line_class is not None and line_class != css_class)
             or len(child) != 1
             or (child.text or "").strip()
@@ -124,7 +114,12 @@ def is_rendered_python_block(node: etree._Element) -> bool:
             return False
         line_class = css_class
         text = child[0]
-        if text.tag != f"{_XHTML}span" or text.get("class") != "bookSpan" or len(text) or (text.tail or "").strip():
+        if (
+            text.tag != f"{_XHTML}span"
+            or text.get("class") not in text_classes
+            or len(text)
+            or (text.tail or "").strip()
+        ):
             return False
         lines.append((text.text or "").replace("\xa0", " "))
     if sum(bool(line.strip()) for line in lines) < 2:
@@ -181,12 +176,19 @@ class CodeContext:
         styles: Mapping[str, str] | None = None,
         *,
         recognize_rendered_python: bool = True,
+        recognize_numbered_shell: bool = True,
+        policy: str = CODE_CLASSIFICATION_VERSION,
     ) -> None:
+        if policy not in CODE_CLASSIFICATION_VERSIONS:
+            raise ValueError(f"unsupported code classification policy: {policy}")
+        self.policy = policy
         self.root = root.getroot() if isinstance(root, etree._ElementTree) else root
         if not isinstance(self.root.tag, str):
             raise TypeError("code classification requires an XML element root")
         self.resource_path = _package_path(resource_path)
         self._styles = self._normalize_styles(styles or {})
+        self._package_paths = styles.package_paths if isinstance(styles, StylesheetSources) else None
+        self.missing_stylesheets: set[str] = set()
         self.stylesheet_hashes: dict[str, str] = {}
         self._elements = tuple(node for node in self.root.iter() if isinstance(node.tag, str))
         self._winners: dict[etree._Element, dict[str, _Winner]] = {node: {} for node in self._elements}
@@ -197,7 +199,7 @@ class CodeContext:
         self._load_document_styles()
         self._load_inline_styles()
         self._validate_conditionals()
-        candidates = self._candidates(recognize_rendered_python)
+        candidates = self._candidates(recognize_rendered_python, recognize_numbered_shell)
         self.regions: dict[etree._Element, Literal["block", "inline"]] = self._maximal(candidates)
         self._code_nodes = {
             descendant for region in self.regions for descendant in region.iter() if isinstance(descendant.tag, str)
@@ -212,13 +214,13 @@ class CodeContext:
         try:
             matches = soupsieve.select(selector, self._soup, namespaces=dict(namespaces or {}))
         except soupsieve.SelectorSyntaxError as error:
-            raise ValueError(
+            raise CodeStyleError(
                 f"unsupported selector for code-related CSS in {self.resource_path}: {selector}"
             ) from error
         result = []
         for match in matches:
             if not isinstance(match, Tag) or id(match) not in self._soup_to_lxml:
-                raise ValueError("selector result cannot be rebound to the source XML")
+                raise CodeStyleError("selector result cannot be rebound to the source XML")
             result.append(self._soup_to_lxml[id(match)])
         return tuple(result)
 
@@ -244,7 +246,7 @@ class CodeContext:
             key = _package_path(path)
             text = text.removeprefix("\ufeff")
             if key in normalized and normalized[key] != text:
-                raise ValueError(f"conflicting stylesheet bytes for {key}")
+                raise CodeStyleError(f"conflicting stylesheet bytes for {key}")
             normalized[key] = text
         return normalized
 
@@ -252,7 +254,7 @@ class CodeContext:
         soup = BeautifulSoup(etree.tostring(self.root, encoding="utf-8"), "xml")
         rendered = tuple(soup.find_all(True))
         if len(rendered) != len(self._elements):
-            raise ValueError("selector tree does not map one-to-one to the source XML")
+            raise CodeStyleError("selector tree does not map one-to-one to the source XML")
         mapping: dict[int, etree._Element] = {}
         for source, selected in zip(self._elements, rendered, strict=True):
             selected_class = selected.get("class")
@@ -263,10 +265,10 @@ class CodeContext:
                 or source.get("id") != selected.get("id")
                 or (source.get("class") or "") != (selected_class or "")
             ):
-                raise ValueError("selector tree identity differs from the source XML")
+                raise CodeStyleError("selector tree identity differs from the source XML")
             mapping[id(selected)] = source
         if len(mapping) != len(self._elements):
-            raise ValueError("selector tree contains duplicate element identities")
+            raise CodeStyleError("selector tree contains duplicate element identities")
         return soup, mapping
 
     def _load_document_styles(self) -> None:
@@ -281,10 +283,13 @@ class CodeContext:
 
     def _load_external(self, path: str) -> None:
         if path in self._loading:
-            raise ValueError(f"css import cycle includes stylesheet {path}")
+            raise CodeStyleError(f"css import cycle includes stylesheet {path}")
         text = self._styles.get(path)
         if text is None:
-            raise ValueError(f"missing stylesheet required by code classification: {path}")
+            if self._package_paths is not None and path not in self._package_paths:
+                self.missing_stylesheets.add(path)
+                return
+            raise CodeStyleError(f"missing stylesheet required by code classification: {path}")
         self._loading.add(path)
         self.stylesheet_hashes[path] = hashlib.sha256(text.encode()).hexdigest()
         try:
@@ -295,7 +300,7 @@ class CodeContext:
     def _apply_stylesheet(self, text: str, path: str) -> None:
         text = text.removeprefix("\ufeff")
         if "\x00" in text:
-            raise ValueError(f"decoded stylesheet contains NUL: {path}")
+            raise CodeStyleError(f"decoded stylesheet contains NUL: {path}")
         rules = tinycss2.parse_stylesheet(text, skip_comments=True, skip_whitespace=True)
         self._apply_rules(rules, path, raw=text, namespaces=_stylesheet_namespaces(rules, path))
 
@@ -304,7 +309,7 @@ class CodeContext:
             kind = getattr(rule, "type", "")
             if kind == "error":
                 if _SUSPICIOUS.search(raw):
-                    raise ValueError(f"invalid code-related CSS in {path}: {rule.message}")
+                    raise CodeStyleError(f"invalid code-related CSS in {path}: {rule.message}")
                 continue
             if kind == "at-rule":
                 keyword = getattr(rule, "lower_at_keyword", "")
@@ -312,7 +317,7 @@ class CodeContext:
                     imported = _import_target(rule.prelude)
                     if imported is None:
                         if _SUSPICIOUS.search(raw):
-                            raise ValueError(f"invalid code-related @import in {path}")
+                            raise CodeStyleError(f"invalid code-related @import in {path}")
                         continue
                     target = _resolve(path, imported)
                     if target is not None:
@@ -347,7 +352,7 @@ class CodeContext:
             kind = getattr(rule, "type", "")
             if kind == "error":
                 if _SUSPICIOUS.search(raw):
-                    raise ValueError(f"invalid conditional code style in {path}: {rule.message}")
+                    raise CodeStyleError(f"invalid conditional code style in {path}: {rule.message}")
                 continue
             if kind == "at-rule" and rule.content is not None:
                 nested = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
@@ -460,16 +465,26 @@ class CodeContext:
                             if inherited is not None
                             else None
                         )
-                before = _computed_code(_name(affected), before_values["white-space"], before_values["font-family"])
-                after_code = _computed_code(_name(affected), after_values["white-space"], after_values["font-family"])
+                before = _computed_code(
+                    _name(affected),
+                    before_values["white-space"],
+                    before_values["font-family"],
+                    policy=self.policy,
+                )
+                after_code = _computed_code(
+                    _name(affected),
+                    after_values["white-space"],
+                    after_values["font-family"],
+                    policy=self.policy,
+                )
                 if before != after_code:
-                    raise ValueError(
+                    raise CodeStyleError(
                         "conditional code style changes classification for "
                         f"<{_name(affected)}> in {conditional.resource}"
                     )
 
     def _effective(self, node: etree._Element, name: str) -> _Winner | None:
-        if _is_caption(node):
+        if _is_caption(node, numbered=self.policy == CODE_CLASSIFICATION_VERSION):
             return None
         current = self._winners[node].get(name)
         if current is not None:
@@ -488,25 +503,35 @@ class CodeContext:
             else None
         )
 
-    def _candidates(self, recognize_rendered_python: bool) -> dict[etree._Element, Literal["block", "inline"]]:
+    def _candidates(
+        self, recognize_rendered_python: bool, recognize_numbered_shell: bool
+    ) -> dict[etree._Element, Literal["block", "inline"]]:
         result: dict[etree._Element, Literal["block", "inline"]] = {}
         for node in self._elements:
             name = _name(node)
-            classes = _classes(node)
+            classes = _classes(node, numbered=self.policy == CODE_CLASSIFICATION_VERSION)
             if name in _SEMANTIC_BLOCK:
                 result[node] = "block"
                 continue
             if name in _SEMANTIC_INLINE:
                 result[node] = "inline"
                 continue
-            if _is_caption(node):
+            if _is_caption(node, numbered=self.policy == CODE_CLASSIFICATION_VERSION):
                 continue
-            if recognize_rendered_python and is_rendered_python_block(node):
+            if (
+                recognize_rendered_python
+                and is_rendered_python_block(node, policy=self.policy)
+                or recognize_numbered_shell
+                and is_numbered_shell_block(node)
+            ):
                 result[node] = "block"
                 continue
             if "programcode" in classes:
                 for descendant in node.iterdescendants():
-                    if isinstance(descendant.tag, str) and _classes(descendant) & _LINE_CLASSES:
+                    if (
+                        isinstance(descendant.tag, str)
+                        and _classes(descendant, numbered=self.policy == CODE_CLASSIFICATION_VERSION) & _LINE_CLASSES
+                    ):
                         result[descendant] = "block"
                 continue
             if name not in {"html", "head", "body"} and _language_code_class(classes):
@@ -521,7 +546,11 @@ class CodeContext:
             whitespace = self._effective(node, "white-space")
             family = self._effective(node, "font-family")
             white_kind = _whitespace_kind(whitespace.value) if whitespace is not None else "other"
-            family_kind = _family_kind(family.value) if family is not None else "other"
+            family_kind = (
+                font_family_kind(family.value, generic_anywhere=self.policy == CODE_CLASSIFICATION_VERSION)
+                if family is not None
+                else "other"
+            )
             suspicious = bool(
                 classes
                 & (
@@ -537,47 +566,48 @@ class CodeContext:
                 and family.direct
                 and family_kind in {"dynamic", "invalid"}
             ):
-                raise ValueError(f"dynamic code style cannot be classified safely on <{name}>")
+                raise CodeStyleError(f"dynamic code style cannot be classified safely on <{name}>")
             if (white_kind == "dynamic" and family_kind == "mono") or (
                 family_kind in {"dynamic", "invalid"} and white_kind == "pre"
             ):
-                raise ValueError(f"dynamic code style cannot be classified safely on <{name}>")
+                raise CodeStyleError(f"dynamic code style cannot be classified safely on <{name}>")
             if suspicious and (white_kind in {"dynamic", "invalid"} or family_kind in {"dynamic", "invalid"}):
-                raise ValueError(f"dynamic code style cannot be classified safely on <{name}>")
-            computed = _computed_code(name, whitespace, family)
+                raise CodeStyleError(f"dynamic code style cannot be classified safely on <{name}>")
+            computed = _computed_code(name, whitespace, family, policy=self.policy)
             if computed == "block":
                 result[node] = "block"
             elif computed == "inline":
                 result[node] = "inline"
         return result
 
-    @staticmethod
     def _strong_code_regions(
+        self,
         node: etree._Element,
         result: dict[etree._Element, Literal["block", "inline"]],
     ) -> None:
         captions = [
             descendant
             for descendant in node.iterdescendants()
-            if isinstance(descendant.tag, str) and _is_caption(descendant)
+            if isinstance(descendant.tag, str)
+            and _is_caption(descendant, numbered=self.policy == CODE_CLASSIFICATION_VERSION)
         ]
         if not captions:
             result[node] = "block"
             return
         if any(caption.getparent() is not node for caption in captions):
-            raise ValueError("cannot partition code container with a nested caption safely")
+            raise CodeStyleError("cannot partition code container with a nested caption safely")
         if (node.text or "").strip():
-            raise ValueError("cannot partition code container with raw code and a caption")
+            raise CodeStyleError("cannot partition code container with raw code and a caption")
         content: list[etree._Element] = []
         for child in node:
             if not isinstance(child.tag, str):
                 continue
             if (child.tail or "").strip():
-                raise ValueError("cannot partition code container with raw code and a caption")
-            if not _is_caption(child):
+                raise CodeStyleError("cannot partition code container with raw code and a caption")
+            if not _is_caption(child, numbered=self.policy == CODE_CLASSIFICATION_VERSION):
                 content.append(child)
         if not content:
-            raise ValueError("cannot partition code container that contains only a caption")
+            raise CodeStyleError("cannot partition code container that contains only a caption")
         for child in content:
             result[child] = "block"
 
@@ -597,12 +627,25 @@ def _name(node: etree._Element) -> str:
     return etree.QName(node).localname.lower()
 
 
-def _classes(node: etree._Element) -> set[str]:
-    return {_CLASS_ALIASES.get(value.casefold(), value.casefold()) for value in (node.get("class") or "").split()}
+def _classes(node: etree._Element, *, numbered: bool = True) -> set[str]:
+    values: set[str] = set()
+    for value in (node.get("class") or "").split():
+        canonical = _canonical_class(value)
+        values.add(canonical)
+        if numbered and (match := _NUMBERED_CLASS.match(canonical)) is not None:
+            base = _canonical_class(match.group("base"))
+            if base in _CODE_CLASS_BASES:
+                values.add(base)
+    return values
 
 
-def _is_caption(node: etree._Element) -> bool:
-    return _name(node) in {"caption", "figcaption"} or "caption" in _classes(node)
+def _canonical_class(value: str) -> str:
+    folded = value.casefold()
+    return _CLASS_ALIASES.get(folded, folded)
+
+
+def _is_caption(node: etree._Element, *, numbered: bool = True) -> bool:
+    return _name(node) in {"caption", "figcaption"} or "caption" in _classes(node, numbered=numbered)
 
 
 def _language_code_class(classes: set[str]) -> bool:
@@ -631,14 +674,14 @@ def _inherits_through(
 def _package_path(path: str) -> str:
     normalized = posixpath.normpath(unquote(urlsplit(path).path))
     if not normalized or normalized == "." or normalized.startswith(("../", "/")):
-        raise ValueError(f"unsafe package stylesheet path: {path!r}")
+        raise CodeStyleError(f"unsafe package stylesheet path: {path!r}")
     return normalized
 
 
 def _resolve(base: str, href: str) -> str | None:
     parsed = urlsplit(href)
     if parsed.scheme or parsed.netloc:
-        raise ValueError(f"remote stylesheet cannot be resolved for code classification: {href}")
+        raise CodeStyleError(f"remote stylesheet cannot be resolved for code classification: {href}")
     if not parsed.path:
         return None
     return _package_path(posixpath.join(posixpath.dirname(base), unquote(parsed.path)))
@@ -666,16 +709,16 @@ def _stylesheet_namespaces(rules: list[Any], resource: str) -> dict[str, str]:
         if len(significant) == 2 and significant[0].type == "ident":
             prefix = str(significant.pop(0).value)
         if len(significant) != 1:
-            raise ValueError(f"invalid @namespace declaration in {resource}")
+            raise CodeStyleError(f"invalid @namespace declaration in {resource}")
         token = significant[0]
         if token.type in {"string", "url"}:
             uri = str(token.value)
         elif token.type == "function" and token.lower_name == "url":
             uri = tinycss2.serialize(token.arguments).strip().strip("\"'")
         else:
-            raise ValueError(f"invalid @namespace declaration in {resource}")
+            raise CodeStyleError(f"invalid @namespace declaration in {resource}")
         if not uri:
-            raise ValueError(f"empty @namespace URI in {resource}")
+            raise CodeStyleError(f"empty @namespace URI in {resource}")
         result[prefix] = uri
     return result
 
@@ -684,7 +727,7 @@ def _require_declared_namespaces(selector: str, namespaces: Mapping[str, str], r
     prefixes = _selector_namespace_prefixes(tinycss2.parse_component_value_list(selector))
     missing = sorted(prefix for prefix in prefixes if prefix not in namespaces)
     if missing:
-        raise ValueError(f"undeclared namespace prefix {missing[0]!r} in code-related CSS: {resource}")
+        raise CodeStyleError(f"undeclared namespace prefix {missing[0]!r} in code-related CSS: {resource}")
 
 
 def _selector_namespace_prefixes(tokens: list[Any]) -> set[str]:
@@ -706,13 +749,13 @@ def _selectors(tokens: list[Any]) -> tuple[str, ...]:
     for token in tokens:
         if token.type == "literal" and getattr(token, "value", None) == ",":
             if not groups[-1]:
-                raise ValueError("empty selector in code-related CSS")
+                raise CodeStyleError("empty selector in code-related CSS")
             groups.append([])
         else:
             groups[-1].append(token)
     selectors = tuple(tinycss2.serialize(group).strip() for group in groups)
     if not selectors or any(not selector for selector in selectors):
-        raise ValueError("empty selector in code-related CSS")
+        raise CodeStyleError("empty selector in code-related CSS")
     return selectors
 
 
@@ -762,7 +805,7 @@ def _specificity(selector: str) -> tuple[int, int, int]:
             classes += 1
         elif kind == "literal" and getattr(token, "value", None) == ".":
             if index + 1 >= len(tokens) or tokens[index + 1].type != "ident":
-                raise ValueError(f"invalid class selector in code-related CSS: {selector}")
+                raise CodeStyleError(f"invalid class selector in code-related CSS: {selector}")
             classes += 1
             index += 1
         elif kind == "literal" and getattr(token, "value", None) == ":":
@@ -773,7 +816,7 @@ def _specificity(selector: str) -> tuple[int, int, int]:
             )
             position = index + 2 if double else index + 1
             if position >= len(tokens) or tokens[position].type not in {"ident", "function"}:
-                raise ValueError(f"invalid pseudo selector in code-related CSS: {selector}")
+                raise CodeStyleError(f"invalid pseudo selector in code-related CSS: {selector}")
             name = str(getattr(tokens[position], "lower_value", None) or getattr(tokens[position], "lower_name", ""))
             if double or name in legacy_elements:
                 elements += 1
@@ -804,7 +847,7 @@ def _reject_complex_selector(selector: str, resource: str) -> None:
             argument.type == "ident" and getattr(argument, "lower_value", "") == "of" for argument in arguments
         )
         if name not in supported or has_of:
-            raise ValueError(f"unsupported functional selector for code-related CSS in {resource}: {selector}")
+            raise CodeStyleError(f"unsupported functional selector for code-related CSS in {resource}: {selector}")
 
 
 def _declarations(
@@ -819,7 +862,7 @@ def _declarations(
     for node in nodes:
         if node.type == "error":
             if _SUSPICIOUS.search(tinycss2.serialize(content)):
-                raise ValueError(f"invalid code-related declaration in {resource}: {node.message}")
+                raise CodeStyleError(f"invalid code-related declaration in {resource}: {node.message}")
             continue
         if node.type != "declaration" or node.lower_name not in _RELEVANT:
             continue
@@ -895,72 +938,19 @@ def _whitespace_kind(value: str) -> Literal["pre", "other", "dynamic", "invalid"
     return "invalid"
 
 
-def _family_kind(value: str) -> Literal["mono", "other", "dynamic", "invalid"]:
-    tokens = tinycss2.parse_component_value_list(value)
-    if any(token.type == "function" for token in tokens):
-        return "dynamic"
-    if monospace_family(value):
-        return "mono"
-    families: list[list[Any]] = [[]]
-    for token in tokens:
-        if token.type in {"whitespace", "comment"}:
-            continue
-        if token.type == "literal" and getattr(token, "value", None) == ",":
-            if not families[-1]:
-                return "invalid"
-            families.append([])
-        elif token.type in {"ident", "string"}:
-            families[-1].append(token)
-        else:
-            return "invalid"
-    if not families[-1]:
-        return "invalid"
-    for index, group in enumerate(families):
-        generics = [token for token in group if token.type == "ident" and token.lower_value in _GENERICS]
-        if generics and (len(group) != 1 or index != len(families) - 1):
-            return "invalid"
-    return "other"
-
-
-def monospace_family(value: str) -> bool:
-    """Return whether a valid family list explicitly selects a known monospace face."""
-    tokens = tinycss2.parse_component_value_list(value)
-    if any(token.type == "function" for token in tokens):
-        return False
-    families: list[list[Any]] = [[]]
-    for token in tokens:
-        if token.type in {"whitespace", "comment"}:
-            continue
-        if token.type == "literal" and getattr(token, "value", None) == ",":
-            if not families[-1]:
-                return False
-            families.append([])
-        elif token.type in {"ident", "string"}:
-            families[-1].append(token)
-        else:
-            return False
-    if not families[-1]:
-        return False
-    names: list[str] = []
-    for index, group in enumerate(families):
-        generics = [token for token in group if token.type == "ident" and token.lower_value in _GENERICS]
-        if generics and (len(group) != 1 or index != len(families) - 1):
-            return False
-        names.append(" ".join(str(token.value) for token in group).casefold())
-    final = families[-1]
-    generic_mono = (
-        len(final) == 1 and final[0].type == "ident" and final[0].lower_value in {"monospace", "ui-monospace"}
-    )
-    return generic_mono or any(name in _KNOWN_MONOSPACE for name in names)
-
-
 def _computed_code(
     name: str,
     whitespace: _Winner | None,
     family: _Winner | None,
+    *,
+    policy: str = CODE_CLASSIFICATION_VERSION,
 ) -> Literal["block", "inline"] | None:
     white_kind = _whitespace_kind(whitespace.value) if whitespace is not None else "other"
-    family_kind = _family_kind(family.value) if family is not None else "other"
+    family_kind = (
+        font_family_kind(family.value, generic_anywhere=policy == CODE_CLASSIFICATION_VERSION)
+        if family is not None
+        else "other"
+    )
     if name in _BLOCK_ELEMENTS and white_kind == "pre" and family_kind == "mono":
         return "block"
     if name in _INLINE_ELEMENTS and family is not None and family.direct and family_kind == "mono":
@@ -968,4 +958,10 @@ def _computed_code(
     return None
 
 
-__all__ = ["CODE_CLASSIFICATION_VERSION", "CodeContext", "monospace_family"]
+__all__ = [
+    "CODE_CLASSIFICATION_VERSION",
+    "CODE_CLASSIFICATION_VERSIONS",
+    "LEGACY_CODE_CLASSIFICATION_VERSIONS",
+    "CodeContext",
+    "monospace_family",
+]

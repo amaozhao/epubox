@@ -19,7 +19,7 @@ class _Tokenizer:
         self.size = size
         self.text = ""
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, **kwargs: object) -> list[int]:
         self.text = text
         return list(range(self.size))
 

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 from engine.epub.chapter import chapter_render_events
@@ -15,6 +16,9 @@ from engine.item.inline import ProjectionError, parse_projection, validate_item_
 from engine.schemas.bridge import AtomicDocument, AtomicItem, ByteSpan
 from engine.schemas.internal import Event
 from engine.schemas.source import RegistryEntry
+
+_SVG = "{http://www.w3.org/2000/svg}svg"
+_WORD_SUFFIX = re.compile(r"-[A-Za-z]+")
 
 
 class FillError(ValueError):
@@ -205,6 +209,19 @@ def _node_text(path: tuple[int, ...], slots: Sequence[SlotSpan]) -> str:
     return "".join(text for _, text in sorted(parts))
 
 
+def _anchor_continuations(events: Sequence[Event]) -> Iterator[tuple[str, int]]:
+    anchor = ""
+    for index, event in enumerate(events):
+        if event.kind == "text":
+            if anchor:
+                yield anchor, index
+            anchor = ""
+        elif event.value.startswith("=x"):
+            anchor = event.value[1:]
+        elif event.value.startswith("-g"):
+            anchor = ""
+
+
 class _Renderer:
     def __init__(
         self,
@@ -305,7 +322,10 @@ class _Renderer:
     def _events(self, item: AtomicItem, *, attribute: bool = False) -> bytes:
         result: list[bytes] = []
         stack: list[tuple[str, NodeSpan | None, bytes | None]] = []
-        for event in self.events[item.item_id]:
+        events = self.events[item.item_id]
+        if not attribute:
+            events = self._without_repeated_svg_prefixes(item, events)
+        for event in events:
             if event.kind == "text":
                 cdata = not attribute and any(suffix is not None for _, _, suffix in stack)
                 escaped = (
@@ -347,6 +367,33 @@ class _Renderer:
         if stack:
             raise FillError("target rendering ended with open range markers")
         return b"".join(result)
+
+    def _without_repeated_svg_prefixes(self, item: AtomicItem, events: Sequence[Event]) -> Sequence[Event]:
+        """Keep the SVG's letter when source text continues the same hyphenated word."""
+        labels: dict[str, str] = {}
+        for ref, entry in item.registry.items():
+            if entry.kind != "x" or entry.hints.get("element") != "svg":
+                continue
+            label = self.slots.get((self.paths[entry.source_node_key], "attribute", "aria-label", None))
+            if self.nodes[entry.source_node_key].qname == _SVG and label and re.fullmatch(r"[A-Za-z]", label.text):
+                labels[ref] = label.text
+        if not labels:
+            return events
+
+        source = parse_projection(item.source_projection)
+        suffixes = {
+            ref: match.group()
+            for ref, index in _anchor_continuations(source)
+            if ref in labels and (match := _WORD_SUFFIX.match(source[index].value))
+        }
+        rendered = list(events)
+        for ref, index in _anchor_continuations(events):
+            if ref not in suffixes or not events[index].value.startswith(labels[ref]):
+                continue
+            remainder = events[index].value[1:]
+            if (match := _WORD_SUFFIX.match(remainder)) and match.group() == suffixes[ref]:
+                rendered[index] = events[index].model_copy(update={"value": remainder})
+        return rendered
 
     @staticmethod
     def _pop(stack: list[tuple[str, NodeSpan | None, bytes | None]], ref: str) -> tuple[NodeSpan | None, bytes | None]:

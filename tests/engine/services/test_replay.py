@@ -26,11 +26,12 @@ def _legacy_residual_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
+    source: str = _GROUNDED_SOURCE,
     target: str = _GROUNDED_TARGET,
     siblings: bool = False,
     malformed: bool = False,
 ) -> tuple[ReadyCase, BodyJournal, str, list[str]]:
-    sources = (_GROUNDED_SOURCE, "Second sentence.") if siblings else (_GROUNDED_SOURCE,)
+    sources = (source, "Second sentence.") if siblings else (source,)
     markup = "".join(f"<p>{source}</p>" for source in sources)
     case = prepare_case(tmp_path, markup, sources)
     journal = BodyJournal(case.session.store, case.session)
@@ -82,10 +83,26 @@ def _legacy_residual_failure(
     return case, journal, failed_id, calls
 
 
+@pytest.mark.parametrize(
+    "source,target",
+    [
+        (_GROUNDED_SOURCE, _GROUNDED_TARGET),
+        (
+            "For example, consider this English sentence: “The cat sat on the mat.”",
+            "例如，考虑这句英文：“The cat sat on the mat.”",
+        ),
+        (
+            "Then consider the Gaelic translation: “Shuigh an cat ar an mata.”",
+            "然后参考盖尔语的译文：“Shuigh an cat ar an mata。”",
+        ),
+    ],
+)
 def test_recover_results_revalidates_legacy_residual_failure_without_retranslation_or_fake_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, target: str
 ) -> None:
-    case, journal, item_id, calls = _legacy_residual_failure(tmp_path, monkeypatch, siblings=True)
+    case, journal, item_id, calls = _legacy_residual_failure(
+        tmp_path, monkeypatch, source=source, target=target, siblings=True
+    )
     failed = journal.records((item_id,))[item_id]
     reviewed = next(
         record for other_id, record in journal.records(case.batch.manifest.item_ids).items() if other_id != item_id
@@ -103,8 +120,8 @@ def test_recover_results_revalidates_legacy_residual_failure_without_retranslati
         update={
             "stage": "proofread",
             "status": ItemStatus.LOCAL_VALID,
-            "target_projection": _GROUNDED_TARGET,
-            "target_hash": canonical_hash(_GROUNDED_TARGET),
+            "target_projection": target,
+            "target_hash": canonical_hash(target),
             "checks": recovered_checks,
             "failure": None,
             "next_action": "review",
@@ -119,7 +136,7 @@ def test_recover_results_revalidates_legacy_residual_failure_without_retranslati
     recovered = resumed.records((item_id,))[item_id]
     assert recovered.status == ItemStatus.LOCAL_VALID
     assert recovered.stage == "proofread"
-    assert recovered.target_projection == _GROUNDED_TARGET
+    assert recovered.target_projection == target
     assert recovered.next_action == "review" and recovered.failure is None
     assert resumed.records((reviewed.item_id,))[reviewed.item_id] == reviewed
     assert _tree(case.session.store.root / "failures") == ledger_before

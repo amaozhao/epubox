@@ -12,6 +12,7 @@ import tiktoken
 
 from engine.agents.runtime import MAX_MODEL_INPUT_TOKENS, request_messages
 from engine.agents.runtime import wire_hash as request_wire_hash
+from engine.core.tokens import encode_text
 from engine.item.inline import parse_projection
 from engine.item.planner import MAX_SOURCE_TOKENS, PlannerConfig, _planner_tokenizer, recommended_output_tokens
 from engine.schemas.budget import (
@@ -200,7 +201,7 @@ def _tokenizer(model: str) -> tuple[Any, str, bool]:
 
 
 def _count(value: str, tokenizer: Any) -> int:
-    return len(tokenizer.encode(value))
+    return len(encode_text(tokenizer, value))
 
 
 def _json(value: Any) -> str:

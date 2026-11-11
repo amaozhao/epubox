@@ -24,6 +24,7 @@ from engine.core.code import (
     _without_pseudos,
 )
 from engine.core.markup import element_path
+from engine.core.styles import StylesheetSources
 from engine.epub.chapter import CHAPTER_LABEL, HEADING_TAGS
 from engine.epub.parsing import XHTML_NAMESPACE, parse_resource
 from engine.epub.ranges import CharSpan, RawSpan, index_resource
@@ -64,8 +65,10 @@ def cleanup_resources(
 ) -> tuple[dict[str, bytes], dict[str, int]]:
     """Clean final XHTML bytes without editing source archives, styles, or targets."""
     candidates = dict(resources)
+    package_paths: set[str] | None = None
     if source is not None:
         with zipfile.ZipFile(source) as archive:
+            package_paths = set(archive.namelist()) | set(resources)
             for name in archive.namelist():
                 if name not in candidates and (
                     _markup(name, media_types)
@@ -78,13 +81,16 @@ def cleanup_resources(
         if name.lower().endswith(".css") or (media_types or {}).get(name) == "text/css":
             _rules, encoding = tinycss2.parse_stylesheet_bytes(raw)
             styles[name] = raw.decode(encoding.codec_info.name)
+    if package_paths is not None:
+        styles = StylesheetSources(styles, package_paths=package_paths)
     result = dict(resources)
     stats = {"removed_empty_tags": 0, "removed_spaces": 0, "changed_documents": 0}
+    skipped: list[str] = []
     for name, raw in candidates.items():
         if not _markup(name, media_types):
             continue
         mapping: dict[tuple[int, ...], tuple[int, ...]] | None = {} if node_maps is not None else None
-        changed, removed, spaces = _clean(raw, node_map=mapping, resource_path=name, styles=styles)
+        changed, removed, spaces = _clean(raw, node_map=mapping, resource_path=name, styles=styles, skipped=skipped)
         if node_maps is not None and mapping is not None:
             node_maps[name] = mapping
         if changed != raw:
@@ -92,6 +98,8 @@ def cleanup_resources(
             stats["removed_empty_tags"] += removed
             stats["removed_spaces"] += spaces
             stats["changed_documents"] += 1
+    if skipped:
+        stats["skipped_documents"] = len(skipped)
     return result, stats
 
 
@@ -202,7 +210,7 @@ class _Safety:
 
     def load(self, base: str, href: str) -> None:
         path = _resolve(base, href)
-        if path is not None:
+        if path is not None and path not in self.code.missing_stylesheets:
             # CodeContext already validated imports and their local resource paths.
             self.add(tinycss2.parse_stylesheet(self.styles[path], skip_comments=True, skip_whitespace=True), path)
 
@@ -337,16 +345,17 @@ def _pseudo_subject(selector: str) -> tuple[str, str]:
         if token.type != "literal" or getattr(token, "value", None) != ":":
             continue
         name_index = index + 1
-        if (
+        double_colon = (
             name_index < len(tokens)
             and tokens[name_index].type == "literal"
             and getattr(tokens[name_index], "value", None) == ":"
-        ):
+        )
+        if double_colon:
             name_index += 1
         if name_index >= len(tokens) or tokens[name_index].type != "ident":
             continue
         name = str(getattr(tokens[name_index], "lower_value", ""))
-        if name not in names:
+        if not double_colon and name not in names:
             continue
         prefix = tokens[:index]
         meaningful = [part for part in prefix if part.type != "comment"]
@@ -592,6 +601,7 @@ def _clean(
     node_map: dict[tuple[int, ...], tuple[int, ...]] | None = None,
     resource_path: str = "cleanup.xhtml",
     styles: Mapping[str, str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[bytes, int, int]:
     parsed = parse_resource(raw, "application/xhtml+xml")
     if parsed.tree is None or parsed.diagnostics:
@@ -607,7 +617,16 @@ def _clean(
         if node_map is not None:
             node_map.update({path: path for path in paths.values()})
         return raw, 0, 0
-    safety = _Safety(code, nodes, styles or {})
+    try:
+        safety = _Safety(code, nodes, styles or {})
+    except (ValueError, NotImplementedError):
+        # Typography cleanup is optional. Keep the complete translated document
+        # and source-node identities when its CSS cannot be modeled safely.
+        if skipped is not None:
+            skipped.append(resource_path)
+        if node_map is not None:
+            node_map.update({path: path for path in paths.values()})
+        return raw, 0, 0
     bodies = [node for node in nodes if node.tag == "{" + XHTML_NAMESPACE + "}body"]
     if len(bodies) != 1:
         return raw, 0, 0
