@@ -17,7 +17,7 @@ from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, T
 from engine.core.config import settings
 from engine.core.markup import parse_xml_safely
 from engine.epub.bindings import resolve_derived_navigation
-from engine.epub.preservation import apply_code_plan, effective_code_plan
+from engine.epub.preservation import CodePreservationError, apply_code_plan, effective_code_plan
 from engine.epub.styles import source_stylesheets, use_reader_fonts
 from engine.epub.upgrade import upgrade_package
 from engine.epub.validation import (
@@ -90,7 +90,13 @@ def validate_publication_compatibility(
     replacements, removed_paths = use_reader_fonts(source_snapshot, inventory, replacements)
     code_plan = effective_code_plan(source_snapshot)
     if code_plan is not None:
-        replacements, _stats = apply_code_plan(source_snapshot, replacements, code_plan)
+        try:
+            replacements, _stats = apply_code_plan(source_snapshot, replacements, code_plan)
+        except CodePreservationError as error:
+            raise EpubValidationError(
+                "publication_preflight_failed",
+                f"出版候选与原书保真规则冲突：{error}",
+            ) from error
     with tempfile.TemporaryDirectory(prefix="epubox-publication-preflight-") as temporary:
         candidate = Path(temporary) / "candidate.epub"
         stage_epub(

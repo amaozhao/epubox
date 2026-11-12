@@ -90,8 +90,10 @@ def upgrade_package(
     source: Path,
     inventory: PackageInventory,
     replacements: Mapping[str, bytes],
+    *,
+    retain_xhtml_nodes: bool = False,
 ) -> dict[str, bytes]:
-    """Return translated replacements plus the minimum deterministic EPUB 3.0 upgrade."""
+    """Upgrade to EPUB 3.0; retain XHTML paths when deriving a preservation reference."""
 
     with zipfile.ZipFile(source) as archive:
         names = set(archive.namelist())
@@ -116,9 +118,9 @@ def upgrade_package(
             current = read(path)
             normalized = _normalize_xhtml(
                 current,
-                allow_converter_markers=marker_css_safe,
+                allow_converter_markers=marker_css_safe and not retain_xhtml_nodes,
                 resource_path=path,
-                package_paths=names | set(replacements),
+                package_paths=None if retain_xhtml_nodes else names | set(replacements),
                 protected_ids=protected_pagebreak_ids,
             )
             if normalized != current:

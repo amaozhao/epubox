@@ -124,7 +124,7 @@ def translate(
             raise typer.Exit(1) from error
         except Exception as error:
             if isinstance(error, EpubValidationError) and error.code == "publication_preflight_failed":
-                typer.echo("EPUB 3.0 出版预检未通过，本次未发起模型请求。", err=True)
+                typer.echo("EPUB 3.0 出版预检未通过，已停止自动续跑；本次未发起模型请求。", err=True)
                 for issue in error.issues:
                     typer.echo(f"- {issue.message}", err=True)
                 if not error.issues:

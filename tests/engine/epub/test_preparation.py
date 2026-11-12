@@ -12,6 +12,7 @@ import engine.services.preparation as pipeline_module
 from engine.agents.runtime import PROMPT_VERSION, RESOLUTION_PROTOCOL_VERSION, TERM_PROMPT_VERSION
 from engine.core.config import settings
 from engine.epub.preparation import PreparationConfig, prepare_book
+from engine.epub.upgrade import upgrade_package
 from engine.epub.validation import EpubCheckResult, EpubValidationError
 from engine.epub.verification import stage_epub, verify_staged_epub
 from engine.item.atoms import ADAPTER_VERSION as ATOMIC_ADAPTER_VERSION
@@ -31,6 +32,30 @@ class StubChecker:
     def check(self, path: Path) -> EpubCheckResult:
         self.paths.append(path)
         return EpubCheckResult(("stub-epubcheck",), 0)
+
+
+def test_publication_preflight_classifies_preservation_conflict_before_candidate_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_epub(
+        tmp_path / "book.epub",
+        {"chapter.xhtml": '<p><a href="#target">Jump</a> <code id="target">keep</code></p>'},
+    )
+    resource = "OEBPS/chapter.xhtml"
+
+    def invalid_upgrade(snapshot, inventory, replacements):
+        upgraded = upgrade_package(snapshot, inventory, replacements)
+        with zipfile.ZipFile(snapshot) as archive:
+            raw = upgraded.get(resource, archive.read(resource))
+        return upgraded | {resource: raw.replace(b'href="#target"', b'href="#forged"')}
+
+    monkeypatch.setattr(preparation_module, "upgrade_package", invalid_upgrade)
+    checker = StubChecker()
+    with pytest.raises(EpubValidationError, match="chapter.xhtml: candidate frozen attribute.*href") as raised:
+        prepare_book(source, tmp_path / "work", PreparationConfig(), checker, publication_preflight=True)
+
+    assert raised.value.code == "publication_preflight_failed"
+    assert [path.name for path in checker.paths] == ["source.epub"]
 
 
 def test_publication_preflight_rejects_all_candidate_errors_before_preparation_commit(tmp_path: Path) -> None:

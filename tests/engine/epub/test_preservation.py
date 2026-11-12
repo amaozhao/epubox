@@ -11,6 +11,7 @@ import pytest
 from engine.core.markup import element_path, parse_xml_bytes
 from engine.epub.cleanup import cleanup_resources
 from engine.epub.parsing import parse_resource
+from engine.epub.preparation import validate_publication_compatibility
 from engine.epub.preservation import (
     CODE_PLAN_FORMAT,
     CODE_POLICY,
@@ -24,10 +25,13 @@ from engine.epub.preservation import (
 )
 from engine.epub.publish import publish_atomic, recover_atomic
 from engine.epub.ranges import index_resource
-from engine.epub.upgrade import _normalize_xhtml
+from engine.epub.upgrade import _normalize_xhtml, upgrade_package
+from engine.epub.validation import EpubCheckResult, inspect_epub
+from engine.epub.verification import file_hash, stage_epub
 from engine.schemas.contracts import canonical_hash, canonical_json_bytes
 from engine.services.atomic import AtomicStore
 from engine.services.journal import BodyJournal
+from tests.engine.epub.test_factory import make_epub
 from tests.engine.epub.test_preparation import StubChecker
 from tests.engine.epub.test_publish import _case
 
@@ -220,6 +224,73 @@ def test_code_overlay_accepts_only_source_derived_image_dimension_normalization(
     assert verify_code_plan(source, output, plan) == stats
     with pytest.raises(ValueError, match="attribute"):
         apply_code_plan(source, {RESOURCE: normalized.replace(b'width="20"', b'width="21"')}, plan)
+
+
+def test_publication_preflight_and_code_verification_accept_only_proven_cover_repairs(tmp_path: Path) -> None:
+    base = make_epub(tmp_path / "base.epub", {"chapter.xhtml": "<p>Main reading order.</p>"})
+    nav_path = "OEBPS/nav.xhtml"
+    old_cover = "OEBPS/legacy-cover.xhtml"
+    css_path = "OEBPS/styles/cover.css"
+    with zipfile.ZipFile(base) as archive:
+        opf = archive.read("OEBPS/content.opf")
+        nav = archive.read(nav_path).replace(b'href="chapter.xhtml"', b'href="chapter.xhtml#chapter"')
+    opf = opf.replace(
+        b"</manifest>",
+        b'<item id="legacy" href="legacy-cover.xhtml" media-type="application/xhtml+xml"/>'
+        b'<item id="cover-css" href="styles/cover.css" media-type="text/css"/></manifest>',
+    ).replace(b"</package>", b'<guide><reference type="cover" title="Cover" href="chapter.xhtml"/></guide></package>')
+    nav = nav.replace(
+        b"</body>",
+        b'<nav epub:type="landmarks"><ol><li><a epub:type="cover" href="legacy-cover.xhtml">'
+        b"<code>Cover</code></a></li></ol></nav></body>",
+    )
+    cover = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Old cover</title>'
+        b'<link rel="stylesheet" href="missing/cover.css"/></head><body><pre>Keep &amp; preserve</pre></body></html>'
+    )
+    source = tmp_path / "source.epub"
+    stage_epub(
+        base,
+        source,
+        {"OEBPS/content.opf": opf, nav_path: nav, old_cover: cover, css_path: b"body { margin: 0; }"},
+        allow_additions=True,
+    )
+
+    class CandidateChecker(StubChecker):
+        def check(self, path: Path) -> EpubCheckResult:
+            if path.name == "candidate.epub":
+                with zipfile.ZipFile(path) as archive:
+                    assert archive.read(nav_path) == nav.replace(b'href="legacy-cover.xhtml"', b'href="chapter.xhtml"')
+                    assert archive.read(old_cover) == cover.replace(
+                        b'href="missing/cover.css"', b'href="styles/cover.css"'
+                    )
+            return super().check(path)
+
+    checker = CandidateChecker()
+    inventory = inspect_epub(source, file_hash(source), checker=checker)
+    validate_publication_compatibility(source, inventory, checker)
+    assert len(checker.paths) == 2
+
+    plan = discover_code_plan(source)
+    assert plan is not None
+    replacements = upgrade_package(source, inventory, {})
+    rendered, stats = apply_code_plan(source, replacements, plan)
+    output = tmp_path / "output.epub"
+    stage_epub(source, output, rendered, allow_additions=True)
+    assert verify_code_plan(source, output, plan) == stats
+
+    for resource, old, new in (
+        (nav_path, b'href="chapter.xhtml#chapter"', b'href="chapter.xhtml"'),
+        (nav_path, b'href="chapter.xhtml"', b'href="chapter.xhtml#forged"'),
+        (old_cover, b'href="styles/cover.css"', b'href="other/cover.css"'),
+    ):
+        # The exact repaired target is allowed at the cover link only.
+        tampered = rendered | {resource: rendered[resource].replace(old, new, 1)}
+        with pytest.raises(ValueError, match="frozen attribute.*href"):
+            apply_code_plan(source, tampered, plan)
+        stage_epub(source, output, tampered, allow_additions=True)
+        with pytest.raises(ValueError, match="frozen attribute.*href"):
+            verify_code_plan(source, output, plan)
 
 
 def test_code_overlay_accepts_source_derived_calibre_pagebreak_id_deduplication(tmp_path: Path) -> None:

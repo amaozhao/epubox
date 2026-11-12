@@ -100,8 +100,9 @@ def test_translate_reports_all_publication_preflight_errors_once(tmp_path, monke
     assert result.exit_code == 1
     assert calls == [True]
     assert "本次未发起模型请求" in result.output
+    assert "已停止自动续跑" in result.output
     assert "chapter.xhtml" in result.output and "nav.xhtml" in result.output
-    assert "自动续跑" not in result.output
+    assert "自动续跑：" not in result.output
 
 
 def test_progress_does_not_repeat_identical_translation_counts(capsys):

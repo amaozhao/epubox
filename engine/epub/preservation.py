@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import re
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from functools import cache, partial
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
@@ -17,7 +18,8 @@ from engine.core.markup import element_path, qname_local_name
 from engine.epub.parsing import ParsedResource, parse_resource
 from engine.epub.ranges import ResourceIndex, index_resource
 from engine.epub.styles import source_stylesheets
-from engine.epub.upgrade import _css_id_references, _entity_patches, _missing_kobo_script_paths, _normalize_xhtml
+from engine.epub.upgrade import _entity_patches, _missing_kobo_script_paths, upgrade_package
+from engine.epub.validation import read_package_inventory
 from engine.schemas.bridge import TRANSLATABLE_ATTRIBUTES
 
 CODE_POLICY = "source-code-v2"
@@ -180,6 +182,10 @@ def effective_code_plan(source: Path, explicit: Mapping[str, object] | None = No
     return _build_code_plan(source, maximal, automatic=True)
 
 
+class CodePreservationError(ValueError):
+    """A candidate resource conflicts with the source code preservation contract."""
+
+
 def apply_code_plan(
     source: Path,
     replacements: Mapping[str, bytes],
@@ -188,15 +194,16 @@ def apply_code_plan(
     """Overlay only selected source nodes onto structurally identical candidates."""
     source = Path(source).resolve(strict=True)
     contexts, stats = _source_contexts(source, plan)
+    reference = _compatibility_reference(source, str(plan["source_hash"]))
     result = dict(replacements)
     if any(not isinstance(path, str) or not isinstance(data, bytes) for path, data in result.items()):
         raise TypeError("EPUB replacements must map resource paths to bytes")
     for resource, context in contexts.items():
         candidate = result.get(resource, context.raw)
         try:
-            indexed, paths = _validate_candidate(context, candidate)
+            indexed, paths = _validate_candidate(context, candidate, reference=partial(reference, resource))
         except ValueError as error:
-            raise ValueError(f"{resource}: {error}") from error
+            raise CodePreservationError(f"{resource}: {error}") from error
         patches = [
             (
                 indexed.nodes[paths[region.path]].full,
@@ -207,7 +214,10 @@ def apply_code_plan(
         restored = candidate
         for span, data in sorted(patches, key=lambda item: item[0].start, reverse=True):
             restored = restored[: span.start] + data + restored[span.end :]
-        _validate_restored(context, restored, paths=paths)
+        try:
+            _validate_restored(context, restored, paths=paths)
+        except ValueError as error:
+            raise CodePreservationError(f"{resource}: {error}") from error
         if restored != context.raw or resource in result:
             result[resource] = restored
     return result, stats
@@ -224,6 +234,7 @@ def verify_code_plan(
     source = Path(source).resolve(strict=True)
     output = Path(output).resolve(strict=True)
     contexts, stats = _source_contexts(source, plan)
+    reference = _compatibility_reference(source, str(plan["source_hash"]))
     with zipfile.ZipFile(output) as archive:
         names = archive.namelist()
         for resource, context in contexts.items():
@@ -232,10 +243,12 @@ def verify_code_plan(
             candidate = archive.read(resource)
             mapping = (node_maps or {}).get(resource)
             try:
-                indexed, paths = _validate_candidate(context, candidate, mapping)
+                indexed, paths = _validate_candidate(
+                    context, candidate, mapping, reference=partial(reference, resource)
+                )
                 _validate_restored(context, candidate, indexed=indexed, paths=paths)
             except ValueError as error:
-                raise ValueError(f"{resource}: {error}") from error
+                raise CodePreservationError(f"{resource}: {error}") from error
     return stats
 
 
@@ -293,7 +306,6 @@ class _Context:
         "indexed",
         "nodes",
         "parsed",
-        "protected_ids",
         "raw",
         "regions",
         "upgrade_removed",
@@ -308,7 +320,6 @@ class _Context:
         regions: tuple[_Region, ...],
         entity_patches: tuple[tuple[int, int, bytes], ...],
         upgrade_removed: tuple[tuple[int, ...], ...],
-        protected_ids: set[str],
     ):
         self.raw = raw
         self.parsed = parsed
@@ -317,7 +328,6 @@ class _Context:
         self.regions = regions
         self.entity_patches = entity_patches
         self.upgrade_removed = upgrade_removed
-        self.protected_ids = protected_ids
 
 
 def _source_contexts(source: Path, plan: Mapping[str, object]) -> tuple[dict[str, _Context], dict[str, int]]:
@@ -394,7 +404,6 @@ def _source_contexts(source: Path, plan: Mapping[str, object]) -> tuple[dict[str
                 tuple(regions),
                 _entity_patches(raw, indexed),
                 _missing_kobo_script_paths(parsed.tree.getroot(), resource, set(names)),
-                _css_id_references(styles.values()),
             )
     return contexts, {
         "checked_resources": len(contexts),
@@ -403,10 +412,25 @@ def _source_contexts(source: Path, plan: Mapping[str, object]) -> tuple[dict[str
     }
 
 
+def _compatibility_reference(source: Path, source_hash: str) -> Callable[[str], bytes | None]:
+    @cache
+    def upgraded() -> dict[str, bytes]:
+        with zipfile.ZipFile(source) as archive:
+            entries = {item.filename: item.file_size for item in archive.infolist()}
+            inventory = read_package_inventory(archive, source_hash, entries)
+        # Reuse the publication rules with the immutable book as the only input.
+        # Keep source node paths stable for the per-node attribute comparison.
+        return upgrade_package(source, inventory, {}, retain_xhtml_nodes=True)
+
+    return lambda resource: upgraded().get(resource)
+
+
 def _validate_candidate(
     context: _Context,
     raw: bytes,
     node_map: Mapping[tuple[int, ...], tuple[int, ...]] | None = None,
+    *,
+    reference: Callable[[], bytes | None],
 ) -> tuple[ResourceIndex, dict[tuple[int, ...], tuple[int, ...]]]:
     try:
         _parsed, indexed, nodes = _indexed(raw, "candidate")
@@ -475,16 +499,9 @@ def _validate_candidate(
         if actual == expected:
             continue
         if normalized_nodes is None:
-            # Publication upgrades legacy XHTML before restoring code. Derive the
-            # permitted attribute changes from the immutable source, never from
-            # the candidate. Disable element deletion to retain source paths.
-            _parsed, _indexed_resource, normalized_nodes = _indexed(
-                _normalize_xhtml(
-                    context.raw,
-                    allow_converter_markers=False,
-                    protected_ids=context.protected_ids,
-                ),
-                "normalized source",
+            normalized = reference()
+            normalized_nodes = (
+                _indexed(normalized, "normalized source")[2] if normalized is not None else context.nodes
             )
         normalized = _frozen_attributes(normalized_nodes[path].attrib)
         if actual != normalized:

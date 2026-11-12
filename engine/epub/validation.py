@@ -10,7 +10,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -215,43 +215,7 @@ def inspect_epub(
     """Validate an immutable source snapshot and return its complete package inventory."""
     with zipfile.ZipFile(source) as archive:
         entries = _validate_zip(archive, limits, require_canonical_mimetype_layout=for_output)
-        rootfiles = _container_rootfiles(_read_xml(archive, "META-INF/container.xml"))
-        if len(rootfiles) != 1:
-            raise EpubValidationError(
-                "multiple_renditions",
-                f"Exactly one rootfile is supported, found {len(rootfiles)}",
-            )
-        opf_path = rootfiles[0]
-        if opf_path not in entries:
-            raise EpubValidationError("missing_opf", f"Container references missing OPF: {opf_path}")
-
-        opf = _parse_xml_bytes(_read_bytes(archive, opf_path), opf_path)
-        epub_version = (opf.attrib.get("version") or "").strip()
-        if not re.fullmatch(r"[23](?:\.\d+){0,2}", epub_version):
-            raise EpubValidationError("unsupported_epub_version", f"Unsupported EPUB version: {epub_version!r}")
-
-        manifest = _manifest_items(opf, opf_path, entries)
-        manifest_by_id = {item.item_id: item for item in manifest}
-        spine, spine_linear = _spine_items(opf, manifest_by_id)
-        documents = tuple(dict.fromkeys(item.path for item in manifest if item.media_type in XHTML_MEDIA_TYPES))
-        nav_path = next((item.path for item in manifest if "nav" in item.properties), None)
-        toc_id = next(
-            (element.attrib.get("toc") for element in opf.iter() if _local_name(element.tag) == "spine"), None
-        )
-        ncx_path = (
-            manifest_by_id[toc_id].path
-            if toc_id in manifest_by_id
-            else next((item.path for item in manifest if item.media_type == "application/x-dtbncx+xml"), None)
-        )
-
-        blockers = _support_blockers(archive, opf, opf_path, manifest, spine, entries, for_output=for_output)
-        if blockers:
-            raise EpubValidationError("unsupported_source", blockers[0].message, issues=blockers)
-        obfuscated = _obfuscated_fonts(archive, manifest, entries)
-
-        for item in manifest:
-            if item.media_type in XML_MEDIA_TYPES:
-                _parse_xml_bytes(_read_bytes(archive, item.path), item.path)
+        inventory = read_package_inventory(archive, source_hash, entries, for_output=for_output)
 
     check_result = checker.check(source)  # type: ignore[attr-defined]
     if not isinstance(check_result, EpubCheckResult):
@@ -270,6 +234,52 @@ def inspect_epub(
         )
         for line in lines
     )
+    return replace(inventory, warnings=warnings, epubcheck=check_result)
+
+
+def read_package_inventory(
+    archive: zipfile.ZipFile,
+    source_hash: str,
+    entries: Mapping[str, int],
+    *,
+    for_output: bool = False,
+) -> PackageInventory:
+    """Read package structure from an already inventoried ZIP without invoking EPUBCheck."""
+    rootfiles = _container_rootfiles(_read_xml(archive, "META-INF/container.xml"))
+    if len(rootfiles) != 1:
+        raise EpubValidationError(
+            "multiple_renditions",
+            f"Exactly one rootfile is supported, found {len(rootfiles)}",
+        )
+    opf_path = rootfiles[0]
+    if opf_path not in entries:
+        raise EpubValidationError("missing_opf", f"Container references missing OPF: {opf_path}")
+
+    opf = _parse_xml_bytes(_read_bytes(archive, opf_path), opf_path)
+    epub_version = (opf.attrib.get("version") or "").strip()
+    if not re.fullmatch(r"[23](?:\.\d+){0,2}", epub_version):
+        raise EpubValidationError("unsupported_epub_version", f"Unsupported EPUB version: {epub_version!r}")
+
+    manifest = _manifest_items(opf, opf_path, entries)
+    manifest_by_id = {item.item_id: item for item in manifest}
+    spine, spine_linear = _spine_items(opf, manifest_by_id)
+    documents = tuple(dict.fromkeys(item.path for item in manifest if item.media_type in XHTML_MEDIA_TYPES))
+    nav_path = next((item.path for item in manifest if "nav" in item.properties), None)
+    toc_id = next((element.attrib.get("toc") for element in opf.iter() if _local_name(element.tag) == "spine"), None)
+    ncx_path = (
+        manifest_by_id[toc_id].path
+        if toc_id in manifest_by_id
+        else next((item.path for item in manifest if item.media_type == "application/x-dtbncx+xml"), None)
+    )
+
+    blockers = _support_blockers(archive, opf, opf_path, manifest, spine, entries, for_output=for_output)
+    if blockers:
+        raise EpubValidationError("unsupported_source", blockers[0].message, issues=blockers)
+    obfuscated = _obfuscated_fonts(archive, manifest, entries)
+
+    for item in manifest:
+        if item.media_type in XML_MEDIA_TYPES:
+            _parse_xml_bytes(_read_bytes(archive, item.path), item.path)
     return PackageInventory(
         source_hash=source_hash,
         epub_version=epub_version,
@@ -282,8 +292,6 @@ def inspect_epub(
         nav_path=nav_path,
         ncx_path=ncx_path,
         obfuscated_fonts=obfuscated,
-        warnings=warnings,
-        epubcheck=check_result,
     )
 
 
