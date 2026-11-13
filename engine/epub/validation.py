@@ -622,7 +622,12 @@ def _script_blocker(
             return "Script-generated interactive reading content is not supported"
         if any(_local_name(name).lower().startswith("on") for name in node.attrib):
             return "Executable event handlers may generate reading content and are not supported"
-        if any(urlsplit(value.strip()).scheme.lower() == "javascript" for value in node.attrib.values()):
+        # data-* attributes hold publisher metadata, including index entries
+        # such as "JavaScript:adding, to POS". They do not navigate to a URL.
+        if any(
+            not name.lower().startswith("data-") and urlsplit(value.strip()).scheme.lower() == "javascript"
+            for name, value in node.attrib.items()
+        ):
             return "JavaScript URLs may generate reading content and are not supported"
         if _local_name(node.tag) != "script":
             continue

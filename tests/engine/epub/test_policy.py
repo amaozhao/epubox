@@ -289,6 +289,7 @@ def test_kobo_reader_exception_rejects_executable_or_redirectable_variants(tmp_p
         ('<script>document.write("Generated content");</script>', "<p>Some static content.</p>"),
         (_MATHJAX_HEAD, '<script>document.body.innerHTML="Generated";</script>'),
         (_MATHJAX_HEAD, '<p onclick="replaceContent()">Static content.</p>'),
+        ("", '<a href="JaVa&#x09;ScRiPt:document.write(1)">Run script</a>'),
         (
             _MATHJAX_HEAD.replace('messageStyle: "none"', 'AuthorInit: function(){document.write("Generated")}'),
             "<p>Text.</p>",
@@ -316,6 +317,18 @@ def test_dynamic_or_unknown_scripts_remain_blocked(tmp_path: Path, head: str, bo
     assert any(
         issue.code == "scripted_content" and issue.resource == "OEBPS/chapter.xhtml" for issue in caught.value.issues
     )
+
+
+@pytest.mark.parametrize("for_output", (False, True))
+def test_javascript_index_metadata_is_static(tmp_path: Path, for_output: bool) -> None:
+    source = make_epub(
+        tmp_path / "index.epub",
+        {"chapter.xhtml": '<p>Use <span data-index-entry="JavaScript:adding, to POS"/> asset bundles.</p>'},
+    )
+
+    inventory = inspect_epub(source, "source", checker=StubChecker(), for_output=for_output)
+
+    assert "OEBPS/chapter.xhtml" in inventory.documents
 
 
 def test_mathjax_identifiers_cannot_hide_a_modified_loader(tmp_path: Path) -> None:
