@@ -496,7 +496,11 @@ def _decode_slots(
         target, allowed_empty = _normalize_fragments(events, target, fragment_hints)
     empty = [key for key, value in target.items() if not value.strip() and key not in allowed_empty]
     if empty:
-        raise ValueError("target slots require nonempty strings" + (f": invalid={empty}" if diagnostics else ""))
+        detail = ""
+        if diagnostics:
+            excerpts = ", ".join(f"{key}={source_slots[int(key) - 1].strip()[:80]!r}" for key in empty[:4])
+            detail = f": invalid={empty}; source slots {excerpts}"
+        raise ValueError("target slots require nonempty strings" + detail)
     slot = 0
     rebuilt = []
     for event in events:

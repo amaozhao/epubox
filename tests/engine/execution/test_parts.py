@@ -8,9 +8,10 @@ from engine.agents.workflow import _manifest
 from engine.execution.atomic import run_atomic
 from engine.execution.parts import WithoutRecords, ensure_part_plans, owns_request
 from engine.item.budget import request_source_tokens
+from engine.item.inline import ProjectionError
 from engine.schemas.contracts import ItemStatus, canonical_hash
 from engine.schemas.parts import PartPlan
-from engine.services import state
+from engine.services import parts, state
 from engine.services.coherence import add_http_budget
 from engine.services.journal import BodyJournal
 from engine.services.partition import plan_path
@@ -87,6 +88,26 @@ def test_atomic_executes_persisted_list_parts_once_under_the_source_limit(tmp_pa
     resumed = asyncio.run(run_atomic(session.store.root, transport=transport, ready_session=session))
     assert resumed.status == "translated"
     assert len(calls) == before
+
+
+def test_composition_pause_identifies_document_and_parent(tmp_path, monkeypatch) -> None:
+    session, parent = _case(tmp_path)
+
+    def invalid_merge(*_args):
+        raise ProjectionError("protected code x17 must remain in its opaque marker")
+
+    monkeypatch.setattr(parts, "merge_targets", invalid_merge)
+
+    async def transport(stage, payload):
+        return answer(stage, payload)
+
+    result = asyncio.run(run_atomic(session.store.root, transport=transport, ready_session=session))
+
+    assert result.status == "paused"
+    assert result.reason == (
+        f"compose:{parent.item_id} ({session.index.resource_paths[parent.document_id]}): "
+        "protected code x17 must remain in its opaque marker"
+    )
 
 
 def test_atomic_leaves_an_oversized_indivisible_paragraph_for_attention(tmp_path) -> None:

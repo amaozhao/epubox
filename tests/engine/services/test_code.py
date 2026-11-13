@@ -18,12 +18,66 @@ from engine.services.journal import BodyJournal
 from engine.services.manual import import_codex_translation
 from engine.services.partition import build_plan, plan_path
 from engine.services.parts import PartJournal
+from engine.services.resume import plan_resume
 from tests.engine.agents import test_workflow as fixtures
-from tests.engine.core.test_code import SHELL
+from tests.engine.core.test_code import SHELL, rendered_listing
 from tests.engine.execution.test_atomic import answer
 
 _ATOMIC4 = "epubox-atomic-4"
 _RUST = "⟦=x1⟧⟦+g1⟧fn⟦-g1⟧ main() {\n        ⟦+g2⟧let⟦-g2⟧ index = values[index / 2];\n    }"
+
+
+def test_frozen_calibre_rust_lines_resume_without_http(tmp_path, monkeypatch):
+    from engine.services import preparation
+
+    version = "epubox-atomic-7"
+    monkeypatch.setattr(preparation, "ATOMIC_EXTRACTOR_VERSION", version)
+    monkeypatch.setattr(fixtures, "EXTRACTOR_VERSION", version)
+    loop = "for (index, value) in samples.iter().enumerate() {"
+    field = "pub index: u32,"
+    body = "<p>Keep data safe.</p>" + rendered_listing(
+        "listing", "fn main() {", loop, "}", "pub struct GpuMetrics {", field, "}"
+    )
+    raw = ('<html xmlns="http://www.w3.org/1999/xhtml"><body>' + body + "</body></html>").encode()
+    extracted = extract_resource(raw, "OEBPS/chapter.xhtml", "source", extractor_version=version)
+    case = fixtures.prepare_case(tmp_path, body, tuple(item.source_projection for item in extracted.items))
+    journal = BodyJournal(case.session.store, case.session)
+    prose, *code = case.batch.items
+    import_codex_translation(journal, prose, journal.records()[prose.item_id], "确保数据安全。", user_authorized=True)
+    prose_before = state.read(journal._result_path(prose.item_id))
+    for member in code:
+        if loop in member.source_projection:
+            journal.save(
+                _failed(
+                    member,
+                    journal.records()[member.item_id],
+                    "translate",
+                    f"untranslated English remains: {loop}",
+                    case.batch,
+                )
+            )
+        if field in member.source_projection:
+            assert journal.records()[member.item_id].status == ItemStatus.PENDING
+
+    code_ids = {member.item_id for member in code}
+
+    async def reject_code_http(stage, payload):
+        assert code_ids.isdisjoint(item["item_id"] for item in payload["items"])
+        return answer(stage, payload)
+
+    result = asyncio.run(run_atomic(journal.store.root, transport=reject_code_http, ready_session=case.session))
+
+    assert result.status == "translated", result.reason
+    assert state.read(journal._result_path(prose.item_id)) == prose_before
+    records = BodyJournal(journal.store).records()
+    for member in code:
+        assert records[member.item_id].status == ItemStatus.REVIEWED
+        assert records[member.item_id].target_projection == member.source_projection
+        assert records[member.item_id].checks["preserved_code"] == {
+            "version": 5,
+            "member_hash": canonical_hash(member),
+        }
+    assert plan_resume(journal.store.root).phase == "publication"
 
 
 def _atomic4_rust_case(tmp_path, monkeypatch, *, body=None, projections=None):
@@ -434,3 +488,4 @@ def test_frozen_shell_with_existing_sentence_parts_resumes_without_http(tmp_path
     assert record.target_projection == member.source_projection
     assert record.checks["preserved_code"] == {"version": 4, "member_hash": canonical_hash(member)}
     assert state.exists(plan_path(journal.store.root, member.item_id))
+    assert plan_resume(journal.store.root).phase == "publication"

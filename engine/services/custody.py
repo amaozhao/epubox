@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from engine.schemas.contracts import ItemRecord, ItemStatus, RequestManifest, Usage, canonical_hash
 from engine.services.atomic import IdentityMismatch
 from engine.services.store import RunStore
+
+_OBSOLETE_OPAQUE_CODE_FAILURE = re.compile(r"protected code x[A-Za-z0-9_.:-]+ must remain in its opaque marker")
 
 
 def manifest(context: Mapping[str, Any]) -> RequestManifest:
@@ -68,7 +71,10 @@ def translation_replayable(record: ItemRecord, request: RequestManifest) -> bool
         and record.target_hash is None
         and (record.failure or {}).get("code") == "translate_failed"
         and isinstance(message, str)
-        and message.startswith("untranslated English remains:")
+        and (
+            message.startswith("untranslated English remains:")
+            or _OBSOLETE_OPAQUE_CODE_FAILURE.fullmatch(message) is not None
+        )
     )
 
 

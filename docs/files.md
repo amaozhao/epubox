@@ -233,4 +233,6 @@
 
 2026-10-24 新增 `engine/core/code.py`、`tests/engine/core/test_code.py`、`tests/engine/agents/test_code.py`、`tests/engine/epub/test_code.py`，负责通用代码/CSS 识别、不可改写投影、初译校对攻击回归及自动出版核验。`code` 为已登记单词；各文件均不超过 1000 行。`preservation.py` 同步改为所有书籍自动发现代码，兼容旧显式计划。
 
+2026-11-12 新增 `engine/core/listings.py`，根据 EPUB 行容器和源码语法识别转换后失去语义标签的清单。`listings` 已登记到单词清单。
+
 2026-10-25 新增 `engine/epub/mathjax.json`，保存官方 MathJax 2.6.1、2.7.9 packed JavaScript 的离线 SHA-256 清单、来源及归档哈希，由 `validation.py` 负责核验。新增 `engine/epub/metadata.py`、`tests/engine/epub/test_metadata.py`，负责基于已有 refinement 恢复空作者、同步 NCX 标识及精确字节回归。`metadata` 为已登记单词；文件均不超过 1000 行，校验清单为生成的紧凑 JSON。

@@ -99,7 +99,7 @@ def stage_epub(
     allow_additions: bool = False,
     removed_paths: frozenset[str] = frozenset(),
 ) -> str:
-    """Create a candidate EPUB while preserving every untouched ZIP member."""
+    """Create a candidate EPUB with all retained resources and nonempty directories."""
     staged_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(source_snapshot) as source:
         names = set(source.namelist())
@@ -113,6 +113,7 @@ def stage_epub(
 
             for path in unknown:
                 _validate_package_path(path)
+        omitted = removed_paths | _empty_directories((names - removed_paths) | set(replacements))
         with zipfile.ZipFile(staged_path, "w") as target:
             mimetype = (
                 replacements["mimetype"]
@@ -123,7 +124,7 @@ def stage_epub(
                 raise EpubValidationError("invalid_mimetype", "mimetype cannot be changed")
             target.writestr("mimetype", mimetype, compress_type=zipfile.ZIP_STORED)
             for info in source.infolist():
-                if info.filename == "mimetype" or info.filename in removed_paths:
+                if info.filename == "mimetype" or info.filename in omitted:
                     continue
                 data = (
                     replacements[info.filename]
@@ -138,9 +139,17 @@ def stage_epub(
                 copied.create_system = info.create_system
                 copied.flag_bits = info.flag_bits & ~0x1
                 target.writestr(copied, data, compress_type=info.compress_type)
-            for path in sorted(unknown):
+            for path in sorted(unknown - omitted):
                 target.writestr(path, replacements[path], compress_type=zipfile.ZIP_DEFLATED)
     return file_hash(staged_path)
+
+
+def _empty_directories(entries: set[str]) -> set[str]:
+    directories = {name for name in entries if name.endswith("/")}
+    for name in entries - directories:
+        for parent in PurePosixPath(name).parents:
+            directories.discard(f"{parent}/")
+    return directories
 
 
 def _source_member(
@@ -199,8 +208,12 @@ def verify_staged_epub(
         raise EpubValidationError(
             "invalid_font_removal", "Only font resources and their encryption metadata may be removed"
         )
-    added = set(output_inventory.entries) - set(source_inventory.entries)
-    if (set(source_inventory.entries) - set(output_inventory.entries)) != set(removed_paths) or (
+    source_entries = set(source_inventory.entries)
+    omitted = removed_paths | (
+        _empty_directories((source_entries - removed_paths) | set(expected_documents)) & source_entries
+    )
+    added = set(output_inventory.entries) - source_entries
+    if (source_entries - set(output_inventory.entries)) != omitted or (
         added and (not upgraded or added != {output_inventory.nav_path} or not added <= set(expected_documents))
     ):
         raise EpubValidationError("resource_inventory_changed", "Output resource inventory differs from source")
@@ -242,7 +255,7 @@ def verify_staged_epub(
     warnings = list(output_inventory.warnings)
     with zipfile.ZipFile(source_snapshot) as source, zipfile.ZipFile(staged_path) as output:
         for name in source.namelist():
-            if name not in expected_documents and name not in removed_paths and source.read(name) != output.read(name):
+            if name not in expected_documents and name not in omitted and source.read(name) != output.read(name):
                 raise EpubValidationError("unexpected_resource_change", f"Unexpected resource change: {name}")
         for path, expected in expected_documents.items():
             actual = output.read(path)

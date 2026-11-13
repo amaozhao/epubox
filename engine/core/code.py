@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import posixpath
 import re
-import textwrap
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -17,12 +15,14 @@ import tinycss2
 from bs4 import BeautifulSoup, Tag
 from lxml import etree  # type: ignore[attr-defined]
 
+from engine.core.listings import is_rendered_listing, is_rendered_python_listing
 from engine.core.styles import CodeStyleError, StylesheetSources, font_family_kind, monospace_family
 from engine.item.policy import _BLOCK_TAGS, is_numbered_shell_block
 
-CODE_CLASSIFICATION_VERSION = "code-context-3"
+CODE_CLASSIFICATION_VERSION = "code-context-4"
 LEGACY_CODE_CLASSIFICATION_VERSIONS = frozenset({"code-context-1", "code-context-2"})
-CODE_CLASSIFICATION_VERSIONS = LEGACY_CODE_CLASSIFICATION_VERSIONS | {CODE_CLASSIFICATION_VERSION}
+_NUMBERED_CODE_POLICIES = frozenset({"code-context-3", CODE_CLASSIFICATION_VERSION})
+CODE_CLASSIFICATION_VERSIONS = LEGACY_CODE_CLASSIFICATION_VERSIONS | _NUMBERED_CODE_POLICIES
 
 _SEMANTIC_BLOCK = {"pre"}
 _SEMANTIC_INLINE = {"code", "kbd", "samp", "var", "tt"}
@@ -37,9 +37,6 @@ _CSS_WIDE = {"inherit", "initial", "revert", "revert-layer", "unset"}
 _NESTED = {"container", "document", "layer", "media", "scope", "starting-style", "supports"}
 _RELEVANT = {"white-space", "font-family", "font", "all"}
 _SUSPICIOUS = re.compile(r"(?:white-space|font(?:-family)?|mono(?:space)?|code|pre-wrap)", re.IGNORECASE)
-_LEGACY_GENERATED_CLASS = re.compile(r"class-[0-9]+-[0-9]+")
-_GENERATED_CLASS = re.compile(r"class(?:[0-9]+|-[0-9]+-[0-9]+)")
-_XHTML = "{http://www.w3.org/1999/xhtml}"
 _CLASS_ALIASES = {
     "code-block": "codeblock",
     "code_block": "codeblock",
@@ -87,83 +84,10 @@ class _Conditional:
 
 
 def is_rendered_python_block(node: etree._Element, *, policy: str = CODE_CLASSIFICATION_VERSION) -> bool:
-    """Recognize Python listings flattened into generated line spans and breaks."""
+    """Recognize a flattened Python listing under the selected extraction policy."""
     if policy not in CODE_CLASSIFICATION_VERSIONS:
         raise ValueError(f"unsupported code classification policy: {policy}")
-    generated = _GENERATED_CLASS if policy == CODE_CLASSIFICATION_VERSION else _LEGACY_GENERATED_CLASS
-    text_classes = {"bookSpan", "bookspan"} if policy == CODE_CLASSIFICATION_VERSION else {"bookSpan"}
-    if node.tag != f"{_XHTML}div" or not generated.fullmatch(node.get("class", "")) or (node.text or "").strip():
-        return False
-    lines = []
-    line_class = None
-    for index, child in enumerate(node):
-        if (child.tail or "").strip():
-            return False
-        if index % 2:
-            if child.tag != f"{_XHTML}br" or len(child) or (child.text or "").strip():
-                return False
-            continue
-        css_class = child.get("class", "")
-        if (
-            child.tag != f"{_XHTML}span"
-            or not generated.fullmatch(css_class)
-            or (line_class is not None and line_class != css_class)
-            or len(child) != 1
-            or (child.text or "").strip()
-        ):
-            return False
-        line_class = css_class
-        text = child[0]
-        if (
-            text.tag != f"{_XHTML}span"
-            or text.get("class") not in text_classes
-            or len(text)
-            or (text.tail or "").strip()
-        ):
-            return False
-        lines.append((text.text or "").replace("\xa0", " "))
-    if sum(bool(line.strip()) for line in lines) < 2:
-        return False
-    try:
-        statements = ast.parse(textwrap.dedent("\n".join(lines))).body
-    except IndentationError:
-        # Some conversions put the first field's indentation in CSS.
-        try:
-            fields = ast.parse("\n".join(line.lstrip() for line in lines)).body
-        except (SyntaxError, ValueError):
-            return False
-        return (
-            bool(fields)
-            and all(isinstance(field, ast.AnnAssign) for field in fields)
-            and any(isinstance(field, ast.AnnAssign) and field.value is not None for field in fields)
-        )
-    except (SyntaxError, ValueError):
-        return False
-    return bool(statements) and all(
-        isinstance(
-            statement,
-            (
-                ast.Assign,
-                ast.AugAssign,
-                ast.FunctionDef,
-                ast.AsyncFunctionDef,
-                ast.ClassDef,
-                ast.For,
-                ast.AsyncFor,
-                ast.While,
-                ast.If,
-                ast.Try,
-                ast.With,
-                ast.Import,
-                ast.ImportFrom,
-            ),
-        )
-        or isinstance(statement, ast.AnnAssign)
-        and statement.value is not None
-        or isinstance(statement, ast.Expr)
-        and isinstance(statement.value, ast.Call)
-        for statement in statements
-    )
+    return is_rendered_python_listing(node, numbered=policy in _NUMBERED_CODE_POLICIES)
 
 
 class CodeContext:
@@ -484,7 +408,7 @@ class CodeContext:
                     )
 
     def _effective(self, node: etree._Element, name: str) -> _Winner | None:
-        if _is_caption(node, numbered=self.policy == CODE_CLASSIFICATION_VERSION):
+        if _is_caption(node, numbered=self.policy in _NUMBERED_CODE_POLICIES):
             return None
         current = self._winners[node].get(name)
         if current is not None:
@@ -509,18 +433,20 @@ class CodeContext:
         result: dict[etree._Element, Literal["block", "inline"]] = {}
         for node in self._elements:
             name = _name(node)
-            classes = _classes(node, numbered=self.policy == CODE_CLASSIFICATION_VERSION)
+            classes = _classes(node, numbered=self.policy in _NUMBERED_CODE_POLICIES)
             if name in _SEMANTIC_BLOCK:
                 result[node] = "block"
                 continue
             if name in _SEMANTIC_INLINE:
                 result[node] = "inline"
                 continue
-            if _is_caption(node, numbered=self.policy == CODE_CLASSIFICATION_VERSION):
+            if _is_caption(node, numbered=self.policy in _NUMBERED_CODE_POLICIES):
                 continue
             if (
                 recognize_rendered_python
                 and is_rendered_python_block(node, policy=self.policy)
+                or self.policy == CODE_CLASSIFICATION_VERSION
+                and is_rendered_listing(node)
                 or recognize_numbered_shell
                 and is_numbered_shell_block(node)
             ):
@@ -530,7 +456,7 @@ class CodeContext:
                 for descendant in node.iterdescendants():
                     if (
                         isinstance(descendant.tag, str)
-                        and _classes(descendant, numbered=self.policy == CODE_CLASSIFICATION_VERSION) & _LINE_CLASSES
+                        and _classes(descendant, numbered=self.policy in _NUMBERED_CODE_POLICIES) & _LINE_CLASSES
                     ):
                         result[descendant] = "block"
                 continue
@@ -547,7 +473,7 @@ class CodeContext:
             family = self._effective(node, "font-family")
             white_kind = _whitespace_kind(whitespace.value) if whitespace is not None else "other"
             family_kind = (
-                font_family_kind(family.value, generic_anywhere=self.policy == CODE_CLASSIFICATION_VERSION)
+                font_family_kind(family.value, generic_anywhere=self.policy in _NUMBERED_CODE_POLICIES)
                 if family is not None
                 else "other"
             )
@@ -589,7 +515,7 @@ class CodeContext:
             descendant
             for descendant in node.iterdescendants()
             if isinstance(descendant.tag, str)
-            and _is_caption(descendant, numbered=self.policy == CODE_CLASSIFICATION_VERSION)
+            and _is_caption(descendant, numbered=self.policy in _NUMBERED_CODE_POLICIES)
         ]
         if not captions:
             result[node] = "block"
@@ -604,7 +530,7 @@ class CodeContext:
                 continue
             if (child.tail or "").strip():
                 raise CodeStyleError("cannot partition code container with raw code and a caption")
-            if not _is_caption(child, numbered=self.policy == CODE_CLASSIFICATION_VERSION):
+            if not _is_caption(child, numbered=self.policy in _NUMBERED_CODE_POLICIES):
                 content.append(child)
         if not content:
             raise CodeStyleError("cannot partition code container that contains only a caption")
@@ -947,7 +873,7 @@ def _computed_code(
 ) -> Literal["block", "inline"] | None:
     white_kind = _whitespace_kind(whitespace.value) if whitespace is not None else "other"
     family_kind = (
-        font_family_kind(family.value, generic_anywhere=policy == CODE_CLASSIFICATION_VERSION)
+        font_family_kind(family.value, generic_anywhere=policy in _NUMBERED_CODE_POLICIES)
         if family is not None
         else "other"
     )

@@ -15,6 +15,7 @@ from engine.orchestrator import run_translation
 from engine.schemas.contracts import RequestManifest, canonical_json_bytes
 from engine.services import state
 from engine.services.journal import BodyJournal
+from engine.services.manual import import_codex_translation
 from engine.services.partition import build_plan, plan_path
 from engine.services.parts import PartJournal
 from engine.services.preparation import prepare_translation
@@ -360,7 +361,10 @@ def test_preview_rejects_corrupt_part_child_or_response_proof(tmp_path: Path, da
     assert before == _tree(root.store.root)
 
 
-def test_preview_accepts_completed_adaptive_review_parts_without_retranslation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("correct_parent", (False, True))
+def test_preview_accepts_completed_adaptive_review_parts_without_retranslation(
+    tmp_path: Path, correct_parent: bool
+) -> None:
     case = prepare_case(
         tmp_path,
         "<p>First sentence. Second sentence! Third sentence?</p>",
@@ -393,6 +397,12 @@ def test_preview_accepts_completed_adaptive_review_parts_without_retranslation(t
         )
     )
     assert result.status == "translated"
+    if correct_parent:
+        journal = BodyJournal(case.session.store)
+        prior = journal.records((parent.item_id,))[parent.item_id]
+        import_codex_translation(
+            journal, parent, prior, "第一句。第二句！第三句话？", user_authorized=True, replace_reviewed=True
+        )
     before = _tree(case.session.store.root)
 
     preview = plan_resume(case.session.store.root)

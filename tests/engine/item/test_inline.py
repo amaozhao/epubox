@@ -197,6 +197,72 @@ def test_projection_locks_css_sensitive_and_hard_atom_order_and_plain_units():
         validate_projection(boundary, "AFTER⟦+b1⟧⟦-b1⟧⟦=x1⟧⟦+b2⟧⟦-b2⟧BEFORE")
 
 
+def test_code_immutability_keeps_opaque_boundaries_when_counting_visible_literals():
+    registry = {
+        "x1": ref("x1", "x", movement="locked", boundary_type="whitespace"),
+        "x2": RegistryEntry(
+            ref_id="x2",
+            kind="x",
+            source_node_key="code-node",
+            parent_ref="n1",
+            movement="fixed",
+            reorder_allowed=False,
+            source_text="pipeline_name",
+            hints={"immutable_code": "v6"},
+            boundary_type="code",
+        ),
+    }
+    unit = make_unit(
+        "Figure: pipeline_name⟦=x1⟧In the portal, click ⟦=x2⟧.",
+        registry=registry,
+    )
+
+    validate_projection(unit, "图：pipeline_name 的说明⟦=x1⟧在门户中，点击 ⟦=x2⟧。")
+
+
+def test_code_immutability_rejects_copying_an_opaque_atom_into_prose():
+    registry = {
+        "x1": RegistryEntry(
+            ref_id="x1",
+            kind="x",
+            source_node_key="code-node",
+            parent_ref="n1",
+            movement="fixed",
+            reorder_allowed=False,
+            source_text="pipeline_name",
+            hints={"immutable_code": "v6"},
+            boundary_type="code",
+        )
+    }
+    unit = make_unit("Click ⟦=x1⟧.", registry=registry)
+
+    with pytest.raises(ProjectionError, match="protected code x1"):
+        validate_projection(unit, "点击 ⟦=x1⟧，然后输入 pipeline_name。")
+
+
+def test_code_immutability_counts_an_acronym_and_its_prose_plural_together():
+    registry = {
+        "x1": RegistryEntry(
+            ref_id="x1",
+            kind="x",
+            source_node_key="code-node",
+            parent_ref="n1",
+            movement="fixed",
+            reorder_allowed=False,
+            source_text="UUID",
+            hints={"immutable_code": "v6"},
+            boundary_type="code",
+        )
+    }
+    unit = make_unit("External ID (⟦=x1⟧). Unlike numeric IDs, UUIDs are unique.", registry=registry)
+    target = "外部 ID（⟦=x1⟧）。与数字 ID 不同，UUID 在各个服务中都是唯一的。"
+
+    validate_projection(unit, target)
+    for extra in ("UUID", "UUIDs"):
+        with pytest.raises(ProjectionError, match="protected code x1"):
+            validate_projection(unit, f"{target} 另一个 {extra}。")
+
+
 def test_hard_boundary_tracks_ordered_root_domains_but_ignores_movable_g_inside_a_domain():
     boundary_registry = {
         "g1": ref("g1", "g", movement="fixed"),

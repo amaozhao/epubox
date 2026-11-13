@@ -20,6 +20,42 @@ def _by_id(root: etree._Element, value: str) -> etree._Element:
     return next(node for node in root.iter() if node.get("id") == value)
 
 
+def rendered_listing(ident: str, *lines: str) -> str:
+    return (
+        f'<div id="{ident}" class="class41">'
+        + "".join(
+            f'<div class="class{42 if index == 0 else 44}"><div class="calibre1">'
+            f'<span class="class43"><span class="bookspan">{line}</span></span> </div></div>'
+            for index, line in enumerate(lines)
+        )
+        + "</div>"
+    )
+
+
+def test_flattened_rust_listings_are_protected_before_extraction():
+    root = _root(
+        rendered_listing(
+            "loop", "fn main() {", "&#160;&#160;for (index, value) in samples.iter().enumerate() {", "}", "}"
+        )
+        + rendered_listing("struct", "pub struct GpuMetrics {", "&#160;&#160;pub index: &#160;u32,", "}")
+        + rendered_listing("config", "[dependencies]", 'thiserror = "2"')
+        + rendered_listing("terminal", "cargo build --release", "Finished release profile")
+        + rendered_listing("prose", "Index of documents", "use this feature; then restart.")
+    )
+    path = "OPS/chapter.xhtml"
+    assert CodeContext(root, path).regions == {
+        _by_id(root, name): "block" for name in ("loop", "struct", "config", "terminal")
+    }
+    data = etree.tostring(root)
+    fresh = extract_resource(data, path, "source")
+    assert len(fresh.items) == 2
+    assert "Index of documents" in fresh.items[0].source_projection
+    assert "use this feature; then restart." in fresh.items[1].source_projection
+    frozen = extract_resource(data, path, "source", extractor_version="epubox-atomic-7")
+    assert any("samples.iter().enumerate()" in item.source_projection for item in frozen.items)
+    assert any("pub index:" in item.source_projection for item in frozen.items)
+
+
 @pytest.mark.parametrize(
     ("block_class", "line_class", "text_class"),
     (("class-0-1", "class-0-2", "bookSpan"), ("class48", "class39", "bookspan")),
@@ -60,7 +96,7 @@ def test_semantic_code_elements_form_maximal_nonoverlapping_regions() -> None:
     )
     context = CodeContext(root, "OPS/chapter.xhtml")
 
-    assert CODE_CLASSIFICATION_VERSION == "code-context-3"
+    assert CODE_CLASSIFICATION_VERSION == "code-context-4"
     assert context.regions == {
         _by_id(root, "code"): "inline",
         _by_id(root, "pre"): "block",
@@ -713,3 +749,4 @@ def test_atomic7_frozen_shell_inventory_keeps_its_original_members():
     raw = ('<html xmlns="http://www.w3.org/1999/xhtml"><body>' + SHELL + "</body></html>").encode()
     frozen = extract_resource(raw, "OPS/chapter.xhtml", "source", extractor_version="epubox-atomic-7")
     assert any("#!/bin/bash" in item.source_projection for item in frozen.items)
+    assert not extract_resource(raw, "OPS/chapter.xhtml", "source").items

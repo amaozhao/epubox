@@ -123,6 +123,7 @@ def test_empty_semantic_inline_slot_is_not_treated_as_split_letter_formatting():
     item = json.loads(decode("translate", raw, "r", ("u",), version=VERSION, sources={"u": source}))["items"][0]
     assert item["target"] is None
     assert "invalid=['2']" in item["decode_error"]
+    assert "source slots 2='important'" in item["decode_error"]
 
 
 @pytest.mark.parametrize(

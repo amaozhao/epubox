@@ -30,6 +30,7 @@ def _legacy_residual_failure(
     target: str = _GROUNDED_TARGET,
     siblings: bool = False,
     malformed: bool = False,
+    legacy_message: str = "untranslated English remains: attention is not all you need",
 ) -> tuple[ReadyCase, BodyJournal, str, list[str]]:
     sources = (source, "Second sentence.") if siblings else (source,)
     markup = "".join(f"<p>{source}</p>" for source in sources)
@@ -41,7 +42,7 @@ def _legacy_residual_failure(
 
     def legacy_error(member, translated, wire):
         if member.item_id == failed_id:
-            return "untranslated English remains: attention is not all you need"
+            return legacy_message
         return current_error(member, translated, wire)
 
     async def transport(kind, payload):
@@ -164,6 +165,48 @@ def test_recover_results_revalidates_legacy_residual_failure_without_retranslati
     assert calls[-1] == "review"
     assert resumed.records((item_id,))[item_id].status == ItemStatus.REVIEWED
     assert _tree(case.session.store.root / "failures") == ledger_before
+
+
+def test_recover_results_revalidates_obsolete_opaque_code_failure_without_retranslation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case, journal, item_id, calls = _legacy_residual_failure(
+        tmp_path,
+        monkeypatch,
+        legacy_message="protected code x17 must remain in its opaque marker",
+    )
+    failed = journal.records((item_id,))[item_id]
+    attempts_before = journal.progress_snapshot()["body_http_attempts"]
+    assert failed.status == ItemStatus.NEEDS_ATTENTION
+
+    resumed = BodyJournal(case.session.store)
+    recovered = resumed.recover_results()[item_id]
+
+    assert recovered.status == ItemStatus.LOCAL_VALID
+    assert recovered.stage == "proofread"
+    assert recovered.target_projection == _GROUNDED_TARGET
+    assert recovered.next_action == "review" and recovered.failure is None
+    assert resumed.progress_snapshot()["body_http_attempts"] == attempts_before
+    assert calls == ["translate"]
+
+
+def test_recover_results_keeps_obsolete_opaque_failure_when_response_still_fails_current_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case, journal, item_id, _calls = _legacy_residual_failure(
+        tmp_path,
+        monkeypatch,
+        target="This replacement remains entirely untranslated and contains a complete English sentence.",
+        legacy_message="protected code x17 must remain in its opaque marker",
+    )
+    prior = journal.records((item_id,))[item_id]
+    result_path = case.session.store.root / "results" / f"{item_id}.json"
+    before = state.read(result_path)
+
+    recovered = BodyJournal(case.session.store).recover_results()[item_id]
+
+    assert recovered == prior
+    assert state.read(result_path) == before
 
 
 @pytest.mark.parametrize(

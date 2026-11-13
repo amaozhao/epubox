@@ -8,7 +8,7 @@ from types import MappingProxyType
 from typing import Any, cast
 
 from engine.agents.workflow import _frame, _target_error, _wire_items
-from engine.item.inline import plain_text
+from engine.item.inline import ProjectionError, plain_text
 from engine.schemas.contracts import (
     ItemRecord,
     ItemStatus,
@@ -500,13 +500,18 @@ class PartJournal(BodyJournal):
             return None
         for record in self._records.values():
             self._require_review_proof(record)
-        parent = self.root.session.index.members_by_id[self.plan.parent_id]
-        merged = merge_targets(
-            cast(Any, parent),
-            self.plan,
-            {item_id: cast(str, value.target_projection) for item_id, value in self._records.items()},
-        )
-        _validate_parent_target(self.root.session, parent.item_id, merged)
+        session = self.root.session
+        parent = session.index.members_by_id[self.plan.parent_id]
+        try:
+            merged = merge_targets(
+                cast(Any, parent),
+                self.plan,
+                {item_id: cast(str, value.target_projection) for item_id, value in self._records.items()},
+            )
+        except ProjectionError as error:
+            resource = session.index.resource_paths[parent.document_id]
+            raise ProjectionError(f"compose:{parent.item_id} ({resource}): {error}") from error
+        _validate_parent_target(session, parent.item_id, merged)
         current = self.root._records[self.plan.parent_id]
         summary = {
             "plan_hash": canonical_hash(self.plan),

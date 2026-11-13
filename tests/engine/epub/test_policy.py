@@ -541,16 +541,22 @@ def test_navigation_target_spine_addition_is_rejected_outside_plain_upgrade(
 def test_stage_and_verify_explicit_font_removal(tmp_path: Path) -> None:
     source = make_epub(tmp_path / "source.epub")
     with zipfile.ZipFile(source, "a") as archive:
-        archive.writestr("OEBPS/unused.ttf", b"font bytes")
+        archive.writestr("OEBPS/Fonts/", b"")
+        archive.writestr("OEBPS/Fonts/Subset/", b"")
+        archive.writestr("OEBPS/Fonts/Subset/unused.ttf", b"font bytes")
+        archive.writestr("OEBPS/Images/", b"")
+        archive.writestr("OEBPS/Images/cover.png", b"image bytes")
     inventory = inspect_epub(source, "source", checker=StubChecker())
     staged = tmp_path / "staged.epub"
-    removed = frozenset({"OEBPS/unused.ttf"})
+    removed = frozenset({"OEBPS/Fonts/Subset/unused.ttf"})
     stage_epub(source, staged, {}, removed_paths=removed)
     verify_staged_epub(
         source, staged, inventory, {}, accepted_targets={}, checker=StubChecker(), removed_paths=removed
     )
     with zipfile.ZipFile(staged) as archive:
-        assert "OEBPS/unused.ttf" not in archive.namelist()
+        assert not any(path.startswith("OEBPS/Fonts/") for path in archive.namelist())
+        assert "OEBPS/Images/" in archive.namelist()
+        assert archive.read("OEBPS/Images/cover.png") == b"image bytes"
     with pytest.raises(EpubValidationError, match="inventory"):
         verify_staged_epub(source, staged, inventory, {}, accepted_targets={}, checker=StubChecker())
 

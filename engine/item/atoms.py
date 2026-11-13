@@ -31,7 +31,7 @@ from engine.schemas.contracts import Unit
 from engine.schemas.internal import DocumentPlan as StructuralDocument
 from engine.schemas.internal import RegistryEntry, ResourceRecord, SlotRange
 
-EXTRACTOR_VERSION = "epubox-atomic-7"
+EXTRACTOR_VERSION = "epubox-atomic-8"
 ADAPTER_VERSION = "epubox-bytes-1"
 DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
 EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
@@ -40,16 +40,19 @@ _V3_EXTRACTOR_VERSION = "epubox-atomic-3"
 _V4_EXTRACTOR_VERSION = "epubox-atomic-4"
 _V5_EXTRACTOR_VERSION = "epubox-atomic-5"
 _V6_EXTRACTOR_VERSION = "epubox-atomic-6"
-_SUPPORTED_EXTRACTOR_VERSIONS = frozenset(
-    {
-        "epubox-atomic-1",
-        _LEGACY_EXTRACTOR_VERSION,
-        _V3_EXTRACTOR_VERSION,
-        _V4_EXTRACTOR_VERSION,
-        _V5_EXTRACTOR_VERSION,
-        _V6_EXTRACTOR_VERSION,
-        EXTRACTOR_VERSION,
-    }
+_V7_EXTRACTOR_VERSION = "epubox-atomic-7"
+CODE_CONTEXT_EXTRACTOR_VERSIONS = frozenset({_V6_EXTRACTOR_VERSION, _V7_EXTRACTOR_VERSION, EXTRACTOR_VERSION})
+_SUPPORTED_EXTRACTOR_VERSIONS = (
+    frozenset(
+        {
+            "epubox-atomic-1",
+            _LEGACY_EXTRACTOR_VERSION,
+            _V3_EXTRACTOR_VERSION,
+            _V4_EXTRACTOR_VERSION,
+            _V5_EXTRACTOR_VERSION,
+        }
+    )
+    | CODE_CONTEXT_EXTRACTOR_VERSIONS
 )
 _NAVIGATION_EXTRACTOR_VERSIONS = frozenset(_SUPPORTED_EXTRACTOR_VERSIONS - {"epubox-atomic-1"})
 _STEM_TITLE_FILTER_EXTRACTOR_VERSIONS = frozenset(_NAVIGATION_EXTRACTOR_VERSIONS - {_LEGACY_EXTRACTOR_VERSION})
@@ -85,9 +88,10 @@ class _AtomicExtractor(_Extractor):
         self.extractor_version = extractor_version
         if parsed.tree is None:
             raise RangeError("genuine HTML has no proven source mapping")
-        selected_policy = code_policy or (
-            "code-context-1" if extractor_version == _V6_EXTRACTOR_VERSION else CODE_CLASSIFICATION_VERSION
-        )
+        selected_policy = code_policy or {
+            _V6_EXTRACTOR_VERSION: "code-context-1",
+            _V7_EXTRACTOR_VERSION: "code-context-3",
+        }.get(extractor_version, CODE_CLASSIFICATION_VERSION)
         if selected_policy not in CODE_CLASSIFICATION_VERSIONS:
             raise ValueError(f"unsupported code classification policy: {selected_policy}")
         if extractor_version == _V6_EXTRACTOR_VERSION and selected_policy != "code-context-1":
@@ -98,11 +102,10 @@ class _AtomicExtractor(_Extractor):
                 path,
                 styles,
                 recognize_rendered_python=extractor_version != _V6_EXTRACTOR_VERSION,
-                # Keep frozen inventories stable; source-proven recovery protects shell members locally.
-                recognize_numbered_shell=False,
+                recognize_numbered_shell=selected_policy == CODE_CLASSIFICATION_VERSION,
                 policy=selected_policy,
             )
-            if extractor_version in {_V6_EXTRACTOR_VERSION, EXTRACTOR_VERSION} and parsed.kind == "xhtml"
+            if extractor_version in CODE_CONTEXT_EXTRACTOR_VERSIONS and parsed.kind == "xhtml"
             else None
         )
         super().__init__(parsed.text, path, source_hash, media_type, config, None, tree=parsed.tree)

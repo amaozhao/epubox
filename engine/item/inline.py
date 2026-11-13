@@ -193,8 +193,8 @@ def validate_projection(
 
 def _validate_code_immutability(source: Sequence[Event], target: Sequence[Event], registry: Mapping[str, Any]) -> None:
     """V6 code atoms cannot be copied out into model-editable prose."""
-    source_text = "".join(event.value for event in source if event.kind == "text")
-    target_text = "".join(event.value for event in target if event.kind == "text")
+    source_text = _model_editable_text(source)
+    target_text = _model_editable_text(target)
     for ref, entry in registry.items():
         guard = _field(entry, "hints", default={}).get("immutable_code")
         if guard is None:
@@ -206,9 +206,18 @@ def _validate_code_immutability(source: Sequence[Event], target: Sequence[Event]
             continue
         left = r"(?<!\w)" if literal[0].isalnum() or literal[0] == "_" else ""
         right = r"(?!\w)" if literal[-1].isalnum() or literal[-1] == "_" else ""
-        pattern = re.compile(left + re.escape(literal) + right)
+        # English prose can pluralize an acronym whose code form is singular.
+        plural = "s?" if re.fullmatch(r"[A-Z]{3,}", literal) else ""
+        pattern = re.compile(left + re.escape(literal) + plural + right)
         if len(pattern.findall(target_text)) > len(pattern.findall(source_text)):
             raise ProjectionError(f"protected code {ref} must remain in its opaque marker")
+
+
+def _model_editable_text(events: Sequence[Event]) -> str:
+    """Join prose across formatting ranges while retaining opaque atom boundaries."""
+    return "".join(
+        event.value if event.kind == "text" else "\0" if event.value.startswith("=") else "" for event in events
+    )
 
 
 def normalize_empty_closes(source_projection: str, target_projection: str) -> str:

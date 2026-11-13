@@ -29,7 +29,7 @@ from engine.epub.chapter import CHAPTER_LABEL, HEADING_TAGS
 from engine.epub.parsing import XHTML_NAMESPACE, parse_resource
 from engine.epub.ranges import CharSpan, RawSpan, index_resource
 
-CLEANUP_POLICY = "zh-inline-v5"
+CLEANUP_POLICY = "zh-inline-v6"
 _EMPTY = {"span", "em", "strong"}
 _BLOCKS = {
     "body",

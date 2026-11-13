@@ -17,7 +17,12 @@ from engine.core.code import CODE_CLASSIFICATION_VERSIONS
 from engine.epub.fill import fill_resource
 from engine.epub.parsing import parse_resource
 from engine.epub.ranges import index_resource
-from engine.item.atoms import _SUPPORTED_EXTRACTOR_VERSIONS, _safe_boundaries, extract_resource
+from engine.item.atoms import (
+    _SUPPORTED_EXTRACTOR_VERSIONS,
+    CODE_CONTEXT_EXTRACTOR_VERSIONS,
+    _safe_boundaries,
+    extract_resource,
+)
 from engine.item.atoms import EXTRACTOR_VERSION as ATOMIC_EXTRACTOR_VERSION
 from engine.item.budget import measure_budget
 from engine.item.inline import events_to_projection, parse_projection
@@ -884,10 +889,10 @@ def _code_policy(document: DocumentPlan) -> str | None:
         boundary.get("policy") for boundary in document.boundaries if boundary.get("kind") == "code_style_context"
     ]
     if not policies:
-        if document.resource.media_type == "application/xhtml+xml" and document.extractor_version in {
-            "epubox-atomic-6",
-            ATOMIC_EXTRACTOR_VERSION,
-        }:
+        if (
+            document.resource.media_type == "application/xhtml+xml"
+            and document.extractor_version in CODE_CONTEXT_EXTRACTOR_VERSIONS
+        ):
             raise IdentityMismatch("prepared XHTML document is missing its code classification policy")
         return None
     if len(policies) != 1 or not isinstance(policies[0], str) or policies[0] not in CODE_CLASSIFICATION_VERSIONS:

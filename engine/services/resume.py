@@ -35,6 +35,7 @@ from engine.schemas.parts import PartPlan
 from engine.schemas.ready import AtomicPlan, AtomicPreparedInput
 from engine.services import state
 from engine.services.atomic import CorruptRecord, IdentityMismatch, safe_id
+from engine.services.code import preserved_code_proof
 from engine.services.coherence import _read as read_coherence_record
 from engine.services.custody import epoch, review_draft, review_feedback
 from engine.services.partition import PartSession, plan_path, split_target
@@ -447,19 +448,23 @@ def _atomic_resume(root: Path) -> ResumePlan:
                 if record != derived_record(record.item_id, source_id):
                     raise ValueError("saved derived result differs from its canonical dependency record")
                 continue
+            if "preserved_code" in record.checks:
+                preserved_code_proof(preview, record)
+                continue
+            if "manual" in record.checks:
+                from engine.services.manual import manual_proof
+
+                manual_proof(preview, record)
+                continue
             if record.item_id in parts:
                 if record.status == ItemStatus.REVIEWED and not isinstance(record.checks.get("parts"), dict):
                     raise ValueError("part parent review lacks a composite proof")
                 continue
             if isinstance(record.checks.get("parts"), dict):
                 raise TypeError("part composite has no persisted part plan")
-            if "manual" in record.checks:
-                from engine.services.manual import manual_proof
-
-                manual_proof(preview, record)
-            elif record.status != ItemStatus.PENDING:
+            if record.status != ItemStatus.PENDING:
                 _atomic_record_frame(root, ready, record, members, index, requests)
-            if record.status == ItemStatus.REVIEWED and "manual" not in record.checks:
+            if record.status == ItemStatus.REVIEWED:
                 _atomic_review_proof(root, ready, record, members, records, index, requests)
     except (CorruptRecord, IdentityMismatch, OSError, TypeError, ValueError) as error:
         return ResumePlan("preparation", "needs_attention", ("repair_shared_identity",), (str(error),))
@@ -475,7 +480,7 @@ def _atomic_resume(root: Path) -> ResumePlan:
         for item_id in plan.unit_members[unit_id]:
             record = records[item_id]
             part = parts.get(item_id)
-            if part is None or isinstance(record.checks.get("parts"), dict):
+            if part is None or any(key in record.checks for key in ("manual", "preserved_code", "parts")):
                 values.append((record.status, record.target_projection is not None))
                 continue
             children = tuple(part[2].values())
