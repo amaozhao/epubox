@@ -87,7 +87,7 @@ b { font: menu !important }
 
     replacements, removed = use_reader_fonts(source, inventory, {})
 
-    assert FONT_POLICY == "reader-fonts-v3"
+    assert FONT_POLICY == "reader-fonts-v4"
     assert removed == frozenset({"OEBPS/fonts/cjk.woff2", "OEBPS/fonts/orphan.ttf", "META-INF/encryption.xml"})
     assert "@font-face" not in replacements["OEBPS/styles/main.css"].decode()
     rendered_css = replacements["OEBPS/styles/main.css"].decode()
@@ -341,25 +341,26 @@ def test_reader_font_policy_rejects_font_used_as_non_typographic_content(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("chapter", "css", "message"),
+    ("chapter", "css"),
     [
         (
             '<html xmlns="http://www.w3.org/1999/xhtml"><body><span>\ue900</span></body></html>'.encode(),
             b"",
-            "private-use text glyph",
         ),
         (
             b'<html xmlns="http://www.w3.org/1999/xhtml"><body><span class="icon"/></body></html>',
-            rb'.icon::before { content: "\e900"; font-family: Icons }',
-            "private-use generated glyph",
+            (
+                rb"@font-face { font-family: Icons; src: url(icon.woff2) }"
+                rb'.icon::before { content: "\e900"; font-family: Icons }'
+                b"p { font-family: Publisher, serif }"
+            ),
         ),
     ],
 )
-def test_reader_font_policy_rejects_private_use_icon_glyphs(
+def test_reader_font_policy_preserves_private_use_icon_glyphs(
     tmp_path: Path,
     chapter: bytes,
     css: bytes,
-    message: str,
 ) -> None:
     css_item = b'<item id="css" href="icons.css" media-type="text/css"/>' if css else b""
     opf = (
@@ -383,8 +384,14 @@ def test_reader_font_policy_rejects_private_use_icon_glyphs(
         manifest.append(ManifestItem("css", "OEBPS/icons.css", "text/css"))
     source, inventory = _book(tmp_path, files, tuple(manifest))
 
-    with pytest.raises(ValueError, match=message):
-        use_reader_fonts(source, inventory, {})
+    pending = chapter.replace(b"</body>", b"<p>Translated.</p></body>")
+    replacements, removed = use_reader_fonts(source, inventory, {"OEBPS/chapter.xhtml": pending})
+
+    assert replacements == {"OEBPS/chapter.xhtml": pending}
+    assert not removed
 
     with ZipFile(source) as archive:
         assert archive.read("OEBPS/chapter.xhtml") == chapter
+        assert archive.read("OEBPS/icon.woff2") == b"icons"
+        if css:
+            assert archive.read("OEBPS/icons.css") == css

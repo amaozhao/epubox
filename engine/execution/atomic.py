@@ -69,6 +69,8 @@ async def run_atomic(
         journal = BodyJournal(store, session=ready_session, progress=progress)
         session = journal.session
         ready = session.prepared
+        if progress:
+            progress({"phase": "recovery", "notice": "恢复：回放已保存的模型响应，检查需要拆分的单元。"})
         journal.recover_results()
         user_restart = claim_restart(store.root)
         plans = ensure_part_plans(journal)
@@ -111,6 +113,8 @@ async def run_atomic(
                 units = automatically_reopenable_units(journal, ready.plan.unit_members, records, units)
             reopened: set[str] = set()
             if units:
+                if progress:
+                    progress({"phase": "recovery", "notice": f"恢复：正在准备 {len(units)} 个待处理单元的重试。"})
                 reopened = set(journal.retry_units(tuple(sorted(units))))
                 recovery_partitions = _selected_partitions(recovery_partitions, reopened)
             if progress:

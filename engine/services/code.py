@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from functools import lru_cache
 from zipfile import ZipFile
 
 from engine.core.code import is_rendered_python_block
@@ -16,17 +17,23 @@ from engine.services import state
 from engine.services.atomic import IdentityMismatch, StaleWrite
 
 
-def _source_code_version(session, member) -> int | None:
-    # Frozen whole members retain their source spans and complete registry.
-    # Attributes and split fragments cannot claim whole-block protection.
-    if member.kind not in {"p", "div_text_region"} or member.channel != "body" or member.piece_count != 1:
-        return None
-    document = session.index.documents[member.document_id]
+def _source_document(session, document_id):
+    document = session.index.documents[document_id]
     with ZipFile(state.snapshot(session.store.root)) as archive:
         raw = archive.read(document.resource.path)
     if hashlib.sha256(raw).hexdigest() != document.resource.source_sha256:
         raise IdentityMismatch("preserved code source resource changed")
-    parsed = parse_resource(raw, document.resource.media_type)
+    return document, parse_resource(raw, document.resource.media_type)
+
+
+def _source_code_version(session, member, *, load_source=None) -> int | None:
+    # Frozen whole members retain their source spans and complete registry.
+    # Attributes and split fragments cannot claim whole-block protection.
+    if member.kind not in {"p", "div_text_region"} or member.channel != "body" or member.piece_count != 1:
+        return None
+    document, parsed = (
+        _source_document(session, member.document_id) if load_source is None else load_source(member.document_id)
+    )
     if parsed.kind != "xhtml" or parsed.tree is None:
         return None
     node = find_by_element_path(parsed.tree, document.nodes[member.root_node_key].element_path)
@@ -115,7 +122,13 @@ def preserved_code_proof(session, record: ItemRecord) -> None:
 
 def recover_preserved_code(journal) -> tuple[str, ...]:
     """Recover source-proven code from a frozen translation inventory."""
-    journal.session.verify()
+    session = journal.session
+    session.verify()
+
+    @lru_cache(maxsize=4)
+    def load_source(document_id):
+        return _source_document(session, document_id)
+
     changes = []
     for prior in journal._records.values():
         member = journal.session.index.members_by_id[prior.item_id]
@@ -135,7 +148,7 @@ def recover_preserved_code(journal) -> tuple[str, ...]:
         )
         if not legacy_failure and member.kind != "div_text_region" and not shell_candidate:
             continue
-        version = _source_code_version(journal.session, member)
+        version = _source_code_version(session, member, load_source=load_source)
         if version is None or (version not in {3, 4, 5} and not legacy_failure):
             continue
         checks = {

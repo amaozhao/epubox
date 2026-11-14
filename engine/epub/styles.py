@@ -26,7 +26,7 @@ from engine.epub.validation import (
     _encryption_resource_path,
 )
 
-FONT_POLICY = "reader-fonts-v3"
+FONT_POLICY = "reader-fonts-v4"
 
 _MARKUP_TYPES = {
     "application/xhtml+xml",
@@ -48,6 +48,10 @@ _FONT_SIZE_KEYWORDS = {
 }
 _CSS_WIDE = {"inherit", "initial", "revert", "revert-layer", "unset"}
 _SYSTEM_FONTS = {"caption", "icon", "menu", "message-box", "small-caption", "status-bar"}
+
+
+class _PrivateUseGlyph(ValueError):
+    """A private-use glyph may need the publisher's original font cascade."""
 
 
 def source_stylesheets(archive: zipfile.ZipFile) -> StylesheetSources:
@@ -79,8 +83,7 @@ def use_reader_fonts(
 
     The source archive is only read. Existing replacement bytes take precedence, which
     lets this pass run after translation and package upgrade without losing their work.
-    EPUBs that deliberately use a private-use/icon font outside ``@font-face`` fail
-    closed because deleting that font would destroy meaningful glyph content.
+    Keep the original font setup when a private-use glyph may depend on it.
     """
     result = dict(replacements)
     manifest = {item.path: item for item in inventory.manifest}
@@ -107,6 +110,15 @@ def use_reader_fonts(
         style_paths = {item.path for item in inventory.manifest if item.media_type == "text/css"} | {
             path for path in names | set(replacements) if PurePosixPath(path).suffix.lower() == ".css"
         }
+        if removed:
+            try:
+                for path in sorted(style_paths):
+                    _assert_no_private_use_css_bytes(source_bytes(path), path)
+                for item in inventory.manifest:
+                    if item.media_type in _MARKUP_TYPES:
+                        _assert_no_private_use_markup(source_bytes(item.path), item.media_type, item.path)
+            except _PrivateUseGlyph:
+                return result, frozenset()
         styles = StylesheetSources(
             {
                 path: _decode_css(source_bytes(path), path)
@@ -121,13 +133,11 @@ def use_reader_fonts(
                 continue
             if item.media_type == "text/css":
                 current = source_bytes(item.path)
-                _assert_no_private_use_css_bytes(current, item.path, removed)
                 changed = _clean_css_bytes(current, item.path)
                 _assert_no_font_urls(changed, item.path, removed)
                 record(item.path, changed)
             elif item.media_type in _MARKUP_TYPES:
                 current = source_bytes(item.path)
-                _assert_no_private_use_markup(current, item.media_type, item.path, removed)
                 changed = _clean_markup(current, item.media_type, item.path, removed, styles)
                 _assert_no_markup_font_references(changed, item.media_type, item.path, removed)
                 record(item.path, changed)
@@ -508,9 +518,7 @@ def _assert_no_font_urls(raw: bytes, resource: str, removed: set[str]) -> None:
             raise ValueError(f"font resource remains referenced outside @font-face in {resource}: {value}")
 
 
-def _assert_no_private_use_css_bytes(raw: bytes, resource: str, removed: set[str]) -> None:
-    if not removed:
-        return
+def _assert_no_private_use_css_bytes(raw: bytes, resource: str) -> None:
     rules, _encoding = tinycss2.parse_stylesheet_bytes(raw, skip_comments=False, skip_whitespace=False)
     _assert_no_private_use_css_nodes(rules, resource)
 
@@ -525,7 +533,7 @@ def _assert_no_private_use_css_nodes(nodes: Iterable[Any], resource: str) -> Non
         if getattr(node, "type", None) == "at-rule" and getattr(node, "lower_at_keyword", "") == "font-face":
             continue
         if getattr(node, "type", None) == "string" and _contains_private_use(str(node.value)):
-            raise ValueError(f"private-use generated glyph depends on an embedded font in {resource}")
+            raise _PrivateUseGlyph(f"private-use generated glyph in {resource}")
         for attribute in ("prelude", "content", "arguments", "value"):
             children = getattr(node, attribute, None)
             if isinstance(children, list):
@@ -536,10 +544,7 @@ def _assert_no_private_use_markup(
     raw: bytes,
     media_type: str,
     resource: str,
-    removed: set[str],
 ) -> None:
-    if not removed:
-        return
     parsed = parse_resource(raw, media_type)
     if parsed.tree is None:
         raise ValueError(f"XML byte-safe private-use validation is unavailable for {resource}")
@@ -552,18 +557,18 @@ def _assert_no_private_use_markup(
             if element.text:
                 _assert_no_private_use_css_text(element.text, resource)
         elif element.text and _contains_private_use(element.text):
-            raise ValueError(f"private-use text glyph depends on an embedded font in {resource}")
+            raise _PrivateUseGlyph(f"private-use text glyph in {resource}")
         for name, value in element.attrib.items():
             if etree.QName(name).localname.lower() == "style":
                 declarations = tinycss2.parse_declaration_list(value, skip_comments=False, skip_whitespace=False)
                 _assert_no_private_use_css_nodes(declarations, resource)
             elif _contains_private_use(value):
-                raise ValueError(f"private-use attribute glyph depends on an embedded font in {resource}")
+                raise _PrivateUseGlyph(f"private-use attribute glyph in {resource}")
         for child in element:
             if isinstance(child.tag, str):
                 walk(child)
             if child.tail and _contains_private_use(child.tail):
-                raise ValueError(f"private-use text glyph depends on an embedded font in {resource}")
+                raise _PrivateUseGlyph(f"private-use text glyph in {resource}")
 
     walk(parsed.tree.getroot())
 

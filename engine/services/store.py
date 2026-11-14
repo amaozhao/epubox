@@ -867,6 +867,16 @@ class RunStore:
         ):
             raise IdentityMismatch("model response identity does not match its request attempt")
         if version is not None:
+            sources = hints = None
+            if version in wire.SLOT_VERSIONS:
+                from engine.services.partition import response_members
+
+                members = response_members(self, manifest)
+                sources = {item_id: member.source_projection for item_id, member in members.items()}
+                hints = {
+                    item_id: {ref: dict(entry.hints) for ref, entry in member.registry.items()}
+                    for item_id, member in members.items()
+                }
             return record.response.model_copy(
                 update={
                     "raw": wire.decode(
@@ -875,8 +885,8 @@ class RunStore:
                         request_id,
                         manifest.item_ids,
                         version=version,
-                        sources=self.read_response_sources(manifest) if version in wire.SLOT_VERSIONS else None,
-                        hints=self.read_response_hints(manifest) if version in wire.SLOT_VERSIONS else None,
+                        sources=sources,
+                        hints=hints,
                     )
                 }
             )

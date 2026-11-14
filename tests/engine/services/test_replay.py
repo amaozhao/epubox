@@ -22,6 +22,52 @@ _GROUNDED_SOURCE = "A Google search for “attention is not all you need” yiel
 _GROUNDED_TARGET = "谷歌搜索“attention is not all you need”可得到 583,000 个结果。"
 
 
+def test_recover_reuses_review_replacement_rejected_by_old_english_check(tmp_path, monkeypatch):
+    case = prepare_case(tmp_path, "<p>First sentence.</p>", ("First sentence.",))
+    journal = BodyJournal(case.session.store, case.session)
+    member = case.batch.items[0]
+    current_error = workflow_module._target_error
+    corrected = "修订后的第一句。"
+
+    def old_error(item, target, wire):
+        if item.item_id == member.item_id and target == corrected:
+            return "untranslated English remains: (seq, values, index)"
+        return current_error(item, target, wire)
+
+    async def transport(stage, payload):
+        response = _answer(stage, payload)
+        if stage == "review":
+            parsed = json.loads(response["raw"])
+            parsed["items"][0].update(decision="replace", target=corrected)
+            response["raw"] = json.dumps(parsed)
+        return response
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(workflow_module, "_target_error", old_error)
+        asyncio.run(
+            run_workflow(
+                case.prepared,
+                case.batch,
+                case.index,
+                journal.runtime(transport=transport),
+                session=case.session,
+                save=journal.save,
+                records=journal.records(case.batch.manifest.item_ids),
+            )
+        )
+    prior = journal.records((member.item_id,))[member.item_id]
+    assert prior.status == ItemStatus.NEEDS_ATTENTION and prior.stage == "review"
+    attempts = journal.progress_snapshot()["http_attempts"]
+
+    resumed = BodyJournal(case.session.store)
+    record = resumed.recover_results()[member.item_id]
+
+    assert record.status == ItemStatus.REVIEWED and record.target_projection == corrected
+    assert record.checks["review_request_id"] == prior.checks["review_request_id"]
+    assert resumed.progress_snapshot()["http_attempts"] == attempts
+    assert BodyJournal(case.session.store).records((member.item_id,))[member.item_id] == record
+
+
 def _legacy_residual_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

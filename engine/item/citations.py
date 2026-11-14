@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from difflib import SequenceMatcher
 
-from engine.item.inline import parse_projection, plain_text
+from engine.item.inline import ProjectionError, parse_projection, plain_text
 from engine.schemas.contracts import RegistryEntry
 from engine.schemas.internal import Event
 
@@ -23,10 +23,13 @@ _CITATION = re.compile(
 )
 _BARE_CITATION = re.compile(r"^(?:[A-Z][A-Za-z’'-]*\s+){1,7}(?:18|19|20)\d{2}[a-z]?$")
 _SYMBOL = re.compile(r"(?:[A-Za-z]|[A-Z]{2,5})")
+_IDENTIFIER = r"[A-Za-z_][A-Za-z_0-9]*"
+_FUNCTION_SIGNATURE = re.compile(rf"{_IDENTIFIER}\((?:{_IDENTIFIER}(?:\s*,\s*{_IDENTIFIER})*)?\)")
 _NAME_WORD = r"[A-Z][A-Za-z]*(?:[’'-][A-Za-z]+)*"
 _SOURCE_NAME = re.compile(
-    rf"(?<![A-Za-z]){_NAME_WORD}(?:\s+(?:(?:and|for|in|of|on|the|to)\s+)*{_NAME_WORD}){{1,7}}(?![A-Za-z])"
+    rf"(?<![A-Za-z]){_NAME_WORD}(?:\s+(?:(?:and|for|in|of|on|the|to|as\s+an?)\s+)*{_NAME_WORD}){{1,7}}(?![A-Za-z])"
 )
+_SOURCE_EXAMPLE_LIST = re.compile(r"\(\s*(?:e\.g\.|for example)\s*,?\s*([^()]{1,240})\)", re.IGNORECASE)
 _SOURCE_DEFINED_NAME_CUE = re.compile(
     r"\b(?:as|called|entitled|named|titled)\s*[\"'“‘]\s*$",
     re.IGNORECASE,
@@ -65,8 +68,10 @@ def script_paragraphs_without_retained_titles(
     source_projection: str,
     target_projection: str,
     registry: Mapping[str, RegistryEntry],
+    *,
+    table: bool = False,
 ) -> tuple[str, ...]:
-    """Return target paragraphs without bounded quoted text retained from the source."""
+    """Return target prose after validating and excluding source-grounded literals."""
     source_events = parse_projection(source_projection)
     target_events = parse_projection(target_projection)
     source_ranges = _range_texts(source_events)
@@ -79,6 +84,14 @@ def script_paragraphs_without_retained_titles(
         scoring_context=any("\u4e00" <= char <= "\u9fff" for char in plain_text(target_events)),
     )
     retained: set[str] = set()
+    if table:
+        for ref, text in source_ranges.items():
+            signature = text.strip()
+            if registry[ref].hints.get("element") not in {"td", "th"} or not _FUNCTION_SIGNATURE.fullmatch(signature):
+                continue
+            if target_ranges[ref].strip() != signature:
+                raise ProjectionError(f"function signature changed: {signature}")
+            retained.add(ref)
 
     for index, event in enumerate(source_events):
         if event.kind != "marker" or not event.value.startswith("+g"):
@@ -245,7 +258,11 @@ def _contains_focused_term(phrase: str, term: str) -> bool:
 
 
 def _has_name_context(source: str, name: str) -> bool:
-    for match in re.finditer(re.escape(name), source):
+    if any(
+        name == item.strip() for examples in _SOURCE_EXAMPLE_LIST.finditer(source) for item in examples[1].split(",")
+    ):
+        return True
+    for match in re.finditer(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", source):
         if re.match(r"\s*\(", source[match.end() :]):
             return True
         if _SOURCE_DEFINED_NAME_CUE.search(source[max(0, match.start() - 120) : match.start()]):

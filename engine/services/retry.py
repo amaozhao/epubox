@@ -185,34 +185,31 @@ def retry_units(journal: BodyJournal, unit_ids: Sequence[str], *, retry_unknown:
 
 def _initial(journal: BodyJournal, item_id: str) -> ItemRecord:
     if journal._initial_records is None:
-        records: dict[str, ItemRecord] = {}
-        for request_id in journal.session._prepared_batches:
-            batch = journal.session._prepared_batches[request_id]
-            items = batch.payload.get("items")
-            if not isinstance(items, list):
+        journal._initial_records = {}
+    records = journal._initial_records
+    if item_id not in records and (batch := journal.session.initial_batch(item_id)) is not None:
+        items = batch.payload.get("items")
+        if not isinstance(items, list):
+            raise IdentityMismatch("initial batch has an invalid item payload")
+        for value in items:
+            if not isinstance(value, Mapping) or not isinstance(value.get("item_id"), str):
                 raise IdentityMismatch("initial batch has an invalid item payload")
-            for value in items:
-                if not isinstance(value, Mapping) or not isinstance(value.get("item_id"), str):
-                    raise IdentityMismatch("initial batch has an invalid item payload")
-                wire = cast(Mapping[str, Any], value)
-                member_id = cast(str, wire["item_id"])
-                raw_terms = wire.get("terms")
-                terms = (
-                    tuple(term for term in raw_terms if isinstance(term, Mapping))
-                    if isinstance(raw_terms, list)
-                    else ()
-                )
-                records[member_id] = ItemRecord(
-                    item_id=member_id,
-                    segment_id=member_id,
-                    selected_term_ids=batch.manifest.term_ids_by_item[member_id],
-                    term_applicability={str(term["term_id"]): term["role"] for term in terms},
-                    terms_hash=batch.manifest.terms_hashes[member_id],
-                    context_hash=batch.manifest.context_hashes[member_id],
-                )
-        journal._initial_records = records
+            wire = cast(Mapping[str, Any], value)
+            member_id = cast(str, wire["item_id"])
+            raw_terms = wire.get("terms")
+            terms = (
+                tuple(term for term in raw_terms if isinstance(term, Mapping)) if isinstance(raw_terms, list) else ()
+            )
+            records[member_id] = ItemRecord(
+                item_id=member_id,
+                segment_id=member_id,
+                selected_term_ids=batch.manifest.term_ids_by_item[member_id],
+                term_applicability={str(term["term_id"]): term["role"] for term in terms},
+                terms_hash=batch.manifest.terms_hashes[member_id],
+                context_hash=batch.manifest.context_hashes[member_id],
+            )
     try:
-        return journal._initial_records[item_id]
+        return records[item_id]
     except KeyError as error:
         raise IdentityMismatch("explicit retry member has no committed initial batch") from error
 

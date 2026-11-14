@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import unquote, urlsplit
@@ -353,6 +353,7 @@ def _verify(store: RunStore, ready: AtomicPreparedInput, progress: Callable[[str
     members_by_document: dict[str, tuple[str, ...]] = {}
     member_metadata: dict[str, tuple[str, str, str]] = {}
     text_sources: dict[str, tuple[str, tuple[str, ...] | None]] = {}
+    verified_texts: BudgetCache[str, str] = BudgetCache(_TEXT_CACHE_BYTES)
     has_text: dict[str, bool] = {}
     resource_paths: dict[str, str] = {}
     unit_ids_by_document: dict[str, tuple[str, ...]] = {}
@@ -387,6 +388,7 @@ def _verify(store: RunStore, ready: AtomicPreparedInput, progress: Callable[[str
             )
             member_metadata[member.item_id] = (member.document_id, member.channel, member.unit_id)
             text_sources[member.item_id] = (member.document_id, views)
+            verified_texts[member.item_id] = text
             has_text[member.item_id] = bool(text)
         members_by_document[document_id] = tuple(member.item_id for member in expected)
         resource_paths[document_id] = inventory.document.resource.path
@@ -419,13 +421,14 @@ def _verify(store: RunStore, ready: AtomicPreparedInput, progress: Callable[[str
     member_view: RecordView[RequestMember] = RecordView(member_ids, load_member, max_bytes=_MEMBER_CACHE_BYTES)
 
     def load_text(item_id: str) -> tuple[str, int]:
-        member = member_view[item_id]
-        document_id, source_views = text_sources[item_id]
-        value = (
-            plain_text(member.source_projection)
-            if source_views is None
-            else _source_view_text(inventories, document_id, source_views)
-        )
+        value = verified_texts.pop(item_id, None)
+        if value is None:
+            document_id, source_views = text_sources[item_id]
+            value = (
+                plain_text(member_view[item_id].source_projection)
+                if source_views is None
+                else _source_view_text(inventories, document_id, source_views)
+            )
         return value, len(value.encode("utf-8")) * 2
 
     text_view: RecordView[str] = RecordView(member_ids, load_text, max_bytes=_TEXT_CACHE_BYTES)
@@ -711,7 +714,7 @@ def _verify_restored_batch(session, batch, capacity, targets, sent_request) -> N
         raise IdentityMismatch("workflow request exceeds or differs from its frozen capacity")
 
 
-def _payload_candidates(session, batch, targets) -> tuple[dict[str, Any], ...]:
+def _payload_candidates(session, batch, targets) -> Iterator[dict[str, Any]]:
     from engine.item.members import build_member_payload
 
     capacity = limits_from_config(
@@ -720,7 +723,7 @@ def _payload_candidates(session, batch, targets) -> tuple[dict[str, Any], ...]:
         output_unlimited=batch.manifest.output_unlimited,
         source_hard_limit=batch.manifest.source_hard_limit,
     )
-    payloads: list[dict[str, Any]] = []
+    previous = None
     for count, compact in ((2, False), (1, False), (0, False), (0, True)):
         if batch.manifest.sparse and count:
             continue
@@ -742,9 +745,9 @@ def _payload_candidates(session, batch, targets) -> tuple[dict[str, Any], ...]:
         )
         if capacity.output_version in {5, 6, 7}:
             payload["wire_version"] = "epubox-wire-5"
-        if not payloads or payload != payloads[-1]:
-            payloads.append(payload)
-    return tuple(payloads)
+        if payload != previous:
+            yield payload
+            previous = payload
 
 
 class ReadySession:

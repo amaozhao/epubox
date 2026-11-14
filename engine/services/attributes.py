@@ -21,10 +21,15 @@ def source_retry_context(journal, item_id: str, *, max_chars: int = _CONTEXT_MAX
     """Return deterministic source evidence for one frozen attribute member."""
     if type(max_chars) is not int or max_chars < 2:
         raise ValueError("attribute retry context limit must be at least two characters")
-    member = journal.session.index.members_by_id.get(item_id)
-    if member is None or member.channel != "attribute" or not journal.session.owns(member):
+    session = journal.session
+    member = session.index.members_by_id.get(item_id)
+    if member is None or member.channel != "attribute":
         return ""
-    inventory = journal.session.index.inventories_by_id[member.document_id]
+    preparation = session.verify().preparation
+    member = session.index.members_by_id.get(item_id)
+    if member is None or not session.owns(member):
+        return ""
+    inventory = session.index.inventories_by_id[member.document_id]
     parent = next((item for item in inventory.items if item.item_id == member.parent_item_id), None)
     if parent is None or parent.channel != "attribute" or parent.kind != "attribute" or len(parent.slot_ids) != 1:
         return ""
@@ -35,11 +40,13 @@ def source_retry_context(journal, item_id: str, *, max_chars: int = _CONTEXT_MAX
     if slot.field != "attribute" or slot.attribute_name != attribute or slot.node_key != parent.node_key:
         raise IdentityMismatch("attribute retry source slot differs from its frozen item")
 
-    preparation, documents = journal.store._trusted_preparation_documents()
-    document = documents.get(member.document_id)
+    # The ready session has validated the book. Rebind just this document,
+    # then prove the exact node and attribute against the source resource.
+    document = journal.store.read_document(
+        member.document_id, expected_hash=preparation.document_hashes[member.document_id]
+    )
     if (
-        document is None
-        or document != inventory.document
+        document != inventory.document
         or preparation.source_hash != document.source_hash
         or member.root_node_key != parent.node_key
     ):

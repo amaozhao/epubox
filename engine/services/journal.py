@@ -34,12 +34,12 @@ from engine.services.atomic import CorruptRecord, IdentityMismatch, StaleWrite, 
 from engine.services.coherence import load_budget_overrides
 from engine.services.context import clear_proof_caches, memory_fingerprint, proof_cache, proof_fingerprint
 from engine.services.custody import bounded as _bounded
+from engine.services.custody import commit_revalidated, review_draft, review_replayable
 from engine.services.custody import epoch as _saved_epoch
 from engine.services.custody import manifest as _manifest
 from engine.services.custody import optional as _optional
 from engine.services.custody import persisted_response as _persisted_response
 from engine.services.custody import positive as _positive
-from engine.services.custody import review_draft
 from engine.services.custody import text as _text
 from engine.services.custody import translation_replayable as _translation_replayable
 from engine.services.ready import ReadySession
@@ -245,40 +245,12 @@ class BodyJournal:
                 else:
                     recovered.append(result)
             self.save_many(recovered)
-            # Keep terminal records immutable through normal saves. This narrow
-            # recovery requires the same request/epoch, current local checks and
-            # a persisted provider proof; it only restores a draft for review.
-            for prior, result in revalidated:
-                if any(getattr(prior, key) != getattr(result, key) for key in _FROZEN_RESULT_FIELDS):
-                    raise IdentityMismatch("revalidated translation changed its frozen identity")
-                _validate_saved_record(self.session, result)
-                self._translation_proof(result)
-            if revalidated:
-                with self.store.lock(), state.batch(self.store.root):
-                    for prior, _result in revalidated:
-                        path = self._result_path(prior.item_id)
-                        if (
-                            self._records[prior.item_id] != prior
-                            or ItemRecord.model_validate_json(state.read(path)) != prior
-                        ):
-                            raise StaleWrite("English residual result changed during revalidation")
-                    frames.flush(self)
-                    for _prior, result in revalidated:
-                        self.store._base.atomic_write_bytes(
-                            self._result_path(result.item_id), canonical_json_bytes(result)
-                        )
-                for prior, result in revalidated:
-                    self._update_result(prior, result)
+            commit_revalidated(self, revalidated)
         for request in tuple(self._requests.values()):
             if (
                 request.stage != "review"
                 or not set(request.item_ids).issubset(self._records)
-                or not any(
-                    self._records[item_id].status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
-                    and _saved_epoch(self._records[item_id], "review_epoch")
-                    == request.revisions[request.item_unit_ids[item_id][0]]
-                    for item_id in request.item_ids
-                )
+                or not any(review_replayable(self._records[item_id], request) for item_id in request.item_ids)
             ):
                 continue
             response = _persisted_response(self.store, request, reconcile=True, finish=self._finish)
@@ -291,11 +263,12 @@ class BodyJournal:
 
                 batch, targets = rebuild_review(self, request)
                 self._review_records[request.request_id] = targets
+            wires = _wire_items(batch)
             expected = {
                 item.item_id: {
                     "base_revision": request.revisions[item.unit_id],
                     "source_projection": item.source_projection,
-                    **review_applicability(item, self.session.index, _wire_items(batch)[item.item_id]),
+                    **review_applicability(item, self.session.index, wires[item.item_id]),
                 }
                 for item in batch.items
             }
@@ -308,11 +281,18 @@ class BodyJournal:
                     raise ProtocolError("review response changed its closed batch protocol")
             except (KeyError, ProtocolError, TypeError, ValueError) as error:
                 parsed, batch_error = None, str(error)
-            wires = _wire_items(batch)
             recovered = []
+            revalidated = []
             for member in batch.items:
                 prior = self._records[member.item_id]
-                if (
+                retrying = prior.status == ItemStatus.NEEDS_ATTENTION
+                if retrying:
+                    if (
+                        not review_replayable(prior, request)
+                        or prior.target_projection != targets[member.item_id].target_projection
+                    ):
+                        continue
+                elif (
                     prior.status not in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}
                     or prior != targets[member.item_id]
                 ):
@@ -328,9 +308,12 @@ class BodyJournal:
                 if decision is not None and decision["decision"] == "replace":
                     error = _target_error(member, decision["target"], wires[member.item_id])
                 if error is not None:
-                    recovered.append(_failed(member, prior, "review", error, batch))
+                    if not retrying:
+                        recovered.append(_failed(member, prior, "review", error, batch))
                     continue
                 assert decision is not None
+                if retrying and decision["decision"] != "replace":
+                    continue
                 if decision["decision"] == "needs_attention":
                     recovered.append(
                         _failed(
@@ -343,36 +326,39 @@ class BodyJournal:
                     )
                     continue
                 target = decision["target"] if decision["decision"] == "replace" else prior.target_projection
-                recovered.append(
-                    prior.model_copy(
-                        update={
-                            "stage": "reviewed",
-                            "status": ItemStatus.REVIEWED,
-                            "target_projection": target,
-                            "target_hash": canonical_hash(target),
-                            "checks": {
-                                "translation_frame": prior.checks["translation_frame"],
-                                **(
-                                    {"review_epoch": prior.checks["review_epoch"]}
-                                    if "review_epoch" in prior.checks
-                                    else {}
-                                ),
-                                **(
-                                    {"translation_epoch": prior.checks["translation_epoch"]}
-                                    if "translation_epoch" in prior.checks
-                                    else {}
-                                ),
-                                "decision": decision["decision"],
-                                "checks": decision["checks"],
-                                "issues": decision["issues"],
-                                "review_request_id": request.request_id,
-                            },
-                            "failure": None,
-                            "next_action": None,
-                        }
-                    )
+                result = prior.model_copy(
+                    update={
+                        "stage": "reviewed",
+                        "status": ItemStatus.REVIEWED,
+                        "target_projection": target,
+                        "target_hash": canonical_hash(target),
+                        "checks": {
+                            "translation_frame": prior.checks["translation_frame"],
+                            **(
+                                {"review_epoch": prior.checks["review_epoch"]}
+                                if "review_epoch" in prior.checks
+                                else {}
+                            ),
+                            **(
+                                {"translation_epoch": prior.checks["translation_epoch"]}
+                                if "translation_epoch" in prior.checks
+                                else {}
+                            ),
+                            "decision": decision["decision"],
+                            "checks": decision["checks"],
+                            "issues": decision["issues"],
+                            "review_request_id": request.request_id,
+                        },
+                        "failure": None,
+                        "next_action": None,
+                    }
                 )
+                if retrying:
+                    revalidated.append((prior, result))
+                else:
+                    recovered.append(result)
             self.save_many(recovered)
+            commit_revalidated(self, revalidated)
         return self.records()
 
     def retry_units(self, unit_ids: Sequence[str], *, retry_unknown: bool = True) -> tuple[str, ...]:
@@ -743,18 +729,15 @@ class BodyJournal:
         attempts = tuple(request.attempts)
         if cached is not None and cached[0] == attempts:
             return cached[1]
-        result = not any(
-            self.store.read_model_response(request.stage, request.request_id, attempt.attempt_id) is not None
-            for attempt in request.attempts
-        ) and any(
-            (
-                attempt.state in {"sent", "unknown"}
-                or attempt.state == "reserved"
-                and any(
-                    value is not None for value in (attempt.sent_at, attempt.finished_at, attempt.usage, attempt.error)
-                )
+        result = any(
+            attempt.state in {"sent", "unknown"}
+            or attempt.state == "reserved"
+            and any(
+                value is not None for value in (attempt.sent_at, attempt.finished_at, attempt.usage, attempt.error)
             )
-            and self.store.read_model_response(request.stage, request.request_id, attempt.attempt_id) is None
+            for attempt in request.attempts
+        ) and not any(
+            self.store.read_model_response(request.stage, request.request_id, attempt.attempt_id) is not None
             for attempt in request.attempts
         )
         self._ambiguous_cache[request.request_id] = (attempts, result)
@@ -803,7 +786,7 @@ class BodyJournal:
 
     def _load_records(self) -> dict[str, ItemRecord]:
         result: dict[str, ItemRecord] = {}
-        for item_id in (member.item_id for member in self.session.index.members):
+        for item_id in self.session.index.members_by_id:
             path = self._result_path(item_id)
             try:
                 record = ItemRecord.model_validate_json(state.read(path))

@@ -87,7 +87,10 @@ def validate_publication_compatibility(
     """Prove that the complete source can pass the deterministic publication transforms."""
 
     replacements = upgrade_package(source_snapshot, inventory, {})
-    replacements, removed_paths = use_reader_fonts(source_snapshot, inventory, replacements)
+    try:
+        replacements, removed_paths = use_reader_fonts(source_snapshot, inventory, replacements)
+    except ValueError as error:
+        raise EpubValidationError("publication_preflight_failed", f"出版候选的字体处理失败：{error}") from error
     code_plan = effective_code_plan(source_snapshot)
     if code_plan is not None:
         try:

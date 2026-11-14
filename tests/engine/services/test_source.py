@@ -164,7 +164,7 @@ def test_attribute_retry_adds_verified_source_context_without_touching_sibling_b
     assert request.item_ids == (member.item_id,)
 
 
-def test_source_retry_context_decodes_entities_and_preserves_nonattribute_feedback(tmp_path) -> None:
+def test_source_retry_context_decodes_entities_and_preserves_nonattribute_feedback(tmp_path, monkeypatch) -> None:
     case = prepare_case(
         tmp_path,
         '<p><img alt="A &amp; B" src="images/a&amp;b.png"/> <b>Visible &amp; parent</b></p>',
@@ -173,6 +173,11 @@ def test_source_retry_context_decodes_entities_and_preserves_nonattribute_feedba
     )
     journal = BodyJournal(case.session.store, case.session)
     member = case.batch.items[0]
+
+    def reject_full_book_reextraction():
+        pytest.fail("one attribute retry must not re-extract the whole book")
+
+    monkeypatch.setattr(journal.store, "_trusted_preparation_documents", reject_full_book_reextraction)
     payload = json.loads(source_retry_context(journal, member.item_id))
     assert payload["source_context"]["attributes"] == {"alt": "A & B", "src": "images/a&b.png"}
     assert payload["source_context"]["parent"]["text"] == "Visible & parent"

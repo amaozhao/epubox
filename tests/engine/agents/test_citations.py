@@ -57,6 +57,46 @@ def error(value: RequestMember, target: str) -> str | None:
     return _target_error(value, target, {"terms": []})
 
 
+def test_source_product_names_with_lowercase_connectors_in_example_lists():
+    source = (
+        "Modern CMS platforms are designed for horizontal ⟦+g1⟧scalability⟦-g1⟧. "
+        "Cloud-native CMS solutions (e.g., Adobe Experience Manager as a Service, Contentstack) "
+        "offer features such as:"
+    )
+    value = member(lead="", title="scalability", element="span").model_copy(update={"source_projection": source})
+    target = (
+        "现代 CMS 平台专为横向⟦+g1⟧可扩展性⟦-g1⟧而设计。"
+        "云原生 CMS 解决方案（例如 Adobe Experience Manager as a Service、Contentstack）提供以下特性："
+    )
+    assert error(value, target) is None
+    assert error(value, target.replace("Adobe Experience Manager", "Acme Content Platform")) is not None
+    assert error(value, target + " The platform has to be configured before it can be used.") is not None
+
+
+def test_table_function_signature_must_stay_exact_even_with_a_glossary_term():
+    signature = "includingAt(seq, values, index)"
+    value = member(lead="", title=signature, element="td")
+    value = value.model_copy(
+        update={
+            "kind": "table",
+            "atomic_tag": "table",
+            "source_projection": f"⟦+g1⟧{signature}⟦-g1⟧",
+            "registry": {
+                "g1": value.registry["g1"].model_copy(
+                    update={"hints": {"element": "td", "source_view_boundary": "paragraph"}}
+                )
+            },
+        }
+    )
+    wire = {"terms": [{"role": "target", "mode": "keep_source", "source": "includingAt"}]}
+
+    assert _target_error(value, value.source_projection, wire) is None
+    assert error(value, "⟦+g1⟧包括在（seq, values, index）处⟦-g1⟧") == "function signature changed: " + signature
+    assert error(value, "⟦+g1⟧includingAt(seq, values)⟦-g1⟧") == "function signature changed: " + signature
+    prose = value.model_copy(update={"source_projection": "⟦+g1⟧Quick (start, values, index)⟦-g1⟧"})
+    assert error(prose, prose.source_projection) is not None
+
+
 def actual_member() -> RequestMember:
     source = (
         "⟦+b1⟧This ReAct loop⟦-b1⟧⟦=x1⟧⟦+b2⟧ is what initiated the broader agent paradigm."

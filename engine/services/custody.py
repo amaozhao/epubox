@@ -78,6 +78,54 @@ def translation_replayable(record: ItemRecord, request: RequestManifest) -> bool
     )
 
 
+def review_replayable(record: ItemRecord, request: RequestManifest) -> bool:
+    if epoch(record, "review_epoch") != request.revisions[request.item_unit_ids[record.item_id][0]]:
+        return False
+    if record.status in {ItemStatus.LOCAL_VALID, ItemStatus.CANDIDATE}:
+        return True
+    message = (record.failure or {}).get("message")
+    return (
+        record.status == ItemStatus.NEEDS_ATTENTION
+        and record.stage == "review"
+        and record.checks.get("review_request_id") == request.request_id
+        and record.target_projection is not None
+        and record.target_hash == request.target_hashes.get(record.item_id) == canonical_hash(record.target_projection)
+        and (record.failure or {}).get("code") == "review_failed"
+        and isinstance(message, str)
+        and message.startswith("untranslated English remains:")
+    )
+
+
+def commit_revalidated(journal, changes) -> None:
+    """Commit unchanged-epoch results whose historical responses now validate."""
+    from engine.agents.workflow import _validate_saved_record
+    from engine.schemas.contracts import canonical_json_bytes
+    from engine.services import frames, state
+    from engine.services.atomic import StaleWrite
+    from engine.services.journal import _FROZEN_RESULT_FIELDS
+
+    if not changes:
+        return
+    for prior, result in changes:
+        if any(getattr(prior, key) != getattr(result, key) for key in _FROZEN_RESULT_FIELDS):
+            raise IdentityMismatch("revalidated result changed its frozen identity")
+        _validate_saved_record(journal.session, result)
+        if result.status == ItemStatus.REVIEWED:
+            journal._require_review_proof(result)
+        else:
+            journal._translation_proof(result)
+    with journal.store.lock(), state.batch(journal.store.root):
+        for prior, _ in changes:
+            path = journal._result_path(prior.item_id)
+            if journal._records[prior.item_id] != prior or ItemRecord.model_validate_json(state.read(path)) != prior:
+                raise StaleWrite("English residual result changed during revalidation")
+        frames.flush(journal)
+        for _, result in changes:
+            journal.store._base.atomic_write_bytes(journal._result_path(result.item_id), canonical_json_bytes(result))
+    for prior, result in changes:
+        journal._update_result(prior, result)
+
+
 def retry_checks(record: ItemRecord, review_epoch: int) -> dict[str, Any]:
     translation_epoch = epoch(record, "translation_epoch")
     return {

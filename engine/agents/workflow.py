@@ -14,7 +14,7 @@ from engine.agents.runtime import ATOMIC_PROMPT_VERSION, ModelRuntime, RequestEr
 from engine.agents.terms import validate_review_response
 from engine.core.quality import find_degenerate_translation, find_untranslated_english_texts
 from engine.item.citations import script_paragraphs_without_retained_titles
-from engine.item.inline import plain_text
+from engine.item.inline import ProjectionError, plain_text
 from engine.item.members import MemberIndex, pack_members, validate_member_target
 from engine.schemas.contracts import ItemRecord, ItemStatus, canonical_hash
 from engine.schemas.members import MemberBatch, RequestMember
@@ -573,10 +573,6 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
     member_ids = cast(list[str], member_ids)
     if member.item_id not in member_ids or len(member_ids) != len(set(member_ids)):
         raise ValueError("saved translation frame does not own its member")
-    try:
-        members = tuple(session.index.members_by_id[value] for value in member_ids)
-    except KeyError as error:
-        raise ValueError("saved translation frame references an unknown member") from error
     request_id = frame.get("request_id")
     if not isinstance(request_id, str):
         raise TypeError("saved translation frame has an invalid request ID")
@@ -615,6 +611,10 @@ def _saved_batch(session: ReadySession, member: RequestMember, record: ItemRecor
         if request is not None:
             wire.verify(request, cached.payload, cached.budget.output_tokens)
         return cached
+    try:
+        members = tuple(session.index.members_by_id[value] for value in member_ids)
+    except KeyError as error:
+        raise ValueError("saved translation frame references an unknown member") from error
     versions: dict[str, int] = {}
     for value, saved_member in zip(member_ids, members, strict=True):
         saved = (
@@ -752,9 +752,14 @@ def _target_error(member: RequestMember, target: str, wire: Mapping[str, Any]) -
     source_text, target_text = plain_text(member.source_projection), plain_text(target)
     if degeneration := find_degenerate_translation(source_text, target_text, markup=False):
         return degeneration
-    script_paragraphs = list(
-        script_paragraphs_without_retained_titles(member.source_projection, target, member.registry)
-    )
+    try:
+        script_paragraphs = list(
+            script_paragraphs_without_retained_titles(
+                member.source_projection, target, member.registry, table=member.kind == "table"
+            )
+        )
+    except ProjectionError as error:
+        return str(error)
     for term in wire.get("terms", ()):
         if isinstance(term, Mapping) and term.get("role") == "target":
             spelling = _source_variant(term, source_text) if term.get("mode") == "keep_source" else term.get("target")
